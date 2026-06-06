@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     binance_api_key: str = Field(default="", env="BINANCE_API_KEY")
     binance_api_secret: str = Field(default="", env="BINANCE_API_SECRET")
     binance_use_testnet: bool = Field(default=True, env="BINANCE_USE_TESTNET")
+    # Risk and operation controls
+    max_daily_loss_usdt: float = Field(default=100.0, env="MAX_DAILY_LOSS_USDT")
+    max_per_trade_usdt: float = Field(default=10.0, env="MAX_PER_TRADE_USDT")
+    dry_run: bool = Field(default=True, env="DRY_RUN")
+    allow_real_trading: bool = Field(default=False, env="ALLOW_REAL_TRADING")
+    trade_cycle_minutes: int = Field(default=5, env="TRADE_CYCLE_MINUTES")
     tradingview_webhook_secret: str = Field(default="", env="TRADINGVIEW_WEBHOOK_SECRET")
     agent_mode: str = Field(default="suggest", env="AGENT_MODE")
     default_trade_size: float = Field(default=10.0, env="DEFAULT_TRADE_SIZE")

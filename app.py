@@ -7,6 +7,8 @@ from agent import TradingAgent
 from binance_client import BinanceClient
 from config import get_settings
 from news_client import NewsClient
+import threading
+import run_trades
 
 settings = get_settings()
 app = FastAPI(title="Binance Trading Agent")
@@ -18,6 +20,22 @@ binance_client = BinanceClient(
 )
 news_client = NewsClient()
 agent = TradingAgent(binance_client=binance_client, news_client=news_client, settings=settings)
+
+
+def _start_trade_cycle():
+    try:
+        interval = int(getattr(settings, 'trade_cycle_minutes', 5))
+    except Exception:
+        interval = 5
+    t = threading.Thread(target=run_trades.run_loop, args=(interval,), daemon=True)
+    t.start()
+
+
+@app.on_event("startup")
+def startup_event():
+    # Start background trade cycle only if agent is in auto mode
+    if settings.agent_mode == 'auto':
+        _start_trade_cycle()
 
 
 class TradingViewPayload(BaseModel):
