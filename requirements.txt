@@ -7,3 +7,6 @@ python-binance==1.0.16
 httpx==0.27.0
 feedparser==6.0.10
 pytest==8.4.2
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0

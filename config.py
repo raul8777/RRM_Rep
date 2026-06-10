@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     default_trade_size: float = Field(default=10.0, env="DEFAULT_TRADE_SIZE")
     default_symbol: str = Field(default="BTCUSDT", env="DEFAULT_SYMBOL")
     news_lookback_hours: int = Field(default=24, env="NEWS_LOOKBACK_HOURS")
+    
+    # Portfolio Manager configuration
+    portfolio_allocation_pct: float = Field(default=100.0, env="PORTFOLIO_ALLOCATION_PCT")
+    min_pair_confidence_score: float = Field(default=50.0, env="MIN_PAIR_CONFIDENCE_SCORE")
+    max_risk_per_pair_pct: float = Field(default=10.0, env="MAX_RISK_PER_PAIR_PCT")
+    diversification_factor: float = Field(default=1.0, env="DIVERSIFICATION_FACTOR")
+    enable_position_closure: bool = Field(default=True, env="ENABLE_POSITION_CLOSURE")
 
     class Config:
         env_file = _resolve_env_file()

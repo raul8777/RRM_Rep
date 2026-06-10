@@ -12,10 +12,12 @@ class TradingAgent:
         binance_client: BinanceClient,
         news_client: NewsClient,
         settings: Settings,
+        portfolio_manager=None,
     ):
         self.binance_client = binance_client
         self.news_client = news_client
         self.settings = settings
+        self.portfolio_manager = portfolio_manager
 
     def process_signal(self, payload: Dict) -> Dict:
         try:
@@ -24,16 +26,33 @@ class TradingAgent:
             return {"error": str(exc), "payload": payload}
 
         news = self._gather_news(signal["symbol"])
+        
+        # Use Portfolio Manager for sizing if available
+        quantity = signal["quantity"]
+        if quantity is None:
+            if self.portfolio_manager:
+                # Try to get risk-adjusted sizing from Portfolio Manager
+                try:
+                    balance = self.portfolio_manager.get_total_balance()
+                    allocation_usdt = balance["allocation_usdt"]
+                    # For now, use a simple allocation logic
+                    # In production, this would use the full allocation logic
+                    quantity = allocation_usdt / 10  # Default to 10% of allocation per trade
+                except Exception:
+                    quantity = self.settings.default_trade_size
+            else:
+                quantity = self.settings.default_trade_size
+        
         result = {
             "symbol": signal["symbol"],
             "action": signal["action"],
-            "quantity": signal["quantity"] or self.settings.default_trade_size,
+            "quantity": quantity,
             "mode": self.settings.agent_mode,
             "news": news,
         }
 
         if self.settings.agent_mode == "auto":
-            order_params = build_order_params(signal, self.settings.default_trade_size)
+            order_params = build_order_params(signal, quantity)
             qty = order_params.get("quantity")
             side = order_params.get("side")
 

@@ -162,3 +162,63 @@ def rank_with_technical(
 
     ranked = sorted(candidates.values(), key=lambda item: item["combined_score"], reverse=True)
     return ranked[:top_n]
+
+
+def rank_for_portfolio_manager(
+    signals: List[Dict],
+    news_scores: Dict[str, float],
+    technical_scores: Dict[str, float],
+    risk_metrics: Dict[str, Dict[str, float]],
+    min_confidence: float = 50.0,
+) -> Dict[str, float]:
+    """
+    Calculate combined ranking scores for Portfolio Manager.
+    
+    This function expands on rank_with_technical to include risk metrics
+    and returns a dictionary of symbol -> combined_score for use by Portfolio Manager.
+    
+    Args:
+        signals: List of trading signals
+        news_scores: Dictionary of news sentiment scores per symbol
+        technical_scores: Dictionary of technical analysis scores per symbol
+        risk_metrics: Dictionary of risk metrics per symbol (with risk_score key)
+        min_confidence: Minimum confidence threshold (0-100)
+        
+    Returns:
+        Dictionary mapping symbol to combined score (0-100)
+    """
+    signal_scores: Dict[str, float] = {}
+    
+    for signal in signals:
+        symbol = normalize_symbol(signal.get("symbol", ""))
+        if not symbol or signal.get("action", "").upper() != "BUY":
+            continue
+        
+        tv_score = score_signal(signal, 0.0)
+        news_score = news_scores.get(symbol, 50.0)
+        tech_score = technical_scores.get(symbol, 50.0)
+        
+        # Get risk score (default to 50 if not available)
+        risk_data = risk_metrics.get(symbol, {})
+        risk_score = risk_data.get("risk_score", 50.0)
+        
+        # Calculate combined score with risk consideration
+        # TradingView: 40%, News: 20%, Technical: 20%, Risk (inverted): 20%
+        # Lower risk = higher contribution
+        risk_contribution = (100 - risk_score) / 100.0
+        
+        combined_score = (
+            tv_score * 0.4 +
+            news_score * 0.2 +
+            tech_score * 0.2 +
+            risk_contribution * 20.0  # Scale to 0-20 range
+        )
+        
+        # Normalize to 0-100 range
+        combined_score = max(0, min(100, combined_score))
+        
+        # Only include if above minimum confidence
+        if combined_score >= min_confidence:
+            signal_scores[symbol] = combined_score
+    
+    return signal_scores

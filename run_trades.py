@@ -7,7 +7,7 @@ from binance_client import BinanceClient
 from config import get_settings
 from news_client import NewsClient
 from signal_store import get_signals
-from strategy import rank_buy_signals, rank_with_technical, normalize_symbol
+from strategy import rank_buy_signals, rank_with_technical, normalize_symbol, rank_for_portfolio_manager
 from analysis_cache import analysis_cache
 
 
@@ -51,7 +51,7 @@ def _get_news_scores(symbols: List[str], news_client: NewsClient, settings) -> D
     return scores
 
 
-def _get_top_buy_symbols(settings, news_client: NewsClient) -> List[Dict]:
+def _get_top_buy_symbols(settings, news_client: NewsClient, portfolio_manager=None) -> List[Dict]:
     signals = get_signals()
     if not signals:
         return []
@@ -68,16 +68,40 @@ def _get_top_buy_symbols(settings, news_client: NewsClient) -> List[Dict]:
         else:
             technical_scores[symbol] = 50.0  # Default neutral score if no analysis yet
     
-    # Use combined ranking if technical scores are available
-    if any(v != 50.0 for v in technical_scores.values()):
-        top_signals = rank_with_technical(signals, news_scores, technical_scores, settings.max_positions)
+    # Use Portfolio Manager if available
+    if portfolio_manager:
+        # Get risk metrics for all symbols
+        from risk_calculator import RiskCalculator
+        risk_calc = RiskCalculator()
+        risk_metrics = {}
+        
+        for symbol in symbols:
+            # For now, use default risk metrics
+            # In production, this would use historical price data
+            risk_metrics[symbol] = {"risk_score": 50.0}  # Default medium risk
+        
+        # Use Portfolio Manager ranking
+        signal_scores = rank_for_portfolio_manager(
+            signals, news_scores, technical_scores, risk_metrics,
+            min_confidence=settings.min_pair_confidence_score
+        )
+        
+        # Convert to list of dicts sorted by score
+        top_signals = [
+            {"symbol": symbol, "score": score}
+            for symbol, score in sorted(signal_scores.items(), key=lambda x: x[1], reverse=True)
+        ][:settings.max_positions]
     else:
-        top_signals = rank_buy_signals(signals, news_scores, settings.max_positions)
+        # Use existing ranking logic
+        if any(v != 50.0 for v in technical_scores.values()):
+            top_signals = rank_with_technical(signals, news_scores, technical_scores, settings.max_positions)
+        else:
+            top_signals = rank_buy_signals(signals, news_scores, settings.max_positions)
     
     return top_signals
 
 
-def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[str, float], top_symbols: List[str]) -> List[Dict]:
+def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[str, float], top_symbols: List[str], portfolio_manager=None) -> List[Dict]:
     orders = []
     for asset, amount in balances.items():
         if asset.upper() == "USDT" or amount <= 0:
@@ -112,7 +136,7 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
     return orders
 
 
-def _buy_top_symbols(client: BinanceClient, settings, top_symbols: List[str]) -> List[Dict]:
+def _buy_top_symbols(client: BinanceClient, settings, top_symbols: List[str], portfolio_manager=None) -> List[Dict]:
     orders = []
     if not top_symbols:
         return orders
@@ -123,8 +147,15 @@ def _buy_top_symbols(client: BinanceClient, settings, top_symbols: List[str]) ->
         print("No USDT available for buys")
         return orders
 
-    allocation = min(settings.max_per_trade_usdt, usdt / len(top_symbols))
-    print(f"USDT available: {usdt}, allocation per symbol: {allocation}")
+    # Use Portfolio Manager for allocation if available
+    if portfolio_manager:
+        balance = portfolio_manager.get_total_balance()
+        allocation_usdt = balance["allocation_usdt"]
+        allocation = min(settings.max_per_trade_usdt, allocation_usdt / len(top_symbols))
+        print(f"USDT available: {usdt}, portfolio allocation: {allocation_usdt}, allocation per symbol: {allocation}")
+    else:
+        allocation = min(settings.max_per_trade_usdt, usdt / len(top_symbols))
+        print(f"USDT available: {usdt}, allocation per symbol: {allocation}")
 
     for symbol in top_symbols:
         try:
@@ -160,6 +191,15 @@ def execute_once():
         dry_run=settings.dry_run,
     )
     news_client = NewsClient()
+    
+    # Initialize Portfolio Manager if available
+    portfolio_manager = None
+    try:
+        from portfolio_manager import PortfolioManager
+        portfolio_manager = PortfolioManager(client, settings)
+        print("Portfolio Manager initialized")
+    except Exception as e:
+        print(f"Portfolio Manager not available: {e}")
 
     print("DRY_RUN=", settings.dry_run)
     print("ALLOW_REAL_TRADING=", settings.allow_real_trading)
@@ -173,7 +213,7 @@ def execute_once():
         print("Agent mode is not auto. Skipping execute_once.")
         return {"top_symbols": [], "sell_orders": [], "buy_orders": []}
 
-    top_signals = _get_top_buy_symbols(settings, news_client)
+    top_signals = _get_top_buy_symbols(settings, news_client, portfolio_manager)
     top_symbols = [signal["symbol"] for signal in top_signals]
     print("Top buy symbols:", top_symbols)
 
@@ -181,12 +221,12 @@ def execute_once():
     print("Balances:", balances)
 
     if top_symbols:
-        sell_orders = _sell_holdings_not_in_top(client, settings, balances, top_symbols)
+        sell_orders = _sell_holdings_not_in_top(client, settings, balances, top_symbols, portfolio_manager)
         if sell_orders:
             balances = client.get_account_balance()
             print("Balances after sells:", balances)
 
-        buy_orders = _buy_top_symbols(client, settings, top_symbols)
+        buy_orders = _buy_top_symbols(client, settings, top_symbols, portfolio_manager)
     else:
         print("No buy signals available; skipping buy allocation.")
         sell_orders = []
