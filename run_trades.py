@@ -6,9 +6,10 @@ from typing import Dict, List
 from binance_client import BinanceClient
 from config import get_settings
 from news_client import NewsClient
-from signal_store import get_signals
+from signal_store import get_signals, add_signal
 from strategy import rank_buy_signals, rank_with_technical, normalize_symbol, rank_for_portfolio_manager
 from analysis_cache import analysis_cache
+from autonomous_signals import AutonomousSignalGenerator
 
 
 def _align_quantity_to_step(quantity: float, step: float) -> float:
@@ -52,11 +53,67 @@ def _get_news_scores(symbols: List[str], news_client: NewsClient, settings) -> D
 
 
 def _get_top_buy_symbols(settings, news_client: NewsClient, portfolio_manager=None) -> List[Dict]:
-    signals = get_signals()
-    if not signals:
-        return []
-
-    symbols = sorted({normalize_symbol(signal.get("symbol", "")) for signal in signals if signal.get("symbol")})
+    # First try to get signals from external sources (TradingView webhook)
+    external_signals = get_signals()
+    
+    # If no external signals, use autonomous signal generation
+    if not external_signals:
+        print("No external signals found, using autonomous signal generation...")
+        try:
+            client = BinanceClient(
+                api_key=settings.binance_api_key,
+                api_secret=settings.binance_api_secret,
+                testnet=settings.binance_use_testnet,
+                dry_run=settings.dry_run,
+            )
+            
+            # Configure symbols for analysis
+            symbols = getattr(settings, 'analysis_symbols', [
+                'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
+                'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT'
+            ])
+            
+            signal_generator = AutonomousSignalGenerator(client, symbols)
+            autonomous_signals = signal_generator.get_top_buy_signals(
+                interval='1h',
+                min_strength=0.0,  # Accept any buy signal
+                limit=getattr(settings, 'max_positions', 5)
+            )
+            
+            # Convert autonomous signals to expected format and add to signal store
+            top_signals = []
+            for signal in autonomous_signals:
+                signal_dict = {
+                    "symbol": signal['symbol'],
+                    "score": signal['strength'] * 100,  # Convert to 0-100 scale
+                    "reason": signal['reason'],
+                    "indicators": signal.get('indicators', {})
+                }
+                top_signals.append(signal_dict)
+                
+                # Add autonomous signal to signal store for analysis cycle
+                try:
+                    add_signal({
+                        "symbol": signal['symbol'],
+                        "action": "BUY",
+                        "price": signal.get('current_price', 0),
+                        "strength": signal['strength'],
+                        "reason": signal['reason'],
+                        "source": "autonomous"
+                    })
+                    print(f"Added autonomous signal for {signal['symbol']} to signal store")
+                except Exception as e:
+                    print(f"Failed to add signal to store: {e}")
+            
+            print(f"Generated {len(top_signals)} autonomous buy signals")
+            return top_signals
+            
+        except Exception as e:
+            print(f"Error in autonomous signal generation: {e}")
+            return []
+    
+    # Use external signals if available
+    symbols = sorted({normalize_symbol(signal.get("symbol", "")) for signal in external_signals if signal.get("symbol")})
     news_scores = _get_news_scores(symbols, news_client, settings)
     
     # Get technical scores from analysis cache
@@ -82,7 +139,7 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, portfolio_manager=No
         
         # Use Portfolio Manager ranking
         signal_scores = rank_for_portfolio_manager(
-            signals, news_scores, technical_scores, risk_metrics,
+            external_signals, news_scores, technical_scores, risk_metrics,
             min_confidence=settings.min_pair_confidence_score
         )
         
@@ -94,9 +151,9 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, portfolio_manager=No
     else:
         # Use existing ranking logic
         if any(v != 50.0 for v in technical_scores.values()):
-            top_signals = rank_with_technical(signals, news_scores, technical_scores, settings.max_positions)
+            top_signals = rank_with_technical(external_signals, news_scores, technical_scores, settings.max_positions)
         else:
-            top_signals = rank_buy_signals(signals, news_scores, settings.max_positions)
+            top_signals = rank_buy_signals(external_signals, news_scores, settings.max_positions)
     
     return top_signals
 
@@ -135,7 +192,11 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
             # Close position in Position Manager if available
             if position_manager:
                 try:
-                    position_manager.close_position(symbol, price, "rebalancing")
+                    # Calculate commission rate for exit
+                    commission_rate = getattr(settings, 'binance_commission_rate', 0.001)
+                    if getattr(settings, 'use_bnb_for_commission', False):
+                        commission_rate = 0.0005  # 0.05% if using BNB
+                    position_manager.close_position(symbol, price, "rebalancing", commission_rate)
                 except Exception as e:
                     print(f"Failed to close position in Position Manager: {e}")
         except Exception as exc:
@@ -150,19 +211,31 @@ def _buy_top_symbols(client: BinanceClient, settings, top_symbols: List[str], po
 
     balances = client.get_account_balance()
     usdt = float(balances.get("USDT", 0.0))
-    if usdt <= 0:
-        print("No USDT available for buys")
-        return orders
-
+    
     # Use Portfolio Manager for allocation if available
     if portfolio_manager:
         balance = portfolio_manager.get_total_balance()
         allocation_usdt = balance["allocation_usdt"]
+        # Use total USDT value including other assets
         allocation = min(settings.max_per_trade_usdt, allocation_usdt / len(top_symbols))
-        print(f"USDT available: {usdt}, portfolio allocation: {allocation_usdt}, allocation per symbol: {allocation}")
+        print(f"USDT available: {usdt}, total portfolio value: {balance['total_usdt']}, allocation_usdt: {allocation_usdt}, allocation per symbol: {allocation}")
     else:
+        if usdt <= 0:
+            print("No USDT available for buys")
+            return orders
         allocation = min(settings.max_per_trade_usdt, usdt / len(top_symbols))
         print(f"USDT available: {usdt}, allocation per symbol: {allocation}")
+    
+    # If USDT is too low, try to sell non-top assets first to get more USDT
+    if usdt < allocation * len(top_symbols) and portfolio_manager:
+        print(f"USDT available ({usdt}) is less than needed ({allocation * len(top_symbols)}), selling non-top assets...")
+        sell_orders = _sell_holdings_not_in_top(client, settings, balances, top_symbols, portfolio_manager, position_manager)
+        orders.extend(sell_orders)
+        
+        # Refresh USDT balance after selling
+        balances = client.get_account_balance()
+        usdt = float(balances.get("USDT", 0.0))
+        print(f"USDT after selling non-top assets: {usdt}")
 
     for symbol in top_symbols:
         try:
@@ -190,15 +263,23 @@ def _buy_top_symbols(client: BinanceClient, settings, top_symbols: List[str], po
                 try:
                     from position_manager import Position
                     from datetime import datetime
+                    # Calculate entry commission
+                    commission_rate = getattr(settings, 'binance_commission_rate', 0.001)
+                    if getattr(settings, 'use_bnb_for_commission', False):
+                        commission_rate = 0.0005  # 0.05% if using BNB
+                    entry_commission = client.calculate_commission(qty, price, commission_rate)
+                    
                     position = Position(
                         symbol=symbol,
                         side="BUY",
                         quantity=qty,
                         entry_price=price,
                         entry_time=datetime.utcnow().isoformat(),
-                        metadata={"order_id": order.get("orderId")}
+                        metadata={"order_id": order.get("orderId")},
+                        entry_commission=entry_commission
                     )
                     position_manager.add_position(position)
+                    print(f"Position tracked with entry commission: {entry_commission:.4f} USDT")
                 except Exception as e:
                     print(f"Failed to track position in Position Manager: {e}")
         except Exception as exc:

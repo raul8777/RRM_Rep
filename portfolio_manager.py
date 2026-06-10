@@ -75,13 +75,22 @@ class PortfolioManager:
         try:
             balances = self.binance_client.get_account_balance()
             
-            # Calculate total USDT value
+            # Calculate total USDT value including all assets
             total_usdt = 0.0
             usdt_balance = float(balances.get("USDT", 0))
             total_usdt += usdt_balance
             
-            # For simplicity, we'll just use USDT balance for now
-            # In production, we should convert other assets to USDT value
+            # Convert other assets to USDT value
+            for asset, amount in balances.items():
+                if asset.upper() == "USDT" or amount <= 0:
+                    continue
+                try:
+                    symbol = f"{asset.upper()}USDT"
+                    price = self.binance_client.get_symbol_price(symbol)
+                    total_usdt += amount * price
+                except Exception:
+                    # If price fetch fails, skip this asset
+                    pass
             
             return {
                 "usdt_available": usdt_balance,
