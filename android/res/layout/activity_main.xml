@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp"
+    android:background="#1a1a2e">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Crypto Trading Agent"
+        android:textSize="24sp"
+        android:textColor="#4ecca3"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:layout_marginBottom="24dp" />
+
+    <TextView
+        android:id="@+id/statusTextView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Loading status..."
+        android:textSize="18sp"
+        android:textColor="#ffffff"
+        android:gravity="center"
+        android:padding="16dp"
+        android:background="#16213e"
+        android:layout_marginBottom="24dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Remote Control"
+        android:textSize="20sp"
+        android:textColor="#4ecca3"
+        android:textStyle="bold"
+        android:layout_marginBottom="16dp" />
+
+    <Button
+        android:id="@+id/pauseButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="PAUSAR"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:backgroundTint="#f39c12"
+        android:layout_marginBottom="12dp" />
+
+    <Button
+        android:id="@+id/stopButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="DETENER"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:backgroundTint="#e74c3c"
+        android:layout_marginBottom="12dp" />
+
+    <Button
+        android:id="@+id/startButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="ENCENDER"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:backgroundTint="#4ecca3" />
+
+</LinearLayout>
