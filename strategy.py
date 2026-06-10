@@ -1,5 +1,6 @@
 import re
-from typing import Dict, Optional
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
 BUY_WORDS = {"buy", "long", "compra", "buying", "bull"}
 SELL_WORDS = {"sell", "short", "venta", "bear"}
@@ -81,3 +82,83 @@ def build_order_params(signal: Dict, default_quantity: float) -> Dict[str, Optio
         "side": signal["action"],
         "quantity": quantity,
     }
+
+
+def _parse_timestamp(timestamp: Optional[str]) -> Optional[datetime]:
+    if not timestamp:
+        return None
+    try:
+        return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def score_signal(signal: Dict, news_score: float = 0.0) -> float:
+    action = (signal.get("action") or "").upper()
+    score = 0.0
+    if action == "BUY":
+        score += 10.0
+    elif action == "SELL":
+        score -= 5.0
+
+    quantity = signal.get("quantity") or 0.0
+    score += min(quantity, 100.0) * 0.05
+    score += news_score * 0.5
+
+    received_at = _parse_timestamp(signal.get("received_at"))
+    if received_at:
+        age_hours = (datetime.now(timezone.utc) - received_at).total_seconds() / 3600.0
+        score += max(0.0, 2.0 - age_hours * 0.25)
+
+    return score
+
+
+def rank_buy_signals(signals: List[Dict], news_scores: Dict[str, float], top_n: int) -> List[Dict]:
+    candidates: Dict[str, Dict] = {}
+    for signal in signals:
+        symbol = normalize_symbol(signal.get("symbol", ""))
+        if not symbol or signal.get("action", "").upper() != "BUY":
+            continue
+
+        score = score_signal(signal, news_scores.get(symbol, 0.0))
+        existing = candidates.get(symbol)
+        if existing is None or score > existing["score"]:
+            candidates[symbol] = {**signal, "symbol": symbol, "score": score}
+
+    ranked = sorted(candidates.values(), key=lambda item: item["score"], reverse=True)
+    return ranked[:top_n]
+
+
+def rank_with_technical(
+    signals: List[Dict],
+    news_scores: Dict[str, float],
+    technical_scores: Dict[str, float],
+    top_n: int,
+) -> List[Dict]:
+    """Rank signals combining TradingView (40%), news (30%), and technical (30%)."""
+    candidates: Dict[str, Dict] = {}
+
+    for signal in signals:
+        symbol = normalize_symbol(signal.get("symbol", ""))
+        if not symbol or signal.get("action", "").upper() != "BUY":
+            continue
+
+        tv_score = score_signal(signal, 0.0)
+        news_score = news_scores.get(symbol, 50.0)
+        tech_score = technical_scores.get(symbol, 50.0)
+
+        combined_score = (tv_score * 0.4) + (news_score * 0.3) + (tech_score * 0.3)
+
+        existing = candidates.get(symbol)
+        if existing is None or combined_score > existing["combined_score"]:
+            candidates[symbol] = {
+                **signal,
+                "symbol": symbol,
+                "tv_score": tv_score,
+                "news_score": news_score,
+                "technical_score": tech_score,
+                "combined_score": combined_score,
+            }
+
+    ranked = sorted(candidates.values(), key=lambda item: item["combined_score"], reverse=True)
+    return ranked[:top_n]

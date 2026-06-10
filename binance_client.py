@@ -1,13 +1,16 @@
+import os
 from binance.client import Client
 from binance.exceptions import BinanceAPIException, BinanceRequestException
+from decimal import Decimal
 from typing import Any, Dict, Optional
 
 
 class BinanceClient:
-    def __init__(self, api_key: str, api_secret: str, testnet: bool = True):
+    def __init__(self, api_key: str, api_secret: str, testnet: bool = True, dry_run: bool = False):
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = testnet
+        self.dry_run = dry_run
         self.client = Client(self.api_key, self.api_secret)
         if self.testnet:
             self.client.API_URL = "https://testnet.binance.vision/api"
@@ -24,6 +27,12 @@ class BinanceClient:
         except (BinanceAPIException, BinanceRequestException) as exc:
             raise RuntimeError(f"Binance balance error: {exc}") from exc
 
+    def _format_amount(self, amount: float) -> str:
+        value = Decimal(str(amount))
+        normalized = value.normalize()
+        # prevent scientific notation in API parameters
+        return format(normalized, 'f')
+
     def create_market_order(
         self,
         symbol: str,
@@ -31,6 +40,18 @@ class BinanceClient:
         quantity: float,
         quote_order_qty: Optional[float] = None,
     ) -> Dict[str, Any]:
+        # If DRY_RUN is enabled, return a simulated order result.
+        if self.dry_run or os.environ.get("DRY_RUN", "false").lower() in ("1", "true", "yes"):
+            simulated = {
+                "simulated": True,
+                "symbol": symbol,
+                "side": side.upper(),
+                "type": "MARKET",
+                "quantity": self._format_amount(quantity),
+                "quoteOrderQty": self._format_amount(quote_order_qty) if quote_order_qty else None,
+            }
+            return simulated
+
         try:
             order_params = {
                 "symbol": symbol,
@@ -38,9 +59,9 @@ class BinanceClient:
                 "type": "MARKET",
             }
             if quote_order_qty:
-                order_params["quoteOrderQty"] = quote_order_qty
+                order_params["quoteOrderQty"] = self._format_amount(quote_order_qty)
             else:
-                order_params["quantity"] = quantity
+                order_params["quantity"] = self._format_amount(quantity)
             result = self.client.create_order(**order_params)
             return result
         except (BinanceAPIException, BinanceRequestException) as exc:

@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     # Risk and operation controls
     max_daily_loss_usdt: float = Field(default=100.0, env="MAX_DAILY_LOSS_USDT")
     max_per_trade_usdt: float = Field(default=10.0, env="MAX_PER_TRADE_USDT")
+    max_positions: int = Field(default=5, env="MAX_POSITIONS")
     dry_run: bool = Field(default=True, env="DRY_RUN")
     allow_real_trading: bool = Field(default=False, env="ALLOW_REAL_TRADING")
     trade_cycle_minutes: int = Field(default=5, env="TRADE_CYCLE_MINUTES")
