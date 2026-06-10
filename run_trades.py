@@ -101,7 +101,7 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, portfolio_manager=No
     return top_signals
 
 
-def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[str, float], top_symbols: List[str], portfolio_manager=None) -> List[Dict]:
+def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[str, float], top_symbols: List[str], portfolio_manager=None, position_manager=None) -> List[Dict]:
     orders = []
     for asset, amount in balances.items():
         if asset.upper() == "USDT" or amount <= 0:
@@ -131,12 +131,19 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
             order = client.create_market_order(symbol=symbol, side="SELL", quantity=qty)
             orders.append({"symbol": symbol, "side": "SELL", "quantity": qty, "order": order})
             print(f"Sold {qty} {symbol}")
+            
+            # Close position in Position Manager if available
+            if position_manager:
+                try:
+                    position_manager.close_position(symbol, price, "rebalancing")
+                except Exception as e:
+                    print(f"Failed to close position in Position Manager: {e}")
         except Exception as exc:
             print(f"Sell order failed for {symbol}: {exc}")
     return orders
 
 
-def _buy_top_symbols(client: BinanceClient, settings, top_symbols: List[str], portfolio_manager=None) -> List[Dict]:
+def _buy_top_symbols(client: BinanceClient, settings, top_symbols: List[str], portfolio_manager=None, position_manager=None) -> List[Dict]:
     orders = []
     if not top_symbols:
         return orders
@@ -177,6 +184,23 @@ def _buy_top_symbols(client: BinanceClient, settings, top_symbols: List[str], po
             order = client.create_market_order(symbol=symbol, side="BUY", quantity=qty)
             orders.append({"symbol": symbol, "side": "BUY", "quantity": qty, "order": order})
             print(f"Bought {qty} {symbol}")
+            
+            # Track position in Position Manager if available
+            if position_manager:
+                try:
+                    from position_manager import Position
+                    from datetime import datetime
+                    position = Position(
+                        symbol=symbol,
+                        side="BUY",
+                        quantity=qty,
+                        entry_price=price,
+                        entry_time=datetime.utcnow().isoformat(),
+                        metadata={"order_id": order.get("orderId")}
+                    )
+                    position_manager.add_position(position)
+                except Exception as e:
+                    print(f"Failed to track position in Position Manager: {e}")
         except Exception as exc:
             print(f"Buy order failed for {symbol}: {exc}")
     return orders
@@ -200,6 +224,15 @@ def execute_once():
         print("Portfolio Manager initialized")
     except Exception as e:
         print(f"Portfolio Manager not available: {e}")
+    
+    # Initialize Position Manager if available
+    position_manager = None
+    try:
+        from position_manager import PositionManager
+        position_manager = PositionManager()
+        print("Position Manager initialized")
+    except Exception as e:
+        print(f"Position Manager not available: {e}")
 
     print("DRY_RUN=", settings.dry_run)
     print("ALLOW_REAL_TRADING=", settings.allow_real_trading)
@@ -221,12 +254,12 @@ def execute_once():
     print("Balances:", balances)
 
     if top_symbols:
-        sell_orders = _sell_holdings_not_in_top(client, settings, balances, top_symbols, portfolio_manager)
+        sell_orders = _sell_holdings_not_in_top(client, settings, balances, top_symbols, portfolio_manager, position_manager)
         if sell_orders:
             balances = client.get_account_balance()
             print("Balances after sells:", balances)
 
-        buy_orders = _buy_top_symbols(client, settings, top_symbols, portfolio_manager)
+        buy_orders = _buy_top_symbols(client, settings, top_symbols, portfolio_manager, position_manager)
     else:
         print("No buy signals available; skipping buy allocation.")
         sell_orders = []

@@ -1,4 +1,5 @@
 from typing import Dict, List, Optional
+from datetime import datetime
 
 from binance_client import BinanceClient
 from config import Settings
@@ -13,11 +14,13 @@ class TradingAgent:
         news_client: NewsClient,
         settings: Settings,
         portfolio_manager=None,
+        position_manager=None,
     ):
         self.binance_client = binance_client
         self.news_client = news_client
         self.settings = settings
         self.portfolio_manager = portfolio_manager
+        self.position_manager = position_manager
 
     def process_signal(self, payload: Dict) -> Dict:
         try:
@@ -105,6 +108,19 @@ class TradingAgent:
                         try:
                             order = self.binance_client.create_market_order(**order_params)
                             result["order"] = order
+                            
+                            # Track position with Position Manager if available
+                            if self.position_manager and order:
+                                from position_manager import Position
+                                position = Position(
+                                    symbol=signal["symbol"],
+                                    side=side,
+                                    quantity=qty,
+                                    entry_price=price or 0.0,
+                                    entry_time=datetime.utcnow().isoformat(),
+                                    metadata={"order_id": order.get("orderId")}
+                                )
+                                self.position_manager.add_position(position)
                         except Exception as exc:
                             result["error"] = f"Order failed: {exc}"
         else:

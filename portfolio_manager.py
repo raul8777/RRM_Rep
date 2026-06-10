@@ -39,17 +39,19 @@ class CapitalAllocation:
 class PortfolioManager:
     """Manages intelligent capital allocation and pair selection."""
     
-    def __init__(self, binance_client, settings: Settings):
+    def __init__(self, binance_client, settings: Settings, position_manager=None):
         """
         Initialize Portfolio Manager.
         
         Args:
             binance_client: BinanceClient instance
             settings: Application settings
+            position_manager: PositionManager instance (optional)
         """
         self.binance_client = binance_client
         self.settings = settings
         self.risk_calculator = RiskCalculator()
+        self.position_manager = position_manager
         
         # Portfolio configuration
         self.allocation_pct = settings.portfolio_allocation_pct / 100.0
@@ -299,6 +301,16 @@ class PortfolioManager:
         
         if symbols_to_close:
             logger.info(f"Decided to close positions for reallocation: {symbols_to_close}")
+            
+            # Close positions in Position Manager if available
+            if self.position_manager:
+                for symbol in symbols_to_close:
+                    try:
+                        # Get current price for closing
+                        price = self.binance_client.get_symbol_price(symbol)
+                        self.position_manager.close_position(symbol, price, "portfolio_rebalancing")
+                    except Exception as e:
+                        logger.error(f"Failed to close position {symbol} in Position Manager: {e}")
         
         return symbols_to_close
     
