@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Trading Agent Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Crypto Trading Agent Dashboard</h1>
+            <div class="status-indicator" id="systemStatus">
+                <span class="status-dot"></span>
+                <span class="status-text">Loading...</span>
+            </div>
+        </header>
+
+        <div class="controls">
+            <button id="pauseBtn" class="btn btn-warning">PAUSAR</button>
+            <button id="stopBtn" class="btn btn-danger">DETENER</button>
+            <button id="startBtn" class="btn btn-success">ENCENDER</button>
+        </div>
+
+        <div class="dashboard-grid">
+            <div class="card">
+                <h2>Portfolio Manager</h2>
+                <div id="portfolioData">
+                    <p>Loading portfolio data...</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Positions</h2>
+                <div id="positionsData">
+                    <p>Loading positions...</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Recent Signals</h2>
+                <div id="signalsData">
+                    <p>Loading signals...</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>System Health</h2>
+                <div id="healthData">
+                    <p>Loading health data...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="dashboard.js"></script>
+</body>
+</html>
