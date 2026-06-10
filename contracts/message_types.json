@@ -1,0 +1,105 @@
+{
+  "SIGNAL": {
+    "description": "Trading signal received from TradingView or other sources",
+    "schema": {
+      "symbol": "string",
+      "action": "string (BUY|SELL)",
+      "quantity": "number (optional)",
+      "price": "number (optional)",
+      "confidence": "number (0-100)",
+      "timestamp": "ISO 8601 datetime",
+      "source": "string"
+    }
+  },
+  "ORDER": {
+    "description": "Order placed on exchange",
+    "schema": {
+      "order_id": "string",
+      "symbol": "string",
+      "side": "string (BUY|SELL)",
+      "order_type": "string (MARKET|LIMIT)",
+      "quantity": "number",
+      "price": "number",
+      "status": "string (PENDING|FILLED|CANCELLED)",
+      "timestamp": "ISO 8601 datetime"
+    }
+  },
+  "POSITION_OPENED": {
+    "description": "Position opened",
+    "schema": {
+      "symbol": "string",
+      "side": "string (BUY|SELL)",
+      "quantity": "number",
+      "entry_price": "number",
+      "entry_time": "ISO 8601 datetime",
+      "strategy_id": "number (optional)",
+      "stop_loss": "number (optional)",
+      "take_profit": "number (optional)"
+    }
+  },
+  "POSITION_CLOSED": {
+    "description": "Position closed",
+    "schema": {
+      "symbol": "string",
+      "side": "string (BUY|SELL)",
+      "quantity": "number",
+      "entry_price": "number",
+      "exit_price": "number",
+      "entry_time": "ISO 8601 datetime",
+      "exit_time": "ISO 8601 datetime",
+      "pnl": "number",
+      "pnl_percentage": "number",
+      "close_reason": "string"
+    }
+  },
+  "CAPITAL_REALLOCATION": {
+    "description": "Capital reallocation by Portfolio Manager",
+    "schema": {
+      "total_capital": "number",
+      "allocations": {
+        "symbol": "string",
+        "capital_usdt": "number",
+        "percentage": "number"
+      },
+      "timestamp": "ISO 8601 datetime"
+    }
+  },
+  "POSITION_CLOSURE_REQUEST": {
+    "description": "Request to close positions for reallocation",
+    "schema": {
+      "symbols": ["string"],
+      "reason": "string",
+      "timestamp": "ISO 8601 datetime"
+    }
+  },
+  "SYSTEM_STATE_CHANGE": {
+    "description": "System state changed (RUNNING|PAUSED|STOPPED)",
+    "schema": {
+      "old_state": "string",
+      "new_state": "string",
+      "changed_by": "string",
+      "reason": "string",
+      "timestamp": "ISO 8601 datetime"
+    }
+  },
+  "ERROR": {
+    "description": "Error occurred in system",
+    "schema": {
+      "error_type": "string",
+      "error_message": "string",
+      "component": "string",
+      "timestamp": "ISO 8601 datetime",
+      "stack_trace": "string (optional)"
+    }
+  },
+  "NOTIFICATION": {
+    "description": "Notification for dashboard/mobile",
+    "schema": {
+      "type": "string (INFO|WARNING|ERROR|SUCCESS)",
+      "title": "string",
+      "message": "string",
+      "timestamp": "ISO 8601 datetime",
+      "metadata": "object (optional)"
+    }
+  }
+}
