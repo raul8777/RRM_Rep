@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: crypto-agent-db
+    environment:
+      POSTGRES_USER: ${DB_USER:-crypto_agent}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-crypto_agent_password}
+      POSTGRES_DB: ${DB_NAME:-crypto_agent}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-crypto_agent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis (for future Message Bus extension)
+  redis:
+    image: redis:7-alpine
+    container_name: crypto-agent-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Crypto Trading Agent
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crypto-agent-app
+    environment:
+      - BINANCE_API_KEY=${BINANCE_API_KEY}
+      - BINANCE_API_SECRET=${BINANCE_API_SECRET}
+      - BINANCE_USE_TESTNET=${BINANCE_USE_TESTNET:-true}
+      - DRY_RUN=${DRY_RUN:-true}
+      - AGENT_MODE=${AGENT_MODE:-suggest}
+      - DB_URL=postgresql://${DB_USER:-crypto_agent}:${DB_PASSWORD:-crypto_agent_password}@postgres:5432/${DB_NAME:-crypto_agent}
+      - DB_USER=${DB_USER:-crypto_agent}
+      - DB_PASSWORD=${DB_PASSWORD:-crypto_agent_password}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-crypto_agent}
+      - PORTFOLIO_ALLOCATION_PCT=${PORTFOLIO_ALLOCATION_PCT:-100.0}
+      - MIN_PAIR_CONFIDENCE_SCORE=${MIN_PAIR_CONFIDENCE_SCORE:-50.0}
+      - MAX_RISK_PER_PAIR_PCT=${MAX_RISK_PER_PAIR_PCT:-10.0}
+      - DIVERSIFICATION_FACTOR=${DIVERSIFICATION_FACTOR:-1.0}
+      - ENABLE_POSITION_CLOSURE=${ENABLE_POSITION_CLOSURE:-true}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - ./frontend:/app/frontend
+    restart: unless-stopped
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  postgres_data:
