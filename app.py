@@ -13,6 +13,7 @@ import threading
 import run_trades
 import analysis_cycle
 from analysis_cache import analysis_cache
+from orchestrator import Orchestrator, SystemState
 
 settings = get_settings()
 app = FastAPI(title="Binance Trading Agent")
@@ -25,6 +26,9 @@ binance_client = BinanceClient(
 )
 news_client = NewsClient()
 agent = TradingAgent(binance_client=binance_client, news_client=news_client, settings=settings)
+
+# Initialize Orchestrator
+orchestrator = Orchestrator()
 
 
 def _start_trade_cycle():
@@ -129,3 +133,89 @@ async def get_analysis_for_symbol(symbol: str) -> Dict:
         "symbol": normalized,
         **result,
     }
+
+
+# Config Console API Endpoints
+
+class ControlRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+@app.post("/control/pause")
+async def pause_system(payload: ControlRequest) -> Dict:
+    """Pause the system (stop new orders, monitor open positions)."""
+    success = orchestrator.pause(changed_by="api", reason=payload.reason or "API request")
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to pause system")
+    return orchestrator.get_state()
+
+
+@app.post("/control/stop")
+async def stop_system(payload: ControlRequest) -> Dict:
+    """Stop the system (stop all, keep open positions)."""
+    success = orchestrator.stop(changed_by="api", reason=payload.reason or "API request")
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to stop system")
+    return orchestrator.get_state()
+
+
+@app.post("/control/start")
+async def start_system(payload: ControlRequest) -> Dict:
+    """Start the system (recalculate everything)."""
+    success = orchestrator.start(changed_by="api", reason=payload.reason or "API request")
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to start system")
+    return orchestrator.get_state()
+
+
+@app.get("/control/status")
+async def get_control_status() -> Dict:
+    """Get current system control status."""
+    return orchestrator.get_state()
+
+
+@app.get("/health")
+async def health_check() -> Dict:
+    """Get overall health status of the system."""
+    return orchestrator.get_health_status()
+
+
+class PortfolioConfigRequest(BaseModel):
+    portfolio_allocation_pct: Optional[float] = None
+    min_pair_confidence_score: Optional[float] = None
+    max_risk_per_pair_pct: Optional[float] = None
+    diversification_factor: Optional[float] = None
+    enable_position_closure: Optional[bool] = None
+
+
+@app.get("/config/portfolio")
+async def get_portfolio_config() -> Dict:
+    """Get current Portfolio Manager configuration."""
+    return {
+        "portfolio_allocation_pct": settings.portfolio_allocation_pct,
+        "min_pair_confidence_score": settings.min_pair_confidence_score,
+        "max_risk_per_pair_pct": settings.max_risk_per_pair_pct,
+        "diversification_factor": settings.diversification_factor,
+        "enable_position_closure": settings.enable_position_closure,
+    }
+
+
+@app.post("/config/portfolio")
+async def update_portfolio_config(payload: PortfolioConfigRequest) -> Dict:
+    """Update Portfolio Manager configuration."""
+    # Note: This updates the settings object but won't affect running instances
+    # In production, this should trigger a restart or reconfiguration
+    config = get_portfolio_config()
+    
+    if payload.portfolio_allocation_pct is not None:
+        config["portfolio_allocation_pct"] = payload.portfolio_allocation_pct
+    if payload.min_pair_confidence_score is not None:
+        config["min_pair_confidence_score"] = payload.min_pair_confidence_score
+    if payload.max_risk_per_pair_pct is not None:
+        config["max_risk_per_pair_pct"] = payload.max_risk_per_pair_pct
+    if payload.diversification_factor is not None:
+        config["diversification_factor"] = payload.diversification_factor
+    if payload.enable_position_closure is not None:
+        config["enable_position_closure"] = payload.enable_position_closure
+    
+    return config
