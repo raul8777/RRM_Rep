@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     max_risk_per_pair_pct: float = Field(default=10.0, env="MAX_RISK_PER_PAIR_PCT")
     diversification_factor: float = Field(default=1.0, env="DIVERSIFICATION_FACTOR")
     enable_position_closure: bool = Field(default=True, env="ENABLE_POSITION_CLOSURE")
+    
+    # Database configuration
+    db_url: str = Field(default="", env="DB_URL")
+    db_user: str = Field(default="", env="DB_USER")
+    db_password: str = Field(default="", env="DB_PASSWORD")
+    db_host: str = Field(default="localhost", env="DB_HOST")
+    db_port: int = Field(default=5432, env="DB_PORT")
+    db_name: str = Field(default="crypto_agent", env="DB_NAME")
 
     class Config:
         env_file = _resolve_env_file()
