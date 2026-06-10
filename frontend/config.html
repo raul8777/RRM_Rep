@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configuration Console</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Configuration Console</h1>
+            <a href="index.html" class="back-link">← Back to Dashboard</a>
+        </header>
+
+        <div class="config-section">
+            <h2>Portfolio Manager Configuration</h2>
+            <form id="portfolioConfigForm">
+                <div class="form-group">
+                    <label for="portfolioAllocationPct">Portfolio Allocation %</label>
+                    <input type="number" id="portfolioAllocationPct" name="portfolio_allocation_pct" min="0" max="100" step="0.1" required>
+                    <small>Percentage of total balance to manage</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="minPairConfidenceScore">Min Pair Confidence Score</label>
+                    <input type="number" id="minPairConfidenceScore" name="min_pair_confidence_score" min="0" max="100" step="0.1" required>
+                    <small>Minimum confidence score for pair selection</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="maxRiskPerPairPct">Max Risk Per Pair %</label>
+                    <input type="number" id="maxRiskPerPairPct" name="max_risk_per_pair_pct" min="0" max="100" step="0.1" required>
+                    <small>Maximum risk percentage per trading pair</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="diversificationFactor">Diversification Factor</label>
+                    <input type="number" id="diversificationFactor" name="diversification_factor" min="0.1" max="10" step="0.1" required>
+                    <small>Factor for portfolio diversification</small>
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="enablePositionClosure" name="enable_position_closure">
+                        Enable Position Closure
+                    </label>
+                    <small>Allow automatic position closure for reallocation</small>
+                </div>
+
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-success">Save Configuration</button>
+                    <button type="button" id="resetBtn" class="btn btn-warning">Reset to Defaults</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="config-section">
+            <h2>Current Configuration</h2>
+            <div id="currentConfig">
+                <p>Loading current configuration...</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="config.js"></script>
+</body>
+</html>
