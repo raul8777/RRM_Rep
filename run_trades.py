@@ -54,7 +54,9 @@ def _get_news_scores(symbols: List[str], news_client: NewsClient, settings) -> D
 
 def _get_top_buy_symbols(settings, news_client: NewsClient, portfolio_manager=None) -> List[Dict]:
     # First try to get signals from external sources (TradingView webhook)
-    external_signals = get_signals()
+    # Filter out autonomous signals to avoid using stale autonomous signals
+    all_signals = get_signals()
+    external_signals = [s for s in all_signals if s.get('source') != 'autonomous']
     
     # If no external signals, use autonomous signal generation
     if not external_signals:
@@ -297,6 +299,22 @@ def execute_once():
     )
     news_client = NewsClient()
     
+    # Try to use global Position Manager from app.py
+    position_manager = None
+    try:
+        import app
+        position_manager = app.position_manager
+        print("Using global Position Manager from app.py")
+    except Exception as e:
+        print(f"Global Position Manager not available: {e}")
+        # Fallback to local Position Manager
+        try:
+            from position_manager import PositionManager
+            position_manager = PositionManager()
+            print("Using local Position Manager")
+        except Exception as e2:
+            print(f"Local Position Manager not available: {e2}")
+    
     # Initialize Portfolio Manager if available
     portfolio_manager = None
     try:
@@ -305,15 +323,6 @@ def execute_once():
         print("Portfolio Manager initialized")
     except Exception as e:
         print(f"Portfolio Manager not available: {e}")
-    
-    # Initialize Position Manager if available
-    position_manager = None
-    try:
-        from position_manager import PositionManager
-        position_manager = PositionManager()
-        print("Position Manager initialized")
-    except Exception as e:
-        print(f"Position Manager not available: {e}")
 
     print("DRY_RUN=", settings.dry_run)
     print("ALLOW_REAL_TRADING=", settings.allow_real_trading)
