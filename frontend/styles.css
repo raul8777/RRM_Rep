@@ -12,7 +12,7 @@ body {
 }
 
 .container {
-    max-width: 1200px;
+    max-width: 1600px;
     margin: 0 auto;
     padding: 20px;
 }
@@ -109,8 +109,14 @@ h1 {
 
 .dashboard-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
     gap: 20px;
+}
+
+/* Wide cards for position tables – always span full width */
+.card.card-full {
+    grid-column: 1 / -1;
+    overflow-x: auto;
 }
 
 .card {
@@ -118,6 +124,8 @@ h1 {
     border-radius: 12px;
     padding: 20px;
     box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    min-width: 0;       /* prevent overflow from children */
+    overflow: hidden;
 }
 
 .card h2 {
@@ -156,3 +164,148 @@ h1 {
     color: #888;
     font-style: italic;
 }
+
+/* Table styles for positions */
+.positions-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+    font-size: 12px;
+    table-layout: auto;
+}
+
+.positions-table thead {
+    background-color: #1a1a2e;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.positions-table th {
+    padding: 8px 10px;
+    text-align: left;
+    font-weight: 600;
+    color: #4ecca3;
+    border-bottom: 2px solid #333;
+    white-space: nowrap;
+}
+
+.positions-table td {
+    padding: 7px 10px;
+    border-bottom: 1px solid #2a2a4e;
+    white-space: nowrap;
+}
+
+.positions-table tbody tr:hover {
+    background-color: #1e1e3e;
+}
+
+.positions-table .positive {
+    color: #4ecca3;
+}
+
+.positions-table .negative {
+    color: #e74c3c;
+}
+
+.positions-table .sl-tp {
+    font-size: 11px;
+    color: #aaa;
+}
+
+/* Prediction badge */
+.pred-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+}
+
+.pred-badge.positive {
+    background: rgba(78, 204, 163, 0.15);
+    color: #4ecca3;
+}
+
+.pred-badge.negative {
+    background: rgba(231, 76, 60, 0.15);
+    color: #e74c3c;
+}
+
+.no-pred {
+    font-size: 11px;
+    color: #555;
+    font-style: italic;
+}
+
+/* Positions summary bar */
+.positions-summary {
+    margin-top: 10px;
+    padding: 8px 10px;
+    background: #1a1a2e;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #aaa;
+}
+
+.positive {
+    color: #4ecca3;
+}
+
+.negative {
+    color: #e74c3c;
+}
+
+.balances-breakdown {
+    margin-top: 15px;
+    padding-top: 15px;
+    border-top: 1px solid #333;
+}
+
+.balances-breakdown h3 {
+    font-size: 16px;
+    color: #4ecca3;
+    margin-bottom: 10px;
+}
+
+/* ── Quality badge ───────────────────────────────────────────────────────── */
+.quality-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 600;
+}
+.quality-good { background: rgba(78,204,163,0.15); color: #4ecca3; }
+.quality-warn { background: rgba(255,200,60,0.15);  color: #ffc83c; }
+.quality-bad  { background: rgba(255,99,99,0.15);   color: #ff6363; }
+
+/* ── Weight bars ─────────────────────────────────────────────────────────── */
+.weight-section  { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.weight-row      { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.weight-label    { width: 60px; color: #aaa; flex-shrink: 0; }
+.weight-bar-wrap { flex: 1; background: #1e2530; border-radius: 4px; height: 8px; overflow: hidden; }
+.weight-bar      { height: 100%; background: linear-gradient(90deg, #4ecca3, #1a8a6e); border-radius: 4px; transition: width 0.4s; }
+.weight-value    { width: 70px; text-align: right; font-size: 12px; color: #ccc; }
+
+/* ── Learning cards extras ───────────────────────────────────────────────── */
+.learning-rec          { background: rgba(255,200,60,0.08); border-left: 3px solid #ffc83c; padding: 6px 10px; font-size: 12px; color: #ffc83c; margin: 8px 0; border-radius: 0 4px 4px 0; }
+.learning-section-title{ font-size: 11px; text-transform: uppercase; color: #666; margin: 10px 0 4px; letter-spacing: 0.5px; }
+
+/* ── Backtest controls inside h2 ─────────────────────────────────────────── */
+.card h2 { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.backtest-controls { display: flex; align-items: center; gap: 6px; }
+.bt-select {
+    background: #1e2530; color: #e0e0e0; border: 1px solid #333;
+    padding: 4px 8px; border-radius: 6px; font-size: 13px; cursor: pointer;
+}
+.bt-select:focus { outline: none; border-color: #4ecca3; }
+
+/* ── Button sizes ────────────────────────────────────────────────────────── */
+.btn-sm { padding: 5px 12px; font-size: 12px; margin-top: 10px; }
+.btn-primary { background: #4ecca3; color: #0d1117; }
+.btn-primary:hover { background: #3db892; }
+
+/* ── Pending backtest row ────────────────────────────────────────────────── */
+.bt-pending td { background: rgba(255,200,60,0.05); }

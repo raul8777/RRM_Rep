@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Trading Agent Dashboard</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="/frontend/styles.css">
 </head>
 <body>
     <div class="container">
@@ -23,6 +23,55 @@
         </div>
 
         <div class="dashboard-grid">
+            <!-- Balance Card -->
+            <div class="card">
+                <h2>Balance</h2>
+                <div id="balanceData">
+                    <p>Loading balance data...</p>
+                </div>
+            </div>
+
+            <!-- PnL History Card -->
+            <div class="card">
+                <h2>PnL Histórico</h2>
+                <div id="pnlHistoryData">
+                    <p>Loading PnL history...</p>
+                </div>
+            </div>
+
+            <!-- Open Positions Card -->
+            <div class="card card-full">
+                <h2>Posiciones Abiertas</h2>
+                <div id="openPositionsData">
+                    <p>Loading open positions...</p>
+                </div>
+            </div>
+
+            <!-- Closed Positions Card -->
+            <div class="card card-full">
+                <h2>Posiciones Cerradas (Últimas 20)</h2>
+                <div id="closedPositionsData">
+                    <p>Loading closed positions...</p>
+                </div>
+            </div>
+
+            <!-- Next Cycle Card -->
+            <div class="card">
+                <h2>Próximo Ciclo</h2>
+                <div id="nextCycleData">
+                    <p>Loading cycle info...</p>
+                </div>
+            </div>
+
+            <!-- Analysis Summary Card -->
+            <div class="card">
+                <h2>Resumen de Análisis</h2>
+                <div id="analysisSummaryData">
+                    <p>Loading analysis summary...</p>
+                </div>
+            </div>
+
+            <!-- Portfolio Manager Card -->
             <div class="card">
                 <h2>Portfolio Manager</h2>
                 <div id="portfolioData">
@@ -30,13 +79,7 @@
                 </div>
             </div>
 
-            <div class="card">
-                <h2>Positions</h2>
-                <div id="positionsData">
-                    <p>Loading positions...</p>
-                </div>
-            </div>
-
+            <!-- Recent Signals Card -->
             <div class="card">
                 <h2>Recent Signals</h2>
                 <div id="signalsData">
@@ -44,15 +87,66 @@
                 </div>
             </div>
 
+            <!-- System Health Card -->
             <div class="card">
                 <h2>System Health</h2>
                 <div id="healthData">
                     <p>Loading health data...</p>
                 </div>
             </div>
+
+            <!-- Aprendizaje del Sistema Card -->
+            <div class="card">
+                <h2>Aprendizaje del Sistema</h2>
+                <div id="learningData">
+                    <p class="loading">Cargando datos de aprendizaje...</p>
+                </div>
+                <button class="btn btn-primary btn-sm" id="triggerLearningBtn">⚡ Re-Aprender</button>
+            </div>
+
+            <!-- Estrategia Activa Card -->
+            <div class="card">
+                <h2>Estrategia Activa</h2>
+                <div id="strategyData">
+                    <p class="loading">Cargando estrategia...</p>
+                </div>
+            </div>
+
+            <!-- Backtesting Card -->
+            <div class="card card-full">
+                <h2>Backtesting
+                    <span class="backtest-controls">
+                        <select id="backtestSymbol" class="bt-select">
+                            <option value="BTCUSDT">BTCUSDT</option>
+                            <option value="ETHUSDT">ETHUSDT</option>
+                            <option value="BNBUSDT">BNBUSDT</option>
+                            <option value="SOLUSDT">SOLUSDT</option>
+                            <option value="XRPUSDT">XRPUSDT</option>
+                        </select>
+                        <select id="backtestDays" class="bt-select">
+                            <option value="14">14d</option>
+                            <option value="30" selected>30d</option>
+                            <option value="60">60d</option>
+                            <option value="90">90d</option>
+                        </select>
+                        <button class="btn btn-success btn-sm" id="runBacktestBtn">▶ Ejecutar</button>
+                    </span>
+                </h2>
+                <div id="backtestData">
+                    <p class="loading">Sin backtests ejecutados aún.</p>
+                </div>
+            </div>
+
+            <!-- Parámetros Optimizados Card -->
+            <div class="card">
+                <h2>Parámetros Optimizados</h2>
+                <div id="optimizedParamsData">
+                    <p class="loading">Cargando parámetros...</p>
+                </div>
+            </div>
         </div>
     </div>
 
-    <script src="dashboard.js"></script>
+    <script src="/frontend/dashboard.js"></script>
 </body>
 </html>

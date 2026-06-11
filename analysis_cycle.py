@@ -5,14 +5,18 @@ from datetime import datetime
 from typing import List, Dict
 
 from config import TRADE_CYCLE_MINUTES
-from binance_client import binance_client
 from technical_analysis import get_indicators, score_technical
 from analysis_cache import analysis_cache
 from signal_store import get_signals
 from strategy import normalize_symbol
 
-
 logger = logging.getLogger(__name__)
+
+
+def _get_client():
+    """Return the shared BinanceClient from init_components (lazy import)."""
+    from init_components import get_components
+    return get_components().binance_client
 
 
 def get_top_symbols_from_signals(limit: int = 5) -> List[str]:
@@ -33,13 +37,15 @@ def get_top_symbols_from_signals(limit: int = 5) -> List[str]:
     return symbols
 
 
-def analyze_symbols(symbols: List[str]) -> Dict[str, Dict]:
+def analyze_symbols(symbols: List[str], client=None) -> Dict[str, Dict]:
     """Analyze technical indicators for each symbol."""
+    if client is None:
+        client = _get_client()
     results = {}
 
     for symbol in symbols:
         try:
-            indicators = get_indicators(binance_client, symbol)
+            indicators = get_indicators(client, symbol)
             tech_score = score_technical(indicators)
             analysis_cache.set(symbol, indicators, tech_score)
             results[symbol] = {
@@ -55,8 +61,13 @@ def analyze_symbols(symbols: List[str]) -> Dict[str, Dict]:
     return results
 
 
+_learning_cycle_counter = 0
+_LEARNING_EVERY_N_CYCLES = 6  # Run LearningEngine every ~6 analysis cycles (~90 min)
+
+
 def execute_once() -> None:
-    """Run one analysis cycle."""
+    """Run one analysis cycle, and periodically trigger LearningEngine."""
+    global _learning_cycle_counter
     try:
         logger.info("Starting technical analysis cycle")
         symbols = get_top_symbols_from_signals(limit=5)
@@ -66,11 +77,29 @@ def execute_once() -> None:
             return
 
         logger.info(f"Analyzing {len(symbols)} symbols: {', '.join(symbols)}")
-        results = analyze_symbols(symbols)
+        results = analyze_symbols(symbols, client=_get_client())
         logger.info(f"Analysis cycle complete. Results: {len(results)} symbols analyzed")
 
     except Exception as e:
         logger.error(f"Technical analysis cycle failed: {e}")
+
+    # Periodic self-learning step
+    _learning_cycle_counter += 1
+    if _learning_cycle_counter >= _LEARNING_EVERY_N_CYCLES:
+        _learning_cycle_counter = 0
+        try:
+            from learning_engine import get_learning_engine
+            from pnl_service import get_predictor
+            result = get_learning_engine().run(min_trades=5, lookback_days=30)
+            if result.get("status") == "completed":
+                logger.info(
+                    f"LearningEngine: {result['trades_analyzed']} trades, "
+                    f"accuracy={result.get('accuracy', {}).get('prediction_accuracy', 0):.2%}, "
+                    f"updated={result.get('symbols_updated', [])}"
+                )
+                get_predictor().invalidate_cache()
+        except Exception as e:
+            logger.warning(f"LearningEngine cycle failed (non-critical): {e}")
 
 
 def run_loop() -> None:
