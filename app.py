@@ -220,6 +220,7 @@ async def webhook(payload: TradingViewPayload, request: Request) -> Dict:
     except ValueError as exc:
         raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
+    signal['source'] = 'external'
     add_signal(signal)
     return {"signal_registered": True, "signal": signal}
 

@@ -51,13 +51,6 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
         fresh_external.append(sig)
     external_signals = fresh_external
 
-    # Mark remaining external signals as processed to avoid reprocessing
-    for signal in external_signals:
-        try:
-            mark_signal_as_processed(signal.get('symbol'))
-        except Exception as e:
-            print(f"Failed to mark signal as processed: {e}")
-
     # If no external signals, use autonomous signal generation
     if not external_signals:
         print("No external signals found, using autonomous signal generation...")
@@ -518,7 +511,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             print(f"Bought {qty} {symbol}")
             ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_INFO, f"Bought {qty} {symbol} @ ~{price:.4f} USDT")
             update_signal_decision(symbol, "executed", "EJECUTADO")
-            
+            mark_signal_as_processed(symbol)
+
             # Track position in Position Manager if available
             if position_manager:
                 try:

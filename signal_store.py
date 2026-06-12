@@ -188,7 +188,8 @@ def mark_signal_as_processed(signal_id: str) -> None:
     """
     if _db_client:
         try:
-            # PostgreSQL does not support ORDER BY / LIMIT in UPDATE — use ctid subquery
+            # Prefer marking the most recent external/non-autonomous signal for this symbol.
+            # Falls back to any signal for the symbol if no external one exists.
             query = """
                 UPDATE market_data
                 SET data = jsonb_set(data, '{processed}', 'true')
@@ -196,11 +197,26 @@ def mark_signal_as_processed(signal_id: str) -> None:
                     SELECT ctid FROM market_data
                     WHERE data_type = 'signal'
                     AND data->>'symbol' = %s
+                    AND (data->>'source' IS NULL OR data->>'source' != 'autonomous')
                     ORDER BY timestamp DESC
                     LIMIT 1
                 )
             """
-            _db_client.execute_update(query, (signal_id,))
+            rows = _db_client.execute_update(query, (signal_id,))
+            if not rows:
+                # fallback: mark most recent signal regardless of source
+                query_fb = """
+                    UPDATE market_data
+                    SET data = jsonb_set(data, '{processed}', 'true')
+                    WHERE ctid = (
+                        SELECT ctid FROM market_data
+                        WHERE data_type = 'signal'
+                        AND data->>'symbol' = %s
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                    )
+                """
+                _db_client.execute_update(query_fb, (signal_id,))
             logger.info(f"Signal marked as processed: {signal_id}")
         except Exception as e:
             logger.error(f"Failed to mark signal as processed in database: {e}")
