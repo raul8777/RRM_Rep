@@ -5,7 +5,7 @@ from typing import Dict, List
 import error_collector as ec
 from binance_client import BinanceClient
 from news_client import NewsClient
-from signal_store import get_signals, add_signal, mark_signal_as_processed, update_signal_decision
+from signal_store import get_signals, add_signal, mark_signal_as_processed, update_signal_decision, expire_stale_signals
 from strategy import rank_buy_signals, rank_with_technical, normalize_symbol, rank_for_portfolio_manager
 from analysis_cache import analysis_cache
 from autonomous_signals import AutonomousSignalGenerator
@@ -29,6 +29,11 @@ def _get_news_scores(symbols: List[str], news_client: NewsClient, settings) -> D
 
 
 def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClient, portfolio_manager=None) -> List[Dict]:
+    # Expire autonomous signals older than 30 min with no decision (housekeeping)
+    expired = expire_stale_signals(max_age_minutes=30)
+    if expired:
+        print(f"Expired {expired} stale autonomous signal(s)")
+
     # First try to get signals from external sources (TradingView webhook)
     # Filter out autonomous signals to avoid using stale autonomous signals
     all_signals = get_signals(include_processed=False)

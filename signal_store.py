@@ -147,8 +147,11 @@ def update_signal_decision(symbol: str, decision: str, reason: str) -> None:
         reason:   Short keyword visible on dashboard
                   e.g. "PNL_LOW", "NO_SALDO", "MAX_POSIC", "EJECUTADO", "QTY_INVALIDA"
     """
+    # Mark as processed for any final decision (executed or rejected); keep pending unprocessed
+    is_final = decision in ("executed", "rejected")
     update = {"decision": decision, "decision_reason": reason,
-              "decision_at": datetime.utcnow().isoformat() + "Z"}
+              "decision_at": datetime.utcnow().isoformat() + "Z",
+              "processed": is_final}
     if _db_client:
         try:
             query = """
@@ -177,6 +180,46 @@ def _update_signal_decision_in_memory(symbol: str, update: Dict) -> None:
             if sig.get("symbol") == symbol:
                 sig.update(update)
                 break
+
+
+def expire_stale_signals(max_age_minutes: int = 30) -> int:
+    """
+    Mark autonomous signals older than max_age_minutes with no final decision
+    as processed=True. Returns count of expired signals.
+    """
+    expired = 0
+    if _db_client:
+        try:
+            query = """
+                UPDATE market_data
+                SET data = jsonb_set(data, '{processed}', 'true')
+                WHERE data_type = 'signal'
+                AND (data->>'source' = 'autonomous' OR data->>'source' IS NULL)
+                AND (data->>'decision' IS NULL OR data->>'decision' = 'pending')
+                AND timestamp < NOW() - make_interval(mins => %s)
+            """
+            expired = _db_client.execute_update(query, (max_age_minutes,))
+            if expired:
+                logger.info(f"Expired {expired} stale signals older than {max_age_minutes}min")
+        except Exception as e:
+            logger.error(f"expire_stale_signals failed: {e}")
+    else:
+        cutoff = datetime.utcnow().isoformat()
+        with _lock:
+            from datetime import timedelta
+            cutoff_dt = datetime.utcnow() - timedelta(minutes=max_age_minutes)
+            for sig in _signals:
+                if (sig.get('source') in ('autonomous', None)
+                        and sig.get('decision') in (None, 'pending')
+                        and not sig.get('processed')):
+                    try:
+                        ra = sig.get('received_at', '')
+                        if ra and datetime.fromisoformat(ra.replace('Z', '')) < cutoff_dt:
+                            sig['processed'] = True
+                            expired += 1
+                    except Exception:
+                        pass
+    return expired
 
 
 def mark_signal_as_processed(signal_id: str) -> None:
