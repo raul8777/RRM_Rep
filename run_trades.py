@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timezone
 from typing import Dict, List
 
 import error_collector as ec
@@ -33,7 +34,24 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
     all_signals = get_signals(include_processed=False)
     external_signals = [s for s in all_signals if s.get('source') != 'autonomous']
 
-    # Mark external signals as processed to avoid reprocessing
+    # ── Mejora D: TTL filter — discard external signals older than 15 min ─────────
+    fresh_external = []
+    for sig in external_signals:
+        received_raw = sig.get('received_at')
+        if received_raw:
+            try:
+                received_dt = datetime.fromisoformat(received_raw.replace('Z', '+00:00'))
+                age_min = (datetime.now(timezone.utc) - received_dt).total_seconds() / 60
+                if age_min > 15:
+                    print(f"Discarding stale external signal for {sig.get('symbol')} (age={age_min:.1f}min > 15min)")
+                    mark_signal_as_processed(sig.get('symbol'))
+                    continue
+            except Exception:
+                pass
+        fresh_external.append(sig)
+    external_signals = fresh_external
+
+    # Mark remaining external signals as processed to avoid reprocessing
     for signal in external_signals:
         try:
             mark_signal_as_processed(signal.get('symbol'))
@@ -52,7 +70,7 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
             
             signal_generator = AutonomousSignalGenerator(client, symbols)  # reuse shared client
             autonomous_signals = signal_generator.get_top_buy_signals(
-                interval='15m',
+                interval='1h',
                 min_strength=getattr(settings, 'min_signal_strength', 0.5),
                 limit=getattr(settings, 'max_positions', 5)
             )
@@ -95,6 +113,22 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
     # Use external signals if available
     symbols = sorted({normalize_symbol(signal.get("symbol", "")) for signal in external_signals if signal.get("symbol")})
     news_scores = _get_news_scores(symbols, news_client, settings)
+
+    # ── Mejora C: Enrich external signals with 4h trend + volume + strength ──
+    try:
+        sig_gen_ext = AutonomousSignalGenerator(client, symbols)
+        for sig in external_signals:
+            sym = normalize_symbol(sig.get("symbol", ""))
+            if not sym:
+                continue
+            analysis = sig_gen_ext.analyze_symbol(sym, interval='1h', use_multi_timeframe=True)
+            sig['strength'] = analysis.get('strength', 0.5)
+            sig['higher_tf_trend'] = analysis.get('higher_tf_trend', 'FLAT')
+            sig['volume_confirmed'] = analysis.get('volume_confirmed', False)
+            if analysis.get('higher_tf_trend') == 'DOWN' and sig.get('action', '').upper() == 'BUY':
+                print(f"External signal {sym}: 4h trend DOWN — strength halved to {sig['strength']:.2f}")
+    except Exception as ext_err:
+        print(f"External signal enrichment error: {ext_err}")
     
     # Get technical scores from analysis cache
     technical_scores: Dict[str, float] = {}

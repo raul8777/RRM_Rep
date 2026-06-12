@@ -3,12 +3,17 @@ Autonomous Signal Generation Module
 Generates trading signals automatically using technical analysis from Binance data.
 """
 
-from typing import List, Dict
+from datetime import datetime, timezone
+from typing import List, Dict, Optional
 from binance_client import BinanceClient
 from technical_indicators import TechnicalIndicators
 import logging
 
 logger = logging.getLogger(__name__)
+
+# ── Per-symbol signal cache (TTL = SIGNAL_CACHE_TTL_SECONDS) ─────────────────
+SIGNAL_CACHE_TTL_SECONDS = 1800  # 30 minutes
+_signal_cache: Dict[str, Dict] = {}  # {symbol: {"signal": ..., "cached_at": datetime}}
 
 
 class AutonomousSignalGenerator:
@@ -111,6 +116,28 @@ class AutonomousSignalGenerator:
             logger.debug(f"Higher-TF trend error for {symbol}: {e}")
             return 'FLAT'
 
+    @staticmethod
+    def _get_cached_signal(symbol: str) -> Optional[Dict]:
+        """Return cached signal if still valid (within TTL), else None."""
+        entry = _signal_cache.get(symbol)
+        if not entry:
+            return None
+        age = (datetime.now(timezone.utc) - entry["cached_at"]).total_seconds()
+        if age < SIGNAL_CACHE_TTL_SECONDS:
+            logger.debug(f"Cache hit for {symbol} (age={age:.0f}s)")
+            return entry["signal"]
+        return None
+
+    @staticmethod
+    def _cache_signal(symbol: str, signal: Dict) -> None:
+        """Store signal in cache with current timestamp."""
+        _signal_cache[symbol] = {"signal": signal, "cached_at": datetime.now(timezone.utc)}
+
+    @staticmethod
+    def _invalidate_cache(symbol: str) -> None:
+        """Remove symbol from cache (e.g. after a trade is executed)."""
+        _signal_cache.pop(symbol, None)
+
     def analyze_symbol(self, symbol: str, interval: str = '1h',
                        use_multi_timeframe: bool = True) -> Dict:
         """
@@ -124,6 +151,11 @@ class AutonomousSignalGenerator:
         Returns:
             Dictionary with signal information
         """
+        # ── Cache check ───────────────────────────────────────────────────────
+        cached = AutonomousSignalGenerator._get_cached_signal(symbol)
+        if cached is not None:
+            return cached
+
         try:
             logger.info(f"Analyzing {symbol}...")
             klines = self.fetch_klines(symbol, interval, limit=100)
@@ -176,6 +208,27 @@ class AutonomousSignalGenerator:
             analysis['current_price']    = closes[-1]
             analysis['higher_tf_trend']  = higher_trend
             analysis['volume_confirmed'] = volume_confirmed
+
+            # ── Enrich with EMA200 trend from analysis_cache (Mejora E) ──────
+            try:
+                from analysis_cache import analysis_cache
+                cached_analysis = analysis_cache.get(symbol)
+                if cached_analysis:
+                    ema200 = cached_analysis.get('indicators', {}).get('ema200', {})
+                    if isinstance(ema200, dict):
+                        analysis['ema200_trend'] = ema200.get('trend', 'UNKNOWN')
+                    elif isinstance(ema200, str) and 'trend' in ema200:
+                        # Powershell serialization artifact — parse manually if needed
+                        analysis['ema200_trend'] = 'UP' if 'UP' in ema200 else 'DOWN'
+                    # If price is below EMA200 (long-term bear), penalize BUY strength
+                    if analysis.get('ema200_trend') == 'DOWN' and analysis['signal'] == 'BUY':
+                        analysis['strength'] = max(0.0, analysis['strength'] * 0.85)
+                        analysis['reason'] += ' [EMA200 DOWN -15%]'
+            except Exception:
+                pass
+
+            # ── Store in cache ────────────────────────────────────────────────
+            AutonomousSignalGenerator._cache_signal(symbol, analysis)
 
             return analysis
 
