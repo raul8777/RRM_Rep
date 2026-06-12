@@ -83,12 +83,16 @@ function renderSignals(d) {
         const reason = s.reason ? `<span class="signal-reason">${s.reason}</span>` : '<span class="signal-reason" style="color:#555">—</span>';
         const ts = s.received_at ? relativeTime(s.received_at) : '';
         // Decision badge
-        let decisionBadge = '<span class="decision-badge decision-pending">PENDIENTE</span>';
+        let decisionBadge;
         if (s.decision === 'executed') {
             decisionBadge = '<span class="decision-badge decision-executed">✅ EJECUTADO</span>';
         } else if (s.decision === 'rejected') {
             const r = s.decision_reason || 'RECHAZADO';
             decisionBadge = `<span class="decision-badge decision-rejected">❌ ${r}</span>`;
+        } else if (s.processed) {
+            decisionBadge = '<span class="decision-badge decision-expired">⏱ EXPIRADA</span>';
+        } else {
+            decisionBadge = '<span class="decision-badge decision-pending">PENDIENTE</span>';
         }
         return `
         <div class="signal-row">

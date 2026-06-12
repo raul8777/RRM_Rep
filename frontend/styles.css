@@ -405,5 +405,10 @@ h1 {
     color: #888;
     border: 1px solid rgba(180,180,180,0.2);
 }
+.decision-expired {
+    background: rgba(180,130,50,0.10);
+    color: #a07830;
+    border: 1px solid rgba(180,130,50,0.25);
+}
 .positive { color: #4ecca3; }
 .negative { color: #ff6363; }
