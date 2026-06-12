@@ -45,7 +45,9 @@ class Orchestrator:
         # Background threads
         self.trade_cycle_thread = None
         self.analysis_cycle_thread = None
+        self.learning_cycle_thread = None
         self.should_run = False
+        self.last_trade_cycle_at: Optional[datetime] = None
         
         # Callbacks
         self.on_state_change: Optional[Callable] = None
@@ -270,6 +272,7 @@ class Orchestrator:
             return
         
         self.should_run = True
+        self._trade_cycle_func = cycle_func
         self.trade_cycle_thread = threading.Thread(
             target=self._run_cycle,
             args=(cycle_func, interval_minutes),
@@ -289,7 +292,7 @@ class Orchestrator:
         if self.analysis_cycle_thread and self.analysis_cycle_thread.is_alive():
             logger.warning("Analysis cycle already running")
             return
-        
+
         self.should_run = True
         self.analysis_cycle_thread = threading.Thread(
             target=self._run_cycle,
@@ -298,6 +301,45 @@ class Orchestrator:
         )
         self.analysis_cycle_thread.start()
         logger.info(f"Analysis cycle started with {interval_minutes} minute interval")
+
+    def start_learning_cycle(self, interval_minutes: int = 90) -> None:
+        """
+        Start the self-learning cycle in a background thread.
+
+        Args:
+            interval_minutes: Interval between learning runs (default 90 min)
+        """
+        if self.learning_cycle_thread and self.learning_cycle_thread.is_alive():
+            logger.warning("Learning cycle already running")
+            return
+
+        self.should_run = True
+        self.learning_cycle_thread = threading.Thread(
+            target=self._run_cycle,
+            args=(self._learning_execute_once, interval_minutes),
+            daemon=True
+        )
+        self.learning_cycle_thread.start()
+        logger.info(f"Learning cycle started with {interval_minutes} minute interval")
+
+    @staticmethod
+    def _learning_execute_once() -> None:
+        """Run one LearningEngine cycle and invalidate the predictor cache."""
+        try:
+            from learning_engine import get_learning_engine
+            from pnl_service import get_predictor
+            result = get_learning_engine().run(min_trades=5, lookback_days=30)
+            if result.get("status") == "completed":
+                logger.info(
+                    f"LearningEngine: {result['trades_analyzed']} trades, "
+                    f"accuracy={result.get('accuracy', {}).get('prediction_accuracy', 0):.2%}, "
+                    f"updated={result.get('symbols_updated', [])}"
+                )
+                get_predictor().invalidate_cache()
+        except Exception as e:
+            import error_collector as ec
+            logger.warning(f"LearningEngine cycle failed (non-critical): {e}")
+            ec.add_error(ec.SOURCE_SYSTEM, ec.LEVEL_WARNING, f"LearningEngine cycle failed: {e}")
     
     def _run_cycle(self, cycle_func: Callable, interval_minutes: int) -> None:
         """
@@ -307,31 +349,39 @@ class Orchestrator:
             cycle_func: Function to run
             interval_minutes: Interval between runs
         """
+        first_run = True
         while self.should_run:
+            if not first_run:
+                time.sleep(max(1, interval_minutes) * 60)
+            first_run = False
             try:
                 if self.can_execute_trades():
                     cycle_func()
                 elif self.can_monitor_positions():
-                    # In PAUSED state, only monitor positions
                     logger.debug("System paused, skipping trade execution")
                 else:
                     logger.debug("System stopped, skipping cycle")
             except Exception as e:
                 logger.error(f"Error in cycle: {e}")
-            
-            time.sleep(max(1, interval_minutes) * 60)
+            else:
+                if cycle_func == getattr(self, '_trade_cycle_func', None):
+                    self.last_trade_cycle_at = datetime.utcnow()
     
     def stop_all_cycles(self) -> None:
         """Stop all background cycles."""
         self.should_run = False
-        
+
         if self.trade_cycle_thread:
             self.trade_cycle_thread.join(timeout=5)
             logger.info("Trade cycle stopped")
-        
+
         if self.analysis_cycle_thread:
             self.analysis_cycle_thread.join(timeout=5)
             logger.info("Analysis cycle stopped")
+
+        if self.learning_cycle_thread:
+            self.learning_cycle_thread.join(timeout=5)
+            logger.info("Learning cycle stopped")
     
     def get_health_status(self) -> Dict:
         """
@@ -344,8 +394,10 @@ class Orchestrator:
             "system_state": self.state.value,
             "trade_cycle_running": self.trade_cycle_thread.is_alive() if self.trade_cycle_thread else False,
             "analysis_cycle_running": self.analysis_cycle_thread.is_alive() if self.analysis_cycle_thread else False,
+            "learning_cycle_running": self.learning_cycle_thread.is_alive() if self.learning_cycle_thread else False,
             "portfolio_manager_active": self.portfolio_manager is not None,
             "position_manager_active": self.position_manager is not None,
             "backtester_active": self.backtester is not None,
+            "last_trade_cycle_at": self.last_trade_cycle_at.isoformat() if self.last_trade_cycle_at else None,
             "timestamp": datetime.utcnow().isoformat()
         }

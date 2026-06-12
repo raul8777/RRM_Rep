@@ -1,11 +1,15 @@
 import os
+import time
 from binance.client import Client
 from binance.exceptions import BinanceAPIException, BinanceRequestException
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 class BinanceClient:
+    PRICE_CACHE_TTL = 30        # seconds
+    FILTERS_CACHE_TTL = 3600    # 1 hour
+
     def __init__(self, api_key: str, api_secret: str, testnet: bool = True, dry_run: bool = False):
         self.api_key = api_key
         self.api_secret = api_secret
@@ -14,6 +18,9 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         if self.testnet:
             self.client.API_URL = "https://testnet.binance.vision/api"
+        # In-process caches: {symbol: (value, timestamp)}
+        self._price_cache: Dict[str, Tuple[float, float]] = {}
+        self._filters_cache: Dict[str, Tuple[Dict, float]] = {}
 
     def get_account_balance(self) -> Dict[str, float]:
         try:
@@ -73,9 +80,55 @@ class BinanceClient:
         except (BinanceAPIException, BinanceRequestException) as exc:
             raise RuntimeError(f"Binance order status error: {exc}") from exc
 
-    def get_symbol_price(self, symbol: str) -> float:
+    def get_symbol_price(self, symbol: str, use_cache: bool = True) -> float:
+        now = time.monotonic()
+        if use_cache and symbol in self._price_cache:
+            val, ts = self._price_cache[symbol]
+            if now - ts < self.PRICE_CACHE_TTL:
+                return val
         try:
             ticker = self.client.get_symbol_ticker(symbol=symbol)
-            return float(ticker.get("price", 0))
+            price = float(ticker.get("price", 0))
+            self._price_cache[symbol] = (price, now)
+            return price
         except (BinanceAPIException, BinanceRequestException) as exc:
             raise RuntimeError(f"Binance price error: {exc}") from exc
+
+    def get_symbol_filters(self, symbol: str) -> Dict:
+        """Return symbol filters with 1-hour cache to minimize API calls."""
+        now = time.monotonic()
+        if symbol in self._filters_cache:
+            val, ts = self._filters_cache[symbol]
+            if now - ts < self.FILTERS_CACHE_TTL:
+                return val
+        try:
+            info = self.client.get_symbol_info(symbol)
+            filters_raw = info.get("filters", []) if info else []
+            result: Dict = {"step": 0.001, "min_qty": 0.001, "min_notional": 10.0}
+            for f in filters_raw:
+                ft = f.get("filterType", "")
+                if ft == "LOT_SIZE":
+                    result["step"] = float(f.get("stepSize", 0.001))
+                    result["min_qty"] = float(f.get("minQty", 0.001))
+                elif ft == "NOTIONAL":
+                    result["min_notional"] = float(f.get("minNotional", 10.0))
+                elif ft == "MIN_NOTIONAL":
+                    result["min_notional"] = float(f.get("minNotional", 10.0))
+            self._filters_cache[symbol] = (result, now)
+            return result
+        except (BinanceAPIException, BinanceRequestException) as exc:
+            raise RuntimeError(f"Binance filters error: {exc}") from exc
+
+    def calculate_commission(self, amount: float, price: float, commission_rate: float = 0.001) -> float:
+        """
+        Calculate commission for a trade.
+        
+        Args:
+            amount: Quantity of the asset
+            price: Price per unit
+            commission_rate: Commission rate (default 0.1% = 0.001)
+            
+        Returns:
+            Commission amount in quote currency (USDT)
+        """
+        return amount * price * commission_rate

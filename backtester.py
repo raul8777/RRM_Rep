@@ -11,6 +11,7 @@ capital management.  Enhanced with:
 
 import json
 import logging
+import uuid
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
@@ -283,21 +284,22 @@ class Backtester:
         if self.db is None:
             return None
         try:
+            run_id = str(uuid.uuid4())
             sql = """
             INSERT INTO backtest_results
-                (symbol, interval, days_back, strategy_name,
+                (run_id, symbol, interval, days_back, strategy_name,
                  total_trades, winning_trades, losing_trades, win_rate,
                  total_pnl, total_pnl_pct, max_drawdown, sharpe_ratio,
                  sortino_ratio, profit_factor,
                  initial_capital, final_capital,
                  start_date, end_date, params, metadata, status)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'completed')
-            RETURNING run_id::text
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'completed')
             """
             params_json = json.dumps(result.params or {})
             meta_json   = json.dumps({k: v for k, v in (result.metadata or {}).items()
                                       if k != 'trades'})
-            rows = self.db.execute_query(sql, (
+            self.db.execute_update(sql, (
+                run_id,
                 symbol, interval, days_back, result.strategy_name,
                 result.total_trades, result.winning_trades, result.losing_trades,
                 result.win_rate, result.total_pnl, result.total_pnl_percentage,
@@ -306,8 +308,7 @@ class Backtester:
                 result.initial_capital, result.final_capital,
                 result.start_date or None, result.end_date or None,
                 params_json, meta_json,
-            ), fetch=True)
-            run_id = str(rows[0][0]) if rows else None
+            ))
             logger.info(f"Backtest result persisted for {symbol}: run_id={run_id}")
             return run_id
         except Exception as e:
@@ -330,15 +331,17 @@ class Backtester:
             {where}
             ORDER BY created_at DESC LIMIT %s
             """
-            rows = self.db.execute_query(sql, args, fetch=True)
+            rows = self.db.execute_query(sql, args)
             return [
                 {
-                    'run_id': str(r[0]), 'symbol': r[1], 'interval': r[2],
-                    'days_back': r[3], 'strategy_name': r[4],
-                    'total_trades': r[5], 'win_rate': r[6], 'total_pnl': r[7],
-                    'sharpe_ratio': r[8], 'sortino_ratio': r[9],
-                    'profit_factor': r[10], 'max_drawdown': r[11],
-                    'status': r[12], 'created_at': str(r[13]),
+                    'run_id': str(r['run_id']), 'symbol': r['symbol'],
+                    'interval': r['interval'], 'days_back': r['days_back'],
+                    'strategy_name': r['strategy_name'],
+                    'total_trades': r['total_trades'], 'win_rate': r['win_rate'],
+                    'total_pnl': r['total_pnl'], 'sharpe_ratio': r['sharpe_ratio'],
+                    'sortino_ratio': r['sortino_ratio'], 'profit_factor': r['profit_factor'],
+                    'max_drawdown': r['max_drawdown'],
+                    'status': r['status'], 'created_at': str(r['created_at']),
                 }
                 for r in rows
             ]

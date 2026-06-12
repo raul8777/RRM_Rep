@@ -8,40 +8,48 @@ import logging
 from typing import Dict, List, Optional, Any
 from contextlib import contextmanager
 import psycopg2
-from psycopg2 import pool
-from psycopg2.extras import RealDictCursor
+from psycopg2 import pool, OperationalError
+from psycopg2.extras import RealDictCursor, execute_batch as pg_execute_batch
 
 logger = logging.getLogger(__name__)
 
 
 class DatabaseClient:
-    """PostgreSQL database client with connection pooling."""
+    """PostgreSQL database client with threaded connection pooling."""
     
-    def __init__(self, db_url: str, min_connections: int = 1, max_connections: int = 10):
+    def __init__(self, db_url: str, min_connections: int = 2, max_connections: int = 10,
+                 statement_timeout_ms: int = 5000):
         """
         Initialize database client with connection pool.
         
         Args:
             db_url: PostgreSQL connection URL
-            min_connections: Minimum number of connections in pool
-            max_connections: Maximum number of connections in pool
+            min_connections: Minimum connections to keep open
+            max_connections: Maximum simultaneous connections
+            statement_timeout_ms: Per-query timeout in milliseconds
         """
         self.db_url = db_url
         self.min_connections = min_connections
         self.max_connections = max_connections
+        self.statement_timeout_ms = statement_timeout_ms
         self.connection_pool = None
         
         self._initialize_pool()
     
     def _initialize_pool(self):
-        """Initialize the connection pool."""
+        """Initialize the threaded connection pool."""
         try:
-            self.connection_pool = pool.SimpleConnectionPool(
+            self.connection_pool = pool.ThreadedConnectionPool(
                 self.min_connections,
                 self.max_connections,
-                self.db_url
+                self.db_url,
+                options=f"-c statement_timeout={self.statement_timeout_ms}",
             )
-            logger.info(f"Database connection pool initialized (min={self.min_connections}, max={self.max_connections})")
+            logger.info(
+                f"DB ThreadedConnectionPool initialized "
+                f"(min={self.min_connections}, max={self.max_connections}, "
+                f"timeout={self.statement_timeout_ms}ms)"
+            )
         except Exception as e:
             logger.error(f"Failed to initialize database connection pool: {e}")
             raise
@@ -60,7 +68,21 @@ class DatabaseClient:
         conn = None
         try:
             conn = self.connection_pool.getconn()
+            # Reconnect if the connection was dropped
+            if conn.closed:
+                self.connection_pool.putconn(conn, close=True)
+                conn = self.connection_pool.getconn()
             yield conn
+        except (OperationalError, psycopg2.InterfaceError) as e:
+            logger.warning(f"DB connection error, will retry on next call: {e}")
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                self.connection_pool.putconn(conn, close=True)
+                conn = None
+            raise
         except Exception as e:
             logger.error(f"Error getting connection from pool: {e}")
             if conn:
@@ -105,21 +127,24 @@ class DatabaseClient:
                 conn.commit()
                 return affected
     
-    def execute_batch(self, query: str, params_list: List[tuple]) -> int:
+    def execute_batch(self, query: str, params_list: List[tuple], page_size: int = 100) -> int:
         """
-        Execute a batch of INSERT/UPDATE/DELETE operations.
+        Execute a batch of INSERT/UPDATE/DELETE operations using psycopg2.extras.execute_batch.
         
         Args:
             query: SQL query string
             params_list: List of parameter tuples
+            page_size: Number of rows per round-trip
             
         Returns:
             Total number of affected rows
         """
+        if not params_list:
+            return 0
         with self.get_connection() as conn:
             with conn.cursor() as cursor:
-                cursor.executemany(query, params_list)
-                total_affected = cursor.rowcount
+                pg_execute_batch(cursor, query, params_list, page_size=page_size)
+                total_affected = len(params_list)
                 conn.commit()
                 return total_affected
     

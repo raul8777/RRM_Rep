@@ -4,15 +4,21 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Trading Agent Dashboard</title>
-    <link rel="stylesheet" href="/frontend/styles.css">
+    <link rel="stylesheet" href="/frontend/styles.css?v=5">
 </head>
 <body>
     <div class="container">
         <header>
             <h1>Crypto Trading Agent Dashboard</h1>
-            <div class="status-indicator" id="systemStatus">
-                <span class="status-dot"></span>
-                <span class="status-text">Loading...</span>
+            <div style="display:flex;align-items:center;gap:16px">
+                <div class="status-indicator" id="systemStatus">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Loading...</span>
+                </div>
+                <div id="healthBadge" title="Estado del sistema" style="cursor:pointer" onclick="document.getElementById('errorCard').scrollIntoView({behavior:'smooth'})">
+                    <span id="healthDot" style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#888;margin-right:4px"></span>
+                    <span id="healthText" style="font-size:0.85rem;color:#ccc">Health...</span>
+                </div>
             </div>
         </header>
 
@@ -39,9 +45,21 @@
                 </div>
             </div>
 
+            <!-- Recent Signals Card -->
+            <div class="card card-wide">
+                <h2>Señales Recientes <span style="font-size:12px;font-weight:400;color:#888">(BUY &amp; SELL)</span></h2>
+                <div id="signalsData">
+                    <p>Cargando señales...</p>
+                </div>
+            </div>
+
             <!-- Open Positions Card -->
             <div class="card card-full">
-                <h2>Posiciones Abiertas</h2>
+                <h2>Posiciones Abiertas
+                    <span style="float:right">
+                        <button class="btn btn-primary btn-sm" id="syncBalanceBtn" title="Importar activos de Binance no rastreados como posiciones gestionables">⇄ Sincronizar Saldo</button>
+                    </span>
+                </h2>
                 <div id="openPositionsData">
                     <p>Loading open positions...</p>
                 </div>
@@ -79,14 +97,6 @@
                 </div>
             </div>
 
-            <!-- Recent Signals Card -->
-            <div class="card">
-                <h2>Recent Signals</h2>
-                <div id="signalsData">
-                    <p>Loading signals...</p>
-                </div>
-            </div>
-
             <!-- System Health Card -->
             <div class="card">
                 <h2>System Health</h2>
@@ -101,7 +111,10 @@
                 <div id="learningData">
                     <p class="loading">Cargando datos de aprendizaje...</p>
                 </div>
-                <button class="btn btn-primary btn-sm" id="triggerLearningBtn">⚡ Re-Aprender</button>
+                <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+                    <button class="btn btn-primary btn-sm" id="triggerLearningBtn">⚡ Re-Aprender</button>
+                    <button class="btn btn-success btn-sm" id="bootstrapBtn" title="Cargar 90 días de historia de Binance para calibrar el predictor de PnL">📊 Bootstrap Predictor (90d)</button>
+                </div>
             </div>
 
             <!-- Estrategia Activa Card -->
@@ -142,6 +155,23 @@
                 <h2>Parámetros Optimizados</h2>
                 <div id="optimizedParamsData">
                     <p class="loading">Cargando parámetros...</p>
+                </div>
+            </div>
+
+            <!-- Sistema & Errores Card -->
+            <div class="card card-full" id="errorCard">
+                <h2>Sistema &amp; Errores
+                    <span style="float:right;display:flex;gap:8px">
+                        <button class="btn btn-primary btn-sm" id="refreshHealthBtn">&#x21bb; Actualizar</button>
+                        <button class="btn btn-warning btn-sm" id="clearErrorsBtn">&#x1F9F9; Limpiar</button>
+                    </span>
+                </h2>
+                <div id="healthChecksData">
+                    <p class="loading">Cargando health checks...</p>
+                </div>
+                <h3 style="margin-top:16px">Errores recientes</h3>
+                <div id="errorsData">
+                    <p class="loading">Cargando errores...</p>
                 </div>
             </div>
         </div>

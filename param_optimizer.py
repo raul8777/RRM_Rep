@@ -10,6 +10,7 @@ Results are persisted to the `optimized_params` table.
 
 import itertools
 import logging
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -114,16 +115,19 @@ class ParameterOptimizer:
             WHERE symbol = %s AND is_active = TRUE
             ORDER BY created_at DESC LIMIT 1
             """
-            rows = self.db.execute_query(sql, (symbol,), fetch=True)
+            rows = self.db.execute_query(sql, (symbol,))
             if not rows:
                 return None
             r = rows[0]
             return {
-                "rsi_period": r[0], "macd_fast": r[1], "macd_slow": r[2],
-                "macd_signal": r[3], "bb_period": r[4], "bb_std": r[5],
-                "buy_score_threshold": r[6], "ema_fast_period": r[7],
-                "ema_slow_period": r[8], "sharpe_ratio": r[9],
-                "win_rate": r[10], "created_at": str(r[11]), "run_id": str(r[12]),
+                "rsi_period": r["rsi_period"], "macd_fast": r["macd_fast"],
+                "macd_slow": r["macd_slow"], "macd_signal": r["macd_signal"],
+                "bb_period": r["bb_period"], "bb_std": r["bb_std"],
+                "buy_score_threshold": r["buy_score_threshold"],
+                "ema_fast_period": r["ema_fast_period"],
+                "ema_slow_period": r["ema_slow_period"],
+                "sharpe_ratio": r["sharpe_ratio"], "win_rate": r["win_rate"],
+                "created_at": str(r["created_at"]), "run_id": str(r["run_id"]),
             }
         except Exception as e:
             logger.warning(f"Could not load active params for {symbol}: {e}")
@@ -142,13 +146,15 @@ class ParameterOptimizer:
             WHERE symbol = %s
             ORDER BY created_at DESC LIMIT %s
             """
-            rows = self.db.execute_query(sql, (symbol, limit), fetch=True)
+            rows = self.db.execute_query(sql, (symbol, limit))
             return [
                 {
-                    "run_id": str(r[0]), "rsi_period": r[1], "macd_fast": r[2],
-                    "macd_slow": r[3], "bb_std": r[4], "buy_score_threshold": r[5],
-                    "sharpe_ratio": r[6], "win_rate": r[7], "total_pnl": r[8],
-                    "is_active": r[9], "created_at": str(r[10]),
+                    "run_id": str(r["run_id"]), "rsi_period": r["rsi_period"],
+                    "macd_fast": r["macd_fast"], "macd_slow": r["macd_slow"],
+                    "bb_std": r["bb_std"], "buy_score_threshold": r["buy_score_threshold"],
+                    "sharpe_ratio": r["sharpe_ratio"], "win_rate": r["win_rate"],
+                    "total_pnl": r["total_pnl"], "is_active": r["is_active"],
+                    "created_at": str(r["created_at"]),
                 }
                 for r in rows
             ]
@@ -179,22 +185,22 @@ class ParameterOptimizer:
             return None
         try:
             import json as _json
+            run_id = str(uuid.uuid4())
             # Deactivate previous active for this symbol
-            self.db.execute_query(
+            self.db.execute_update(
                 "UPDATE optimized_params SET is_active = FALSE WHERE symbol = %s",
                 (symbol,),
             )
             sql = """
             INSERT INTO optimized_params
-                (symbol, rsi_period, macd_fast, macd_slow, macd_signal,
+                (run_id, symbol, rsi_period, macd_fast, macd_slow, macd_signal,
                  bb_period, bb_std, buy_score_threshold,
                  ema_fast_period, ema_slow_period,
                  sharpe_ratio, win_rate, total_pnl, is_active, metadata)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,%s)
-            RETURNING run_id
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,%s)
             """
-            rows = self.db.execute_query(sql, (
-                symbol,
+            self.db.execute_update(sql, (
+                run_id, symbol,
                 params["rsi_period"], params["macd_fast"], params["macd_slow"],
                 params["macd_signal"], params["bb_period"], params["bb_std"],
                 params["buy_score_threshold"], params["ema_fast_period"],
@@ -202,8 +208,8 @@ class ParameterOptimizer:
                 result.sharpe_ratio, result.win_rate, result.total_pnl,
                 _json.dumps({"total_trades": result.total_trades,
                              "max_drawdown": result.max_drawdown}),
-            ), fetch=True)
-            return str(rows[0][0]) if rows else None
+            ))
+            return run_id
         except Exception as e:
             logger.warning(f"Could not persist optimized params for {symbol}: {e}")
             return None

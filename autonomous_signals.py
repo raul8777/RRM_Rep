@@ -28,6 +28,25 @@ class AutonomousSignalGenerator:
             'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT'
         ]
     
+    def get_btc_market_trend(self, interval: str = '4h') -> str:
+        """
+        Get BTC macro trend on the given timeframe.
+        Returns 'UP', 'DOWN', or 'FLAT'.
+        Used to scale position sizes: DOWN -> reduce exposure, UP -> normal/aggressive.
+        """
+        try:
+            klines = self.fetch_klines('BTCUSDT', interval, limit=50)
+            if not klines or len(klines) < 22:
+                return 'FLAT'
+            closes = [k['close'] for k in klines]
+            ema_f, ema_s, _ = TechnicalIndicators.ema_cross(closes, fast=9, slow=21)
+            if not ema_f or not ema_s:
+                return 'FLAT'
+            return 'UP' if ema_f[-1] > ema_s[-1] else 'DOWN'
+        except Exception as e:
+            logger.debug(f"BTC market trend error: {e}")
+            return 'FLAT'
+
     def fetch_klines(self, symbol: str, interval: str = '1h', limit: int = 100) -> List[Dict]:
         """
         Fetch kline data from Binance.

@@ -77,6 +77,10 @@ class PnLPredictor:
         """
         try:
             weights = self.load_learned_weights(symbol)
+            # Detect bootstrap: if all weights match defaults, no learning has happened
+            _default_items = {k: v for k, v in _DEFAULT_WEIGHTS.items()}
+            _weight_items  = {k: weights.get(k) for k in _DEFAULT_WEIGHTS}
+            is_default = (_weight_items == _default_items)
 
             # Calculate success probability based on indicators + learned weights
             success_probability = self._calculate_success_probability(indicators, weights)
@@ -114,7 +118,8 @@ class PnLPredictor:
                 'indicators_used': indicators,
                 'prediction_time': datetime.utcnow().isoformat(),
                 'cycle_duration_minutes': cycle_duration_minutes,
-                'position_size_usdt': position_size_usdt
+                'position_size_usdt': position_size_usdt,
+                'bootstrap_mode': is_default,
             }
             
             logger.info(

@@ -256,8 +256,12 @@ class TechnicalIndicators:
         # ── Scoring (max 10 buy / 10 sell) ───────────────────────────────────
         buy_score = sell_score = 0
 
-        # RSI (weight 2)
-        if latest_rsi < 35:   buy_score  += 2
+        # RSI (weight 2) — veto overbought/oversold extremes
+        if latest_rsi > 72:   # overbought veto — do not add buy points
+            sell_score += 2
+        elif latest_rsi < 28: # oversold veto — do not add sell points
+            buy_score  += 2
+        elif latest_rsi < 35:   buy_score  += 2
         elif latest_rsi < 45: buy_score  += 1
         elif latest_rsi > 65: sell_score += 2
         elif latest_rsi > 55: sell_score += 1
@@ -280,8 +284,8 @@ class TechnicalIndicators:
         elif latest_cross == -1:
             sell_score += 2   # fresh bearish cross
         elif latest_ema_f is not None and latest_ema_s is not None:
-            if latest_ema_f > latest_ema_s:   buy_score  += 1
-            else:                              sell_score += 1
+            if latest_ema_f > latest_ema_s:   buy_score  += 1.5  # trending above slow EMA
+            else:                              sell_score += 1.5  # trending below slow EMA
 
         # StochRSI confirmation (weight 1)
         if latest_stoch_k < 0.2 and latest_stoch_k > latest_stoch_d:
@@ -295,7 +299,9 @@ class TechnicalIndicators:
             elif sell_score > buy_score: sell_score += 1
 
         # ── Determine signal ──────────────────────────────────────────────────
-        max_score = 8  # theoretical max without vol spike bonus
+        # max_score=6: excludes vol spike bonus (+1) and EMA position fractional bonus
+        # This means buy_score=3 → strength=0.50, buy_score=4 → 0.67, etc.
+        max_score = 6
         if buy_score >= 3:
             signal   = "BUY"
             strength = min(buy_score / max_score, 1.0)

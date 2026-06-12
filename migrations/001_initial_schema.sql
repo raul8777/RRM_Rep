@@ -19,11 +19,12 @@ CREATE TABLE IF NOT EXISTS market_data (
     data_type TEXT NOT NULL, -- 'technical', 'news', 'signal'
     data JSONB NOT NULL,
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    expires_at TIMESTAMP WITH TIME ZONE,
-    INDEX idx_market_data_symbol (symbol),
-    INDEX idx_market_data_type (data_type),
-    INDEX idx_market_data_timestamp (timestamp)
+    expires_at TIMESTAMP WITH TIME ZONE
 );
+
+CREATE INDEX IF NOT EXISTS idx_market_data_symbol ON market_data(symbol);
+CREATE INDEX IF NOT EXISTS idx_market_data_type ON market_data(data_type);
+CREATE INDEX IF NOT EXISTS idx_market_data_timestamp ON market_data(timestamp);
 
 -- Trades open table
 CREATE TABLE IF NOT EXISTS trades_open (
@@ -38,10 +39,12 @@ CREATE TABLE IF NOT EXISTS trades_open (
     take_profit NUMERIC(20, 8),
     status TEXT DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'PENDING_CLOSE')),
     metadata JSONB,
-    INDEX idx_trades_open_symbol (symbol),
-    INDEX idx_trades_open_status (status),
-    INDEX idx_trades_open_entry_time (entry_time)
+    entry_commission NUMERIC(20, 8)
 );
+
+CREATE INDEX IF NOT EXISTS idx_trades_open_symbol ON trades_open(symbol);
+CREATE INDEX IF NOT EXISTS idx_trades_open_status ON trades_open(status);
+CREATE INDEX IF NOT EXISTS idx_trades_open_entry_time ON trades_open(entry_time);
 
 -- Trades closed table
 CREATE TABLE IF NOT EXISTS trades_closed (
@@ -58,10 +61,13 @@ CREATE TABLE IF NOT EXISTS trades_closed (
     pnl_percentage NUMERIC(10, 4),
     close_reason TEXT,
     metadata JSONB,
-    INDEX idx_trades_closed_symbol (symbol),
-    INDEX idx_trades_closed_entry_time (entry_time),
-    INDEX idx_trades_closed_exit_time (exit_time)
+    entry_commission NUMERIC(20, 8),
+    exit_commission NUMERIC(20, 8)
 );
+
+CREATE INDEX IF NOT EXISTS idx_trades_closed_symbol ON trades_closed(symbol);
+CREATE INDEX IF NOT EXISTS idx_trades_closed_entry_time ON trades_closed(entry_time);
+CREATE INDEX IF NOT EXISTS idx_trades_closed_exit_time ON trades_closed(exit_time);
 
 -- Orders table
 CREATE TABLE IF NOT EXISTS orders (
@@ -78,11 +84,12 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     filled_at TIMESTAMP WITH TIME ZONE,
-    metadata JSONB,
-    INDEX idx_orders_symbol (symbol),
-    INDEX idx_orders_status (status),
-    INDEX idx_orders_created_at (created_at)
+    metadata JSONB
 );
+
+CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders(symbol);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
 
 -- Audit log table
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -94,11 +101,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
     new_values JSONB,
     user_id TEXT,
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    metadata JSONB,
-    INDEX idx_audit_log_event_type (event_type),
-    INDEX idx_audit_log_entity (entity_type, entity_id),
-    INDEX idx_audit_log_timestamp (timestamp)
+    metadata JSONB
 );
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_event_type ON audit_log(event_type);
+CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
 
 -- Function to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()

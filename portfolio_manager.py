@@ -5,12 +5,14 @@ Manages intelligent capital allocation and pair selection for trading.
 """
 
 import logging
+import time
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from dataclasses import dataclass
 
 from risk_calculator import RiskCalculator
 from config import Settings
+from pnl_predictor import PnLPredictor
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ class PortfolioManager:
         self.settings = settings
         self.risk_calculator = RiskCalculator()
         self.position_manager = position_manager
+        self.pnl_predictor = PnLPredictor()
         
         # Portfolio configuration
         self.allocation_pct = settings.portfolio_allocation_pct / 100.0
@@ -60,18 +63,36 @@ class PortfolioManager:
         self.diversification_factor = settings.diversification_factor
         self.enable_closure = settings.enable_position_closure
         
+        # Prediction-based closure configuration
+        self.min_pnl_improvement_threshold = getattr(settings, 'min_pnl_improvement_threshold', 0.5)
+        self.min_success_probability_improvement = getattr(settings, 'min_success_probability_improvement', 0.2)
+        self.enable_prediction_based_closing = getattr(settings, 'enable_prediction_based_closing', True)
+
+        # Balance cache: (result_dict, monotonic_timestamp)
+        self._balance_cache: Optional[tuple] = None
+        self._balance_cache_ttl = 30.0  # seconds
+        
         logger.info(
             f"Portfolio Manager initialized: allocation_pct={self.allocation_pct:.2%}, "
             f"min_confidence={self.min_confidence}, max_risk_per_pair={self.max_risk_per_pair:.2%}"
         )
     
-    def get_total_balance(self) -> Dict[str, float]:
+    def get_total_balance(self, use_cache: bool = True) -> Dict[str, float]:
         """
-        Get total balance from Binance account.
-        
+        Get total balance from Binance account (cached 30 s by default).
+
+        Args:
+            use_cache: Set False to force a fresh Binance API call.
+
         Returns:
             Dictionary with balance information
         """
+        now_mono = time.monotonic()
+        if use_cache and self._balance_cache is not None:
+            cached_result, cached_ts = self._balance_cache
+            if now_mono - cached_ts < self._balance_cache_ttl:
+                return cached_result
+
         try:
             balances = self.binance_client.get_account_balance()
             
@@ -80,7 +101,7 @@ class PortfolioManager:
             usdt_balance = float(balances.get("USDT", 0))
             total_usdt += usdt_balance
             
-            # Convert other assets to USDT value
+            # Convert other assets to USDT value (price cache in BinanceClient prevents extra calls)
             for asset, amount in balances.items():
                 if asset.upper() == "USDT" or amount <= 0:
                     continue
@@ -89,15 +110,16 @@ class PortfolioManager:
                     price = self.binance_client.get_symbol_price(symbol)
                     total_usdt += amount * price
                 except Exception:
-                    # If price fetch fails, skip this asset
                     pass
             
-            return {
+            result = {
                 "usdt_available": usdt_balance,
                 "total_usdt": total_usdt,
                 "allocation_usdt": total_usdt * self.allocation_pct,
                 "timestamp": datetime.utcnow().isoformat()
             }
+            self._balance_cache = (result, now_mono)
+            return result
         except Exception as e:
             logger.error(f"Error getting total balance: {e}")
             return {
@@ -278,10 +300,136 @@ class PortfolioManager:
         
         return allocations
     
+    def get_position_predictions(self, current_positions: Dict[str, Dict]) -> Dict[str, Dict]:
+        """
+        Get PnL predictions for current open positions.
+        
+        Args:
+            current_positions: Current open positions (symbol -> position data)
+            
+        Returns:
+            Dictionary mapping symbol to prediction data
+        """
+        predictions = {}
+        
+        if not self.position_manager:
+            logger.warning("Position Manager not available, cannot get predictions")
+            return predictions
+        
+        try:
+            # Import AutonomousSignalGenerator for technical indicators
+            from autonomous_signals import AutonomousSignalGenerator
+            signal_gen = AutonomousSignalGenerator(self.binance_client)
+            
+            for symbol, position_data in current_positions.items():
+                try:
+                    # Get current price
+                    current_price = self.binance_client.get_symbol_price(symbol)
+                    
+                    # Get technical indicators
+                    signal_data = signal_gen.analyze_symbol(symbol, interval='1h')
+                    indicators = signal_data.get('indicators', {})
+                    
+                    # Format indicators for predictor
+                    formatted_indicators = {
+                        'rsi': {'value': indicators.get('rsi', 50)},
+                        'macd': {
+                            'macd': indicators.get('macd', 0),
+                            'signal': indicators.get('signal', 0),
+                            'histogram': indicators.get('histogram', 0)
+                        },
+                        'sma': {'value': indicators.get('middle_band', current_price)},
+                        'ema': {'value': indicators.get('middle_band', current_price)},
+                        'bollinger_bands': {
+                            'upper': indicators.get('upper_band', current_price * 1.02),
+                            'middle': indicators.get('middle_band', current_price),
+                            'lower': indicators.get('lower_band', current_price * 0.98)
+                        }
+                    }
+                    
+                    # Calculate prediction
+                    cycle_duration = getattr(self.settings, 'trade_cycle_minutes', 5)
+                    position_size = position_data.get('quantity', 0) * current_price
+                    
+                    prediction = self.pnl_predictor.predict_pnl(
+                        symbol=symbol,
+                        current_price=current_price,
+                        indicators=formatted_indicators,
+                        cycle_duration_minutes=cycle_duration,
+                        position_size_usdt=position_size
+                    )
+                    
+                    predictions[symbol] = prediction
+                    logger.debug(f"Prediction for {symbol}: {prediction['expected_pnl']:.2f} USDT")
+                    
+                except Exception as e:
+                    logger.error(f"Error getting prediction for {symbol}: {e}")
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"Error in get_position_predictions: {e}")
+        
+        return predictions
+    
+    def compare_predictions(
+        self,
+        current_predictions: Dict[str, Dict],
+        new_predictions: Dict[str, Dict]
+    ) -> List[Tuple[str, str, float]]:
+        """
+        Compare current position predictions with new opportunity predictions.
+        
+        Args:
+            current_predictions: Predictions for current positions
+            new_predictions: Predictions for new opportunities
+            
+        Returns:
+            List of tuples (current_symbol, new_symbol, improvement_score) sorted by improvement
+        """
+        comparisons = []
+        
+        for current_symbol, current_pred in current_predictions.items():
+            for new_symbol, new_pred in new_predictions.items():
+                # Skip if same symbol
+                if current_symbol == new_symbol:
+                    continue
+                
+                # Calculate improvement score
+                current_pnl = current_pred.get('expected_pnl', 0)
+                new_pnl = new_pred.get('expected_pnl', 0)
+                
+                current_prob = current_pred.get('success_probability', 0.5)
+                new_prob = new_pred.get('success_probability', 0.5)
+                
+                current_risk = current_pred.get('risk_metrics', {}).get('percentage_risk', 10.0)
+                new_risk = new_pred.get('risk_metrics', {}).get('percentage_risk', 10.0)
+                
+                # Calculate improvement factors
+                pnl_improvement = (new_pnl - current_pnl) / abs(current_pnl) if current_pnl != 0 else 0
+                prob_improvement = new_prob - current_prob
+                risk_improvement = (current_risk - new_risk) / current_risk if current_risk > 0 else 0
+                
+                # Combined improvement score (weighted)
+                improvement_score = (
+                    pnl_improvement * 0.5 +
+                    prob_improvement * 0.3 +
+                    risk_improvement * 0.2
+                )
+                
+                # Only include if improvement is positive
+                if improvement_score > 0:
+                    comparisons.append((current_symbol, new_symbol, improvement_score))
+        
+        # Sort by improvement score (descending)
+        comparisons.sort(key=lambda x: x[2], reverse=True)
+        
+        return comparisons
+    
     def decide_position_closures(
         self,
         current_positions: Dict[str, Dict],
-        new_allocations: List[CapitalAllocation]
+        new_allocations: List[CapitalAllocation],
+        new_predictions: Optional[Dict[str, Dict]] = None
     ) -> List[str]:
         """
         Decide which positions to close for capital reallocation.
@@ -289,6 +437,7 @@ class PortfolioManager:
         Args:
             current_positions: Current open positions
             new_allocations: New capital allocations
+            new_predictions: Optional predictions for new opportunities
             
         Returns:
             List of symbols to close
@@ -304,22 +453,48 @@ class PortfolioManager:
         # Get symbols in current positions
         current_symbols = set(current_positions.keys())
         
-        # Find symbols that are in current positions but not in new allocations
-        # These should be closed to free up capital
-        symbols_to_close = list(current_symbols - new_symbols)
+        # If prediction-based closing is enabled and we have new predictions
+        if self.enable_prediction_based_closing and new_predictions:
+            try:
+                # Get predictions for current positions
+                current_predictions = self.get_position_predictions(current_positions)
+                
+                if current_predictions:
+                    # Compare predictions
+                    comparisons = self.compare_predictions(current_predictions, new_predictions)
+                    
+                    # Decide which positions to close based on predictions
+                    for current_symbol, new_symbol, improvement_score in comparisons:
+                        # Check if improvement meets threshold
+                        if improvement_score >= self.min_pnl_improvement_threshold:
+                            # Check if new symbol is in new allocations
+                            if new_symbol in new_symbols:
+                                symbols_to_close.append(current_symbol)
+                                logger.info(
+                                    f"Closing {current_symbol} for {new_symbol} (improvement: {improvement_score:.2f})"
+                                )
+                                break  # Only close each position once
+                    
+                    if symbols_to_close:
+                        logger.info(f"Prediction-based closures: {symbols_to_close}")
+            except Exception as e:
+                logger.error(f"Error in prediction-based closure: {e}")
         
-        if symbols_to_close:
-            logger.info(f"Decided to close positions for reallocation: {symbols_to_close}")
-            
-            # Close positions in Position Manager if available
-            if self.position_manager:
-                for symbol in symbols_to_close:
-                    try:
-                        # Get current price for closing
-                        price = self.binance_client.get_symbol_price(symbol)
-                        self.position_manager.close_position(symbol, price, "portfolio_rebalancing")
-                    except Exception as e:
-                        logger.error(f"Failed to close position {symbol} in Position Manager: {e}")
+        # Fallback: close positions not in new allocations
+        if not symbols_to_close:
+            symbols_to_close = list(current_symbols - new_symbols)
+            if symbols_to_close:
+                logger.info(f"Closing positions not in new allocations: {symbols_to_close}")
+        
+        # Close positions in Position Manager if available
+        if symbols_to_close and self.position_manager:
+            for symbol in symbols_to_close:
+                try:
+                    # Get current price for closing
+                    price = self.binance_client.get_symbol_price(symbol)
+                    self.position_manager.close_position(symbol, price, "portfolio_rebalancing")
+                except Exception as e:
+                    logger.error(f"Failed to close position {symbol} in Position Manager: {e}")
         
         return symbols_to_close
     

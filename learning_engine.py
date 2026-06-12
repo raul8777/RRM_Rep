@@ -383,7 +383,7 @@ class LearningEngine:
             accuracy.get("signal_quality_score", 0.0),
             json.dumps(meta),
         )
-        self.db.execute_query(sql, params)
+        self.db.execute_update(sql, params)
 
     def _load_weights_from_db(self, symbol: str) -> Dict[str, float]:
         defaults = {"rsi": 0.15, "macd": 0.10, "bb": 0.10,
@@ -398,14 +398,14 @@ class LearningEngine:
             WHERE symbol = %s
             LIMIT 1
             """
-            rows = self.db.execute_query(sql, (symbol,), fetch=True)
+            rows = self.db.execute_query(sql, (symbol,))
             if not rows:
                 if symbol != "__global__":
                     return self._load_weights_from_db("__global__")
                 return defaults
             row = rows[0]
             # Expire if older than TTL
-            updated_at = row[6]
+            updated_at = row.get("updated_at")
             if updated_at:
                 if isinstance(updated_at, str):
                     updated_at = datetime.fromisoformat(updated_at)
@@ -414,8 +414,9 @@ class LearningEngine:
                     logger.info(f"Weights for {symbol} expired ({age}d old) — using defaults")
                     return defaults
             return {
-                "rsi": row[0], "macd": row[1], "bb": row[2],
-                "ema": row[3], "volume": row[4], "bias_correction": row[5],
+                "rsi": row["rsi_weight"], "macd": row["macd_weight"],
+                "bb": row["bb_weight"], "ema": row["ema_weight"],
+                "volume": row["volume_weight"], "bias_correction": row["bias_correction"],
             }
         except Exception as e:
             logger.warning(f"Could not load weights for {symbol}: {e}")

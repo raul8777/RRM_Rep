@@ -62,13 +62,49 @@ function renderPortfolio(d) {
 function renderSignals(d) {
     if (!d) return;
     const el = document.getElementById('signalsData');
-    el.innerHTML = d.signals && d.signals.length > 0
-        ? d.signals.slice(0, 5).map(s => `
-            <div class="data-item">
-                <span class="data-label">${s.symbol || '—'}</span>
-                <span class="data-value">${s.action || '—'}</span>
-            </div>`).join('')
-        : '<p class="loading">Sin señales</p>';
+    if (!d.signals || d.signals.length === 0) {
+        el.innerHTML = '<p class="loading">Sin señales</p>';
+        return;
+    }
+    const header = `<div class="signal-row signal-header">
+        <span class="signal-symbol" style="color:#666;font-size:11px;font-weight:400">SÍMBOLO</span>
+        <span style="color:#666;font-size:11px">ACCIÓN</span>
+        <span style="color:#666;font-size:11px">PRECIO</span>
+        <span style="color:#666;font-size:11px">RAZÓN</span>
+        <span style="color:#666;font-size:11px">PNL</span>
+        <span style="color:#666;font-size:11px">HACE</span>
+    </div>`;
+    el.innerHTML = header + d.signals.slice(0, 15).map(s => {
+        const isBuy = (s.action || '').toUpperCase() === 'BUY';
+        const badge = isBuy
+            ? '<span class="signal-badge signal-buy">BUY</span>'
+            : '<span class="signal-badge signal-sell">SELL</span>';
+        const price = s.price ? `$${parseFloat(s.price).toFixed(4)}` : '—';
+        const reason = s.reason ? `<span class="signal-reason">${s.reason}</span>` : '';
+        const pnl = s.pnl_pct != null
+            ? `<span class="${s.pnl_pct >= 0 ? 'positive' : 'negative'}">${s.pnl_pct > 0 ? '+' : ''}${s.pnl_pct.toFixed(2)}%</span>`
+            : '';
+        const ts = s.received_at ? relativeTime(s.received_at) : '';
+        return `
+        <div class="signal-row">
+            <span class="signal-symbol">${s.symbol || '—'}</span>
+            ${badge}
+            <span class="signal-price">${price}</span>
+            ${reason}
+            ${pnl}
+            <span class="signal-ts">${ts}</span>
+        </div>`;
+    }).join('');
+}
+
+function relativeTime(isoStr) {
+    try {
+        const diff = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000);
+        if (diff < 60) return `${diff}s`;
+        if (diff < 3600) return `${Math.floor(diff/60)}m`;
+        if (diff < 86400) return `${Math.floor(diff/3600)}h`;
+        return `${Math.floor(diff/86400)}d`;
+    } catch { return ''; }
 }
 
 function renderHealth(d) {
@@ -90,11 +126,13 @@ function renderBalance(d) {
         <div class="data-item"><span class="data-label">USD/MXN</span><span class="data-value">${fmt(d.usd_to_mxn_rate)}</span></div>
         <div class="balances-breakdown">
             <h3>Desglose por Activo:</h3>
-            ${Object.entries(d.balances_usdt || {}).map(([a, v]) => `
+            <div class="balances-scroll">
+            ${Object.entries(d.balances_usdt || {}).filter(([a, v]) => parseFloat(v) >= 5).map(([a, v]) => `
                 <div class="data-item">
                     <span class="data-label">${a}</span>
                     <span class="data-value">${fmt(v, 4)} USDT / ${fmt((d.balances_mxn || {})[a])} MXN</span>
                 </div>`).join('')}
+            </div>
         </div>
     `;
 }
@@ -118,15 +156,19 @@ function renderOpenPositions(d) {
         return;
     }
     el.innerHTML = `
+        <div class="table-scroll-10">
         <table class="positions-table">
             <thead>
                 <tr>
+                    <th>#</th>
                     <th>Símbolo</th>
                     <th>Lado</th>
                     <th>Qty</th>
                     <th>Entrada</th>
                     <th>Actual</th>
-                    <th>PnL Real</th>
+                    <th>Invertido (MXN)</th>
+                    <th>Valor actual (MXN)</th>
+                    <th>PnL No Real.</th>
                     <th>PnL Pred.</th>
                     <th>SL / TP</th>
                     <th>Horas</th>
@@ -135,22 +177,29 @@ function renderOpenPositions(d) {
             <tbody>
                 ${d.positions.map(p => `
                     <tr>
+                        <td title="ID: ${p.position_id || ''}">E${p.entry_number || 1}</td>
                         <td>${p.symbol}</td>
                         <td>${p.side}</td>
                         <td>${fmt(p.quantity, 4)}</td>
                         <td>$${fmt(p.entry_price)}</td>
                         <td>$${fmt(p.current_price)}</td>
-                        <td class="${pnlClass(p.unrealized_pnl)}">${fmt(p.unrealized_pnl)} USDT</td>
+                        <td>$${fmt(p.invested_mxn ?? (p.invested_usdt * 17.5), 2)} MXN</td>
+                        <td>$${fmt(p.current_value_mxn ?? 0, 2)} MXN</td>
+                        <td class="${pnlClass(p.unrealized_pnl)}">${fmt(p.unrealized_pnl)} USDT<br><small class="${pnlClass(p.unrealized_pnl_mxn)}">${fmt(p.unrealized_pnl_mxn ?? 0, 2)} MXN</small></td>
                         <td>${fmtPrediction(p.pnl_prediction)}</td>
                         <td class="sl-tp">${p.stop_loss ? '$' + fmt(p.stop_loss) : '—'} / ${p.take_profit ? '$' + fmt(p.take_profit) : '—'}</td>
                         <td>${p.hours_held ?? '—'}h</td>
                     </tr>`).join('')}
             </tbody>
         </table>
+        </div>
         <div class="positions-summary">
+            Total invertido: <strong>$${fmt(d.positions.reduce((s, p) => s + parseFloat(p.invested_mxn || 0), 0), 2)} MXN</strong>
+            &nbsp;|&nbsp;
             Total PnL No Realizado:
             <span class="${pnlClass(d.positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0))}">
                 ${fmt(d.positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0))} USDT
+                / $${fmt(d.positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl_mxn || 0), 0), 2)} MXN
             </span>
         </div>
     `;
@@ -164,6 +213,7 @@ function renderClosedPositions(d) {
         return;
     }
     el.innerHTML = `
+        <div class="table-scroll-10">
         <table class="positions-table">
             <thead>
                 <tr>
@@ -196,6 +246,7 @@ function renderClosedPositions(d) {
                 }).join('')}
             </tbody>
         </table>
+        </div>
     `;
 }
 
@@ -370,6 +421,87 @@ function renderOptimizedParams(d) {
         <div class="data-item"><span class="data-label">Actualizado</span><span class="data-value">${active.created_at ? new Date(active.created_at).toLocaleString('es-MX') : '—'}</span></div>`;
 }
 
+// ── Health & Error rendering ──────────────────────────────────────
+
+const _healthIcon = s => s === 'ok' ? '✅' : s === 'warning' ? '⚠️' : s === 'error' ? '❌' : '❓';
+const _healthColor = s => s === 'ok' ? '#4caf50' : s === 'warning' ? '#ff9800' : s === 'error' ? '#f44336' : '#888';
+const _levelColor = l => l === 'ERROR' ? '#f44336' : l === 'WARNING' ? '#ff9800' : '#aaa';
+
+function updateHealthBadge(overall, summary) {
+    const dot = document.getElementById('healthDot');
+    const txt = document.getElementById('healthText');
+    if (!dot || !txt) return;
+    dot.style.background = _healthColor(overall);
+    const e = summary ? summary.errors_last_5min || 0 : 0;
+    const w = summary ? summary.warnings_last_5min || 0 : 0;
+    txt.textContent = overall === 'ok'
+        ? 'Sistema OK'
+        : `${e} err / ${w} warn (5min)`;
+    txt.style.color = _healthColor(overall);
+}
+
+function renderHealthChecks(data) {
+    const el = document.getElementById('healthChecksData');
+    if (!data || data.error) { el.innerHTML = '<p class="loading">No disponible</p>'; return; }
+    const checks = data.checks || {};
+    const rows = Object.entries(checks).map(([key, c]) => {
+        if (!c || typeof c !== 'object') return '';
+        let detail = '';
+        if (key === 'db')           detail = c.latency_ms != null ? `${c.latency_ms} ms` : (c.detail || '');
+        if (key === 'binance')      detail = c.latency_ms != null ? `${c.latency_ms} ms${c.testnet ? ' (testnet)' : ''}` : (c.detail || '');
+        if (key === 'trade_cycle')  detail = c.last_cycle_at ? `Último: ${new Date(c.last_cycle_at).toLocaleTimeString('es-MX')} (${c.age_minutes}min ago)` : (c.detail || 'Sin datos');
+        if (key === 'position_sync')detail = `DB: ${c.db_open_positions ?? '?'} | Binance: ${c.binance_holdings ?? '?'}${c.mismatch ? ` | ⚠ Dif: ${c.mismatch}` : ''}`;
+        if (key === 'errors')       detail = `${c.errors_last_5min || 0} err / ${c.warnings_last_5min || 0} warn (5min) | Total: ${c.total_records || 0}`;
+        return `<div class="data-item">
+            <span class="data-label">${_healthIcon(c.status || c.health)} ${key}</span>
+            <span class="data-value" style="color:${_healthColor(c.status || c.health)}">${detail || c.status || c.health}</span>
+        </div>`;
+    }).join('');
+    el.innerHTML = rows || '<p class="loading">Sin checks</p>';
+}
+
+function renderErrors(data) {
+    const el = document.getElementById('errorsData');
+    if (!data) { el.innerHTML = '<p class="loading">Cargando...</p>'; return; }
+    const errors = data.errors || [];
+    if (!errors.length) { el.innerHTML = '<p class="loading" style="color:#4caf50">✅ Sin errores recientes</p>'; return; }
+    const rows = errors.map(e => {
+        const ts = e.timestamp ? new Date(e.timestamp).toLocaleTimeString('es-MX') : '';
+        const ctx = e.context && Object.keys(e.context).length ? `<small style="color:#888"> ${JSON.stringify(e.context)}</small>` : '';
+        return `<tr>
+            <td style="white-space:nowrap;color:#aaa">${ts}</td>
+            <td><span style="color:${_levelColor(e.level)};font-weight:bold">${e.level}</span></td>
+            <td><span style="color:#7ec8e3">${e.source}</span></td>
+            <td style="word-break:break-word">${e.message}${ctx}</td>
+        </tr>`;
+    }).join('');
+    el.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:0.82rem">
+        <thead><tr style="color:#aaa;text-align:left">
+            <th style="padding:2px 8px">Hora</th>
+            <th style="padding:2px 8px">Nivel</th>
+            <th style="padding:2px 8px">Fuente</th>
+            <th style="padding:2px 8px">Mensaje</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function updateHealthAndErrors() {
+    try {
+        const [hRes, eRes] = await Promise.all([
+            fetch(`${API_BASE}/health/status`),
+            fetch(`${API_BASE}/errors/recent?limit=50`)
+        ]);
+        const hData = hRes.ok ? await hRes.json() : null;
+        const eData = eRes.ok ? await eRes.json() : null;
+        renderHealthChecks(hData);
+        renderErrors(eData);
+        if (hData) updateHealthBadge(hData.overall, hData.checks && hData.checks.errors);
+    } catch (e) {
+        console.error('Health fetch error:', e);
+    }
+}
+
 // ── Backtest polling ───────────────────────────────────────────────────────────
 let _pendingBacktests = [];
 
@@ -496,8 +628,64 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // ── Sync Balance button ──────────────────────────────────────
+    document.getElementById('syncBalanceBtn').addEventListener('click', async () => {
+        const btn = document.getElementById('syncBalanceBtn');
+        btn.disabled = true;
+        btn.textContent = '⏳ Sincronizando...';
+        try {
+            const res = await fetch(`${API_BASE}/positions/sync`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok) {
+                const msg = data.count > 0
+                    ? `✅ ${data.count} importado(s): ${data.imported.join(', ')}`
+                    : '✅ Sin activos huérfanos';
+                btn.textContent = msg;
+                await updateDashboard();
+            } else {
+                btn.textContent = '❌ Error';
+            }
+        } catch (e) {
+            btn.textContent = '❌ Error';
+        }
+        setTimeout(() => { btn.disabled = false; btn.textContent = '⇄ Sincronizar Saldo'; }, 4000);
+    });
+
+    // ── Bootstrap Predictor button ───────────────────────────────
+    document.getElementById('bootstrapBtn').addEventListener('click', async () => {
+        const btn = document.getElementById('bootstrapBtn');
+        btn.disabled = true;
+        btn.textContent = '⏳ Cargando 90d...';
+        try {
+            const res = await fetch(`${API_BASE}/predictor/bootstrap?days=90`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok && data.status === 'completed') {
+                const wr = data.global_win_rate != null ? (data.global_win_rate * 100).toFixed(1) : '?';
+                btn.textContent = `✅ ${data.total_simulated_trades} trades, WR=${wr}%`;
+            } else if (res.ok && data.status === 'skipped') {
+                btn.textContent = '⚠️ Sin señales';
+            } else {
+                btn.textContent = '❌ Error';
+            }
+        } catch (e) {
+            btn.textContent = '❌ Error de red';
+        }
+        setTimeout(() => { btn.disabled = false; btn.textContent = '📊 Bootstrap Predictor (90d)'; }, 6000);
+    });
+
+    // ── Refresh Health button ────────────────────────────────────
+    document.getElementById('refreshHealthBtn').addEventListener('click', () => updateHealthAndErrors());
+
+    // ── Clear Errors button ──────────────────────────────────────
+    document.getElementById('clearErrorsBtn').addEventListener('click', async () => {
+        await fetch(`${API_BASE}/errors/clear`, { method: 'POST' });
+        await updateHealthAndErrors();
+    });
+
     updateDashboard();
+    updateHealthAndErrors();
     pollBacktestResults();
     setInterval(updateDashboard, POLL_INTERVAL_MS);
+    setInterval(updateHealthAndErrors, 60000);  // Health & errors refresh every 60s
     setInterval(tickCountdown, 1000);
 });

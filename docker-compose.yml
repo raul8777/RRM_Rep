@@ -45,6 +45,7 @@ services:
       - BINANCE_API_SECRET=${BINANCE_API_SECRET}
       - BINANCE_USE_TESTNET=${BINANCE_USE_TESTNET:-true}
       - DRY_RUN=${DRY_RUN:-true}
+      - ALLOW_REAL_TRADING=${ALLOW_REAL_TRADING:-false}
       - AGENT_MODE=${AGENT_MODE:-suggest}
       - DB_URL=postgresql://${DB_USER:-crypto_agent}:${DB_PASSWORD:-crypto_agent_password}@postgres:5432/${DB_NAME:-crypto_agent}
       - DB_USER=${DB_USER:-crypto_agent}
@@ -57,6 +58,9 @@ services:
       - MAX_RISK_PER_PAIR_PCT=${MAX_RISK_PER_PAIR_PCT:-10.0}
       - DIVERSIFICATION_FACTOR=${DIVERSIFICATION_FACTOR:-1.0}
       - ENABLE_POSITION_CLOSURE=${ENABLE_POSITION_CLOSURE:-true}
+      - MAX_PER_TRADE_USDT=50.0
+      - MAX_POSITIONS=10
+      - MAX_POSITIONS_PER_SYMBOL=3
     ports:
       - "8000:8000"
     depends_on:
@@ -68,7 +72,7 @@ services:
       - .:/app
       - ./frontend:/app/frontend
     restart: unless-stopped
-    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app:app --host 0.0.0.0 --port 8000
 
 volumes:
   postgres_data:

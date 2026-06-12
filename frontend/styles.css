@@ -109,7 +109,7 @@ h1 {
 
 .dashboard-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    grid-template-columns: repeat(4, 1fr);
     gap: 20px;
 }
 
@@ -117,6 +117,11 @@ h1 {
 .card.card-full {
     grid-column: 1 / -1;
     overflow-x: auto;
+}
+
+/* 2-column span card */
+.card.card-wide {
+    grid-column: span 2;
 }
 
 .card {
@@ -165,11 +170,43 @@ h1 {
     font-style: italic;
 }
 
+/* Scrollable table wrappers */
+.table-scroll-10 {
+    max-height: 340px;   /* ~10 rows × 34px */
+    overflow-y: auto;
+    overflow-x: auto;
+    border-radius: 6px;
+    border: 1px solid #2a2a4e;
+}
+
+.table-scroll-10::-webkit-scrollbar,
+.balances-scroll::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+}
+
+.table-scroll-10::-webkit-scrollbar-track,
+.balances-scroll::-webkit-scrollbar-track {
+    background: #12122a;
+}
+
+.table-scroll-10::-webkit-scrollbar-thumb,
+.balances-scroll::-webkit-scrollbar-thumb {
+    background: #333;
+    border-radius: 3px;
+}
+
+.balances-scroll {
+    max-height: 185px;   /* ~5 rows × 37px */
+    overflow-y: auto;
+    margin-top: 8px;
+}
+
 /* Table styles for positions */
 .positions-table {
     width: 100%;
     border-collapse: collapse;
-    margin-top: 10px;
+    margin-top: 0;
     font-size: 12px;
     table-layout: auto;
 }
@@ -309,3 +346,35 @@ h1 {
 
 /* ── Pending backtest row ────────────────────────────────────────────────── */
 .bt-pending td { background: rgba(255,200,60,0.05); }
+
+/* ── Recent Signals ──────────────────────────────────────────────────────── */
+#signalsData {
+    max-height: 280px;
+    overflow-y: auto;
+}
+.signal-row {
+    display: grid;
+    grid-template-columns: 90px 52px 80px 1fr auto auto;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 4px;
+    border-bottom: 1px solid #1e2530;
+    font-size: 13px;
+}
+.signal-row:last-child { border-bottom: none; }
+.signal-symbol { font-weight: 600; color: #e0e0e0; white-space: nowrap; }
+.signal-badge {
+    display: inline-block; padding: 2px 7px; border-radius: 4px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase;
+    text-align: center;
+}
+.signal-buy  { background: rgba(78,204,163,0.15); color: #4ecca3; border: 1px solid #4ecca3; }
+.signal-sell { background: rgba(255,99,99,0.15);  color: #ff6363; border: 1px solid #ff6363; }
+.signal-price  { color: #aaa; white-space: nowrap; }
+.signal-reason {
+    font-size: 11px; color: #888;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.signal-ts     { font-size: 11px; color: #555; white-space: nowrap; }
+.positive { color: #4ecca3; }
+.negative { color: #ff6363; }

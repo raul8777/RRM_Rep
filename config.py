@@ -45,9 +45,11 @@ class Settings(BaseSettings):
     max_daily_loss_usdt: float = Field(default=100.0, env="MAX_DAILY_LOSS_USDT")
     max_per_trade_usdt: float = Field(default=10.0, env="MAX_PER_TRADE_USDT")
     max_positions: int = Field(default=5, env="MAX_POSITIONS")
+    max_positions_per_symbol: int = Field(default=3, env="MAX_POSITIONS_PER_SYMBOL")
     dry_run: bool = Field(default=True, env="DRY_RUN")
     allow_real_trading: bool = Field(default=False, env="ALLOW_REAL_TRADING")
     trade_cycle_minutes: int = Field(default=5, env="TRADE_CYCLE_MINUTES")
+    trade_horizon_minutes: int = Field(default=240, env="TRADE_HORIZON_MINUTES")  # realistic hold time for PnL prediction (4h)
     tradingview_webhook_secret: str = Field(default="", env="TRADINGVIEW_WEBHOOK_SECRET")
     agent_mode: str = Field(default="suggest", env="AGENT_MODE")
     default_trade_size: float = Field(default=10.0, env="DEFAULT_TRADE_SIZE")
@@ -60,6 +62,37 @@ class Settings(BaseSettings):
     max_risk_per_pair_pct: float = Field(default=10.0, env="MAX_RISK_PER_PAIR_PCT")
     diversification_factor: float = Field(default=1.0, env="DIVERSIFICATION_FACTOR")
     enable_position_closure: bool = Field(default=True, env="ENABLE_POSITION_CLOSURE")
+    
+    # Autonomous signal generation configuration
+    analysis_symbols: list = Field(default=[
+        'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
+        'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT',
+        'SUIUSDT', 'PEPEUSDT', 'FETUSDT', 'RENDERUSDT', 'WIFUSDT'
+    ], env="ANALYSIS_SYMBOLS")
+    
+    # Prediction-based position closure configuration
+    min_pnl_improvement_threshold: float = Field(default=0.5, env="MIN_PNL_IMPROVEMENT_THRESHOLD")  # 50% improvement
+    min_success_probability_improvement: float = Field(default=0.2, env="MIN_SUCCESS_PROBABILITY_IMPROVEMENT")  # 20% improvement
+    enable_prediction_based_closing: bool = Field(default=True, env="ENABLE_PREDICTION_BASED_CLOSING")
+
+    # Stop-Loss / Take-Profit configuration
+    stop_loss_pct: float = Field(default=1.5, env="STOP_LOSS_PCT")       # % below entry price
+    take_profit_pct: float = Field(default=2.5, env="TAKE_PROFIT_PCT")   # % above entry price
+    trailing_stop_enabled: bool = Field(default=True, env="TRAILING_STOP_ENABLED")
+    trailing_stop_activation_pct: float = Field(default=2.0, env="TRAILING_STOP_ACTIVATION_PCT")  # activate trailing after +2%
+    trailing_stop_distance_pct: float = Field(default=1.0, env="TRAILING_STOP_DISTANCE_PCT")      # trail 1% below peak
+    protect_profitable_positions: bool = Field(default=True, env="PROTECT_PROFITABLE_POSITIONS")  # skip rebalance if PnL>1%
+    protect_profit_min_pct: float = Field(default=2.5, env="PROTECT_PROFIT_MIN_PCT")              # minimum PnL% to protect
+
+    # Signal quality filter
+    min_signal_strength: float = Field(default=0.35, env="MIN_SIGNAL_STRENGTH")  # 0.0 = accept all, 0.5 = moderate filter
+    
+    # Binance commission configuration
+    binance_commission_rate: float = Field(default=0.001, env="BINANCE_COMMISSION_RATE")  # 0.1% default
+    use_bnb_for_commission: bool = Field(default=False, env="USE_BNB_FOR_COMMISSION")  # 0.05% if True
+    
+    # Currency conversion configuration
+    usd_to_mxn_rate: float = Field(default=17.0, env="USD_TO_MXN_RATE")  # Default USD to MXN exchange rate
     
     # Database configuration
     db_url: str = Field(default="", env="DB_URL")
@@ -92,3 +125,7 @@ def get_settings() -> Settings:
     settings = Settings()
     _validate_settings(settings)
     return settings
+
+
+# Export constants for backward compatibility
+TRADE_CYCLE_MINUTES = 5  # Default value, will be overridden by settings

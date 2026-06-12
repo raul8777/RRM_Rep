@@ -7,23 +7,18 @@ from typing import Dict, Optional
 import os
 from datetime import datetime, timedelta, timezone
 
-from agent import TradingAgent
-from binance_client import BinanceClient
 from config import get_settings
-from news_client import NewsClient
-from signal_store import add_signal, get_signals, set_db_client
-from strategy import build_order_params, parse_signal
-import threading
+from signal_store import add_signal, get_signals, get_recent_signals, set_db_client
+from strategy import parse_signal
 import run_trades
 import analysis_cycle
-from backtester import Backtester
 from analysis_cache import analysis_cache
+from backtester import Backtester
 from learning_engine import get_learning_engine
 from param_optimizer import get_optimizer
-from orchestrator import Orchestrator, SystemState
-from portfolio_manager import PortfolioManager
-from position_manager import PositionManager
-from db_client import get_db_client
+from orchestrator import SystemState
+from init_components import get_components
+import error_collector as ec
 
 settings = get_settings()
 app = FastAPI(title="Binance Trading Agent")
@@ -48,39 +43,18 @@ if os.path.exists(frontend_path):
         from fastapi.responses import FileResponse
         return FileResponse(os.path.join(frontend_path, "index.html"))
 
-binance_client = BinanceClient(
-    api_key=settings.binance_api_key,
-    api_secret=settings.binance_api_secret,
-    testnet=settings.binance_use_testnet,
-    dry_run=settings.dry_run,
-)
-news_client = NewsClient()
-agent = TradingAgent(binance_client=binance_client, news_client=news_client, settings=settings)
+# All service singletons come from init_components — single source of truth
+_comp = get_components()
+binance_client = _comp.binance_client
+news_client = _comp.news_client
+db_client = _comp.db_client
+position_manager = _comp.position_manager
+portfolio_manager = _comp.portfolio_manager
+orchestrator = _comp.orchestrator
 
-# Initialize Database Client
-db_client = None
-try:
-    db_url = os.getenv('DB_URL')
-    if db_url:
-        db_client = get_db_client(db_url)
-        print(f"Database client initialized with URL: {db_url}")
-    else:
-        print("DB_URL not set, using in-memory storage")
-except Exception as e:
-    print(f"Failed to initialize database client: {e}")
-
-# Set db_client for Signal Store
+# Wire db_client into Signal Store
 if db_client:
     set_db_client(db_client)
-
-# Initialize Portfolio Manager and Position Manager
-portfolio_manager = PortfolioManager(binance_client=binance_client, settings=settings)
-position_manager = PositionManager(db_client=db_client)
-
-# Initialize Orchestrator
-orchestrator = Orchestrator()
-orchestrator.set_portfolio_manager(portfolio_manager)
-orchestrator.set_position_manager(position_manager)
 
 # Mexico Central Timezone (UTC-6)
 MEXICO_TZ = timezone(timedelta(hours=-6))
@@ -103,31 +77,95 @@ def to_mexico_time_str(utc_iso: str) -> str:
         return utc_iso
 
 
-def _start_trade_cycle():
-    try:
-        interval = int(getattr(settings, 'trade_cycle_minutes', 5))
-    except Exception:
-        interval = 5
-    t = threading.Thread(target=run_trades.run_loop, args=(interval,), daemon=True)
-    t.start()
-
-
-def _start_analysis_cycle():
-    """Start background technical analysis cycle (every 15 minutes)."""
-    t = threading.Thread(target=analysis_cycle.run_loop, daemon=True)
-    t.start()
-
-
 @app.on_event("startup")
 def startup_event():
+    # Set RUNNING state FIRST so cycles can execute on first iteration
+    orchestrator.start(changed_by="startup", reason="System startup")
+    # Sync exchange balance: import pre-existing/orphan assets as managed positions
+    try:
+        comp = get_components()
+        if comp.position_manager and comp.binance_client:
+            synced = comp.position_manager.sync_with_exchange_balance(
+                comp.binance_client, settings, min_value_usdt=5.0
+            )
+            if synced:
+                print(f"Balance sync: imported {len(synced)} orphan position(s): {synced}")
+            else:
+                print("Balance sync: no orphan assets found (>$5 USDT)")
+    except Exception as e:
+        print(f"Balance sync error at startup: {e}")
     # Start background trade cycle only if agent is in auto mode
     if settings.agent_mode == 'auto':
         interval = int(getattr(settings, 'trade_cycle_minutes', 5))
         orchestrator.start_trade_cycle(run_trades.execute_once, interval_minutes=interval)
-    # Always start technical analysis cycle
+        print(f"Trade cycle started (interval={interval}min, mode={settings.agent_mode})")
+    # Always start technical analysis cycle (technical indicators, every 15 min)
     orchestrator.start_analysis_cycle(analysis_cycle.execute_once, interval_minutes=15)
-    # Set orchestrator to RUNNING state
-    orchestrator.start(changed_by="startup", reason="System startup")
+    print("Analysis cycle started")
+    # Start self-learning cycle (LearningEngine, every 90 min)
+    orchestrator.start_learning_cycle(interval_minutes=90)
+    print("Learning cycle started")
+    # Bootstrap PnL predictor with historical data if insufficient trade history
+    try:
+        from bootstrap_history import run_bootstrap, needs_bootstrap
+        comp2 = get_components()
+        if comp2.binance_client and needs_bootstrap(min_trades=50):
+            print("Bootstrap: insufficient trade history — loading 90d historical data...")
+            import threading
+            def _bg_bootstrap():
+                try:
+                    result = run_bootstrap(comp2.binance_client, settings, lookback_days=90)
+                    print(f"Bootstrap complete: {result.get('total_simulated_trades', 0)} trades, "
+                          f"win_rate={result.get('global_win_rate', 0):.1%}")
+                except Exception as be:
+                    print(f"Bootstrap background error: {be}")
+            threading.Thread(target=_bg_bootstrap, daemon=True).start()
+        else:
+            print("Bootstrap: sufficient trade history found — skipping")
+    except Exception as e:
+        print(f"Bootstrap startup error: {e}")
+
+
+@app.post("/predictor/bootstrap")
+async def trigger_bootstrap(days: int = 90) -> Dict:
+    """Manually trigger PnL predictor bootstrap with historical Binance data."""
+    try:
+        from bootstrap_history import run_bootstrap
+        comp = get_components()
+        if not comp.binance_client:
+            raise HTTPException(status_code=503, detail="Binance client not initialized")
+        import asyncio
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: run_bootstrap(comp.binance_client, settings, lookback_days=days)
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/positions/sync")
+async def sync_positions() -> Dict:
+    """Manually trigger balance sync: import orphan Binance assets >$5 as managed positions."""
+    try:
+        comp = get_components()
+        if not comp.position_manager or not comp.binance_client:
+            raise HTTPException(status_code=503, detail="Components not initialized")
+        synced = comp.position_manager.sync_with_exchange_balance(
+            comp.binance_client, settings, min_value_usdt=5.0
+        )
+        return {
+            "status": "ok",
+            "imported": synced,
+            "count": len(synced),
+            "timestamp": to_mexico_time(datetime.utcnow()).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 class TradingViewPayload(BaseModel):
@@ -161,6 +199,15 @@ async def signals() -> Dict[str, object]:
     }
 
 
+@app.get("/signals/recent")
+async def signals_recent(limit: int = 20) -> Dict[str, object]:
+    """Get the most recent N signals (BUY and SELL, processed or not)."""
+    return {
+        "signals": get_recent_signals(limit=limit),
+        "count": limit,
+    }
+
+
 @app.post("/webhook")
 async def webhook(payload: TradingViewPayload, request: Request) -> Dict:
     secret = request.headers.get("X-Webhook-Secret")
@@ -174,9 +221,7 @@ async def webhook(payload: TradingViewPayload, request: Request) -> Dict:
         raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     add_signal(signal)
-    result = agent.process_signal(payload_dict)
-    result["signal_registered"] = True
-    return result
+    return {"signal_registered": True, "signal": signal}
 
 
 @app.post("/command")
@@ -261,6 +306,14 @@ class PortfolioConfigRequest(BaseModel):
     max_risk_per_pair_pct: Optional[float] = None
     diversification_factor: Optional[float] = None
     enable_position_closure: Optional[bool] = None
+    stop_loss_pct: Optional[float] = None
+    take_profit_pct: Optional[float] = None
+    trailing_stop_enabled: Optional[bool] = None
+    trailing_stop_activation_pct: Optional[float] = None
+    trailing_stop_distance_pct: Optional[float] = None
+    protect_profitable_positions: Optional[bool] = None
+    protect_profit_min_pct: Optional[float] = None
+    min_signal_strength: Optional[float] = None
 
 
 @app.get("/config/portfolio")
@@ -272,15 +325,35 @@ async def get_portfolio_config() -> Dict:
         "max_risk_per_pair_pct": settings.max_risk_per_pair_pct,
         "diversification_factor": settings.diversification_factor,
         "enable_position_closure": settings.enable_position_closure,
+        "stop_loss_pct": settings.stop_loss_pct,
+        "take_profit_pct": settings.take_profit_pct,
+        "trailing_stop_enabled": settings.trailing_stop_enabled,
+        "trailing_stop_activation_pct": settings.trailing_stop_activation_pct,
+        "trailing_stop_distance_pct": settings.trailing_stop_distance_pct,
+        "protect_profitable_positions": settings.protect_profitable_positions,
+        "protect_profit_min_pct": settings.protect_profit_min_pct,
+        "min_signal_strength": settings.min_signal_strength,
     }
 
 
 @app.post("/config/portfolio")
 async def update_portfolio_config(payload: PortfolioConfigRequest) -> Dict:
     """Update Portfolio Manager configuration."""
-    # Note: This updates the settings object but won't affect running instances
-    # In production, this should trigger a restart or reconfiguration
-    config = get_portfolio_config()
+    config = {
+        "portfolio_allocation_pct": settings.portfolio_allocation_pct,
+        "min_pair_confidence_score": settings.min_pair_confidence_score,
+        "max_risk_per_pair_pct": settings.max_risk_per_pair_pct,
+        "diversification_factor": settings.diversification_factor,
+        "enable_position_closure": settings.enable_position_closure,
+        "stop_loss_pct": settings.stop_loss_pct,
+        "take_profit_pct": settings.take_profit_pct,
+        "trailing_stop_enabled": settings.trailing_stop_enabled,
+        "trailing_stop_activation_pct": settings.trailing_stop_activation_pct,
+        "trailing_stop_distance_pct": settings.trailing_stop_distance_pct,
+        "protect_profitable_positions": settings.protect_profitable_positions,
+        "protect_profit_min_pct": settings.protect_profit_min_pct,
+        "min_signal_strength": settings.min_signal_strength,
+    }
     
     if payload.portfolio_allocation_pct is not None:
         config["portfolio_allocation_pct"] = payload.portfolio_allocation_pct
@@ -291,8 +364,32 @@ async def update_portfolio_config(payload: PortfolioConfigRequest) -> Dict:
     if payload.diversification_factor is not None:
         config["diversification_factor"] = payload.diversification_factor
     if payload.enable_position_closure is not None:
+        settings.enable_position_closure = payload.enable_position_closure
         config["enable_position_closure"] = payload.enable_position_closure
-    
+    if payload.stop_loss_pct is not None:
+        settings.stop_loss_pct = payload.stop_loss_pct
+        config["stop_loss_pct"] = payload.stop_loss_pct
+    if payload.take_profit_pct is not None:
+        settings.take_profit_pct = payload.take_profit_pct
+        config["take_profit_pct"] = payload.take_profit_pct
+    if payload.trailing_stop_enabled is not None:
+        settings.trailing_stop_enabled = payload.trailing_stop_enabled
+        config["trailing_stop_enabled"] = payload.trailing_stop_enabled
+    if payload.trailing_stop_activation_pct is not None:
+        settings.trailing_stop_activation_pct = payload.trailing_stop_activation_pct
+        config["trailing_stop_activation_pct"] = payload.trailing_stop_activation_pct
+    if payload.trailing_stop_distance_pct is not None:
+        settings.trailing_stop_distance_pct = payload.trailing_stop_distance_pct
+        config["trailing_stop_distance_pct"] = payload.trailing_stop_distance_pct
+    if payload.protect_profitable_positions is not None:
+        settings.protect_profitable_positions = payload.protect_profitable_positions
+        config["protect_profitable_positions"] = payload.protect_profitable_positions
+    if payload.protect_profit_min_pct is not None:
+        settings.protect_profit_min_pct = payload.protect_profit_min_pct
+        config["protect_profit_min_pct"] = payload.protect_profit_min_pct
+    if payload.min_signal_strength is not None:
+        settings.min_signal_strength = payload.min_signal_strength
+        config["min_signal_strength"] = payload.min_signal_strength
     return config
 
 
@@ -377,30 +474,49 @@ async def get_open_positions() -> Dict:
         positions = position_manager.get_all_positions()
         positions_data = []
         
-        for symbol, position in positions.items():
-            # Get current price to calculate unrealized PnL
+        for symbol, pos_list in positions.items():
+            # Fetch current price once per symbol
             try:
-                current_price = binance_client.get_symbol_price(symbol)
-                if position.side.upper() == "BUY":
-                    unrealized_pnl = (current_price - position.entry_price) * position.quantity
-                else:
-                    unrealized_pnl = (position.entry_price - current_price) * position.quantity
+                current_price = float(binance_client.get_symbol_price(symbol))
             except Exception:
-                current_price = position.entry_price
-                unrealized_pnl = 0.0
-            
-            positions_data.append({
-                "symbol": symbol,
-                "side": position.side,
-                "quantity": position.quantity,
-                "entry_price": position.entry_price,
-                "current_price": current_price,
-                "unrealized_pnl": unrealized_pnl,
-                "entry_time": to_mexico_time_str(position.entry_time),
-                "entry_commission": position.entry_commission,
-                "stop_loss": position.stop_loss,
-                "take_profit": position.take_profit
-            })
+                current_price = None
+            for entry_num, position in enumerate(pos_list, start=1):
+                entry_price = float(position.entry_price)
+                quantity    = float(position.quantity)
+                if current_price is not None:
+                    if position.side.upper() == "BUY":
+                        unrealized_pnl = round((current_price - entry_price) * quantity, 4)
+                    else:
+                        unrealized_pnl = round((entry_price - current_price) * quantity, 4)
+                    cp = current_price
+                else:
+                    cp = entry_price
+                    unrealized_pnl = 0.0
+
+                unrealized_pnl_pct = round((cp - entry_price) / entry_price * 100, 4) if entry_price > 0 else 0.0
+                # Compute dynamic SL/TP/trailing prices from settings
+                sl_price = round(entry_price * (1 - settings.stop_loss_pct / 100), 6)
+                tp_price = round(entry_price * (1 + settings.take_profit_pct / 100), 6)
+                meta = getattr(position, 'metadata', {}) or {}
+                trailing_peak = meta.get('trailing_peak')
+                trail_stop_price = round(float(trailing_peak) * (1 - settings.trailing_stop_distance_pct / 100), 6) if trailing_peak else None
+                positions_data.append({
+                    "symbol": symbol,
+                    "position_id": position.position_id,
+                    "entry_number": entry_num,
+                    "side": position.side,
+                    "quantity": quantity,
+                    "entry_price": entry_price,
+                    "current_price": cp,
+                    "unrealized_pnl": unrealized_pnl,
+                    "unrealized_pnl_pct": unrealized_pnl_pct,
+                    "entry_time": to_mexico_time_str(position.entry_time),
+                    "entry_commission": float(position.entry_commission) if position.entry_commission else 0.0,
+                    "stop_loss_price": sl_price,
+                    "take_profit_price": tp_price,
+                    "trailing_peak": float(trailing_peak) if trailing_peak else None,
+                    "trail_stop_price": trail_stop_price,
+                })
         
         return {
             "positions": positions_data,
@@ -409,6 +525,32 @@ async def get_open_positions() -> Dict:
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get open positions: {str(e)}")
+
+
+@app.post("/positions/close-all")
+async def close_all_positions() -> Dict:
+    """Sell all open positions on Binance and close them in DB."""
+    from run_trades import get_symbol_filters, align_quantity_to_step, is_quantity_valid
+    results = []
+    all_positions = position_manager.get_all_positions()
+    if not all_positions:
+        return {"closed": [], "message": "No open positions"}
+    for symbol, pos_list in all_positions.items():
+        total_qty = sum(float(p.quantity) for p in pos_list)
+        try:
+            try:
+                filters = get_symbol_filters(binance_client, symbol)
+                total_qty = align_quantity_to_step(total_qty, filters["step"])
+            except Exception:
+                pass
+            price = float(binance_client.get_symbol_price(symbol))
+            order = binance_client.create_market_order(symbol=symbol, side="SELL", quantity=total_qty)
+            commission_rate = getattr(settings, 'binance_commission_rate', 0.001)
+            position_manager.close_all_positions_for_symbol(symbol, price, "manual_rebalance", commission_rate)
+            results.append({"symbol": symbol, "qty": total_qty, "price": price, "status": "sold", "entries_closed": len(pos_list)})
+        except Exception as e:
+            results.append({"symbol": symbol, "status": "error", "error": str(e)})
+    return {"closed": results, "count": len(results)}
 
 
 @app.get("/positions/closed")
@@ -487,6 +629,13 @@ async def get_dashboard_summary() -> Dict:
     """Single endpoint that returns all dashboard data to minimize API calls."""
     result = {}
 
+    # Exchange rate (computed once, reused across blocks)
+    _usd_mxn = 17.5
+    try:
+        _usd_mxn = binance_client.get_symbol_price("USDCUSDT") * 17.5 or 17.5
+    except Exception:
+        pass
+
     # System status
     try:
         result["system_status"] = orchestrator.get_state()
@@ -511,9 +660,9 @@ async def get_dashboard_summary() -> Dict:
     except Exception as e:
         result["portfolio_config"] = {"error": str(e)}
 
-    # Signals
+    # Signals — use get_recent_signals so SELL signals and processed BUYs are visible
     try:
-        result["signals"] = {"signals": get_signals()}
+        result["signals"] = {"signals": get_recent_signals(limit=20)}
     except Exception as e:
         result["signals"] = {"signals": [], "error": str(e)}
 
@@ -534,17 +683,12 @@ async def get_dashboard_summary() -> Dict:
                     total_usdt += usdt_val
                 except Exception:
                     pass
-        usd_mxn = 17.5
-        try:
-            usd_mxn = binance_client.get_symbol_price("USDCUSDT") * 17.5 or 17.5
-        except Exception:
-            pass
         result["balance"] = {
             "total_usdt": total_usdt,
-            "total_mxn": total_usdt * usd_mxn,
-            "usd_to_mxn_rate": usd_mxn,
+            "total_mxn": total_usdt * _usd_mxn,
+            "usd_to_mxn_rate": _usd_mxn,
             "balances_usdt": balances_usdt,
-            "balances_mxn": {k: v * usd_mxn for k, v in balances_usdt.items()},
+            "balances_mxn": {k: v * _usd_mxn for k, v in balances_usdt.items()},
         }
     except Exception as e:
         result["balance"] = {"error": str(e)}
@@ -557,12 +701,14 @@ async def get_dashboard_summary() -> Dict:
         year_start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
 
         def _pnl_for_period(positions, since):
-            total = sum(float(p.pnl) for p in positions if p.exit_time and
-                        to_mexico_time(datetime.fromisoformat(p.exit_time.replace('Z', '+00:00'))
-                                       if isinstance(p.exit_time, str) else p.exit_time.isoformat()) >= since)
-            count = sum(1 for p in positions if p.exit_time and
-                        to_mexico_time(datetime.fromisoformat(p.exit_time.replace('Z', '+00:00'))
-                                       if isinstance(p.exit_time, str) else p.exit_time.isoformat()) >= since)
+            def _to_dt(t):
+                if isinstance(t, str):
+                    return to_mexico_time(datetime.fromisoformat(t.replace('Z', '+00:00')))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                return to_mexico_time(t)
+            total = sum(float(p.pnl) for p in positions if p.exit_time and _to_dt(p.exit_time) >= since)
+            count = sum(1 for p in positions if p.exit_time and _to_dt(p.exit_time) >= since)
             return {"total_pnl": total, "total_trades": count, "pnl_percentage": 0.0}
 
         closed = position_manager.get_closed_positions(limit=500)
@@ -578,40 +724,58 @@ async def get_dashboard_summary() -> Dict:
     try:
         positions = position_manager.get_all_positions()
         open_list = []
-        for symbol, position in positions.items():
+        for symbol, pos_list in positions.items():
+            # Fetch price once per symbol
             try:
-                current_price = binance_client.get_symbol_price(symbol)
-                if position.side.upper() == "BUY":
-                    unrealized_pnl = float((current_price - position.entry_price) * position.quantity)
-                else:
-                    unrealized_pnl = float((position.entry_price - current_price) * position.quantity)
+                current_price_sym = float(binance_client.get_symbol_price(symbol))
             except Exception:
-                current_price = float(position.entry_price)
-                unrealized_pnl = 0.0
+                current_price_sym = None
+            for entry_num, position in enumerate(pos_list, start=1):
+                try:
+                    entry_p = float(position.entry_price)
+                    qty_f   = float(position.quantity)
+                    cp = current_price_sym if current_price_sym is not None else entry_p
+                    if position.side.upper() == "BUY":
+                        unrealized_pnl = round((cp - entry_p) * qty_f, 4)
+                    else:
+                        unrealized_pnl = round((entry_p - cp) * qty_f, 4)
+                except Exception:
+                    entry_p = float(position.entry_price)
+                    qty_f   = float(position.quantity)
+                    cp = entry_p
+                    unrealized_pnl = 0.0
 
-            entry_time_str = ""
-            try:
-                entry_time_str = to_mexico_time_str(position.entry_time) if position.entry_time else ""
-                now_dt = to_mexico_time(datetime.utcnow())
-                entry_dt = datetime.fromisoformat(entry_time_str) if entry_time_str else now_dt
-                hours_held = (now_dt - entry_dt).total_seconds() / 3600
-            except Exception:
-                hours_held = 0.0
+                entry_time_str = ""
+                try:
+                    entry_time_str = to_mexico_time_str(position.entry_time) if position.entry_time else ""
+                    now_dt = to_mexico_time(datetime.utcnow())
+                    entry_dt = datetime.fromisoformat(entry_time_str) if entry_time_str else now_dt
+                    hours_held = (now_dt - entry_dt).total_seconds() / 3600
+                except Exception:
+                    hours_held = 0.0
 
-            open_list.append({
-                "symbol": symbol,
-                "side": position.side,
-                "quantity": float(position.quantity),
-                "entry_price": float(position.entry_price),
-                "current_price": float(current_price),
-                "unrealized_pnl": unrealized_pnl,
-                "entry_time": entry_time_str,
-                "hours_held": round(hours_held, 1),
-                "entry_commission": float(position.entry_commission) if position.entry_commission else 0.0,
-                "stop_loss": float(position.stop_loss) if position.stop_loss else None,
-                "take_profit": float(position.take_profit) if position.take_profit else None,
-                "pnl_prediction": position.pnl_prediction,
-            })
+                invested_usdt      = round(entry_p * qty_f, 4)
+                current_value_usdt = round(cp * qty_f, 4)
+                open_list.append({
+                    "symbol": symbol,
+                    "position_id": position.position_id,
+                    "entry_number": entry_num,
+                    "side": position.side,
+                    "quantity": qty_f,
+                    "entry_price": entry_p,
+                    "current_price": cp,
+                    "invested_usdt": invested_usdt,
+                    "invested_mxn": round(invested_usdt * _usd_mxn, 2),
+                    "current_value_mxn": round(current_value_usdt * _usd_mxn, 2),
+                    "unrealized_pnl": unrealized_pnl,
+                    "unrealized_pnl_mxn": round(unrealized_pnl * _usd_mxn, 2),
+                    "entry_time": entry_time_str,
+                    "hours_held": round(hours_held, 1),
+                    "entry_commission": float(position.entry_commission) if position.entry_commission else 0.0,
+                    "stop_loss": float(position.stop_loss) if position.stop_loss else None,
+                    "take_profit": float(position.take_profit) if position.take_profit else None,
+                    "pnl_prediction": position.pnl_prediction,
+                })
         result["open_positions"] = {"positions": open_list, "count": len(open_list)}
     except Exception as e:
         result["open_positions"] = {"positions": [], "count": 0, "error": str(e)}
@@ -746,8 +910,7 @@ async def run_backtest(
 
     def _do_backtest():
         try:
-            db = get_db_client(settings)
-            bt = Backtester(initial_capital=10_000.0, db_client=db)
+            bt = Backtester(initial_capital=10_000.0, db_client=db_client)
             klines = bt.fetch_klines_from_binance(symbol, interval, days_back)
             from param_optimizer import DEFAULT_GRID
             default_params = {k: v[len(v) // 2] for k, v in DEFAULT_GRID.items()}
@@ -776,8 +939,7 @@ async def run_backtest(
 async def get_backtest_results(symbol: str = None, limit: int = 10) -> Dict:
     """Return recent backtest results from DB + any in-progress tasks."""
     try:
-        db = get_db_client(settings)
-        bt = Backtester(db_client=db)
+        bt = Backtester(db_client=db_client)
         db_results = bt.get_results(symbol=symbol, limit=limit)
         pending = [
             v for v in _backtest_tasks.values()
@@ -825,9 +987,8 @@ async def trigger_learning(background_tasks: BackgroundTasks,
     """Manually trigger a LearningEngine cycle."""
     def _do_learn():
         try:
-            db = get_db_client(settings)
             from learning_engine import LearningEngine
-            engine = LearningEngine(db_client=db)
+            engine = LearningEngine(db_client=db_client)
             engine.run(min_trades=min_trades, lookback_days=lookback_days)
             # Invalidate PnLPredictor weight cache after re-learning
             from pnl_service import get_predictor
@@ -861,6 +1022,129 @@ async def get_strategy_params(symbol: str = "__global__") -> Dict:
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Health & Error monitoring endpoints ─────────────────────────────────────
+
+_STALE_CYCLE_MINUTES = 15  # warn if last trade cycle was more than this long ago
+
+
+@app.get("/health/status")
+async def get_health_status() -> Dict:
+    """Active health checks: DB, Binance, trade cycle freshness, position sync."""
+    checks = {}
+    overall = "ok"
+
+    # DB check
+    try:
+        import time as _time
+        t0 = _time.monotonic()
+        db_client.execute_query("SELECT 1")
+        latency_ms = round((_time.monotonic() - t0) * 1000, 1)
+        checks["db"] = {"status": "ok", "latency_ms": latency_ms}
+    except Exception as e:
+        checks["db"] = {"status": "error", "detail": str(e)}
+        ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"DB health check failed: {e}")
+        overall = "error"
+
+    # Binance check
+    try:
+        import time as _time
+        t0 = _time.monotonic()
+        binance_client.get_account_balance()
+        latency_ms = round((_time.monotonic() - t0) * 1000, 1)
+        checks["binance"] = {"status": "ok", "latency_ms": latency_ms,
+                              "testnet": settings.binance_use_testnet}
+    except Exception as e:
+        checks["binance"] = {"status": "error", "detail": str(e)}
+        ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_ERROR, f"Binance health check failed: {e}")
+        if overall != "error":
+            overall = "warning"
+
+    # Trade cycle freshness
+    last_cycle = orchestrator.last_trade_cycle_at
+    if last_cycle:
+        age_min = (datetime.utcnow() - last_cycle).total_seconds() / 60
+        stale = age_min > _STALE_CYCLE_MINUTES
+        checks["trade_cycle"] = {
+            "status": "warning" if stale else "ok",
+            "last_cycle_at": to_mexico_time_str(last_cycle.isoformat()),
+            "age_minutes": round(age_min, 1),
+            "cycle_running": orchestrator.trade_cycle_thread.is_alive() if orchestrator.trade_cycle_thread else False,
+        }
+        if stale:
+            ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_WARNING,
+                         f"Trade cycle may be stale: last run {age_min:.1f} min ago")
+            if overall != "error":
+                overall = "warning"
+    else:
+        checks["trade_cycle"] = {"status": "unknown", "detail": "No cycle completed yet"}
+
+    # Position sync: compare tracked symbols in DB vs their balances in Binance
+    try:
+        all_pos = position_manager.get_all_positions()
+        db_count = sum(len(v) for v in all_pos.values())
+        balances = binance_client.get_account_balance()
+        # Only check symbols the system is actively tracking (e.g. BNBUSDT -> BNB)
+        tracked_symbols = set(all_pos.keys())
+        binance_holding_count = sum(
+            1 for sym in tracked_symbols
+            if float(balances.get(sym.replace("USDT", "").replace("BTC", ""), 0)) > 0
+        )
+        # mismatch: DB has entries for symbols with no Binance balance
+        symbols_missing_in_binance = [
+            sym for sym in tracked_symbols
+            if float(balances.get(sym.replace("USDT", "").replace("BTC", ""), 0)) == 0
+        ]
+        mismatch = len(symbols_missing_in_binance)
+        sync_status = "ok" if mismatch == 0 else "warning"
+        checks["position_sync"] = {
+            "status": sync_status,
+            "db_open_positions": db_count,
+            "tracked_symbols": len(tracked_symbols),
+            "binance_confirmed": binance_holding_count,
+            "symbols_missing_in_binance": symbols_missing_in_binance,
+            "mismatch": mismatch,
+        }
+        if mismatch > 0:
+            ec.add_error(ec.SOURCE_SYSTEM, ec.LEVEL_WARNING,
+                         f"Position sync mismatch: {mismatch} tracked symbol(s) missing in Binance: {symbols_missing_in_binance}")
+            if overall != "error":
+                overall = "warning"
+    except Exception as e:
+        checks["position_sync"] = {"status": "error", "detail": str(e)}
+
+    # Error summary
+    err_summary = ec.get_summary(minutes=5)
+    checks["errors"] = err_summary
+    if err_summary["errors_last_5min"] > 0 and overall == "ok":
+        overall = "warning"
+
+    return {
+        "overall": overall,
+        "checks": checks,
+        "timestamp": to_mexico_time(datetime.utcnow()).isoformat(),
+    }
+
+
+@app.get("/errors/recent")
+async def get_recent_errors(limit: int = 50) -> Dict:
+    """Return recent captured errors and warnings from all system layers."""
+    records = ec.get_recent(limit)
+    summary = ec.get_summary(minutes=5)
+    return {
+        "errors": records,
+        "count": len(records),
+        **summary,
+        "timestamp": to_mexico_time(datetime.utcnow()).isoformat(),
+    }
+
+
+@app.post("/errors/clear")
+async def clear_errors() -> Dict:
+    """Clear the in-memory error log."""
+    ec.clear_errors()
+    return {"status": "cleared", "timestamp": to_mexico_time(datetime.utcnow()).isoformat()}
 
 
 @app.get("/analysis/predictions")

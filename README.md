@@ -52,6 +52,27 @@ Guarda este contenido en un archivo fuera del repositorio y define `SECRETS_FILE
 ```
 
 ## Ejecutar
+
+### Con Docker Compose (Recomendado)
+Inicia todos los servicios (PostgreSQL, Redis, App):
+
+```bash
+docker-compose --env-file .env up -d
+```
+
+Detén todos los servicios:
+
+```bash
+docker-compose --env-file .env down
+```
+
+Verifica los logs:
+
+```bash
+docker-compose logs app
+```
+
+### Local (Sin Docker)
 Instala dependencias:
 
 ```bash

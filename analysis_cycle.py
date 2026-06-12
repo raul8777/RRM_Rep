@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 from typing import List, Dict
 
+import error_collector as ec
 from config import TRADE_CYCLE_MINUTES
 from technical_analysis import get_indicators, score_technical
 from analysis_cache import analysis_cache
@@ -56,18 +57,14 @@ def analyze_symbols(symbols: List[str], client=None) -> Dict[str, Dict]:
             logger.info(f"Analyzed {symbol}: score={tech_score:.1f}")
         except Exception as e:
             logger.error(f"Failed to analyze {symbol}: {e}")
+            ec.add_error(ec.SOURCE_ANALYSIS, ec.LEVEL_ERROR, f"Failed to analyze {symbol}: {e}")
             results[symbol] = {'status': 'error', 'error': str(e)}
 
     return results
 
 
-_learning_cycle_counter = 0
-_LEARNING_EVERY_N_CYCLES = 6  # Run LearningEngine every ~6 analysis cycles (~90 min)
-
-
 def execute_once() -> None:
-    """Run one analysis cycle, and periodically trigger LearningEngine."""
-    global _learning_cycle_counter
+    """Run one technical analysis cycle (indicators + scores for tracked symbols)."""
     try:
         logger.info("Starting technical analysis cycle")
         symbols = get_top_symbols_from_signals(limit=5)
@@ -82,24 +79,7 @@ def execute_once() -> None:
 
     except Exception as e:
         logger.error(f"Technical analysis cycle failed: {e}")
-
-    # Periodic self-learning step
-    _learning_cycle_counter += 1
-    if _learning_cycle_counter >= _LEARNING_EVERY_N_CYCLES:
-        _learning_cycle_counter = 0
-        try:
-            from learning_engine import get_learning_engine
-            from pnl_service import get_predictor
-            result = get_learning_engine().run(min_trades=5, lookback_days=30)
-            if result.get("status") == "completed":
-                logger.info(
-                    f"LearningEngine: {result['trades_analyzed']} trades, "
-                    f"accuracy={result.get('accuracy', {}).get('prediction_accuracy', 0):.2%}, "
-                    f"updated={result.get('symbols_updated', [])}"
-                )
-                get_predictor().invalidate_cache()
-        except Exception as e:
-            logger.warning(f"LearningEngine cycle failed (non-critical): {e}")
+        ec.add_error(ec.SOURCE_ANALYSIS, ec.LEVEL_ERROR, f"Technical analysis cycle failed: {e}")
 
 
 def run_loop() -> None:
