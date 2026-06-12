@@ -137,6 +137,48 @@ def clear_signals() -> None:
         _signals.clear()
 
 
+def update_signal_decision(symbol: str, decision: str, reason: str) -> None:
+    """
+    Persist the trade decision for the most recent signal of a symbol.
+
+    Args:
+        symbol:   Trading pair symbol (e.g. "SOLUSDT")
+        decision: "executed" | "rejected" | "pending"
+        reason:   Short keyword visible on dashboard
+                  e.g. "PNL_LOW", "NO_SALDO", "MAX_POSIC", "EJECUTADO", "QTY_INVALIDA"
+    """
+    update = {"decision": decision, "decision_reason": reason,
+              "decision_at": datetime.utcnow().isoformat() + "Z"}
+    if _db_client:
+        try:
+            query = """
+                UPDATE market_data
+                SET data = data || %s::jsonb
+                WHERE ctid = (
+                    SELECT ctid FROM market_data
+                    WHERE data_type = 'signal'
+                    AND data->>'symbol' = %s
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                )
+            """
+            _db_client.execute_update(query, (json.dumps(update), symbol))
+        except Exception as e:
+            logger.error(f"update_signal_decision DB failed ({symbol}): {e}")
+            ec.add_error(ec.SOURCE_DB, ec.LEVEL_WARNING, f"update_signal_decision failed ({symbol}): {e}")
+            _update_signal_decision_in_memory(symbol, update)
+    else:
+        _update_signal_decision_in_memory(symbol, update)
+
+
+def _update_signal_decision_in_memory(symbol: str, update: Dict) -> None:
+    with _lock:
+        for sig in reversed(_signals):
+            if sig.get("symbol") == symbol:
+                sig.update(update)
+                break
+
+
 def mark_signal_as_processed(signal_id: str) -> None:
     """
     Mark a signal as processed to avoid reprocessing.

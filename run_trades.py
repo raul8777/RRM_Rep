@@ -4,7 +4,7 @@ from typing import Dict, List
 import error_collector as ec
 from binance_client import BinanceClient
 from news_client import NewsClient
-from signal_store import get_signals, add_signal, mark_signal_as_processed
+from signal_store import get_signals, add_signal, mark_signal_as_processed, update_signal_decision
 from strategy import rank_buy_signals, rank_with_technical, normalize_symbol, rank_for_portfolio_manager
 from analysis_cache import analysis_cache
 from autonomous_signals import AutonomousSignalGenerator
@@ -299,6 +299,58 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
     return orders
 
 
+def _kelly_position_size(settings, strength: float, prediction: dict,
+                         usdt_liquid: float, sl_pct: float = 0.015,
+                         tp_pct: float = 0.025) -> float:
+    """
+    Half-Kelly position sizing scaled by signal quality.
+
+    Tiers (prob / strength thresholds):
+      FUERTE  prob >= 0.65 + strength >= 0.80  → kelly_max_usdt  ($150)
+      ALTA    prob >= 0.60 + strength >= 0.70  → 80% of max       ($120)
+      MEDIA   prob >= 0.55 + strength >= 0.55  → 60% of max       ($90)
+      BASE    prob >= 0.50  (passed validation) → kelly_base_usdt  ($60)
+
+    Fallback (kelly disabled): max_per_trade_usdt.
+    Hard cap: kelly_max_pct_liquid of available USDT.
+    """
+    if not getattr(settings, "kelly_enabled", True):
+        return getattr(settings, "max_per_trade_usdt", 50.0)
+
+    base = getattr(settings, "kelly_base_usdt", 60.0)
+    max_usdt = getattr(settings, "kelly_max_usdt", 150.0)
+    cap_pct = getattr(settings, "kelly_max_pct_liquid", 0.40)
+
+    prob = float((prediction or {}).get("success_probability", 0.50))
+    r = tp_pct / sl_pct if sl_pct > 0 else 1.67
+
+    # Half-Kelly fraction
+    kelly_f = max(0.0, (prob - (1 - prob) / r)) * 0.5
+
+    # Map to tier
+    if prob >= 0.65 and strength >= 0.80:
+        tier, amount = "FUERTE", max_usdt
+    elif prob >= 0.60 and strength >= 0.70:
+        tier, amount = "ALTA", base + (max_usdt - base) * 0.80
+    elif prob >= 0.55 and strength >= 0.55:
+        tier, amount = "MEDIA", base + (max_usdt - base) * 0.50
+    else:
+        tier, amount = "BASE", base
+
+    # Scale further by half-kelly fraction (softens high-tier amounts when kelly_f is low)
+    scaled = amount * min(1.0, kelly_f * 10)
+    # Never go below base
+    sized = max(base, scaled)
+
+    # Hard cap: fraction of liquid USDT
+    liquid_cap = usdt_liquid * cap_pct
+    final = min(sized, liquid_cap, max_usdt)
+
+    print(f"Kelly sizing: prob={prob:.2f}, strength={strength:.2f}, kelly_f={kelly_f:.3f} "
+          f"→ tier={tier}, sized=${sized:.2f}, cap=${liquid_cap:.2f} → final=${final:.2f} USDT")
+    return final
+
+
 def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: List, portfolio_manager=None, position_manager=None, precomputed_predictions: Dict = None) -> List[Dict]:
     # Accept either plain symbol strings or dicts with metadata (for aggressive mode)
     if top_signals_with_meta and isinstance(top_signals_with_meta[0], dict):
@@ -323,6 +375,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
 
     balances = client.get_account_balance()
     usdt = float(balances.get("USDT", 0.0))
+    usdt_liquid = usdt  # default; overridden below if portfolio_manager available
     
     # Use Portfolio Manager for allocation if available
     if portfolio_manager:
@@ -360,6 +413,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             total_open = sum(len(v) for v in position_manager.get_all_positions().values())
             if total_open >= settings.max_positions:
                 print(f"Skipping buy {symbol}: global max positions ({total_open}/{settings.max_positions}) reached")
+                update_signal_decision(symbol, "rejected", "MAX_POSIC")
                 break
         # Enforce per-symbol MAX_POSITIONS_PER_SYMBOL limit
         if position_manager:
@@ -367,6 +421,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             max_per = getattr(settings, 'max_positions_per_symbol', 3)
             if count >= max_per:
                 print(f"Skipping buy {symbol}: per-symbol limit ({count}/{max_per}) reached")
+                update_signal_decision(symbol, "rejected", "LÍM_SÍMBOLO")
                 continue
 
         try:
@@ -374,34 +429,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             filters = get_symbol_filters(client, symbol)
         except Exception as exc:
             print(f"Skip buy {symbol}: {exc}")
+            update_signal_decision(symbol, "rejected", "ERROR_PRECIO")
             continue
 
-        # ── Aggressive opportunity: 2x size when strong signal + vol + BTC UP ─
-        trade_allocation = allocation
+        # ── Signal metadata ───────────────────────────────────────────────
         meta = signal_meta.get(symbol, {})
         strength = float(meta.get('strength', 0.0))
-        volume_confirmed = bool(meta.get('volume_confirmed', False))
-        if (btc_trend == 'UP' and strength >= 0.8 and volume_confirmed
-                and not getattr(settings, 'dry_run', True)):
-            trade_allocation = min(allocation * 2.0, float(usdt) * 0.25)
-            print(f"AGGRESSIVE mode {symbol}: 2x allocation ({trade_allocation:.4f} USDT, strength={strength:.2f})")
 
-        qty = align_quantity_to_step(trade_allocation / price, filters["step"])
-        valid, reason = is_quantity_valid(qty, price, filters)
-        if not valid:
-            print(f"Skipping buy {symbol}: {reason}")
-            continue
-
-        # Guard: verify liquid USDT is sufficient before placing order
-        cost_estimate = qty * price * 1.002  # include ~0.2% buffer for fees
-        current_usdt = float(client.get_account_balance().get("USDT", 0))
-        if current_usdt < cost_estimate:
-            print(f"Skipping buy {symbol}: insufficient USDT ({current_usdt:.4f} < {cost_estimate:.4f} needed)")
-            ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_WARNING,
-                         f"Skipped buy {symbol}: insufficient USDT ({current_usdt:.4f} < {cost_estimate:.4f})")
-            continue
-
-        # PnL prediction — reuse pre-computed if available, otherwise fetch
+        # ── PnL prediction (needed for Kelly sizing) ───────────────────────
         if precomputed_predictions and symbol in precomputed_predictions:
             prediction = precomputed_predictions[symbol]
             formatted_indicators = None
@@ -414,15 +449,41 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             ep = prediction.get('expected_pnl', 0) if prediction else 0
             sp = prediction.get('success_probability', 0) if prediction else 0
             print(f"Skipping buy {symbol}: {reason} (pred={ep:.2f} USDT, prob={sp:.2f})")
+            update_signal_decision(symbol, "rejected", "PNL_BAJO")
             continue
         if prediction:
             print(f"Prediction OK for {symbol}: {prediction['expected_pnl']:.2f} USDT, prob={prediction['success_probability']:.2f}")
+
+        # ── Kelly dynamic position sizing ───────────────────────────────
+        sl_pct = getattr(settings, 'stop_loss_pct', 1.5) / 100.0
+        tp_pct = getattr(settings, 'take_profit_pct', 2.5) / 100.0
+        usdt_liquid_now = float(client.get_account_balance().get("USDT", usdt_liquid))
+        trade_allocation = _kelly_position_size(
+            settings, strength, prediction, usdt_liquid_now, sl_pct, tp_pct
+        )
+
+        qty = align_quantity_to_step(trade_allocation / price, filters["step"])
+        valid, reason = is_quantity_valid(qty, price, filters)
+        if not valid:
+            print(f"Skipping buy {symbol}: {reason}")
+            update_signal_decision(symbol, "rejected", "QTY_INVÁLIDA")
+            continue
+
+        # Guard: verify liquid USDT is sufficient before placing order
+        cost_estimate = qty * price * 1.002  # include ~0.2% buffer for fees
+        if usdt_liquid_now < cost_estimate:
+            print(f"Skipping buy {symbol}: insufficient USDT ({usdt_liquid_now:.4f} < {cost_estimate:.4f} needed)")
+            ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_WARNING,
+                         f"Skipped buy {symbol}: insufficient USDT ({usdt_liquid_now:.4f} < {cost_estimate:.4f})")
+            update_signal_decision(symbol, "rejected", "SIN_SALDO")
+            continue
 
         try:
             order = client.create_market_order(symbol=symbol, side="BUY", quantity=qty)
             orders.append({"symbol": symbol, "side": "BUY", "quantity": qty, "order": order})
             print(f"Bought {qty} {symbol}")
             ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_INFO, f"Bought {qty} {symbol} @ ~{price:.4f} USDT")
+            update_signal_decision(symbol, "executed", "EJECUTADO")
             
             # Track position in Position Manager if available
             if position_manager:
@@ -486,6 +547,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         except Exception as exc:
             print(f"Buy order failed for {symbol}: {exc}")
             ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_ERROR, f"Buy order failed for {symbol}: {exc}")
+            update_signal_decision(symbol, "rejected", "ERROR_ORDEN")
     return orders
 
 

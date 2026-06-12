@@ -70,8 +70,8 @@ function renderSignals(d) {
         <span class="signal-symbol" style="color:#666;font-size:11px;font-weight:400">SÍMBOLO</span>
         <span style="color:#666;font-size:11px">ACCIÓN</span>
         <span style="color:#666;font-size:11px">PRECIO</span>
-        <span style="color:#666;font-size:11px">RAZÓN</span>
-        <span style="color:#666;font-size:11px">PNL</span>
+        <span style="color:#666;font-size:11px">DECISIÓN</span>
+        <span style="color:#666;font-size:11px">RAZÓN SEÑAL</span>
         <span style="color:#666;font-size:11px">HACE</span>
     </div>`;
     el.innerHTML = header + d.signals.slice(0, 15).map(s => {
@@ -80,18 +80,23 @@ function renderSignals(d) {
             ? '<span class="signal-badge signal-buy">BUY</span>'
             : '<span class="signal-badge signal-sell">SELL</span>';
         const price = s.price ? `$${parseFloat(s.price).toFixed(4)}` : '—';
-        const reason = s.reason ? `<span class="signal-reason">${s.reason}</span>` : '';
-        const pnl = s.pnl_pct != null
-            ? `<span class="${s.pnl_pct >= 0 ? 'positive' : 'negative'}">${s.pnl_pct > 0 ? '+' : ''}${s.pnl_pct.toFixed(2)}%</span>`
-            : '';
+        const reason = s.reason ? `<span class="signal-reason">${s.reason}</span>` : '<span class="signal-reason" style="color:#555">—</span>';
         const ts = s.received_at ? relativeTime(s.received_at) : '';
+        // Decision badge
+        let decisionBadge = '<span class="decision-badge decision-pending">PENDIENTE</span>';
+        if (s.decision === 'executed') {
+            decisionBadge = '<span class="decision-badge decision-executed">✅ EJECUTADO</span>';
+        } else if (s.decision === 'rejected') {
+            const r = s.decision_reason || 'RECHAZADO';
+            decisionBadge = `<span class="decision-badge decision-rejected">❌ ${r}</span>`;
+        }
         return `
         <div class="signal-row">
             <span class="signal-symbol">${s.symbol || '—'}</span>
             ${badge}
             <span class="signal-price">${price}</span>
+            ${decisionBadge}
             ${reason}
-            ${pnl}
             <span class="signal-ts">${ts}</span>
         </div>`;
     }).join('');

@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     allow_real_trading: bool = Field(default=False, env="ALLOW_REAL_TRADING")
     trade_cycle_minutes: int = Field(default=5, env="TRADE_CYCLE_MINUTES")
     trade_horizon_minutes: int = Field(default=240, env="TRADE_HORIZON_MINUTES")  # realistic hold time for PnL prediction (4h)
+    # Kelly dynamic position sizing
+    kelly_enabled: bool = Field(default=True, env="KELLY_ENABLED")
+    kelly_base_usdt: float = Field(default=60.0, env="KELLY_BASE_USDT")
+    kelly_max_usdt: float = Field(default=150.0, env="KELLY_MAX_USDT")
+    kelly_max_pct_liquid: float = Field(default=0.40, env="KELLY_MAX_PCT_LIQUID")
     tradingview_webhook_secret: str = Field(default="", env="TRADINGVIEW_WEBHOOK_SECRET")
     agent_mode: str = Field(default="suggest", env="AGENT_MODE")
     default_trade_size: float = Field(default=10.0, env="DEFAULT_TRADE_SIZE")

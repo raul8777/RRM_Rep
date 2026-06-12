@@ -354,7 +354,7 @@ h1 {
 }
 .signal-row {
     display: grid;
-    grid-template-columns: 90px 52px 80px 1fr auto auto;
+    grid-template-columns: 90px 52px 72px 110px 1fr auto;
     align-items: center;
     gap: 8px;
     padding: 6px 4px;
@@ -376,5 +376,34 @@ h1 {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .signal-ts     { font-size: 11px; color: #555; white-space: nowrap; }
+
+/* ── Decision badges ─────────────────────────────────────────────────────── */
+.decision-badge {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 110px;
+}
+.decision-executed {
+    background: rgba(78,204,163,0.15);
+    color: #4ecca3;
+    border: 1px solid rgba(78,204,163,0.4);
+}
+.decision-rejected {
+    background: rgba(231,76,60,0.13);
+    color: #e74c3c;
+    border: 1px solid rgba(231,76,60,0.35);
+}
+.decision-pending {
+    background: rgba(180,180,180,0.08);
+    color: #888;
+    border: 1px solid rgba(180,180,180,0.2);
+}
 .positive { color: #4ecca3; }
 .negative { color: #ff6363; }
