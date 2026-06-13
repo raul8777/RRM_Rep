@@ -4,13 +4,18 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Trading Agent Dashboard</title>
-    <link rel="stylesheet" href="/frontend/styles.css?v=8">
+    <link rel="stylesheet" href="/frontend/styles.css?v=9">
 </head>
 <body>
     <div class="container">
         <header>
             <h1>Crypto Trading Agent Dashboard</h1>
             <div style="display:flex;align-items:center;gap:16px">
+                <div class="market-regime-badge" id="marketRegime" title="">
+                    <span class="regime-dot" id="marketRegimeDot"></span>
+                    <span class="regime-label" id="marketRegimeLabel">Mercado</span>
+                    <span class="regime-text" id="marketRegimeText">...</span>
+                </div>
                 <div class="status-indicator" id="systemStatus">
                     <span class="status-dot"></span>
                     <span class="status-text">Loading...</span>

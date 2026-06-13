@@ -524,6 +524,30 @@ async function pollBacktestResults() {
     } catch (e) { /* silent */ }
 }
 
+// ── Market Regime Badge ─────────────────────────────────────────────────────────
+function renderMarketRegime(r) {
+    const dot  = document.getElementById('marketRegimeDot');
+    const text = document.getElementById('marketRegimeText');
+    const badge = document.getElementById('marketRegime');
+    if (!dot || !text || !r) return;
+
+    const color = r.color || '#888';
+    const regime = r.regime || '?';
+    const chg = r.day_change_pct != null ? r.day_change_pct : 0;
+    const vol = r.vol_ratio != null ? r.vol_ratio : 0;
+    const trend = r.btc_trend || '?';
+
+    // Emoji prefix
+    const emoji = { 'ALCISTA': '🟢', 'BAJISTA': '🔴', 'LATERAL': '🟡', 'DÉBIL ALZA': '🟡', 'DÉBIL BAJA': '🟠' }[regime] || '⚪';
+
+    dot.style.background = color;
+    dot.style.boxShadow = `0 0 6px ${color}80`;
+    text.textContent = `${emoji} ${regime}`;
+    text.style.color = color;
+
+    badge.title = `BTC 4h: ${trend} | Cambio día: ${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% | Vol ratio: ${vol.toFixed(2)}x`;
+}
+
 // ── Ticker Bar ──────────────────────────────────────────────────────────────────
 function renderTickerBar(items) {
     const track = document.getElementById('tickerTrack');
@@ -577,6 +601,7 @@ async function updateDashboard() {
     renderAnalysisSummary(data.performance);
     renderLearning(data.learning);
     renderStrategy(data.learning);
+    renderMarketRegime(data.market_regime);
     renderTickerBar(data.daily_ticker);
 
     // Optimized params: separate lightweight call (cached 30s in backend)

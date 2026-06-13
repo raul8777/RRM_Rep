@@ -625,6 +625,65 @@ async def get_analysis_summary() -> Dict:
         raise HTTPException(status_code=500, detail=f"Failed to get analysis summary: {str(e)}")
 
 
+# ── Market regime cache (5 min) ──────────────────────────────────────────────
+_regime_cache: Dict = {"data": None, "ts": 0.0}
+
+
+def _get_market_regime() -> Dict:
+    """Classify current BTC/crypto market regime using EMA9/21 4h + daily change + vol."""
+    import time as _time
+    now = _time.monotonic()
+    if _regime_cache["data"] and now - _regime_cache["ts"] < 300:
+        return _regime_cache["data"]
+
+    try:
+        bc = get_components().binance_client
+        from autonomous_signals import AutonomousSignalGenerator
+        sig_gen = AutonomousSignalGenerator(bc, ["BTCUSDT"])
+
+        # EMA trend 4h
+        btc_trend = sig_gen.get_btc_market_trend(interval="4h")
+
+        # Daily change %
+        open_p = bc.get_daily_open_price("BTCUSDT")
+        cur_p = bc.get_symbol_price("BTCUSDT")
+        day_chg = (cur_p - open_p) / open_p * 100 if open_p else 0.0
+
+        # Volume ratio: last 1h vs avg of previous 23h
+        klines = bc.client.get_klines(symbol="BTCUSDT", interval="1h", limit=25)
+        vols = [float(k[5]) for k in klines]
+        avg_vol = sum(vols[:-1]) / len(vols[:-1]) if len(vols) > 1 else 1
+        vol_ratio = vols[-1] / avg_vol if avg_vol > 0 else 1.0
+
+        # Classify
+        if btc_trend == "UP" and day_chg > 0.8 and vol_ratio >= 0.8:
+            regime, color = "ALCISTA", "#4ecca3"
+        elif btc_trend == "DOWN" and day_chg < -0.8:
+            regime, color = "BAJISTA", "#e74c3c"
+        elif -0.8 <= day_chg <= 0.8 and vol_ratio < 0.6:
+            regime, color = "LATERAL", "#f39c12"
+        elif btc_trend == "UP" and vol_ratio < 0.6:
+            regime, color = "DÉBIL ALZA", "#f39c12"
+        elif btc_trend == "DOWN":
+            regime, color = "DÉBIL BAJA", "#e67e22"
+        else:
+            regime, color = "LATERAL", "#f39c12"
+
+        result = {
+            "regime": regime,
+            "color": color,
+            "btc_trend": btc_trend,
+            "day_change_pct": round(day_chg, 2),
+            "vol_ratio": round(vol_ratio, 2),
+        }
+    except Exception as e:
+        result = {"regime": "?", "color": "#888", "btc_trend": "?", "day_change_pct": 0.0, "vol_ratio": 0.0}
+
+    _regime_cache["data"] = result
+    _regime_cache["ts"] = now
+    return result
+
+
 @app.get("/dashboard/summary")
 async def get_dashboard_summary() -> Dict:
     """Single endpoint that returns all dashboard data to minimize API calls."""
@@ -850,6 +909,12 @@ async def get_dashboard_summary() -> Dict:
         }
     except Exception as e:
         result["learning"] = {"error": str(e)}
+
+    # Market regime
+    try:
+        result["market_regime"] = _get_market_regime()
+    except Exception as e:
+        result["market_regime"] = {"regime": "?", "color": "#888", "btc_trend": "?", "day_change_pct": 0.0, "vol_ratio": 0.0}
 
     # Daily ticker bar (8AM Mexico open vs current price)
     try:
