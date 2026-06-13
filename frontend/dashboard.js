@@ -524,6 +524,42 @@ async function pollBacktestResults() {
     } catch (e) { /* silent */ }
 }
 
+// ── Ticker Bar ──────────────────────────────────────────────────────────────────
+function renderTickerBar(items) {
+    const track = document.getElementById('tickerTrack');
+    if (!track) return;
+    if (!items || items.length === 0) {
+        track.innerHTML = '<span class="ticker-loading">Sin datos de precios</span>';
+        return;
+    }
+
+    function fmtPrice(p, sym) {
+        const n = parseFloat(p);
+        if (sym === 'BTCUSDT') return '$' + n.toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 0});
+        if (sym === 'ETHUSDT') return '$' + n.toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 0});
+        if (n >= 100) return '$' + n.toFixed(2);
+        if (n >= 1)   return '$' + n.toFixed(3);
+        return '$' + n.toFixed(5);
+    }
+
+    function buildItem(t) {
+        const label = (t.symbol || '').replace('USDT', '');
+        const chg = parseFloat(t.change_pct || 0);
+        const cls = chg > 0.05 ? 'up' : chg < -0.05 ? 'down' : 'flat';
+        const arrow = chg > 0.05 ? '▲' : chg < -0.05 ? '▼' : '▸';
+        return `<div class="ticker-item">
+            <span class="ticker-symbol">${label}</span>
+            <span class="ticker-open">8AM: ${fmtPrice(t.open_price, t.symbol)}</span>
+            <span class="ticker-price">${fmtPrice(t.current_price, t.symbol)}</span>
+            <span class="ticker-change ${cls}">${arrow} ${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>
+        </div>`;
+    }
+
+    // Duplicate content for seamless infinite loop
+    const html = items.map(buildItem).join('');
+    track.innerHTML = html + html;
+}
+
 // ── Main update loop (single fetch per cycle) ─────────────────────────────────
 async function updateDashboard() {
     const data = await fetchDashboardData();
@@ -541,6 +577,7 @@ async function updateDashboard() {
     renderAnalysisSummary(data.performance);
     renderLearning(data.learning);
     renderStrategy(data.learning);
+    renderTickerBar(data.daily_ticker);
 
     // Optimized params: separate lightweight call (cached 30s in backend)
     try {

@@ -119,6 +119,27 @@ class BinanceClient:
         except (BinanceAPIException, BinanceRequestException) as exc:
             raise RuntimeError(f"Binance filters error: {exc}") from exc
 
+    def get_daily_open_price(self, symbol: str, open_hour_utc: int = 14) -> float:
+        """Return the open price of the 1h candle at open_hour_utc today (8AM Mexico = 14:00 UTC).
+        Falls back to current price if klines are unavailable."""
+        import calendar
+        from datetime import datetime, timezone, timedelta
+        now_utc = datetime.now(timezone.utc)
+        # Build timestamp for today's open_hour_utc; if we haven't reached it yet use yesterday's
+        target = now_utc.replace(hour=open_hour_utc, minute=0, second=0, microsecond=0)
+        if now_utc < target:
+            target -= timedelta(days=1)
+        start_ms = int(calendar.timegm(target.timetuple()) * 1000)
+        try:
+            klines = self.client.get_klines(
+                symbol=symbol, interval="1h", startTime=start_ms, limit=1
+            )
+            if klines:
+                return float(klines[0][1])  # index 1 = open
+        except Exception:
+            pass
+        return self.get_symbol_price(symbol)
+
     def calculate_commission(self, amount: float, price: float, commission_rate: float = 0.001) -> float:
         """
         Calculate commission for a trade.

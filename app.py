@@ -851,8 +851,50 @@ async def get_dashboard_summary() -> Dict:
     except Exception as e:
         result["learning"] = {"error": str(e)}
 
+    # Daily ticker bar (8AM Mexico open vs current price)
+    try:
+        ticker_symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+        ticker_data = []
+        for sym in ticker_symbols:
+            try:
+                open_p = binance_client.get_daily_open_price(sym)
+                cur_p = binance_client.get_symbol_price(sym)
+                change_pct = round((cur_p - open_p) / open_p * 100, 2) if open_p else 0.0
+                ticker_data.append({
+                    "symbol": sym,
+                    "open_price": round(open_p, 6),
+                    "current_price": round(cur_p, 6),
+                    "change_pct": change_pct,
+                })
+            except Exception:
+                pass
+        result["daily_ticker"] = ticker_data
+    except Exception as e:
+        result["daily_ticker"] = []
+
     result["timestamp"] = to_mexico_time(datetime.utcnow()).isoformat()
     return result
+
+
+@app.get("/market/daily-ticker")
+async def get_daily_ticker() -> Dict:
+    """Daily open (8AM Mexico) vs current price for main trading pairs."""
+    symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+    data = []
+    for sym in symbols:
+        try:
+            open_p = binance_client.get_daily_open_price(sym)
+            cur_p = binance_client.get_symbol_price(sym)
+            change_pct = round((cur_p - open_p) / open_p * 100, 2) if open_p else 0.0
+            data.append({
+                "symbol": sym,
+                "open_price": round(open_p, 6),
+                "current_price": round(cur_p, 6),
+                "change_pct": change_pct,
+            })
+        except Exception:
+            pass
+    return {"ticker": data}
 
 
 @app.get("/positions/open/detail")

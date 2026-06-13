@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Trading Agent Dashboard</title>
-    <link rel="stylesheet" href="/frontend/styles.css?v=7">
+    <link rel="stylesheet" href="/frontend/styles.css?v=8">
 </head>
 <body>
     <div class="container">
@@ -26,6 +26,13 @@
             <button id="pauseBtn" class="btn btn-warning">PAUSAR</button>
             <button id="stopBtn" class="btn btn-danger">DETENER</button>
             <button id="startBtn" class="btn btn-success">ENCENDER</button>
+        </div>
+
+        <!-- Market Ticker Bar -->
+        <div class="ticker-bar" id="tickerBar">
+            <div class="ticker-track" id="tickerTrack">
+                <span class="ticker-loading">Cargando precios...</span>
+            </div>
         </div>
 
         <div class="dashboard-grid">
