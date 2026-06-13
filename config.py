@@ -110,6 +110,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = _resolve_env_file()
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 def _validate_settings(settings: Settings) -> None:
