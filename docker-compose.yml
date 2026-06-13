@@ -9,8 +9,7 @@ services:
       POSTGRES_USER: ${DB_USER:-crypto_agent}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-crypto_agent_password}
       POSTGRES_DB: ${DB_NAME:-crypto_agent}
-    ports:
-      - "5432:5432"
+    # Port NOT exposed to host — only accessible within Docker network
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d
@@ -25,11 +24,11 @@ services:
   redis:
     image: redis:7-alpine
     container_name: crypto-agent-redis
-    ports:
-      - "6379:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD:-changeme_redis_2024}
+    # Port NOT exposed to host — only accessible within Docker network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme_redis_2024}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -58,6 +57,8 @@ services:
       - MAX_RISK_PER_PAIR_PCT=${MAX_RISK_PER_PAIR_PCT:-10.0}
       - DIVERSIFICATION_FACTOR=${DIVERSIFICATION_FACTOR:-1.0}
       - ENABLE_POSITION_CLOSURE=${ENABLE_POSITION_CLOSURE:-true}
+      - DASHBOARD_API_KEY=${DASHBOARD_API_KEY:-}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-changeme_redis_2024}
       - MAX_PER_TRADE_USDT=50.0
       - MAX_POSITIONS=10
       - MAX_POSITIONS_PER_SYMBOL=3

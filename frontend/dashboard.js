@@ -1,5 +1,13 @@
 const API_BASE = 'http://localhost:8000';
 
+// API key for mutating endpoints (set DASHBOARD_API_KEY in .env; empty = no auth)
+const _API_KEY = window._DASHBOARD_API_KEY || '';
+function _authHeaders() {
+    const h = { 'Content-Type': 'application/json' };
+    if (_API_KEY) h['X-API-Key'] = _API_KEY;
+    return h;
+}
+
 // ── Frontend cache ────────────────────────────────────────────────────────────
 let _lastFetch = 0;
 let _cachedData = null;
@@ -628,7 +636,7 @@ async function controlAction(path) {
     try {
         await fetch(`${API_BASE}${path}`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: _authHeaders(),
             body: JSON.stringify({ reason: 'Manual action from dashboard' })
         });
         _cachedData = null;
@@ -651,7 +659,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await fetch(
                 `${API_BASE}/backtest/run?symbol=${symbol}&days_back=${days}`,
-                { method: 'POST' }
+                { method: 'POST', headers: _authHeaders() }
             );
             if (res.ok) {
                 btn.textContent = '⏳ Corriendo...';
@@ -681,7 +689,7 @@ document.addEventListener('DOMContentLoaded', () => {
         btn.disabled = true;
         btn.textContent = '⏳ Aprendiendo...';
         try {
-            const res = await fetch(`${API_BASE}/learning/run`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/learning/run`, { method: 'POST', headers: _authHeaders() });
             if (res.ok) {
                 setTimeout(async () => {
                     _cachedData = null;

@@ -1,10 +1,11 @@
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Depends
 from fastapi import status as http_status
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Optional
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from config import get_settings
@@ -23,14 +24,33 @@ import error_collector as ec
 settings = get_settings()
 app = FastAPI(title="Binance Trading Agent")
 
-# Add CORS middleware
+# Add CORS middleware — restrict to localhost only
+_CORS_ORIGINS = [
+    "http://localhost", "http://localhost:8000",
+    "http://127.0.0.1", "http://127.0.0.1:8000",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for development
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+# ── API Key auth dependency (for mutating / control endpoints) ────────────────
+def _require_api_key(request: Request) -> None:
+    """
+    Validates X-API-Key header against DASHBOARD_API_KEY env var.
+    If DASHBOARD_API_KEY is not set, auth is skipped (local dev only).
+    """
+    api_key = os.environ.get("DASHBOARD_API_KEY", "")
+    if not api_key:
+        return  # No key configured — local dev, allow through
+    provided = request.headers.get("X-API-Key", "")
+    if not secrets.compare_digest(provided, api_key):
+        raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid or missing X-API-Key")
 
 # Mount static files for frontend
 frontend_path = os.path.join(os.path.dirname(__file__), "frontend")
@@ -127,8 +147,10 @@ def startup_event():
 
 
 @app.post("/predictor/bootstrap")
-async def trigger_bootstrap(days: int = 90) -> Dict:
+async def trigger_bootstrap(days: int = 90, _auth: None = Depends(_require_api_key)) -> Dict:
     """Manually trigger PnL predictor bootstrap with historical Binance data."""
+    if not 1 <= days <= 365:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 365")
     try:
         from bootstrap_history import run_bootstrap
         comp = get_components()
@@ -147,7 +169,7 @@ async def trigger_bootstrap(days: int = 90) -> Dict:
 
 
 @app.post("/positions/sync")
-async def sync_positions() -> Dict:
+async def sync_positions(_auth: None = Depends(_require_api_key)) -> Dict:
     """Manually trigger balance sync: import orphan Binance assets >$5 as managed positions."""
     try:
         comp = get_components()
@@ -209,7 +231,7 @@ async def signals_recent(limit: int = 20) -> Dict[str, object]:
 
 
 @app.post("/webhook")
-async def webhook(payload: TradingViewPayload, request: Request) -> Dict:
+async def webhook(payload: TradingViewPayload, request: Request, _auth: None = Depends(_require_api_key)) -> Dict:
     secret = request.headers.get("X-Webhook-Secret")
     if secret != settings.tradingview_webhook_secret:
         raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="Unauthorized webhook")
@@ -226,7 +248,7 @@ async def webhook(payload: TradingViewPayload, request: Request) -> Dict:
 
 
 @app.post("/command")
-async def command(payload: CommandPayload) -> Dict[str, str]:
+async def command(payload: CommandPayload, _auth: None = Depends(_require_api_key)) -> Dict[str, str]:
     if payload.mode not in {"suggest", "auto"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid mode")
     settings.agent_mode = payload.mode
@@ -263,7 +285,7 @@ class ControlRequest(BaseModel):
 
 
 @app.post("/control/pause")
-async def pause_system(payload: ControlRequest) -> Dict:
+async def pause_system(payload: ControlRequest, _auth: None = Depends(_require_api_key)) -> Dict:
     """Pause the system (stop new orders, monitor open positions)."""
     success = orchestrator.pause(changed_by="api", reason=payload.reason or "API request")
     if not success:
@@ -272,7 +294,7 @@ async def pause_system(payload: ControlRequest) -> Dict:
 
 
 @app.post("/control/stop")
-async def stop_system(payload: ControlRequest) -> Dict:
+async def stop_system(payload: ControlRequest, _auth: None = Depends(_require_api_key)) -> Dict:
     """Stop the system (stop all, keep open positions)."""
     success = orchestrator.stop(changed_by="api", reason=payload.reason or "API request")
     if not success:
@@ -281,7 +303,7 @@ async def stop_system(payload: ControlRequest) -> Dict:
 
 
 @app.post("/control/start")
-async def start_system(payload: ControlRequest) -> Dict:
+async def start_system(payload: ControlRequest, _auth: None = Depends(_require_api_key)) -> Dict:
     """Start the system (recalculate everything)."""
     success = orchestrator.start(changed_by="api", reason=payload.reason or "API request")
     if not success:
@@ -338,7 +360,7 @@ async def get_portfolio_config() -> Dict:
 
 
 @app.post("/config/portfolio")
-async def update_portfolio_config(payload: PortfolioConfigRequest) -> Dict:
+async def update_portfolio_config(payload: PortfolioConfigRequest, _auth: None = Depends(_require_api_key)) -> Dict:
     """Update Portfolio Manager configuration."""
     config = {
         "portfolio_allocation_pct": settings.portfolio_allocation_pct,
@@ -529,7 +551,7 @@ async def get_open_positions() -> Dict:
 
 
 @app.post("/positions/close-all")
-async def close_all_positions() -> Dict:
+async def close_all_positions(_auth: None = Depends(_require_api_key)) -> Dict:
     """Sell all open positions on Binance and close them in DB."""
     from run_trades import get_symbol_filters, align_quantity_to_step, is_quantity_valid
     results = []
@@ -1006,11 +1028,20 @@ _backtest_tasks: Dict[str, Dict] = {}  # run_id -> status dict
 @app.post("/backtest/run")
 async def run_backtest(
     background_tasks: BackgroundTasks,
+    _auth: None = Depends(_require_api_key),
     symbol: str = "BTCUSDT",
     interval: str = "1h",
     days_back: int = 30,
 ) -> Dict:
     """Launch a walk-forward backtest in the background. Returns run_id immediately."""
+    import re, uuid
+    if not re.match(r'^[A-Z0-9]{2,20}$', symbol.upper()):
+        raise HTTPException(status_code=400, detail="Invalid symbol format")
+    symbol = symbol.upper()
+    if not 1 <= days_back <= 365:
+        raise HTTPException(status_code=400, detail="days_back must be between 1 and 365")
+    if interval not in {"1m","5m","15m","30m","1h","4h","1d"}:
+        raise HTTPException(status_code=400, detail="Invalid interval")
     import uuid
     run_id = str(uuid.uuid4())
     _backtest_tasks[run_id] = {"status": "running", "symbol": symbol,
@@ -1089,7 +1120,7 @@ async def get_learning_status() -> Dict:
 
 
 @app.post("/learning/run")
-async def trigger_learning(background_tasks: BackgroundTasks,
+async def trigger_learning(background_tasks: BackgroundTasks, _auth: None = Depends(_require_api_key),
                            min_trades: int = 5,
                            lookback_days: int = 30) -> Dict:
     """Manually trigger a LearningEngine cycle."""
