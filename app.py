@@ -708,9 +708,14 @@ def _get_market_regime() -> Dict:
 
 @app.get("/dashboard/config")
 async def get_dashboard_config(request: Request) -> Dict:
-    """Return frontend runtime config. Only serves API key to localhost clients."""
+    """Return frontend runtime config. Only serves API key to local/docker clients."""
     client_host = request.client.host if request.client else ""
-    is_local = client_host in ("127.0.0.1", "::1", "localhost")
+    is_local = (
+        client_host in ("127.0.0.1", "::1", "localhost")
+        or client_host.startswith("172.")   # Docker bridge network
+        or client_host.startswith("192.168.")  # LAN
+        or client_host.startswith("10.")    # Private network
+    )
     api_key = os.environ.get("DASHBOARD_API_KEY", "") if is_local else ""
     return {"api_key": api_key}
 
