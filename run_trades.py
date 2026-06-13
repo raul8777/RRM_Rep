@@ -488,10 +488,44 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         if not is_valid:
             ep = prediction.get('expected_pnl', 0) if prediction else 0
             sp = prediction.get('success_probability', 0) if prediction else 0
-            print(f"Skipping buy {symbol}: {reason} (pred={ep:.2f} USDT, prob={sp:.2f})")
-            update_signal_decision(symbol, "rejected", "PNL_BAJO")
-            continue
-        if prediction:
+            # ── VolSpike override for narrative tokens ─────────────────────
+            volspike_override = False
+            if getattr(settings, 'volspike_override_enabled', True):
+                narrative_set = set(getattr(settings, 'narrative_tokens', []))
+                only_narrative = getattr(settings, 'volspike_override_narrative_only', True)
+                if not only_narrative or symbol in narrative_set:
+                    try:
+                        _kl = client.client.get_klines(symbol=symbol, interval='4h', limit=26)
+                        _closes = [float(k[4]) for k in _kl]
+                        _vols   = [float(k[5]) for k in _kl]
+                        _avg_vol = sum(_vols[:-1]) / max(len(_vols) - 1, 1)
+                        _spike   = _vols[-1] / _avg_vol if _avg_vol > 0 else 0
+                        # RSI 14 on 4h closes
+                        _gains = _losses = 0.0
+                        for _i in range(1, 15):
+                            _d = _closes[_i] - _closes[_i - 1]
+                            if _d > 0: _gains += _d
+                            else: _losses += -_d
+                        _ag = _gains / 14; _al = _losses / 14
+                        _rsi = 100 - 100 / (1 + _ag / _al) if _al > 0 else 100
+                        # EMA9 vs EMA21 for 4h trend
+                        _k9 = 2/10; _k21 = 2/22; _e9 = _closes[0]; _e21 = _closes[0]
+                        for _c in _closes[1:]: _e9 = _c*_k9 + _e9*(1-_k9); _e21 = _c*_k21 + _e21*(1-_k21)
+                        _trend_up = _e9 > _e21
+                        _min_spike = getattr(settings, 'volspike_override_min_spike', 1.5)
+                        _max_rsi   = getattr(settings, 'volspike_override_max_rsi', 65.0)
+                        _need_trend = getattr(settings, 'volspike_override_trend_required', True)
+                        if (_spike >= _min_spike and _rsi < _max_rsi
+                                and (not _need_trend or _trend_up)):
+                            volspike_override = True
+                            print(f"VolSpike OVERRIDE {symbol}: spike={_spike:.2f}x, RSI4h={_rsi:.1f}, trend={'UP' if _trend_up else 'DOWN'} → bypassing PnL veto (pred={ep:.2f}, prob={sp:.2f})")
+                    except Exception as _ve:
+                        print(f"VolSpike override check failed for {symbol}: {_ve}")
+            if not volspike_override:
+                print(f"Skipping buy {symbol}: {reason} (pred={ep:.2f} USDT, prob={sp:.2f})")
+                update_signal_decision(symbol, "rejected", "PNL_BAJO")
+                continue
+        if prediction and is_valid:
             print(f"Prediction OK for {symbol}: {prediction['expected_pnl']:.2f} USDT, prob={prediction['success_probability']:.2f}")
 
         # ── Kelly dynamic position sizing ───────────────────────────────

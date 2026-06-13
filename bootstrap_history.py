@@ -38,6 +38,35 @@ TP_ATR_MULT = 2.5
 SL_PCT_FALLBACK = 0.015
 TP_PCT_FALLBACK = 0.025
 
+# ── Per-category lookback days ────────────────────────────────────────────────
+# Narrative/AI tokens: sparse activity bursts → need more history to sample enough breakouts
+_NARRATIVE_TOKENS = {
+    "FETUSDT", "TAOUSDT", "RENDERUSDT", "NEARUSDT", "WLDUSDT",
+    "AGIXUSDT", "OCEANUSDT", "NMRUSDT", "RLCUSDT",
+}
+# Mid-cap alts: moderate activity → 180d gives 2x more signal samples
+_MIDCAP_ALTS = {
+    "SOLUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "SUIUSDT",
+    "ADAUSDT", "XRPUSDT", "WIFUSDT", "PEPEUSDT", "DOGEUSDT",
+}
+# Large caps: high daily activity → 90d is sufficient
+_LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
+
+_LOOKBACK_NARRATIVE = 365
+_LOOKBACK_MIDCAP    = 180
+_LOOKBACK_LARGECAP  =  90
+
+
+def _lookback_for_symbol(symbol: str, default: int = LOOKBACK_DAYS) -> int:
+    """Return appropriate lookback days based on token category."""
+    if symbol in _NARRATIVE_TOKENS:
+        return _LOOKBACK_NARRATIVE
+    if symbol in _MIDCAP_ALTS:
+        return _LOOKBACK_MIDCAP
+    if symbol in _LARGE_CAPS:
+        return _LOOKBACK_LARGECAP
+    return default
+
 
 # ── Fake position object (duck-typed for LearningEngine) ─────────────────────
 
@@ -197,12 +226,13 @@ def run_bootstrap(binance_client, settings,
     all_synthetic: List[_SyntheticPosition] = []
     per_symbol: Dict[str, int] = {}
 
-    logger.info(f"Bootstrap: starting for {len(symbols)} symbols, {lookback_days}d history")
+    logger.info(f"Bootstrap: starting for {len(symbols)} symbols, variable lookback per category")
 
     for symbol in symbols:
         try:
+            sym_lookback = _lookback_for_symbol(symbol, lookback_days)
             klines = _fetch_all_klines(binance_client, symbol,
-                                       interval=INTERVAL, days=lookback_days)
+                                       interval=INTERVAL, days=sym_lookback)
             if len(klines) < WINDOW + FORWARD_CANDLES:
                 logger.warning(f"Bootstrap {symbol}: skipped (only {len(klines)} klines)")
                 per_symbol[symbol] = 0
@@ -212,9 +242,10 @@ def run_bootstrap(binance_client, settings,
             all_synthetic.extend(trades)
             per_symbol[symbol] = len(trades)
             wins = sum(1 for t in trades if t.pnl > 0)
-            logger.info(f"Bootstrap {symbol}: {len(trades)} simulated trades, "
-                        f"win_rate={wins/len(trades):.1%}" if trades else
-                        f"Bootstrap {symbol}: 0 signals")
+            logger.info(
+                f"Bootstrap {symbol} ({sym_lookback}d): {len(trades)} simulated trades"
+                + (f", win_rate={wins/len(trades):.1%}" if trades else "")
+            )
         except Exception as e:
             logger.error(f"Bootstrap {symbol} failed: {e}")
             per_symbol[symbol] = 0

@@ -72,8 +72,15 @@ class Settings(BaseSettings):
     analysis_symbols: list = Field(default=[
         'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
         'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT',
-        'SUIUSDT', 'PEPEUSDT', 'FETUSDT', 'RENDERUSDT', 'WIFUSDT'
+        'SUIUSDT', 'PEPEUSDT', 'FETUSDT', 'TAOUSDT', 'RENDERUSDT', 'WIFUSDT'
     ], env="ANALYSIS_SYMBOLS")
+
+    # VolSpike override: bypass PnL predictor for narrative tokens with strong volume
+    volspike_override_enabled: bool = Field(default=True, env="VOLSPIKE_OVERRIDE_ENABLED")
+    volspike_override_min_spike: float = Field(default=1.5, env="VOLSPIKE_OVERRIDE_MIN_SPIKE")   # x avg volume
+    volspike_override_max_rsi: float = Field(default=65.0, env="VOLSPIKE_OVERRIDE_MAX_RSI")      # RSI must be below this
+    volspike_override_trend_required: bool = Field(default=True, env="VOLSPIKE_OVERRIDE_TREND_REQUIRED")  # must be 4h UP
+    volspike_override_narrative_only: bool = Field(default=True, env="VOLSPIKE_OVERRIDE_NARRATIVE_ONLY")  # only for narrative tokens
     
     # Prediction-based position closure configuration
     min_pnl_improvement_threshold: float = Field(default=0.5, env="MIN_PNL_IMPROVEMENT_THRESHOLD")  # 50% improvement
@@ -91,6 +98,12 @@ class Settings(BaseSettings):
 
     # Signal quality filter
     min_signal_strength: float = Field(default=0.35, env="MIN_SIGNAL_STRENGTH")  # 0.0 = accept all, 0.5 = moderate filter
+
+    # Narrative token classification (used by volspike override + bootstrap)
+    narrative_tokens: list = Field(default=[
+        'FETUSDT', 'TAOUSDT', 'RENDERUSDT', 'NEARUSDT', 'WLDUSDT',
+        'AGIXUSDT', 'OCEANUSDT',
+    ], env="NARRATIVE_TOKENS")
     
     # Binance commission configuration
     binance_commission_rate: float = Field(default=0.001, env="BINANCE_COMMISSION_RATE")  # 0.1% default
