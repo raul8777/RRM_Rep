@@ -312,7 +312,7 @@ function renderLearning(d) {
 
     const acc = parseFloat(d.prediction_accuracy || 0);
     const err = parseFloat(d.avg_prediction_error || 0);
-    const lastRun = d.last_run ? new Date(d.last_run).toLocaleString('es-MX') : '—';
+    const lastRun = d.last_run ? new Date(d.last_run).toLocaleString('es-MX', { timeZone: 'America/Mexico_City', hour12: false }) : '—';
 
     const biasRows = Object.entries(d.bias_by_symbol || {}).slice(0, 5)
         .map(([sym, b]) => {
