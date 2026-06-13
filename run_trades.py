@@ -13,6 +13,9 @@ from trade_utils import align_quantity_to_step, get_symbol_filters, is_quantity_
 import pnl_service
 
 
+# Symbols confirmed invalid on Binance (delisted) — skip without API call
+_INVALID_SYMBOLS: set = {"EONUSDT", "ADDUSDT", "MEETONEUSDT", "ATDUSDT", "EOPUSDT", "ETHWUSDT"}
+
 
 def _get_news_scores(symbols: List[str], news_client: NewsClient, settings) -> Dict[str, float]:
     if not symbols:
@@ -270,6 +273,8 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
             continue
 
         symbol = f"{asset.upper()}USDT"
+        if symbol in _INVALID_SYMBOLS:
+            continue
         if symbol in top_symbols:
             print(f"Keeping asset {asset} because {symbol} is in top symbols")
             continue
@@ -295,7 +300,10 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
             filters = get_symbol_filters(client, symbol)
             price = client.get_symbol_price(symbol)
         except Exception as exc:
-            print(f"Skip sell {symbol}: {exc}")
+            if "-1121" in str(exc):
+                _INVALID_SYMBOLS.add(symbol)
+            else:
+                print(f"Skip sell {symbol}: {exc}")
             continue
 
         qty = align_quantity_to_step(amount, filters["step"])
