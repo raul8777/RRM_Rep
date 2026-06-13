@@ -706,6 +706,15 @@ def _get_market_regime() -> Dict:
     return result
 
 
+@app.get("/dashboard/config")
+async def get_dashboard_config(request: Request) -> Dict:
+    """Return frontend runtime config. Only serves API key to localhost clients."""
+    client_host = request.client.host if request.client else ""
+    is_local = client_host in ("127.0.0.1", "::1", "localhost")
+    api_key = os.environ.get("DASHBOARD_API_KEY", "") if is_local else ""
+    return {"api_key": api_key}
+
+
 @app.get("/dashboard/summary")
 async def get_dashboard_summary() -> Dict:
     """Single endpoint that returns all dashboard data to minimize API calls."""

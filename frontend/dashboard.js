@@ -1,7 +1,13 @@
 const API_BASE = 'http://localhost:8000';
 
-// API key for mutating endpoints (set DASHBOARD_API_KEY in .env; empty = no auth)
-const _API_KEY = window._DASHBOARD_API_KEY || '';
+// API key loaded dynamically from backend at startup — never hardcoded in source
+let _API_KEY = '';
+(async () => {
+    try {
+        const r = await fetch(`${API_BASE}/dashboard/config`);
+        if (r.ok) { const d = await r.json(); _API_KEY = d.api_key || ''; }
+    } catch (e) { /* silent — no key = local dev mode */ }
+})();
 function _authHeaders() {
     const h = { 'Content-Type': 'application/json' };
     if (_API_KEY) h['X-API-Key'] = _API_KEY;
