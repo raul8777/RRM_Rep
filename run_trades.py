@@ -16,6 +16,11 @@ import pnl_service
 # Symbols confirmed invalid on Binance (delisted) — skip without API call
 _INVALID_SYMBOLS: set = {"EONUSDT", "ADDUSDT", "MEETONEUSDT", "ATDUSDT", "EOPUSDT", "ETHWUSDT"}
 
+# VolSpike override cooldown: {symbol: datetime_of_last_override_entry}
+# Prevents re-entering the same narrative token breakout every 5min cycle
+_VOLSPIKE_COOLDOWN: Dict[str, datetime] = {}
+_VOLSPIKE_COOLDOWN_HOURS = 4.0
+
 
 def _get_news_scores(symbols: List[str], news_client: NewsClient, settings) -> Dict[str, float]:
     if not symbols:
@@ -517,8 +522,32 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         _need_trend = getattr(settings, 'volspike_override_trend_required', True)
                         if (_spike >= _min_spike and _rsi < _max_rsi
                                 and (not _need_trend or _trend_up)):
-                            volspike_override = True
-                            print(f"VolSpike OVERRIDE {symbol}: spike={_spike:.2f}x, RSI4h={_rsi:.1f}, trend={'UP' if _trend_up else 'DOWN'} → bypassing PnL veto (pred={ep:.2f}, prob={sp:.2f})")
+                            # Check cooldown — no re-entry within 4h of last override
+                            _last = _VOLSPIKE_COOLDOWN.get(symbol)
+                            from datetime import datetime as _dt
+                            _now_utc = _dt.now(timezone.utc)
+                            if _last:
+                                _hours_since = (_now_utc - _last).total_seconds() / 3600
+                                if _hours_since < _VOLSPIKE_COOLDOWN_HOURS:
+                                    print(f"VolSpike OVERRIDE {symbol}: cooldown active ({_hours_since:.1f}h < {_VOLSPIKE_COOLDOWN_HOURS}h) — skip")
+                                else:
+                                    # Check max 1 open override position for this symbol
+                                    _open_count = position_manager.get_positions_count(symbol) if position_manager else 0
+                                    if _open_count >= 1:
+                                        print(f"VolSpike OVERRIDE {symbol}: already {_open_count} open position(s) — skip")
+                                    else:
+                                        volspike_override = True
+                                        _VOLSPIKE_COOLDOWN[symbol] = _now_utc
+                                        print(f"VolSpike OVERRIDE {symbol}: spike={_spike:.2f}x, RSI4h={_rsi:.1f}, trend={'UP' if _trend_up else 'DOWN'} → bypassing PnL veto (pred={ep:.2f}, prob={sp:.2f})")
+                            else:
+                                # First time — check no open position exists
+                                _open_count = position_manager.get_positions_count(symbol) if position_manager else 0
+                                if _open_count >= 1:
+                                    print(f"VolSpike OVERRIDE {symbol}: already {_open_count} open position(s) — skip")
+                                else:
+                                    volspike_override = True
+                                    _VOLSPIKE_COOLDOWN[symbol] = _dt.now(timezone.utc)
+                                    print(f"VolSpike OVERRIDE {symbol}: spike={_spike:.2f}x, RSI4h={_rsi:.1f}, trend={'UP' if _trend_up else 'DOWN'} → bypassing PnL veto (pred={ep:.2f}, prob={sp:.2f})")
                     except Exception as _ve:
                         print(f"VolSpike override check failed for {symbol}: {_ve}")
             if not volspike_override:
@@ -687,9 +716,41 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
             new_allocations=new_allocations,
             new_predictions=predictions,
         )
-        if symbols_to_close:
-            print(f"Closing positions based on predictions: {symbols_to_close}")
-            time.sleep(2)
+        if not symbols_to_close:
+            return
+        print(f"Closing positions based on predictions: {symbols_to_close}")
+        # ── Execute real sell orders for each symbol to close ─────────────
+        from trade_utils import get_symbol_filters, align_quantity_to_step, is_quantity_valid
+        for sym in symbols_to_close:
+            try:
+                balances = client.get_account_balance()
+                asset = sym.replace("USDT", "")
+                qty_held = float(balances.get(asset, 0))
+                if qty_held <= 0:
+                    print(f"Prediction close {sym}: no balance held, skipping sell")
+                    continue
+                filters = get_symbol_filters(client, sym)
+                qty = align_quantity_to_step(qty_held, filters["step"])
+                valid, reason = is_quantity_valid(qty, client.get_symbol_price(sym), filters)
+                if not valid:
+                    print(f"Prediction close {sym}: invalid qty {qty} — {reason}")
+                    continue
+                order = client.place_order(symbol=sym, side="SELL", quantity=qty)
+                exit_price = float(order.get("fills", [{}])[0].get("price", 0) or
+                                   client.get_symbol_price(sym))
+                # Close position records in DB
+                for pos in position_manager.get_all_positions().get(sym, []):
+                    pnl = (exit_price - float(pos.entry_price)) * float(pos.quantity)
+                    position_manager.close_position(
+                        position_id=pos.position_id,
+                        exit_price=exit_price,
+                        pnl=pnl,
+                        close_reason="prediction_reallocation",
+                    )
+                print(f"Prediction close {sym}: sold {qty} @ {exit_price:.4f}, pnl estimated")
+            except Exception as sell_err:
+                print(f"Prediction close {sym}: sell failed — {sell_err}")
+        time.sleep(1)
     except Exception as e:
         print(f"Error in prediction-based position closure: {e}")
 
