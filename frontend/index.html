@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Trading Agent Dashboard</title>
-    <link rel="stylesheet" href="/frontend/styles.css?v=14">
+    <link rel="stylesheet" href="/frontend/styles.css?v=15">
 </head>
 <body>
     <div class="container">
@@ -64,6 +64,14 @@
                 <h2>PnL Histórico</h2>
                 <div id="pnlHistoryData">
                     <p>Loading PnL history...</p>
+                </div>
+            </div>
+
+            <!-- Profit Projection Card -->
+            <div class="card card-wide">
+                <h2>📈 Proyección de Ganancias</h2>
+                <div id="profitProjectionData">
+                    <p class="loading">Calculando proyección...</p>
                 </div>
             </div>
 
@@ -215,6 +223,6 @@
         </div>
     </div>
 
-    <script src="/frontend/dashboard.js?v=16"></script>
+    <script src="/frontend/dashboard.js?v=17"></script>
 </body>
 </html>

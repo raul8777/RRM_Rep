@@ -163,10 +163,35 @@ function renderHealth(d) {
 
 function renderBalance(d) {
     if (!d || d.error) return;
+    const spotPct    = parseFloat(d.spot_pct    || 100);
+    const futPct     = parseFloat(d.futures_pct || 0);
+    const spotUsdt   = parseFloat(d.spot_usdt   || d.total_usdt || 0);
+    const futUsdt    = parseFloat(d.futures_usdt || 0);
+    const rate       = parseFloat(d.usd_to_mxn_rate || 17.8);
+    const walletHtml = futUsdt > 0 ? `
+        <div class="wallet-split">
+            <div class="wallet-row">
+                <span class="wallet-icon">💼</span>
+                <span class="wallet-label">Spot</span>
+                <span class="wallet-amount">$${fmt(spotUsdt)} USDT</span>
+                <span class="wallet-pct">${spotPct}%</span>
+            </div>
+            <div class="wallet-bar-wrap">
+                <div class="wallet-bar-spot" style="width:${spotPct}%"></div>
+                <div class="wallet-bar-fut"  style="width:${futPct}%"></div>
+            </div>
+            <div class="wallet-row">
+                <span class="wallet-icon">⚡</span>
+                <span class="wallet-label">Futuros</span>
+                <span class="wallet-amount">$${fmt(futUsdt)} USDT</span>
+                <span class="wallet-pct">${futPct}%</span>
+            </div>
+        </div>` : '';
     document.getElementById('balanceData').innerHTML = `
         <div class="data-item"><span class="data-label">Total USDT</span><span class="data-value">$${fmt(d.total_usdt)}</span></div>
         <div class="data-item"><span class="data-label">Total MXN</span><span class="data-value">$${fmt(d.total_mxn)}</span></div>
         <div class="data-item"><span class="data-label">USD/MXN</span><span class="data-value">${fmt(d.usd_to_mxn_rate)}</span></div>
+        ${walletHtml}
         <div class="balances-breakdown">
             <h3>Desglose por Activo:</h3>
             <div class="balances-scroll">
@@ -176,6 +201,71 @@ function renderBalance(d) {
                     <span class="data-value">${fmt(v, 4)} USDT / ${fmt((d.balances_mxn || {})[a])} MXN</span>
                 </div>`).join('')}
             </div>
+        </div>
+    `;
+}
+
+function renderProfitProjection(pp) {
+    const el = document.getElementById('profitProjectionData');
+    if (!el) return;
+    if (!pp || pp.error) {
+        el.innerHTML = `<p class="loading">${pp && pp.error === 'insufficient_trades' ? 'Insuficientes trades (' + (pp.n_trades||0) + '< 5)' : 'Sin datos'}</p>`;
+        return;
+    }
+    const rate = parseFloat(pp.usd_mxn_rate || 17.8);
+    const pRow = (label, obj, objMxn) => {
+        const cls = parseFloat(obj.mean) >= 0 ? 'positive' : 'negative';
+        return `<tr>
+            <td>${label}</td>
+            <td class="${cls}">${fmt(obj.mean, 4)} USD</td>
+            <td class="${cls}">${fmt(objMxn.mean)} MXN</td>
+            <td style="color:#888;font-size:0.82em">${fmt(objMxn.p5)} / ${fmt(objMxn.p95)}</td>
+        </tr>`;
+    };
+    // Progress bar toward $30k MXN/month
+    const t30 = pp.target_30k_mxn || {};
+    const prog = Math.min(parseFloat(t30.current_progress_pct || 0), 100);
+    const s100 = pp.scenario_100k_mxn || {};
+    el.innerHTML = `
+        <div class="proj-stats">
+            <span class="proj-stat">WR <b>${fmt(pp.win_rate, 1)}%</b></span>
+            <span class="proj-stat">Trades/mes <b>${fmt(pp.trades_per_month, 1)}</b></span>
+            <span class="proj-stat">Avg win <b class="positive">+$${fmt(pp.avg_win_usd, 3)}</b></span>
+            <span class="proj-stat">Avg loss <b class="negative">$${fmt(pp.avg_loss_usd, 3)}</b></span>
+        </div>
+        <table class="proj-table">
+            <thead><tr><th>Período</th><th>Esperado</th><th>En MXN</th><th>Rango P5/P95 MXN</th></tr></thead>
+            <tbody>
+                ${pRow('📅 Hoy',    pp.day,   pp.day_mxn)}
+                ${pRow('📆 Semana', pp.week,  pp.week_mxn)}
+                ${pRow('🗓️ Mes',    pp.month, pp.month_mxn)}
+            </tbody>
+        </table>
+        <div class="proj-scenario">
+            <div class="proj-scenario-title">💰 Con $100,000 MXN (~$${fmt(s100.capital_usd)} USD)</div>
+            <div class="proj-scenario-row">
+                <span>Ganancia mensual esperada:</span>
+                <span class="${parseFloat(s100.monthly_mean_mxn||0)>=0?'positive':'negative'}"><b>$${fmt(s100.monthly_mean_mxn)} MXN</b></span>
+            </div>
+            <div class="proj-scenario-row">
+                <span>Rango P5–P95:</span>
+                <span style="color:#aaa">$${fmt(s100.monthly_p5_mxn)} – $${fmt(s100.monthly_p95_mxn)} MXN</span>
+            </div>
+            <div class="proj-scenario-row">
+                <span>Ganancia anual esperada:</span>
+                <span class="${parseFloat(s100.annual_mean_mxn||0)>=0?'positive':'negative'}"><b>$${fmt(s100.annual_mean_mxn)} MXN</b></span>
+            </div>
+        </div>
+        <div class="proj-target">
+            <div class="proj-target-title">🎯 Objetivo: $30,000 MXN/mes</div>
+            <div class="proj-target-row">
+                <span>Capital requerido:</span>
+                <span><b>$${fmt(t30.capital_required_mxn)} MXN</b> (~$${fmt(t30.capital_required_usd)} USD)</span>
+            </div>
+            <div class="proj-progress-wrap">
+                <div class="proj-progress-bar" style="width:${prog}%"></div>
+            </div>
+            <div class="proj-progress-label">Capital actual: ${fmt(prog, 1)}% del objetivo</div>
         </div>
     `;
 }
@@ -1071,6 +1161,7 @@ async function updateDashboard() {
     renderTradingModeBadge(data.market_regime);
     renderTradingModeCard(data.market_regime);
     renderMonteCarlo(data.monte_carlo_projection);
+    renderProfitProjection(data.profit_projection);
     renderMarketRegime(data.market_regime);
     renderFngBadge(data.market_context);
     renderMarketContext(data.market_context);

@@ -899,15 +899,110 @@ async def get_dashboard_summary() -> Dict:
                     total_usdt += usdt_val
                 except Exception:
                     pass
+        # Futures wallet balance
+        _spot_usdt = float(balances.get("USDT", 0))
+        _futures_usdt = 0.0
+        try:
+            from run_trades import _get_futures_client
+            _fc_bal = _get_futures_client(settings)
+            _futures_usdt = _fc_bal.get_available_usdt()
+        except Exception:
+            pass
+        _grand_total = total_usdt + _futures_usdt
         result["balance"] = {
-            "total_usdt": total_usdt,
-            "total_mxn": total_usdt * _usd_mxn,
+            "total_usdt": _grand_total,
+            "total_mxn": _grand_total * _usd_mxn,
             "usd_to_mxn_rate": _usd_mxn,
             "balances_usdt": balances_usdt,
             "balances_mxn": {k: v * _usd_mxn for k, v in balances_usdt.items()},
+            "spot_usdt": round(total_usdt, 4),
+            "futures_usdt": round(_futures_usdt, 4),
+            "spot_pct": round(total_usdt / _grand_total * 100, 1) if _grand_total > 0 else 100.0,
+            "futures_pct": round(_futures_usdt / _grand_total * 100, 1) if _grand_total > 0 else 0.0,
         }
     except Exception as e:
         result["balance"] = {"error": str(e)}
+
+    # Profit Projection (Monte Carlo forward, based on real trade history)
+    try:
+        import random as _rnd, math as _math
+        _rnd.seed(42)
+        _closed_pp = position_manager.get_closed_positions(limit=500)
+        _pnls_pp   = [float(p.pnl) for p in _closed_pp if p.pnl is not None]
+        _wins_pp   = [p for p in _pnls_pp if p > 0]
+        _losses_pp = [p for p in _pnls_pp if p <= 0]
+        _n_pp = len(_pnls_pp)
+        if _n_pp >= 5:
+            _wr_pp      = len(_wins_pp) / _n_pp
+            _avg_win    = sum(_wins_pp) / len(_wins_pp) if _wins_pp else 0.001
+            _avg_loss   = sum(_losses_pp) / len(_losses_pp) if _losses_pp else -0.001
+            # Estimate trades per month from history age
+            _tpm_pp = max(1.0, _n_pp / 6.0)  # assume ~6 months of data
+            # Simple Monte Carlo: 1000 sims x 30 days
+            def _mc_period(days, n_sims=1000):
+                results = []
+                for _ in range(n_sims):
+                    trades = max(0, int(_rnd.gauss(_tpm_pp * days / 30, _tpm_pp * days / 30 * 0.3)))
+                    pnl = sum(
+                        _rnd.gauss(_avg_win, abs(_avg_win) * 0.4) if _rnd.random() < _wr_pp
+                        else _rnd.gauss(_avg_loss, abs(_avg_loss) * 0.4)
+                        for _ in range(trades)
+                    )
+                    results.append(pnl)
+                results.sort()
+                return {
+                    "p5":  round(results[int(n_sims * 0.05)], 4),
+                    "p50": round(results[int(n_sims * 0.50)], 4),
+                    "p95": round(results[int(n_sims * 0.95)], 4),
+                    "mean": round(sum(results) / n_sims, 4),
+                }
+            _proj_day   = _mc_period(1)
+            _proj_week  = _mc_period(7)
+            _proj_month = _mc_period(30)
+            # $100k MXN scenario
+            _cap_100k_mxn = 100000.0 / _usd_mxn  # USD
+            _cap_current  = result.get("balance", {}).get("total_usdt", 282.0)
+            _scale = _cap_100k_mxn / _cap_current if _cap_current > 0 else 1.0
+            _proj_100k_month = _mc_period(30)
+            # Capital for $30k MXN/month
+            _target_usd_month = 30000 / _usd_mxn
+            _cap_for_target = (_target_usd_month / _proj_month["mean"] * _cap_current
+                               if _proj_month["mean"] > 0.001 else 999999)
+            result["profit_projection"] = {
+                "day":   {k: round(v * 1, 4) for k, v in _proj_day.items()},
+                "week":  {k: round(v * 1, 4) for k, v in _proj_week.items()},
+                "month": {k: round(v * 1, 4) for k, v in _proj_month.items()},
+                "day_mxn":   {k: round(v * _usd_mxn, 2) for k, v in _proj_day.items()},
+                "week_mxn":  {k: round(v * _usd_mxn, 2) for k, v in _proj_week.items()},
+                "month_mxn": {k: round(v * _usd_mxn, 2) for k, v in _proj_month.items()},
+                "win_rate": round(_wr_pp * 100, 1),
+                "trades_per_month": round(_tpm_pp, 1),
+                "avg_win_usd": round(_avg_win, 4),
+                "avg_loss_usd": round(_avg_loss, 4),
+                "capital_usd": round(_cap_current, 2),
+                "capital_mxn": round(_cap_current * _usd_mxn, 2),
+                "usd_mxn_rate": _usd_mxn,
+                # $100k MXN scenario (scaled)
+                "scenario_100k_mxn": {
+                    "capital_usd":   round(_cap_100k_mxn, 2),
+                    "monthly_mean_usd":  round(_proj_month["mean"] * _scale, 2),
+                    "monthly_mean_mxn":  round(_proj_month["mean"] * _scale * _usd_mxn, 2),
+                    "monthly_p5_mxn":    round(_proj_month["p5"] * _scale * _usd_mxn, 2),
+                    "monthly_p95_mxn":   round(_proj_month["p95"] * _scale * _usd_mxn, 2),
+                    "annual_mean_mxn":   round(_proj_month["mean"] * _scale * 12 * _usd_mxn, 2),
+                },
+                # Target: $30k MXN/month
+                "target_30k_mxn": {
+                    "monthly_target_usd": round(_target_usd_month, 2),
+                    "capital_required_usd": round(min(_cap_for_target, 9_999_999), 2),
+                    "capital_required_mxn": round(min(_cap_for_target * _usd_mxn, 999_999_999), 2),
+                    "current_progress_pct": round(_cap_current / min(_cap_for_target, 9_999_999) * 100, 2),
+                },
+            }
+        else:
+            result["profit_projection"] = {"error": "insufficient_trades", "n_trades": _n_pp}
+    except Exception as _ppe:
+        result["profit_projection"] = {"error": str(_ppe)}
 
     # PnL History
     try:

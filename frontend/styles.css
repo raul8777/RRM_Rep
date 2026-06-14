@@ -794,3 +794,61 @@ h1 {
 .mode-warn {
     border-left: 3px solid #ffc83c;
 }
+
+/* ── Wallet split (spot / futures allocation) ───────────────────────────────── */
+.wallet-split { margin: 10px 0 4px; }
+.wallet-row {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; padding: 2px 0;
+}
+.wallet-icon { font-size: 15px; }
+.wallet-label { color: #aaa; flex: 0 0 60px; }
+.wallet-amount { font-weight: 600; flex: 1; }
+.wallet-pct { color: #666; font-size: 11px; }
+.wallet-bar-wrap {
+    display: flex; height: 8px; border-radius: 4px;
+    overflow: hidden; margin: 4px 0 6px; background: rgba(255,255,255,0.06);
+}
+.wallet-bar-spot { background: #4ecca3; transition: width 0.6s ease; }
+.wallet-bar-fut  { background: #9b59b6; transition: width 0.6s ease; }
+
+/* ── Profit Projection card ─────────────────────────────────────────────────── */
+.proj-stats {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    margin-bottom: 12px; padding: 8px 10px;
+    background: rgba(255,255,255,0.04); border-radius: 6px;
+}
+.proj-stat { font-size: 12px; color: #aaa; }
+.proj-stat b { color: #e0e0e0; }
+.proj-table {
+    width: 100%; border-collapse: collapse; margin-bottom: 14px; font-size: 13px;
+}
+.proj-table th {
+    text-align: left; color: #666; font-weight: 600; font-size: 11px;
+    padding: 4px 6px; border-bottom: 1px solid #1e1e2e;
+}
+.proj-table td { padding: 5px 6px; border-bottom: 1px solid #151520; }
+.proj-scenario, .proj-target {
+    background: rgba(255,255,255,0.04); border-radius: 8px;
+    padding: 10px 12px; margin-top: 10px;
+}
+.proj-scenario { border-left: 3px solid #f39c12; }
+.proj-target   { border-left: 3px solid #4ecca3; }
+.proj-scenario-title, .proj-target-title {
+    font-size: 12px; font-weight: 700; color: #ccc; margin-bottom: 8px;
+}
+.proj-scenario-row, .proj-target-row {
+    display: flex; justify-content: space-between;
+    font-size: 13px; margin-bottom: 4px;
+}
+.proj-scenario-row span:first-child,
+.proj-target-row   span:first-child { color: #aaa; }
+.proj-progress-wrap {
+    height: 8px; background: rgba(255,255,255,0.07);
+    border-radius: 4px; overflow: hidden; margin: 8px 0 4px;
+}
+.proj-progress-bar {
+    height: 100%; background: linear-gradient(90deg, #4ecca3, #27ae60);
+    border-radius: 4px; transition: width 0.8s ease; min-width: 2px;
+}
+.proj-progress-label { font-size: 11px; color: #666; }
