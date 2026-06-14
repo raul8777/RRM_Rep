@@ -345,8 +345,9 @@ class FuturesClient:
             self._post("/fapi/v1/marginType", {"symbol": symbol, "marginType": "ISOLATED"})
             return True
         except Exception as e:
-            if "No need to change margin type" in str(e):
-                return True  # already isolated
+            err = str(e)
+            if "No need to change margin type" in err or "-4046" in err or "already" in err.lower():
+                return True  # already isolated — not an error
             print(f"[Futures] Set isolated margin failed {symbol}: {e}")
             return False
 
@@ -443,32 +444,37 @@ class FuturesClient:
             sl_price = round(filled_price * (1 + sl_pct / 100), 6)
             tp_price = round(filled_price * (1 - tp_pct / 100), 6)
 
-            # 2. Stop-loss order (STOP_MARKET, reduceOnly)
+            # 2. Stop-loss order (STOP_MARKET + closePosition — no timeInForce)
             sl_order_id = None
-            try:
-                sl_order = self._post("/fapi/v1/order", {
-                    "symbol": symbol, "side": "BUY", "type": "STOP_MARKET",
-                    "stopPrice": str(sl_price), "closePosition": "true",
-                    "timeInForce": "GTE_GTC",
-                })
-                sl_order_id = str(sl_order.get("orderId", ""))
-                print(f"[Futures] SL order placed: {sl_price:.4f} (id={sl_order_id})")
-            except Exception as se:
-                print(f"[Futures] SL order failed for {symbol}: {se} — position open WITHOUT SL, closing immediately")
-                # Safety: close position immediately if SL couldn't be placed
-                self._post("/fapi/v1/order", {
-                    "symbol": symbol, "side": "BUY", "type": "MARKET",
-                    "quantity": str(qty), "reduceOnly": "true",
-                })
-                return None
+            for _sl_attempt in range(2):
+                try:
+                    _sl_price_use = round(self.get_price(symbol) * (1 + sl_pct / 100), 6) if _sl_attempt > 0 else sl_price
+                    sl_order = self._post("/fapi/v1/order", {
+                        "symbol": symbol, "side": "BUY", "type": "STOP_MARKET",
+                        "stopPrice": str(_sl_price_use), "closePosition": "true",
+                    })
+                    sl_order_id = str(sl_order.get("orderId", ""))
+                    sl_price = _sl_price_use
+                    print(f"[Futures] SL order placed: {sl_price:.4f} (id={sl_order_id})")
+                    break
+                except Exception as se:
+                    if _sl_attempt == 0:
+                        print(f"[Futures] SL order attempt 1 failed for {symbol}: {se} — retrying with refreshed price")
+                        time.sleep(0.5)
+                    else:
+                        print(f"[Futures] SL order failed for {symbol}: {se} — position open WITHOUT SL, closing immediately")
+                        self._post("/fapi/v1/order", {
+                            "symbol": symbol, "side": "BUY", "type": "MARKET",
+                            "quantity": str(qty), "reduceOnly": "true",
+                        })
+                        return None
 
-            # 3. Take-profit order (TAKE_PROFIT_MARKET, reduceOnly)
+            # 3. Take-profit order (TAKE_PROFIT_MARKET + closePosition — no timeInForce)
             tp_order_id = None
             try:
                 tp_order = self._post("/fapi/v1/order", {
                     "symbol": symbol, "side": "BUY", "type": "TAKE_PROFIT_MARKET",
                     "stopPrice": str(tp_price), "closePosition": "true",
-                    "timeInForce": "GTE_GTC",
                 })
                 tp_order_id = str(tp_order.get("orderId", ""))
                 print(f"[Futures] TP order placed: {tp_price:.4f} (id={tp_order_id})")
