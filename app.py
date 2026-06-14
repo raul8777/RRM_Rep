@@ -966,17 +966,29 @@ async def get_dashboard_summary() -> Dict:
         _fng_mod = _nc.get_fear_greed_modifier()
         _trending = _nc.get_trending_symbols()
         _analysis_base = [s.replace("USDT", "") for s in getattr(settings, "analysis_symbols", [])]
+        # News sentiment (Fase 3) — count positive/negative articles last 24h
+        _news_sentiment = {"positive": 0, "negative": 0, "neutral": 0}
+        try:
+            _all_syms = getattr(settings, "analysis_symbols", [])
+            _recent = _nc.get_recent_news(_all_syms, since_hours=24)
+            for _art in _recent:
+                _s = _art.get("sentiment", "neutral")
+                _news_sentiment[_s] = _news_sentiment.get(_s, 0) + 1
+        except Exception:
+            pass
         result["market_context"] = {
             "fear_greed_value": _fng.get("value", 50),
             "fear_greed_label": _fng.get("label", "Neutral"),
             "fear_greed_modifier": _fng_mod,
             "trending_symbols": _trending,
             "analysis_symbols_base": _analysis_base,
+            "news_sentiment": _news_sentiment,
         }
     except Exception as _fng_e:
         result["market_context"] = {
             "fear_greed_value": 50, "fear_greed_label": "Neutral",
             "fear_greed_modifier": 0.0, "trending_symbols": [], "analysis_symbols_base": [],
+            "news_sentiment": {"positive": 0, "negative": 0, "neutral": 0},
         }
 
     # Effective thresholds (category base + F&G modifier applied)

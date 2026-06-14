@@ -661,6 +661,24 @@ function renderMarketContext(ctx) {
         return `<span class="trending-chip ${inSys ? 'in-system' : 'out-system'}" title="${inSys ? 'En nuestro análisis' : 'Fuera del sistema'}">${s}${check}</span>`;
     }).join('');
     const trendingAge = trending.length > 0 ? ' <small style="color:#555">(CoinGecko)</small>' : '';
+    // News sentiment section (Fase 3)
+    const ns = ctx.news_sentiment || {};
+    const nsPos = ns.positive || 0;
+    const nsNeg = ns.negative || 0;
+    const nsNeu = ns.neutral  || 0;
+    const nsTotal = nsPos + nsNeg + nsNeu;
+    let sentimentHtml = '';
+    if (nsTotal > 0) {
+        const sentColor = nsNeg >= 2 ? '#e74c3c' : nsPos > nsNeg ? '#4ecca3' : '#aaa';
+        const sentLabel = nsNeg >= 2 ? '⚠️ Noticias negativas' : nsPos > nsNeg ? '✅ Noticias positivas' : '➖ Noticias neutras';
+        sentimentHtml = `<div class="news-sentiment-row" style="margin-top:8px;font-size:12px;display:flex;gap:10px;align-items:center">
+            <span style="color:#555;font-size:11px">📰 Noticias 24h:</span>
+            <span style="color:#4ecca3">+${nsPos}</span>
+            <span style="color:#e74c3c">-${nsNeg}</span>
+            <span style="color:#555">${nsNeu} neu</span>
+            <span style="color:${sentColor};font-weight:600">${sentLabel}</span>
+        </div>`;
+    }
     el.innerHTML = `
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
             <span style="font-size:22px;font-weight:800;color:${ v<25?'#e74c3c':v<45?'#ff7c4d':v<56?'#aaa':v<75?'#a8d5c4':'#ffc83c' }">${v}</span>
@@ -675,6 +693,7 @@ function renderMarketContext(ctx) {
         <div class="fng-effect ${effectCls}">${effectText}</div>
         <div class="trending-section-title">🔥 Trending CoinGecko${trendingAge}</div>
         <div class="trending-chips">${chips || '<span style="color:#555;font-size:12px">Sin datos</span>'}</div>
+        ${sentimentHtml}
     `;
 }
 

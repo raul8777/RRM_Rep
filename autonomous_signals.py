@@ -139,7 +139,8 @@ class AutonomousSignalGenerator:
         _signal_cache.pop(symbol, None)
 
     def analyze_symbol(self, symbol: str, interval: str = '1h',
-                       use_multi_timeframe: bool = True) -> Dict:
+                       use_multi_timeframe: bool = True,
+                       news_client=None) -> Dict:
         """
         Analyze a single symbol and generate trading signal.
 
@@ -227,6 +228,28 @@ class AutonomousSignalGenerator:
             except Exception:
                 pass
 
+            # ── Social trending boost (Fase 2 — activa solo con CRYPTOCOMPARE_ENABLED) ──
+            if news_client and analysis['signal'] == 'BUY':
+                try:
+                    if news_client.is_social_trending(symbol):
+                        analysis['strength'] = min(1.0, analysis['strength'] + 0.10)
+                        analysis['reason'] += ' [+social trending]'
+                        logger.info(f"Social trending BOOST {symbol}: strength → {analysis['strength']:.2f}")
+                except Exception:
+                    pass
+
+            # ── News sentiment penalty (Fase 3 — activa siempre) ─────────────────────
+            if news_client and analysis['signal'] == 'BUY':
+                try:
+                    recent_news = news_client.get_recent_news([symbol], since_hours=12)
+                    neg_count = sum(1 for a in recent_news if a.get('sentiment') == 'negative')
+                    if neg_count >= 2:
+                        analysis['strength'] = max(0.0, analysis['strength'] - 0.10)
+                        analysis['reason'] += f' [-{neg_count} neg news]'
+                        logger.info(f"News sentiment PENALTY {symbol}: {neg_count} negative articles")
+                except Exception:
+                    pass
+
             # ── Store in cache ────────────────────────────────────────────────
             AutonomousSignalGenerator._cache_signal(symbol, analysis)
 
@@ -240,7 +263,8 @@ class AutonomousSignalGenerator:
             }
     
     def generate_signals(self, interval: str = '1h',
-                         use_multi_timeframe: bool = True) -> List[Dict]:
+                         use_multi_timeframe: bool = True,
+                         news_client=None) -> List[Dict]:
         """
         Generate trading signals for all configured symbols.
 
@@ -256,7 +280,8 @@ class AutonomousSignalGenerator:
         for symbol in self.symbols:
             try:
                 signal = self.analyze_symbol(symbol, interval,
-                                             use_multi_timeframe=use_multi_timeframe)
+                                             use_multi_timeframe=use_multi_timeframe,
+                                             news_client=news_client)
                 signals.append(signal)
                 vol_tag = ' 🔊' if signal.get('volume_confirmed') else ''
                 tf_tag  = f" [{signal.get('higher_tf_trend','?')}]" if use_multi_timeframe else ''
@@ -279,7 +304,8 @@ class AutonomousSignalGenerator:
         return signals
 
     def get_top_buy_signals(self, interval: str = '1h', min_strength: float = 0.6,
-                            limit: int = 5, use_multi_timeframe: bool = True) -> List[Dict]:
+                            limit: int = 5, use_multi_timeframe: bool = True,
+                            news_client=None) -> List[Dict]:
         """
         Get top BUY signals, filtered by min_strength.
 
@@ -292,7 +318,7 @@ class AutonomousSignalGenerator:
         Returns:
             List of top BUY signal dicts
         """
-        all_signals = self.generate_signals(interval, use_multi_timeframe=use_multi_timeframe)
+        all_signals = self.generate_signals(interval, use_multi_timeframe=use_multi_timeframe, news_client=news_client)
         logger.info(f"Total signals generated: {len(all_signals)}")
         logger.info(
             f"Signal breakdown: "

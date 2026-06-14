@@ -78,7 +78,8 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
             autonomous_signals = signal_generator.get_top_buy_signals(
                 interval='1h',
                 min_strength=getattr(settings, 'min_signal_strength', 0.5),
-                limit=getattr(settings, 'max_positions', 5)
+                limit=getattr(settings, 'max_positions', 5),
+                news_client=news_client
             )
             
             # Convert autonomous signals to expected format and add to signal store
@@ -127,7 +128,7 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
             sym = normalize_symbol(sig.get("symbol", ""))
             if not sym:
                 continue
-            analysis = sig_gen_ext.analyze_symbol(sym, interval='1h', use_multi_timeframe=True)
+            analysis = sig_gen_ext.analyze_symbol(sym, interval='1h', use_multi_timeframe=True, news_client=news_client)
             sig['strength'] = analysis.get('strength', 0.5)
             sig['higher_tf_trend'] = analysis.get('higher_tf_trend', 'FLAT')
             sig['volume_confirmed'] = analysis.get('volume_confirmed', False)
