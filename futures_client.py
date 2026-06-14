@@ -95,6 +95,7 @@ class FuturesClient:
             return json.loads(r.read())
 
     def _post(self, path: str, params: dict, timeout: int = 8) -> dict:
+        import urllib.error as _ue
         params["timestamp"] = int(time.time() * 1000)
         query = urllib.parse.urlencode(params)
         query += f"&signature={self._sign(query)}"
@@ -104,8 +105,12 @@ class FuturesClient:
             url, data=data, method="POST",
             headers={"X-MBX-APIKEY": self.api_key, "Content-Type": "application/x-www-form-urlencoded"}
         )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read())
+        except _ue.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            raise Exception(f"HTTP {e.code} {e.reason} — {body}") from None
 
     def _delete(self, path: str, params: dict, timeout: int = 8) -> dict:
         params["timestamp"] = int(time.time() * 1000)
