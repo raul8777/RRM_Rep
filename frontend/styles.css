@@ -542,3 +542,143 @@ h1 {
 }
 .positive { color: #4ecca3; }
 .negative { color: #ff6363; }
+
+/* ── Fear & Greed badge (header) ─────────────────────────────────────────── */
+.fng-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 20px;
+    padding: 4px 12px 4px 8px;
+    cursor: default;
+    transition: border-color 0.4s;
+}
+.fng-dot {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: #888;
+    flex-shrink: 0;
+    animation: pulse 2s ease-in-out infinite;
+}
+.fng-label {
+    font-size: 0.72rem; color: #666;
+    font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase;
+}
+.fng-value {
+    font-size: 0.82rem; font-weight: 700; color: #ccc; letter-spacing: 0.3px;
+}
+.fng-extreme-fear  { border-color: rgba(231,76,60,0.5);   }
+.fng-fear          { border-color: rgba(255,124,77,0.4);  }
+.fng-neutral       { border-color: rgba(136,136,136,0.3); }
+.fng-greed         { border-color: rgba(168,213,196,0.4); }
+.fng-extreme-greed { border-color: rgba(255,200,60,0.6);  }
+
+/* ── Market Context card ─────────────────────────────────────────────────── */
+.fng-bar-wrap {
+    height: 8px; border-radius: 4px;
+    background: linear-gradient(90deg, #e74c3c 0%, #ff7c4d 20%, #ffc83c 45%, #a8d5c4 70%, #4ecca3 85%, #ffc83c 100%);
+    position: relative; margin: 6px 0 2px; overflow: visible;
+}
+.fng-bar-cursor {
+    position: absolute; top: -3px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #fff; border: 2px solid #1a1a2e;
+    box-shadow: 0 0 6px rgba(255,255,255,0.5);
+    transform: translateX(-50%);
+    transition: left 0.5s;
+}
+.fng-effect {
+    font-size: 12px; font-weight: 600; margin-top: 4px;
+}
+.fng-effect.relax  { color: #4ecca3; }
+.fng-effect.tighten{ color: #e74c3c; }
+.fng-effect.neutral{ color: #888; }
+
+.trending-section-title {
+    font-size: 11px; text-transform: uppercase; color: #666;
+    letter-spacing: 0.5px; margin: 12px 0 6px;
+}
+.trending-chips {
+    display: flex; flex-wrap: wrap; gap: 5px;
+}
+.trending-chip {
+    padding: 3px 10px; border-radius: 12px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.3px;
+    transition: transform 0.15s;
+}
+.trending-chip:hover { transform: scale(1.05); }
+.trending-chip.in-system {
+    background: rgba(78,204,163,0.15); color: #4ecca3;
+    border: 1px solid rgba(78,204,163,0.4);
+}
+.trending-chip.out-system {
+    background: rgba(100,100,130,0.12); color: #555;
+    border: 1px solid rgba(100,100,130,0.25);
+}
+.trending-chip .trending-check { color: #4ecca3; margin-left: 3px; font-size: 10px; }
+
+/* ── Category icon in tables ─────────────────────────────────────────────── */
+.cat-icon {
+    font-size: 13px; cursor: default; display: inline-block;
+    width: 18px; text-align: center;
+}
+
+/* ── Category win-rate bars ──────────────────────────────────────────────── */
+.category-wr-section { margin-top: 12px; }
+.category-wr-title {
+    font-size: 11px; text-transform: uppercase; color: #666;
+    letter-spacing: 0.5px; margin-bottom: 6px;
+}
+.category-wr-row {
+    display: flex; align-items: center; gap: 6px;
+    margin: 5px 0; font-size: 12px;
+}
+.category-wr-icon  { width: 20px; text-align: center; font-size: 13px; }
+.category-wr-name  { width: 88px; color: #aaa; font-size: 11px; }
+.category-wr-bar-wrap {
+    flex: 1; background: #1e2530; border-radius: 3px; height: 6px; overflow: hidden;
+}
+.category-wr-bar   { height: 100%; border-radius: 3px; transition: width 0.5s; }
+.category-wr-pct   { width: 38px; text-align: right; font-size: 11px; font-weight: 700; }
+.category-wr-n     { width: 52px; text-align: right; font-size: 10px; color: #555; }
+.wr-good  { background: linear-gradient(90deg, #2d8c6e, #4ecca3); }
+.wr-warn  { background: linear-gradient(90deg, #b38a00, #ffc83c); }
+.wr-bad   { background: linear-gradient(90deg, #9b2335, #e74c3c); }
+
+/* ── Effective threshold table ───────────────────────────────────────────── */
+.threshold-section { margin-top: 12px; }
+.threshold-title {
+    font-size: 11px; text-transform: uppercase; color: #666;
+    letter-spacing: 0.5px; margin-bottom: 6px;
+}
+.threshold-table {
+    width: 100%; font-size: 11px; border-collapse: collapse;
+}
+.threshold-table td { padding: 3px 6px; }
+.threshold-table tr:hover td { background: rgba(255,255,255,0.02); }
+.threshold-cat   { color: #aaa; font-weight: 600; }
+.threshold-base  { color: #555; text-align: right; }
+.threshold-arrow { color: #444; text-align: center; }
+.threshold-eff   { font-weight: 700; text-align: right; }
+.threshold-delta { text-align: right; font-size: 10px; font-weight: 600; }
+.t-delta-good  { color: #4ecca3; }
+.t-delta-warn  { color: #ffc83c; }
+.t-delta-bad   { color: #e74c3c; }
+.t-eff-aggressive { color: #ffc83c; }
+.t-eff-normal     { color: #4ecca3; }
+.t-eff-strict     { color: #e74c3c; }
+
+/* ── Trending boost badge in signals ─────────────────────────────────────── */
+.signal-trending {
+    font-size: 10px; font-weight: 700; color: #ff9f43;
+    padding: 1px 5px; border-radius: 8px;
+    background: rgba(255,159,67,0.12); border: 1px solid rgba(255,159,67,0.3);
+    white-space: nowrap;
+}
+
+/* ── Subtle row PnL tinting ──────────────────────────────────────────────── */
+.row-pnl-pos { background: rgba(78,204,163,0.04); }
+.row-pnl-neg { background: rgba(231,76,60,0.04); }

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Trading Agent Dashboard</title>
-    <link rel="stylesheet" href="/frontend/styles.css?v=9">
+    <link rel="stylesheet" href="/frontend/styles.css?v=10">
 </head>
 <body>
     <div class="container">
@@ -15,6 +15,11 @@
                     <span class="regime-dot" id="marketRegimeDot"></span>
                     <span class="regime-label" id="marketRegimeLabel">Mercado</span>
                     <span class="regime-text" id="marketRegimeText">...</span>
+                </div>
+                <div class="fng-badge" id="fngBadge" title="Crypto Fear &amp; Greed Index">
+                    <span class="fng-dot" id="fngDot"></span>
+                    <span class="fng-label">F&amp;G</span>
+                    <span class="fng-value" id="fngValue">—</span>
                 </div>
                 <div class="status-indicator" id="systemStatus">
                     <span class="status-dot"></span>
@@ -101,19 +106,11 @@
                 </div>
             </div>
 
-            <!-- Portfolio Manager Card -->
-            <div class="card">
-                <h2>Portfolio Manager</h2>
-                <div id="portfolioData">
-                    <p>Loading portfolio data...</p>
-                </div>
-            </div>
-
-            <!-- System Health Card -->
-            <div class="card">
-                <h2>System Health</h2>
-                <div id="healthData">
-                    <p>Loading health data...</p>
+            <!-- Contexto de Mercado Card -->
+            <div class="card card-wide">
+                <h2>🌡️ Contexto de Mercado</h2>
+                <div id="marketContextData">
+                    <p class="loading">Cargando contexto...</p>
                 </div>
             </div>
 

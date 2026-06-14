@@ -96,6 +96,8 @@ function renderSignals(d) {
         const price = s.price ? `$${parseFloat(s.price).toFixed(4)}` : '—';
         const reason = s.reason ? `<span class="signal-reason">${s.reason}</span>` : '<span class="signal-reason" style="color:#555">—</span>';
         const ts = s.received_at ? relativeTime(s.received_at) : '';
+        const catIco = catIcon(s.category || 'MIDCAP_ALT');
+        const trendingBadge = s.trending_boost ? '<span class="signal-trending">🔥 TRENDING</span>' : '';
         // Decision badge
         let decisionBadge;
         if (s.decision === 'executed') {
@@ -110,11 +112,11 @@ function renderSignals(d) {
         }
         return `
         <div class="signal-row">
-            <span class="signal-symbol">${s.symbol || '—'}</span>
+            <span class="signal-symbol">${catIco} ${s.symbol || '—'}</span>
             ${badge}
             <span class="signal-price">${price}</span>
             ${decisionBadge}
-            ${reason}
+            <span style="display:flex;gap:4px;align-items:center;overflow:hidden">${reason}${trendingBadge}</span>
             <span class="signal-ts">${ts}</span>
         </div>`;
     }).join('');
@@ -185,6 +187,7 @@ function renderOpenPositions(d) {
                 <tr>
                     <th>#</th>
                     <th>Símbolo</th>
+                    <th>Cat</th>
                     <th>Lado</th>
                     <th>Qty</th>
                     <th>Entrada</th>
@@ -198,10 +201,13 @@ function renderOpenPositions(d) {
                 </tr>
             </thead>
             <tbody>
-                ${d.positions.map(p => `
-                    <tr>
+                ${d.positions.map(p => {
+                    const rowCls = parseFloat(p.unrealized_pnl||0) > 0 ? 'row-pnl-pos' : parseFloat(p.unrealized_pnl||0) < -0.01 ? 'row-pnl-neg' : '';
+                    return `
+                    <tr class="${rowCls}">
                         <td title="ID: ${p.position_id || ''}">E${p.entry_number || 1}</td>
                         <td>${p.symbol}</td>
+                        <td>${catIcon(p.category || 'MIDCAP_ALT')}</td>
                         <td>${p.side}</td>
                         <td>${fmt(p.quantity, 4)}</td>
                         <td>$${fmt(p.entry_price)}</td>
@@ -212,7 +218,8 @@ function renderOpenPositions(d) {
                         <td>${fmtPrediction(p.pnl_prediction)}</td>
                         <td class="sl-tp">${p.stop_loss ? '$' + fmt(p.stop_loss) : '—'} / ${p.take_profit ? '$' + fmt(p.take_profit) : '—'}</td>
                         <td>${p.hours_held ?? '—'}h</td>
-                    </tr>`).join('')}
+                    </tr>`;
+                }).join('')}
             </tbody>
         </table>
         </div>
@@ -255,9 +262,10 @@ function renderClosedPositions(d) {
                     const acc = p.prediction_accuracy != null
                         ? `<span class="${parseFloat(p.prediction_accuracy) >= 0 ? 'positive' : 'negative'}">${fmt(p.prediction_accuracy)}%</span>`
                         : '—';
+                    const rowCls = parseFloat(p.pnl||0) > 0 ? 'row-pnl-pos' : parseFloat(p.pnl||0) < -0.01 ? 'row-pnl-neg' : '';
                     return `
-                    <tr>
-                        <td>${p.symbol}</td>
+                    <tr class="${rowCls}">
+                        <td>${catIcon(p.category || 'MIDCAP_ALT')} ${p.symbol}</td>
                         <td>${p.side}</td>
                         <td class="${pnlClass(p.pnl)}">${fmt(p.pnl)} USDT</td>
                         <td class="${pnlClass(p.pnl_percentage)}">${fmt(p.pnl_percentage)}%</td>
@@ -284,16 +292,48 @@ function renderNextCycle(d) {
     `;
 }
 
-function renderAnalysisSummary(d) {
+function renderAnalysisSummary(d, closedPositions) {
     if (!d || d.error) return;
     const m = d.metrics || {};
+    const wr = parseFloat(m.win_rate || 0);
+    const wrCls = wr >= 50 ? 'positive' : wr >= 40 ? '' : 'negative';
+
+    // Win-rate by category from closed positions
+    const catOrder = ['LARGE_CAP','MIDCAP_ALT','NARRATIVE','MEME'];
+    const catTotals = {};
+    const catWins = {};
+    ((closedPositions && closedPositions.positions) || []).forEach(p => {
+        const cat = p.category || 'MIDCAP_ALT';
+        catTotals[cat] = (catTotals[cat] || 0) + 1;
+        if (parseFloat(p.pnl || 0) > 0) catWins[cat] = (catWins[cat] || 0) + 1;
+    });
+    const hasCatData = Object.keys(catTotals).length > 0;
+    const catRows = hasCatData ? catOrder.filter(c => catTotals[c] > 0).map(c => {
+        const n   = catTotals[c] || 0;
+        const w   = catWins[c]   || 0;
+        const pct = n > 0 ? Math.round(w / n * 100) : 0;
+        const barCls = pct >= 50 ? 'wr-good' : pct >= 40 ? 'wr-warn' : 'wr-bad';
+        const pctCls = pct >= 50 ? 'positive' : pct >= 40 ? '' : 'negative';
+        return `<div class="category-wr-row">
+            <span class="category-wr-icon">${CAT_ICON[c] || '📊'}</span>
+            <span class="category-wr-name">${CAT_LABEL[c] || c}</span>
+            <div class="category-wr-bar-wrap"><div class="category-wr-bar ${barCls}" style="width:${pct}%"></div></div>
+            <span class="category-wr-pct ${pctCls}">${pct}%</span>
+            <span class="category-wr-n">${n} trades</span>
+        </div>`;
+    }).join('') : '<span style="color:#555;font-size:11px">Sin suficientes trades por categoría</span>';
+
     document.getElementById('analysisSummaryData').innerHTML = `
-        <div class="data-item"><span class="data-label">Win Rate</span><span class="data-value">${fmt(m.win_rate)}%</span></div>
+        <div class="data-item"><span class="data-label">Win Rate Global</span><span class="data-value ${wrCls}">${fmt(m.win_rate)}%</span></div>
         <div class="data-item"><span class="data-label">Profit Factor</span><span class="data-value">${fmt(m.profit_factor)}</span></div>
         <div class="data-item"><span class="data-label">Max Drawdown</span><span class="data-value ${m.max_drawdown <= 0 ? 'positive' : 'negative'}">${fmt(m.max_drawdown)}%</span></div>
         <div class="data-item"><span class="data-label">Total Trades</span><span class="data-value">${m.total_trades ?? 0}</span></div>
         <div class="data-item"><span class="data-label">Ganadores</span><span class="data-value positive">${m.winning_trades ?? 0}</span></div>
         <div class="data-item"><span class="data-label">Perdedores</span><span class="data-value negative">${m.losing_trades ?? 0}</span></div>
+        <div class="category-wr-section">
+            <div class="category-wr-title">Win Rate por Categoría</div>
+            ${catRows}
+        </div>
     `;
 }
 
@@ -538,6 +578,79 @@ async function pollBacktestResults() {
     } catch (e) { /* silent */ }
 }
 
+// ── Category helpers ─────────────────────────────────────────────────────────────
+const CAT_ICON = { 'LARGE_CAP': '🏦', 'MIDCAP_ALT': '📊', 'NARRATIVE': '🤖', 'MEME': '🎭' };
+const CAT_LABEL = { 'LARGE_CAP': 'LARGE CAP', 'MIDCAP_ALT': 'MID ALT', 'NARRATIVE': 'NARRATIVE', 'MEME': 'MEME' };
+function catIcon(cat) {
+    const icon = CAT_ICON[cat] || '📊';
+    const label = CAT_LABEL[cat] || cat;
+    return `<span class="cat-icon" title="${label}">${icon}</span>`;
+}
+
+// ── F&G header badge ──────────────────────────────────────────────────────────────
+function renderFngBadge(ctx) {
+    const badge = document.getElementById('fngBadge');
+    const dot   = document.getElementById('fngDot');
+    const val   = document.getElementById('fngValue');
+    if (!badge || !ctx) return;
+    const v = ctx.fear_greed_value ?? 50;
+    const label = ctx.fear_greed_label || 'Neutral';
+    // Color & class
+    let cls, dotColor, shortLabel;
+    if (v < 25)      { cls = 'fng-extreme-fear';  dotColor = '#e74c3c'; shortLabel = 'MIEDO EXT.'; }
+    else if (v < 45) { cls = 'fng-fear';           dotColor = '#ff7c4d'; shortLabel = 'MIEDO'; }
+    else if (v < 56) { cls = 'fng-neutral';        dotColor = '#888';    shortLabel = 'NEUTRAL'; }
+    else if (v < 75) { cls = 'fng-greed';          dotColor = '#a8d5c4'; shortLabel = 'CODICIA'; }
+    else             { cls = 'fng-extreme-greed';  dotColor = '#ffc83c'; shortLabel = 'COD. EXT.'; }
+    badge.className = `fng-badge ${cls}`;
+    badge.title = `Fear & Greed: ${v} — ${label}`;
+    dot.style.background = dotColor;
+    dot.style.boxShadow = `0 0 6px ${dotColor}80`;
+    val.textContent = `${v} ${shortLabel}`;
+    val.style.color = dotColor;
+}
+
+// ── Market Context card ───────────────────────────────────────────────────────────
+function renderMarketContext(ctx) {
+    const el = document.getElementById('marketContextData');
+    if (!el || !ctx) return;
+    const v   = ctx.fear_greed_value ?? 50;
+    const lbl = ctx.fear_greed_label || 'Neutral';
+    const mod = parseFloat(ctx.fear_greed_modifier ?? 0);
+    const pct = Math.round(v);
+    // Effect text
+    let effectCls, effectText;
+    if (mod < -0.04)      { effectCls = 'relax';   effectText = `↓ ${Math.abs(mod*100).toFixed(0)}% más fácil entrar — oportunidad de compra`; }
+    else if (mod < 0)     { effectCls = 'relax';   effectText = `↓ ${Math.abs(mod*100).toFixed(0)}% más fácil entrar`; }
+    else if (mod === 0)   { effectCls = 'neutral';  effectText = 'Sin cambio en umbrales'; }
+    else if (mod < 0.05)  { effectCls = 'tighten'; effectText = `↑ ${(mod*100).toFixed(0)}% más difícil entrar`; }
+    else                  { effectCls = 'tighten'; effectText = `↑ ${(mod*100).toFixed(0)}% más difícil — evitar comprar en techo`; }
+    // Trending chips
+    const trending   = ctx.trending_symbols || [];
+    const inSystem   = new Set(ctx.analysis_symbols_base || []);
+    const chips = trending.map(s => {
+        const inSys = inSystem.has(s);
+        const check = inSys ? ' <span class="trending-check">✓</span>' : '';
+        return `<span class="trending-chip ${inSys ? 'in-system' : 'out-system'}" title="${inSys ? 'En nuestro análisis' : 'Fuera del sistema'}">${s}${check}</span>`;
+    }).join('');
+    const trendingAge = trending.length > 0 ? ' <small style="color:#555">(CoinGecko)</small>' : '';
+    el.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+            <span style="font-size:22px;font-weight:800;color:${ v<25?'#e74c3c':v<45?'#ff7c4d':v<56?'#aaa':v<75?'#a8d5c4':'#ffc83c' }">${v}</span>
+            <span style="font-size:13px;font-weight:600;color:#aaa">${lbl}</span>
+        </div>
+        <div class="fng-bar-wrap">
+            <div class="fng-bar-cursor" style="left:${pct}%"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:#444;margin-bottom:6px">
+            <span>Miedo Ext.</span><span>Miedo</span><span>Neutral</span><span>Codicia</span><span>Cod. Ext.</span>
+        </div>
+        <div class="fng-effect ${effectCls}">${effectText}</div>
+        <div class="trending-section-title">🔥 Trending CoinGecko${trendingAge}</div>
+        <div class="trending-chips">${chips || '<span style="color:#555;font-size:12px">Sin datos</span>'}</div>
+    `;
+}
+
 // ── Market Regime Badge ─────────────────────────────────────────────────────────
 function renderMarketRegime(r) {
     const dot  = document.getElementById('marketRegimeDot');
@@ -612,10 +725,12 @@ async function updateDashboard() {
     renderOpenPositions(data.open_positions);
     renderClosedPositions(data.closed_positions);
     renderNextCycle(data.next_cycle);
-    renderAnalysisSummary(data.performance);
+    renderAnalysisSummary(data.performance, data.closed_positions);
     renderLearning(data.learning);
-    renderStrategy(data.learning);
+    renderStrategy(data.learning, data.effective_thresholds);
     renderMarketRegime(data.market_regime);
+    renderFngBadge(data.market_context);
+    renderMarketContext(data.market_context);
     renderTickerBar(data.daily_ticker);
 
     // Optimized params: separate lightweight call (cached 30s in backend)

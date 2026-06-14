@@ -852,11 +852,15 @@ async def get_dashboard_summary() -> Dict:
 
                 invested_usdt      = round(entry_p * qty_f, 4)
                 current_value_usdt = round(cp * qty_f, 4)
+                _cat_map = getattr(settings, "token_categories", {})
+                _sym_cat = _cat_map.get(symbol, {})
                 open_list.append({
                     "symbol": symbol,
                     "position_id": position.position_id,
                     "entry_number": entry_num,
                     "side": position.side,
+                    "category": _sym_cat.get("market_behavior", "MIDCAP_ALT"),
+                    "origin": _sym_cat.get("origin", ""),
                     "quantity": qty_f,
                     "entry_price": entry_p,
                     "current_price": cp,
@@ -880,10 +884,13 @@ async def get_dashboard_summary() -> Dict:
     try:
         closed_positions = position_manager.get_closed_positions(limit=20)
         closed_list = []
+        _cat_map_cl = getattr(settings, "token_categories", {})
         for pos in closed_positions:
+            _cl_cat = _cat_map_cl.get(pos.symbol, {})
             closed_list.append({
                 "symbol": pos.symbol,
                 "side": pos.side,
+                "category": _cl_cat.get("market_behavior", "MIDCAP_ALT"),
                 "quantity": float(pos.quantity) if pos.quantity else 0.0,
                 "entry_price": float(pos.entry_price) if pos.entry_price else 0.0,
                 "exit_price": float(pos.exit_price) if pos.exit_price else 0.0,
@@ -951,6 +958,41 @@ async def get_dashboard_summary() -> Dict:
         result["market_regime"] = _get_market_regime()
     except Exception as e:
         result["market_regime"] = {"regime": "?", "color": "#888", "btc_trend": "?", "day_change_pct": 0.0, "vol_ratio": 0.0}
+
+    # Market context: Fear & Greed + CoinGecko Trending
+    try:
+        _nc = news_client
+        _fng = _nc.get_fear_greed()
+        _fng_mod = _nc.get_fear_greed_modifier()
+        _trending = _nc.get_trending_symbols()
+        _analysis_base = [s.replace("USDT", "") for s in getattr(settings, "analysis_symbols", [])]
+        result["market_context"] = {
+            "fear_greed_value": _fng.get("value", 50),
+            "fear_greed_label": _fng.get("label", "Neutral"),
+            "fear_greed_modifier": _fng_mod,
+            "trending_symbols": _trending,
+            "analysis_symbols_base": _analysis_base,
+        }
+    except Exception as _fng_e:
+        result["market_context"] = {
+            "fear_greed_value": 50, "fear_greed_label": "Neutral",
+            "fear_greed_modifier": 0.0, "trending_symbols": [], "analysis_symbols_base": [],
+        }
+
+    # Effective thresholds (category base + F&G modifier applied)
+    try:
+        _fng_mod2 = result.get("market_context", {}).get("fear_greed_modifier", 0.0)
+        _cat_th = getattr(settings, "category_thresholds", {})
+        result["effective_thresholds"] = {
+            cat: {
+                "base_prob": th["min_prob"],
+                "effective_prob": round(th["min_prob"] + _fng_mod2, 3),
+                "delta": round(_fng_mod2, 3),
+            }
+            for cat, th in _cat_th.items()
+        }
+    except Exception:
+        result["effective_thresholds"] = {}
 
     # Daily ticker bar (8AM Mexico open vs current price)
     try:
