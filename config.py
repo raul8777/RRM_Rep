@@ -55,6 +55,18 @@ class Settings(BaseSettings):
     kelly_base_usdt: float = Field(default=60.0, env="KELLY_BASE_USDT")
     kelly_max_usdt: float = Field(default=150.0, env="KELLY_MAX_USDT")
     kelly_max_pct_liquid: float = Field(default=0.40, env="KELLY_MAX_PCT_LIQUID")
+    kelly_dynamic_base_pct: float = Field(default=0.15, env="KELLY_DYNAMIC_BASE_PCT")  # base = capital * this (if > fixed base)
+    # Bear market mode
+    bear_market_mode_enabled: bool = Field(default=True, env="BEAR_MARKET_MODE_ENABLED")
+    bear_market_btc_7d_threshold: float = Field(default=-10.0, env="BEAR_MARKET_BTC_7D_THRESHOLD")  # % change
+    bear_market_kelly_multiplier: float = Field(default=0.5, env="BEAR_MARKET_KELLY_MULTIPLIER")  # reduce Kelly
+    bear_market_volspike_min: float = Field(default=2.0, env="BEAR_MARKET_VOLSPIKE_MIN")  # stricter spike req
+    # Scale-out on take-profit
+    scale_out_enabled: bool = Field(default=True, env="SCALE_OUT_ENABLED")
+    scale_out_first_close_pct: float = Field(default=0.5, env="SCALE_OUT_FIRST_CLOSE_PCT")  # close 50% at TP
+    # BTC dominance filter
+    btc_dominance_filter_enabled: bool = Field(default=True, env="BTC_DOMINANCE_FILTER_ENABLED")
+    btc_dominance_altcoin_threshold: float = Field(default=56.0, env="BTC_DOMINANCE_ALTCOIN_THRESHOLD")  # if BTC.D > this, skip alts
     tradingview_webhook_secret: str = Field(default="", env="TRADINGVIEW_WEBHOOK_SECRET")
     agent_mode: str = Field(default="suggest", env="AGENT_MODE")
     default_trade_size: float = Field(default=10.0, env="DEFAULT_TRADE_SIZE")

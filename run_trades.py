@@ -257,7 +257,35 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
                 if close_reason:
                     try:
                         filters = get_symbol_filters(client, symbol)
-                        qty = align_quantity_to_step(float(pos.quantity), filters["step"])
+                        full_qty = float(pos.quantity)
+                        _scale_out = getattr(settings, 'scale_out_enabled', True)
+                        _scale_pct = getattr(settings, 'scale_out_first_close_pct', 0.5)
+                        _is_tp = close_reason.startswith("take_profit")
+
+                        if _scale_out and _is_tp and full_qty * _scale_pct >= filters.get("min_qty", 0):
+                            # ── Scale-out: sell 50% at TP, move SL to breakeven ──────────
+                            sell_qty = align_quantity_to_step(full_qty * _scale_pct, filters["step"])
+                            valid, reason = is_quantity_valid(sell_qty, current_price, filters)
+                            if valid:
+                                order = client.create_market_order(symbol=symbol, side="SELL", quantity=sell_qty)
+                                print(f"SCALE-OUT {symbol}: sold {sell_qty} ({_scale_pct*100:.0f}%) @ {current_price:.4f}, SL→breakeven={entry_price:.4f}")
+                                metadata = getattr(pos, 'metadata', {}) or {}
+                                metadata['scale_out_done'] = True
+                                metadata['trailing_peak'] = current_price
+                                try:
+                                    position_manager.update_position_metadata(pos.position_id, metadata)
+                                    position_manager.update_position_sl(pos.position_id, entry_price)
+                                except Exception:
+                                    pass
+                                ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
+                                             f"Scale-out {symbol}: {sell_qty} @ {current_price:.4f}")
+                                add_signal({"symbol": symbol, "action": "SELL", "price": current_price,
+                                            "reason": f"scale_out_tp ({pnl_pct*100:.2f}%)",
+                                            "pnl_pct": round(pnl_pct * 100, 4), "source": "scale_out"})
+                                closed.append({"symbol": symbol, "reason": f"scale_out_tp",
+                                               "price": current_price, "order": order})
+                                continue
+                        qty = align_quantity_to_step(full_qty, filters["step"])
                         valid, reason = is_quantity_valid(qty, current_price, filters)
                         if not valid:
                             print(f"SL/TP: cannot sell {symbol}: {reason}")
@@ -378,7 +406,9 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
     if not getattr(settings, "kelly_enabled", True):
         return getattr(settings, "max_per_trade_usdt", 50.0)
 
-    base = getattr(settings, "kelly_base_usdt", 60.0)
+    fixed_base = getattr(settings, "kelly_base_usdt", 60.0)
+    dyn_pct = getattr(settings, "kelly_dynamic_base_pct", 0.15)
+    base = max(fixed_base, usdt_liquid * dyn_pct)
     max_usdt = getattr(settings, "kelly_max_usdt", 150.0)
     cap_pct = getattr(settings, "kelly_max_pct_liquid", 0.40)
 
@@ -452,6 +482,37 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         allocation = min(settings.max_per_trade_usdt, usdt / len(top_symbols))
         print(f"USDT available: {usdt}, allocation per symbol: {allocation}")
 
+    # ── Bear market mode — BTC 7d performance check ───────────────────────────
+    _bear_mode_active = False
+    if getattr(settings, 'bear_market_mode_enabled', True):
+        try:
+            _klines7 = client.get_klines('BTCUSDT', '1d', limit=8)
+            if _klines7 and len(_klines7) >= 7:
+                _btc_7d_open = float(_klines7[-7]['open'])
+                _btc_now = float(_klines7[-1]['close'])
+                _btc_7d_chg = (_btc_now - _btc_7d_open) / _btc_7d_open * 100
+                _bear_thresh = getattr(settings, 'bear_market_btc_7d_threshold', -10.0)
+                if _btc_7d_chg <= _bear_thresh:
+                    _bear_mode_active = True
+                    print(f"BEAR MARKET MODE: BTC 7d={_btc_7d_chg:.1f}% (<= {_bear_thresh}%) — Kelly×{getattr(settings,'bear_market_kelly_multiplier',0.5)}, stricter VolSpike")
+        except Exception as _bme:
+            print(f"Bear market check failed: {_bme}")
+
+    # ── BTC dominance filter — skip altcoins if BTC.D too high ────────────────
+    _btc_dom_high = False
+    if getattr(settings, 'btc_dominance_filter_enabled', True):
+        try:
+            import urllib.request as _ur, json as _json
+            with _ur.urlopen('https://api.coingecko.com/api/v3/global', timeout=3) as _r:
+                _gdata = _json.loads(_r.read())
+            _btc_dom = _gdata.get('data', {}).get('market_cap_percentage', {}).get('btc', 0)
+            _dom_thresh = getattr(settings, 'btc_dominance_altcoin_threshold', 56.0)
+            if _btc_dom > _dom_thresh:
+                _btc_dom_high = True
+                print(f"BTC Dominance {_btc_dom:.1f}% > {_dom_thresh}% — altcoin entries restricted to NARRATIVE only")
+        except Exception:
+            pass
+
     # ── BTC bearish market: reduce allocation 50% ──────────────────────────────
     if btc_trend == 'DOWN':
         allocation *= 0.5
@@ -493,8 +554,23 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             update_signal_decision(symbol, "rejected", "ERROR_PRECIO")
             continue
 
-        # ── NARRATIVE token buy cooldown ─────────────────────────────────
+        # ── Bear market mode — restrict non-NARRATIVE entries ────────────
         narrative_set = set(getattr(settings, 'narrative_tokens', []))
+        if _bear_mode_active and symbol not in narrative_set:
+            _bear_min_spike = getattr(settings, 'bear_market_volspike_min', 2.0)
+            _meta_spike = float(signal_meta.get(symbol, {}).get('vol_spike', 0))
+            if _meta_spike < _bear_min_spike:
+                print(f"Skipping buy {symbol}: BEAR MODE active, not NARRATIVE, vol_spike={_meta_spike:.2f} < {_bear_min_spike}")
+                update_signal_decision(symbol, "rejected", "BEAR_MODE")
+                continue
+
+        # ── BTC dominance filter — restrict non-NARRATIVE when BTC.D high ─
+        if _btc_dom_high and symbol not in narrative_set:
+            print(f"Skipping buy {symbol}: BTC.D high — only NARRATIVE allowed")
+            update_signal_decision(symbol, "rejected", "BTC_DOM")
+            continue
+
+        # ── NARRATIVE token buy cooldown ─────────────────────────────────
         if symbol in narrative_set:
             from datetime import datetime as _dt2
             _last_buy = _NARRATIVE_BUY_COOLDOWN.get(symbol)
@@ -617,6 +693,10 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         trade_allocation = _kelly_position_size(
             settings, strength, prediction, usdt_liquid_now, sl_pct, tp_pct
         )
+        if _bear_mode_active:
+            _bmult = getattr(settings, 'bear_market_kelly_multiplier', 0.5)
+            trade_allocation *= _bmult
+            print(f"BEAR MODE: Kelly reduced ×{_bmult} → ${trade_allocation:.2f} for {symbol}")
 
         qty = align_quantity_to_step(trade_allocation / price, filters["step"])
         valid, reason = is_quantity_valid(qty, price, filters)

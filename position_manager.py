@@ -359,6 +359,22 @@ class PositionManager:
                             logger.warning(f"Could not persist metadata update for {position_id}: {e}")
                     return
 
+    def update_position_sl(self, position_id: str, new_sl_price: float) -> None:
+        """Move stop-loss price of an open position (e.g. to breakeven after scale-out)."""
+        for pos_list in self._open_positions.values():
+            for pos in pos_list:
+                if str(pos.position_id) == str(position_id):
+                    pos.stop_loss_price = new_sl_price
+                    if self.db_client:
+                        try:
+                            self.db_client.execute_update(
+                                "UPDATE trades_open SET stop_loss_price = %s WHERE position_id = %s",
+                                (new_sl_price, str(position_id))
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not persist SL update for {position_id}: {e}")
+                    return
+
     def _calc_close(self, position: Position, exit_price: float, commission_rate: float):
         """Shared PnL calculation for closing a position. Returns (qty, entry_p, exit_price, pnl, pnl_pct, exit_comm, pred_accuracy)."""
         qty        = float(position.quantity)
