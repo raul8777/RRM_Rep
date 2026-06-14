@@ -53,6 +53,15 @@ function fmtPrediction(pred) {
     </span>`;
 }
 
+// ── Category helpers (must be before any render function) ───────────────────
+const CAT_ICON  = { 'LARGE_CAP': '🏦', 'MIDCAP_ALT': '📊', 'NARRATIVE': '🤖', 'MEME': '🎭' };
+const CAT_LABEL = { 'LARGE_CAP': 'LARGE CAP', 'MIDCAP_ALT': 'MID ALT', 'NARRATIVE': 'NARRATIVE', 'MEME': 'MEME' };
+function catIcon(cat) {
+    const icon  = CAT_ICON[cat]  || '📊';
+    const label = CAT_LABEL[cat] || cat;
+    return `<span class="cat-icon" title="${label}">${icon}</span>`;
+}
+
 // ── Render functions (pure – no fetch) ───────────────────────────────────────
 function renderSystemStatus(d) {
     if (!d) return;
@@ -578,15 +587,6 @@ async function pollBacktestResults() {
     } catch (e) { /* silent */ }
 }
 
-// ── Category helpers ─────────────────────────────────────────────────────────────
-const CAT_ICON = { 'LARGE_CAP': '🏦', 'MIDCAP_ALT': '📊', 'NARRATIVE': '🤖', 'MEME': '🎭' };
-const CAT_LABEL = { 'LARGE_CAP': 'LARGE CAP', 'MIDCAP_ALT': 'MID ALT', 'NARRATIVE': 'NARRATIVE', 'MEME': 'MEME' };
-function catIcon(cat) {
-    const icon = CAT_ICON[cat] || '📊';
-    const label = CAT_LABEL[cat] || cat;
-    return `<span class="cat-icon" title="${label}">${icon}</span>`;
-}
-
 // ── F&G header badge ──────────────────────────────────────────────────────────────
 function renderFngBadge(ctx) {
     const badge = document.getElementById('fngBadge');
@@ -717,7 +717,6 @@ async function updateDashboard() {
     if (!data) return;
 
     renderSystemStatus(data.system_status);
-    renderPortfolio(data.portfolio_config);
     renderSignals(data.signals);
     renderHealth(data.health);
     renderBalance(data.balance);
