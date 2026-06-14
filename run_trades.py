@@ -62,8 +62,8 @@ def _get_news_scores(symbols: List[str], news_client: NewsClient, settings) -> D
 
 
 def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClient, portfolio_manager=None, regime: str = "SPOT_BULL") -> List[Dict]:
-    # Expire autonomous signals older than 30 min with no decision (housekeeping)
-    expired = expire_stale_signals(max_age_minutes=30)
+    # Expire autonomous signals older than 10 min with no decision (B3: matches SIGNAL_CACHE_TTL)
+    expired = expire_stale_signals(max_age_minutes=10)
     if expired:
         print(f"Expired {expired} stale autonomous signal(s)")
 

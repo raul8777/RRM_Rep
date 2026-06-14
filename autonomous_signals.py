@@ -12,7 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # ── Per-symbol signal cache (TTL = SIGNAL_CACHE_TTL_SECONDS) ─────────────────
-SIGNAL_CACHE_TTL_SECONDS = 1800  # 30 minutes
+SIGNAL_CACHE_TTL_SECONDS = 600   # 10 minutes (B3: fresher signals in volatile conditions)
 _signal_cache: Dict[str, Dict] = {}  # {symbol: {"signal": ..., "cached_at": datetime}}
 
 
