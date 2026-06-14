@@ -239,6 +239,61 @@ class FuturesClient:
             print(f"[Futures] transfer_to_futures error: {e}")
             return False
 
+    def transfer_to_spot(self, amount: float, spot_api_key: str = None, spot_api_secret: str = None) -> bool:
+        """
+        Transfer USDT from Futures wallet back to Spot wallet.
+        Uses /sapi/v1/futures/transfer (type=2 = USDT-M Futures→SPOT).
+        Only transfers if no open positions remain.
+        Returns True on success.
+        """
+        _key    = spot_api_key    or self.api_key
+        _secret = spot_api_secret or self.api_secret
+        if self.dry_run:
+            print(f"[Futures DRY] Transfer ${amount:.2f} USDT futures→spot")
+            return True
+        try:
+            params = {
+                "asset":     "USDT",
+                "amount":    str(round(amount, 4)),
+                "type":      "2",           # 2 = USDT-M Futures → SPOT
+                "timestamp": int(time.time() * 1000),
+            }
+            query = urllib.parse.urlencode(params)
+            sig   = hmac.new(_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+            url   = f"https://api.binance.com/sapi/v1/futures/transfer?{query}&signature={sig}"
+            req   = urllib.request.Request(
+                url, data=b"", method="POST",
+                headers={"X-MBX-APIKEY": _key, "Content-Type": "application/x-www-form-urlencoded"}
+            )
+            with urllib.request.urlopen(req, timeout=8) as r:
+                result = json.loads(r.read())
+            if result.get("tranId"):
+                print(f"[Futures] Transferred ${amount:.2f} USDT futures→spot (tranId={result['tranId']})")
+                return True
+            print(f"[Futures] Transfer futures→spot failed: {result}")
+            return False
+        except Exception as e:
+            print(f"[Futures] transfer_to_spot error: {e}")
+            return False
+
+    def return_idle_funds_to_spot(self, reserve_usdt: float = 5.0,
+                                  spot_api_key: str = None, spot_api_secret: str = None) -> bool:
+        """
+        Return excess futures balance to spot when no positions are open.
+        Keeps `reserve_usdt` in futures as buffer; transfers the rest.
+        Returns True if transfer executed or not needed.
+        """
+        if self._open_positions:
+            print(f"[Futures] {len(self._open_positions)} open positions — not returning funds to spot")
+            return False
+        available = self.get_available_usdt()
+        transferable = available - reserve_usdt
+        if transferable < 1.0:
+            print(f"[Futures] Balance ${available:.2f} too low to return (reserve=${reserve_usdt:.2f})")
+            return False
+        print(f"[Futures] Returning ${transferable:.2f} USDT futures→spot (keeping ${reserve_usdt:.2f} reserve)")
+        return self.transfer_to_spot(transferable, spot_api_key, spot_api_secret)
+
     def check_and_fund(self, required_usdt: float, spot_api_key: str = None, spot_api_secret: str = None) -> bool:
         """
         Check futures balance and auto-transfer from spot if needed.

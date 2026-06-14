@@ -21,10 +21,12 @@ from typing import Optional
 
 
 # ── Constants ────────────────────────────────────────────────────────────────
-_CACHE_TTL_SECONDS  = 240        # Re-detect every 4 minutes
-_CONFIRM_CYCLES     = 2          # Anti-whipsaw: 2 consecutive detections before switching
-_BEAR_7D_THRESHOLD  = -7.0       # BTC 7d < -7% → potential bear
-_BEAR_30D_THRESHOLD = -15.0      # BTC 30d < -15% → structural bear (faster confirmation)
+_CACHE_TTL_SECONDS        = 240   # Re-detect every 4 minutes
+_CONFIRM_CYCLES           = 2    # Anti-whipsaw: 2 consecutive detections before switching
+_CONFIRM_CYCLES_FAST      = 1    # Accelerated: 1 cycle in severe structural bear
+_BEAR_7D_THRESHOLD        = -7.0  # BTC 7d < -7% → potential bear
+_BEAR_30D_THRESHOLD       = -15.0 # BTC 30d < -15% → structural bear (faster confirmation)
+_BEAR_SEVERE_30D          = -15.0 # Accelerate FUTURES_SHORT confirmation when 30d < this
 _SIDEWAYS_DAY_RANGE = 1.2        # |BTC day change| < 1.2% → not trending today
 _SIDEWAYS_VOL_MAX   = 0.7        # vol_ratio < 0.7 → low conviction (sideways)
 _BULL_DAY_MIN       = 0.5        # BTC day change > 0.5% → mild bull
@@ -274,6 +276,12 @@ def get_regime(binance_client, force_refresh: bool = False, settings=None) -> Ma
     raw = _detect_raw(binance_client)
     proposed_mode = raw["mode"]
 
+    # ── Choose confirm threshold: accelerate in severe structural bear ────────
+    _is_severe_bear = raw.get("btc_30d_pct", 0.0) <= _BEAR_SEVERE_30D
+    _confirm_needed = _CONFIRM_CYCLES_FAST if _is_severe_bear else _CONFIRM_CYCLES
+    if _is_severe_bear:
+        print(f"[MarketRegime] Severe bear (30d={raw.get('btc_30d_pct',0):.1f}%) — fast confirm ({_confirm_needed} cycle)")
+
     # ── Anti-whipsaw logic ───────────────────────────────────────────────────
     current_regime = _cache.get("regime")
     current_mode   = current_regime.mode if current_regime else "SPOT_BULL"
@@ -288,7 +296,7 @@ def get_regime(binance_client, force_refresh: bool = False, settings=None) -> Ma
     elif proposed_mode == _cache["pending_mode"]:
         # Same as pending — increment counter
         _cache["pending_count"] += 1
-        if _cache["pending_count"] >= _CONFIRM_CYCLES:
+        if _cache["pending_count"] >= _confirm_needed:
             # Confirmed switch
             confirmed_regime = _build_regime(raw, confirmed=True)
             _cache["pending_mode"]  = None

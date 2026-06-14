@@ -596,6 +596,19 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     _f_sl    = getattr(settings, 'futures_sl_pct', 3.0)
                     _f_tp    = getattr(settings, 'futures_tp_pct', 5.0)
                     _f_lev   = getattr(settings, 'futures_leverage', 2)
+                    # Fear & Greed boost: Extreme Fear (<25) → larger short margin (better entry)
+                    try:
+                        if news_client:
+                            _fng = news_client.get_fear_greed_index()
+                            _fng_val = _fng.get('value', 50) if isinstance(_fng, dict) else 50
+                            if _fng_val < 25:
+                                _f_usdt = round(_f_usdt * 1.3, 2)
+                                print(f"[Futures] F&G Extreme Fear ({_fng_val}) → boosted margin ${_f_usdt}")
+                            elif _fng_val > 75:
+                                _f_usdt = round(_f_usdt * 0.8, 2)
+                                print(f"[Futures] F&G Extreme Greed ({_fng_val}) → reduced short margin ${_f_usdt}")
+                    except Exception:
+                        pass
                     print(f"[Futures] FUTURES_SHORT mode: opening short {symbol} margin=${_f_usdt}")
                     _pos = _fc.open_short(symbol, usdt_amount=_f_usdt,
                                           sl_pct=_f_sl, tp_pct=_f_tp, leverage=_f_lev)
@@ -1070,6 +1083,17 @@ def execute_once():
                         print(f"[Futures] Closed short {_sym} due to regime change → {_regime_mode}")
                     except Exception as _ce:
                         print(f"[Futures] Failed to close {_sym} on regime change: {_ce}")
+
+            # Bidirectional: return idle futures funds to spot when not in SHORT mode
+            if _regime_mode not in ("PRESERVATION", "FUTURES_SHORT"):
+                try:
+                    _fc.return_idle_funds_to_spot(
+                        reserve_usdt    = 5.0,
+                        spot_api_key    = settings.binance_api_key,
+                        spot_api_secret = settings.binance_api_secret,
+                    )
+                except Exception as _rfe:
+                    print(f"[Futures] return_idle_funds_to_spot error: {_rfe}")
 
             # Normal SL/TP cycle check
             _cycle_closes = _fc.check_positions()
