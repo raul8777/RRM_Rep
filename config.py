@@ -154,6 +154,21 @@ class Settings(BaseSettings):
         "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.0, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.5},
     }, env="CATEGORY_THRESHOLDS")
     
+    # ── Market Regime adaptive mode ──────────────────────────────────────────
+    market_regime_enabled: bool = Field(default=True, env="MARKET_REGIME_ENABLED")
+    # RANGE_SCALP mode parameters
+    range_scalp_sl_pct: float = Field(default=1.2, env="RANGE_SCALP_SL_PCT")
+    range_scalp_tp_pct: float = Field(default=1.5, env="RANGE_SCALP_TP_PCT")
+    range_scalp_kelly_mult: float = Field(default=0.7, env="RANGE_SCALP_KELLY_MULT")
+    range_scalp_max_rsi: float = Field(default=40.0, env="RANGE_SCALP_MAX_RSI")   # only enter RSI < 40
+    range_scalp_require_bb_lower: bool = Field(default=True, env="RANGE_SCALP_REQUIRE_BB_LOWER")
+    # PRESERVATION mode parameters
+    preservation_sl_pct: float = Field(default=1.5, env="PRESERVATION_SL_PCT")
+    preservation_tp_pct: float = Field(default=3.0, env="PRESERVATION_TP_PCT")
+    preservation_kelly_mult: float = Field(default=0.5, env="PRESERVATION_KELLY_MULT")
+    preservation_narrative_only: bool = Field(default=True, env="PRESERVATION_NARRATIVE_ONLY")
+    preservation_max_rsi: float = Field(default=65.0, env="PRESERVATION_MAX_RSI")
+
     # Binance commission configuration
     binance_commission_rate: float = Field(default=0.001, env="BINANCE_COMMISSION_RATE")  # 0.1% default
     use_bnb_for_commission: bool = Field(default=False, env="USE_BNB_FOR_COMMISSION")  # 0.05% if True

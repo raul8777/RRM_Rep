@@ -4,6 +4,7 @@ from typing import Dict, List
 
 import error_collector as ec
 from binance_client import BinanceClient
+from market_regime import get_regime, MarketRegime
 from news_client import NewsClient
 from signal_store import get_signals, add_signal, mark_signal_as_processed, update_signal_decision, expire_stale_signals
 from strategy import rank_buy_signals, rank_with_technical, normalize_symbol, rank_for_portfolio_manager
@@ -464,6 +465,17 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     except Exception as e:
         print(f"BTC trend check failed: {e}")
 
+    # ── Market Regime Detection — adaptive mode router ─────────────────────────
+    _regime: MarketRegime = None
+    _regime_mode = "SPOT_BULL"
+    if getattr(settings, 'market_regime_enabled', True):
+        try:
+            _regime = get_regime(client)
+            _regime_mode = _regime.mode
+            print(f"[Regime] {_regime_mode} | {_regime.regime} | {_regime.reason} | confirmed={_regime.confirmed}")
+        except Exception as _re:
+            print(f"[Regime] detection failed: {_re}")
+
     balances = client.get_account_balance()
     usdt = float(balances.get("USDT", 0.0))
     usdt_liquid = usdt  # default; overridden below if portfolio_manager available
@@ -563,6 +575,38 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 print(f"Skipping buy {symbol}: BEAR MODE active, not NARRATIVE, vol_spike={_meta_spike:.2f} < {_bear_min_spike}")
                 update_signal_decision(symbol, "rejected", "BEAR_MODE")
                 continue
+
+        # ── Market Regime gate — mode-specific entry filters ─────────────
+        if _regime and _regime.confirmed:
+            if _regime_mode == "PRESERVATION":
+                # Only NARRATIVE tokens allowed in preservation mode
+                if getattr(settings, 'preservation_narrative_only', True) and symbol not in narrative_set:
+                    print(f"Skipping buy {symbol}: PRESERVATION mode — only NARRATIVE allowed")
+                    update_signal_decision(symbol, "rejected", "PRESERVATION")
+                    continue
+                # RSI check for PRESERVATION
+                _prsv_max_rsi = getattr(settings, 'preservation_max_rsi', 65.0)
+                _meta_rsi = float(signal_meta.get(symbol, {}).get('rsi', 50))
+                if _meta_rsi > _prsv_max_rsi:
+                    print(f"Skipping buy {symbol}: PRESERVATION mode RSI={_meta_rsi:.1f} > {_prsv_max_rsi}")
+                    update_signal_decision(symbol, "rejected", "PRSV_RSI")
+                    continue
+
+            elif _regime_mode == "RANGE_SCALP":
+                # Only enter when RSI < range_scalp_max_rsi (oversold — near BB lower)
+                _rs_max_rsi = getattr(settings, 'range_scalp_max_rsi', 40.0)
+                _meta_rsi   = float(signal_meta.get(symbol, {}).get('rsi', 50))
+                if _meta_rsi > _rs_max_rsi:
+                    print(f"Skipping buy {symbol}: RANGE_SCALP mode RSI={_meta_rsi:.1f} > {_rs_max_rsi} (not at BB lower)")
+                    update_signal_decision(symbol, "rejected", "RANGE_RSI")
+                    continue
+                # Optionally check BB lower band touch
+                if getattr(settings, 'range_scalp_require_bb_lower', True):
+                    _meta_bb_pos = float(signal_meta.get(symbol, {}).get('bb_position', 0.5))
+                    if _meta_bb_pos > 0.35:  # must be in lower 35% of BB range
+                        print(f"Skipping buy {symbol}: RANGE_SCALP mode bb_pos={_meta_bb_pos:.2f} > 0.35 (not near BB lower)")
+                        update_signal_decision(symbol, "rejected", "RANGE_BB")
+                        continue
 
         # ── BTC dominance filter — restrict non-NARRATIVE when BTC.D high ─
         if _btc_dom_high and symbol not in narrative_set:
@@ -689,6 +733,18 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         # ── Kelly dynamic position sizing ───────────────────────────────
         sl_pct = getattr(settings, 'stop_loss_pct', 1.5) / 100.0
         tp_pct = getattr(settings, 'take_profit_pct', 2.5) / 100.0
+
+        # Apply regime-specific SL/TP overrides
+        if _regime and _regime.confirmed:
+            if _regime_mode == "RANGE_SCALP":
+                sl_pct = getattr(settings, 'range_scalp_sl_pct', 1.2) / 100.0
+                tp_pct = getattr(settings, 'range_scalp_tp_pct', 1.5) / 100.0
+                print(f"[Regime] RANGE_SCALP: SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}%")
+            elif _regime_mode == "PRESERVATION":
+                sl_pct = getattr(settings, 'preservation_sl_pct', 1.5) / 100.0
+                tp_pct = getattr(settings, 'preservation_tp_pct', 3.0) / 100.0
+                print(f"[Regime] PRESERVATION: SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}%")
+
         usdt_liquid_now = float(client.get_account_balance().get("USDT", usdt_liquid))
         trade_allocation = _kelly_position_size(
             settings, strength, prediction, usdt_liquid_now, sl_pct, tp_pct
@@ -697,6 +753,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             _bmult = getattr(settings, 'bear_market_kelly_multiplier', 0.5)
             trade_allocation *= _bmult
             print(f"BEAR MODE: Kelly reduced ×{_bmult} → ${trade_allocation:.2f} for {symbol}")
+        # Regime Kelly multiplier (additive with bear mode if both active)
+        if _regime and _regime.confirmed and _regime_mode != "SPOT_BULL" and not _bear_mode_active:
+            _rmult = _regime.kelly_multiplier
+            trade_allocation *= _rmult
+            print(f"[Regime] {_regime_mode}: Kelly ×{_rmult} → ${trade_allocation:.2f} for {symbol}")
 
         qty = align_quantity_to_step(trade_allocation / price, filters["step"])
         valid, reason = is_quantity_valid(qty, price, filters)
