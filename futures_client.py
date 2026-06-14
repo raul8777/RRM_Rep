@@ -449,18 +449,24 @@ class FuturesClient:
             sl_price = round(filled_price * (1 + sl_pct / 100), 6)
             tp_price = round(filled_price * (1 - tp_pct / 100), 6)
 
-            # 2. Stop-loss order (STOP_MARKET + closePosition — no timeInForce)
+            # 2. Stop-loss order
+            # Use STOP (limit-stop) with reduceOnly — compatible with all account types
+            # For SHORT: BUY STOP fires when price rises to stopPrice
+            # price (limit) = stopPrice * 1.003 to guarantee fill on fast moves
             sl_order_id = None
             for _sl_attempt in range(2):
                 try:
-                    _sl_price_use = round(self.get_price(symbol) * (1 + sl_pct / 100), 6) if _sl_attempt > 0 else sl_price
+                    _sl_stop = round(self.get_price(symbol) * (1 + sl_pct / 100), 6) if _sl_attempt > 0 else sl_price
+                    _sl_limit = round(_sl_stop * 1.003, 6)  # 0.3% above stop = guaranteed fill
                     sl_order = self._post("/fapi/v1/order", {
-                        "symbol": symbol, "side": "BUY", "type": "STOP_MARKET",
-                        "stopPrice": str(_sl_price_use), "closePosition": "true",
+                        "symbol": symbol, "side": "BUY", "type": "STOP",
+                        "quantity": str(qty), "stopPrice": str(_sl_stop),
+                        "price": str(_sl_limit), "reduceOnly": "true",
+                        "timeInForce": "GTC",
                     })
                     sl_order_id = str(sl_order.get("orderId", ""))
-                    sl_price = _sl_price_use
-                    print(f"[Futures] SL order placed: {sl_price:.4f} (id={sl_order_id})")
+                    sl_price = _sl_stop
+                    print(f"[Futures] SL order placed: stop={sl_price:.4f} limit={_sl_limit:.4f} (id={sl_order_id})")
                     break
                 except Exception as se:
                     if _sl_attempt == 0:
@@ -474,15 +480,21 @@ class FuturesClient:
                         })
                         return None
 
-            # 3. Take-profit order (TAKE_PROFIT_MARKET + closePosition — no timeInForce)
+            # 3. Take-profit order
+            # Use TAKE_PROFIT (limit-tp) with reduceOnly — compatible with all account types
+            # For SHORT: BUY TAKE_PROFIT fires when price falls to stopPrice
+            # price (limit) = stopPrice * 0.997 to guarantee fill
             tp_order_id = None
             try:
+                _tp_limit = round(tp_price * 0.997, 6)  # 0.3% below TP = guaranteed fill
                 tp_order = self._post("/fapi/v1/order", {
-                    "symbol": symbol, "side": "BUY", "type": "TAKE_PROFIT_MARKET",
-                    "stopPrice": str(tp_price), "closePosition": "true",
+                    "symbol": symbol, "side": "BUY", "type": "TAKE_PROFIT",
+                    "quantity": str(qty), "stopPrice": str(tp_price),
+                    "price": str(_tp_limit), "reduceOnly": "true",
+                    "timeInForce": "GTC",
                 })
                 tp_order_id = str(tp_order.get("orderId", ""))
-                print(f"[Futures] TP order placed: {tp_price:.4f} (id={tp_order_id})")
+                print(f"[Futures] TP order placed: stop={tp_price:.4f} limit={_tp_limit:.4f} (id={tp_order_id})")
             except Exception as te:
                 print(f"[Futures] TP order failed for {symbol}: {te} — continuing with SL only")
 
