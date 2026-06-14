@@ -93,6 +93,7 @@ function renderSignals(d) {
         <span class="signal-symbol" style="color:#666;font-size:11px;font-weight:400">SÍMBOLO</span>
         <span style="color:#666;font-size:11px">ACCIÓN</span>
         <span style="color:#666;font-size:11px">PRECIO</span>
+        <span style="color:#666;font-size:11px">FUERZA</span>
         <span style="color:#666;font-size:11px">DECISIÓN</span>
         <span style="color:#666;font-size:11px">RAZÓN SEÑAL</span>
         <span style="color:#666;font-size:11px">HACE</span>
@@ -119,11 +120,18 @@ function renderSignals(d) {
         } else {
             decisionBadge = '<span class="decision-badge decision-pending">PENDIENTE</span>';
         }
+        const str = parseFloat(s.strength || 0);
+        const strCls = str >= 0.75 ? 'positive' : str >= 0.55 ? '' : 'negative';
+        const strBar = Math.round(str * 100);
+        const strengthBadge = str > 0
+            ? `<span class="strength-badge ${strCls}" title="Fuerza de señal: ${strBar}%">${strBar}%</span>`
+            : '<span class="strength-badge" style="color:#555">—</span>';
         return `
         <div class="signal-row">
             <span class="signal-symbol">${catIco} ${s.symbol || '—'}</span>
             ${badge}
             <span class="signal-price">${price}</span>
+            ${strengthBadge}
             ${decisionBadge}
             <span style="display:flex;gap:4px;align-items:center;overflow:hidden">${reason}${trendingBadge}</span>
             <span class="signal-ts">${ts}</span>
@@ -206,12 +214,23 @@ function renderOpenPositions(d) {
                     <th>PnL No Real.</th>
                     <th>PnL Pred.</th>
                     <th>SL / TP</th>
+                    <th>%→SL</th>
+                    <th>%→TP</th>
                     <th>Horas</th>
                 </tr>
             </thead>
             <tbody>
                 ${d.positions.map(p => {
                     const rowCls = parseFloat(p.unrealized_pnl||0) > 0 ? 'row-pnl-pos' : parseFloat(p.unrealized_pnl||0) < -0.01 ? 'row-pnl-neg' : '';
+                    const curP = parseFloat(p.current_price || 0);
+                    const slDistPct = p.stop_loss && curP > 0
+                        ? ((parseFloat(p.stop_loss) - curP) / curP * 100)
+                        : null;
+                    const tpDistPct = p.take_profit && curP > 0
+                        ? ((parseFloat(p.take_profit) - curP) / curP * 100)
+                        : null;
+                    const slCls = slDistPct != null && Math.abs(slDistPct) < 1.0 ? 'negative' : '';
+                    const tpCls = tpDistPct != null && Math.abs(tpDistPct) < 1.0 ? 'positive' : '';
                     return `
                     <tr class="${rowCls}">
                         <td title="ID: ${p.position_id || ''}">E${p.entry_number || 1}</td>
@@ -226,6 +245,8 @@ function renderOpenPositions(d) {
                         <td class="${pnlClass(p.unrealized_pnl)}">${fmt(p.unrealized_pnl)} USDT<br><small class="${pnlClass(p.unrealized_pnl_mxn)}">${fmt(p.unrealized_pnl_mxn ?? 0, 2)} MXN</small></td>
                         <td>${fmtPrediction(p.pnl_prediction)}</td>
                         <td class="sl-tp">${p.stop_loss ? '$' + fmt(p.stop_loss) : '—'} / ${p.take_profit ? '$' + fmt(p.take_profit) : '—'}</td>
+                        <td class="${slCls}" title="Distancia al Stop-Loss">${slDistPct != null ? (slDistPct >= 0 ? '+' : '') + slDistPct.toFixed(2) + '%' : '—'}</td>
+                        <td class="${tpCls}" title="Distancia al Take-Profit">${tpDistPct != null ? (tpDistPct >= 0 ? '+' : '') + tpDistPct.toFixed(2) + '%' : '—'}</td>
                         <td>${p.hours_held ?? '—'}h</td>
                     </tr>`;
                 }).join('')}
@@ -735,9 +756,13 @@ function renderTradingModeCard(r) {
     const chgClsDay = chgDay >= 0 ? 'up'   : 'down';
     const volCls    = vol   >= 1 ? 'up'   : vol >= 0.6 ? 'flat' : 'down';
     const trendCls  = trend === 'UP' ? 'up' : trend === 'DOWN' ? 'down' : 'flat';
+    const bb        = r.bb_bandwidth != null ? r.bb_bandwidth : null;
+    const bbCls     = bb != null ? (bb < 0.04 ? 'down' : bb < 0.07 ? 'flat' : 'up') : '';
+    const bbAlert   = bb != null && bb < 0.04 ? ' ⚡' : '';
+    const confirmed = r.mode_confirmed !== false;
 
-    const futuresWarn = (mode === 'PRESERVATION')
-        ? `<div class="mode-warn">⚠️ Modo PRESERVATION activo — Futuros SHORT no implementados aún. Operando en modo defensivo spot.</div>`
+    const futuresWarn = (mode === 'FUTURES_SHORT')
+        ? `<div class="mode-warn" style="color:#9b59b6;border-left-color:#9b59b6">⚠️ FUTURES SHORT activo — Posiciones con apalancamiento 2× abiertas. SL: ${r.regime_sl_pct ?? 3.0}% | TP: ${r.regime_tp_pct ?? 5.0}% | Kelly: ${r.regime_kelly ?? 0.3}×</div>`
         : '';
 
     el.innerHTML = `
@@ -764,6 +789,14 @@ function renderTradingModeCard(r) {
             <div class="mode-ind-item">
                 <div class="mode-ind-label">Tendencia 4h</div>
                 <div class="mode-ind-val ${trendCls}">${trend === 'UP' ? '⬆ UP' : trend === 'DOWN' ? '⬇ DOWN' : '→ FLAT'}</div>
+            </div>
+            ${bb != null ? `<div class="mode-ind-item">
+                <div class="mode-ind-label">BB Bandwidth${bbAlert}</div>
+                <div class="mode-ind-val ${bbCls}" title="${bb < 0.04 ? 'COMPRESIÓN — breakout inminente' : bb < 0.07 ? 'Moderado' : 'Expandido'}">${(bb * 100).toFixed(2)}%</div>
+            </div>` : ''}
+            <div class="mode-ind-item">
+                <div class="mode-ind-label">Confirmado</div>
+                <div class="mode-ind-val ${confirmed ? 'up' : 'flat'}">${confirmed ? '✅ Sí' : '⏳ Pendiente'}</div>
             </div>
         </div>
         <div class="mode-strategy-box" style="border-left-color:${cfg.color}">
@@ -877,6 +910,69 @@ function renderMonteCarlo(mc) {
     `;
 }
 
+// ── Futures Positions Card (C1) ───────────────────────────────────────────────
+async function renderFuturesPositions() {
+    const el = document.getElementById('futuresPositionsData');
+    const card = document.getElementById('futuresCard');
+    if (!el) return;
+    try {
+        const res = await fetch(`${API_BASE}/futures/positions`);
+        if (!res.ok) { el.innerHTML = '<p class="loading">No disponible</p>'; return; }
+        const data = await res.json();
+        if (!data.enabled) {
+            card && (card.style.display = 'none');
+            return;
+        }
+        card && (card.style.display = '');
+        if (!data.positions || data.positions.length === 0) {
+            el.innerHTML = '<p class="loading" style="color:#9b59b6">Sin posiciones de futuros abiertas</p>';
+            return;
+        }
+        const totalPnl = data.positions.reduce((s, p) => s + (p.unrealized_pnl || 0), 0);
+        const pnlCls = totalPnl >= 0 ? 'positive' : 'negative';
+        el.innerHTML = `
+        <div class="table-scroll-10">
+        <table class="positions-table">
+            <thead><tr>
+                <th>Símbolo</th><th>Lado</th><th>Qty</th>
+                <th>Entrada</th><th>Actual</th>
+                <th>SL</th><th>TP</th>
+                <th>%→SL</th><th>%→TP</th>
+                <th>PnL No Real.</th><th>Abierto</th>
+            </tr></thead>
+            <tbody>
+            ${data.positions.map(p => {
+                const upnlCls = p.unrealized_pnl >= 0 ? 'positive' : 'negative';
+                const slCls = Math.abs(p.sl_dist_pct) < 1.0 ? 'negative' : '';
+                const tpCls = Math.abs(p.tp_dist_pct) < 1.0 ? 'positive' : '';
+                const age = p.opened_at ? relativeTime(p.opened_at) : '—';
+                return `<tr>
+                    <td style="color:#9b59b6;font-weight:600">${p.symbol}</td>
+                    <td><span style="color:#9b59b6">▼ SHORT</span></td>
+                    <td>${parseFloat(p.qty || 0).toFixed(4)}</td>
+                    <td>$${fmt(p.entry_price)}</td>
+                    <td>$${fmt(p.current_price)}</td>
+                    <td class="${slCls}">$${fmt(p.sl_price)}</td>
+                    <td class="${tpCls}">$${fmt(p.tp_price)}</td>
+                    <td class="${slCls}">${p.sl_dist_pct >= 0 ? '+' : ''}${fmt(p.sl_dist_pct)}%</td>
+                    <td class="${tpCls}">${p.tp_dist_pct >= 0 ? '+' : ''}${fmt(p.tp_dist_pct)}%</td>
+                    <td class="${upnlCls}">${fmt(p.unrealized_pnl, 4)} USDT</td>
+                    <td>${age}</td>
+                </tr>`;
+            }).join('')}
+            </tbody>
+        </table>
+        </div>
+        <div class="positions-summary">
+            Total PnL No Realizado (Futuros):
+            <span class="${pnlCls}"><strong>${fmt(totalPnl, 4)} USDT</strong></span>
+            &nbsp;|&nbsp; Posiciones: <strong>${data.count}</strong>
+        </div>`;
+    } catch (e) {
+        el.innerHTML = '<p class="loading">Error cargando futuros</p>';
+    }
+}
+
 // ── Market Regime Badge ─────────────────────────────────────────────────────────
 function renderMarketRegime(r) {
     const dot  = document.getElementById('marketRegimeDot');
@@ -948,6 +1044,7 @@ async function updateDashboard() {
     renderBalance(data.balance);
     renderPnlHistory(data.pnl_history);
     renderOpenPositions(data.open_positions);
+    renderFuturesPositions();  // C1: async, fetches /futures/positions independently
     renderClosedPositions(data.closed_positions);
     renderNextCycle(data.next_cycle);
     renderAnalysisSummary(data.performance, data.closed_positions);

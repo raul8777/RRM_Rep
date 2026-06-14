@@ -652,120 +652,59 @@ _regime_cache: Dict = {"data": None, "ts": 0.0}
 
 
 def _get_market_regime() -> Dict:
-    """Classify current BTC/crypto market regime using EMA9/21 4h + daily change + vol."""
+    """
+    Return regime data sourced from the real trading engine (market_regime.get_regime()).
+    Dashboard is now always consistent with run_trades.py decisions.
+    Cache TTL = 240s (matches market_regime._CACHE_TTL_SECONDS).
+    """
     import time as _time
     now = _time.monotonic()
-    if _regime_cache["data"] and now - _regime_cache["ts"] < 300:
+    if _regime_cache["data"] and now - _regime_cache["ts"] < 240:
         return _regime_cache["data"]
 
     try:
-        bc = get_components().binance_client
-        from autonomous_signals import AutonomousSignalGenerator
-        sig_gen = AutonomousSignalGenerator(bc, ["BTCUSDT"])
+        comp = get_components()
+        from market_regime import get_regime as _get_regime
+        r = _get_regime(comp.binance_client, settings=comp.settings)
 
-        # EMA trend 4h
-        btc_trend = sig_gen.get_btc_market_trend(interval="4h")
-
-        # Daily change %
-        open_p = bc.get_daily_open_price("BTCUSDT")
-        cur_p = bc.get_symbol_price("BTCUSDT")
-        day_chg = (cur_p - open_p) / open_p * 100 if open_p else 0.0
-
-        # Volume ratio: last 1h vs avg of previous 23h
-        klines_1h = bc.client.get_klines(symbol="BTCUSDT", interval="1h", limit=25)
-        vols = [float(k[5]) for k in klines_1h]
-        avg_vol = sum(vols[:-1]) / len(vols[:-1]) if len(vols) > 1 else 1
-        vol_ratio = vols[-1] / avg_vol if avg_vol > 0 else 1.0
-
-        # BTC 7-day change %
-        try:
-            klines_7d = bc.client.get_klines(symbol="BTCUSDT", interval="1d", limit=8)
-            btc_7d_chg = (float(klines_7d[-1]["close"] if isinstance(klines_7d[-1], dict) else klines_7d[-1][4])
-                          - float(klines_7d[-7]["open"] if isinstance(klines_7d[-7], dict) else klines_7d[-7][1])) \
-                         / float(klines_7d[-7]["open"] if isinstance(klines_7d[-7], dict) else klines_7d[-7][1]) * 100 \
-                         if len(klines_7d) >= 7 else 0.0
-        except Exception:
-            btc_7d_chg = 0.0
-
-        # Classify regime
-        if btc_trend == "UP" and day_chg > 0.8 and vol_ratio >= 0.8:
-            regime, color = "ALCISTA", "#4ecca3"
-        elif btc_trend == "DOWN" and day_chg < -0.8:
-            regime, color = "BAJISTA", "#e74c3c"
-        elif -0.8 <= day_chg <= 0.8 and vol_ratio < 0.6:
-            regime, color = "LATERAL", "#f39c12"
-        elif btc_trend == "UP" and vol_ratio < 0.6:
-            regime, color = "DÉBIL ALZA", "#f39c12"
-        elif btc_trend == "DOWN":
-            regime, color = "DÉBIL BAJA", "#e67e22"
-        else:
-            regime, color = "LATERAL", "#f39c12"
-
-        # Derive trading mode from regime + 7d change
-        # Check if futures are enabled to decide between PRESERVATION and FUTURES_SHORT
-        from init_components import get_components as _get_comp
-        _futures_on = False
-        try:
-            _futures_on = getattr(_get_comp().settings, 'futures_enabled', False)
-        except Exception:
-            pass
-
-        if regime in ("ALCISTA", "DÉBIL ALZA"):
-            trading_mode = "SPOT_BULL"
-            mode_color = "#4ecca3"
-            mode_reason = f"BTC tendencia UP, día {day_chg:+.1f}%"
-            mode_desc = "Compras en breakout con Kelly dinámico. Trailing stop activo. Scale-out en TP."
-        elif regime == "LATERAL":
-            trading_mode = "RANGE_SCALP"
-            mode_color = "#f39c12"
-            mode_reason = f"Mercado lateral, vol {vol_ratio:.1f}x, día {day_chg:+.1f}%"
-            mode_desc = "Compras en soporte BB inferior (RSI<35), venta en BB superior (RSI>65). TP ajustado 1.5%."
-        elif btc_7d_chg <= -7:
-            if _futures_on:
-                trading_mode = "FUTURES_SHORT"
-                mode_color = "#9b59b6"
-                mode_reason = f"Bear market: BTC 7d={btc_7d_chg:+.1f}% — Futuros ACTIVOS"
-                mode_desc = "Shorts 2× en BTC/ETH/SOL/BNB. SL 3% arriba, TP 5% abajo. Máx 2 posiciones simultáneas."
-            else:
-                trading_mode = "PRESERVATION"
-                mode_color = "#e74c3c"
-                mode_reason = f"Bear market: BTC 7d={btc_7d_chg:+.1f}%"
-                mode_desc = "Capital 80%+ en USDT. Solo NARRATIVE con VolSpike≥2x. Kelly×0.5. Activa FUTURES_ENABLED para shorts."
-        elif regime in ("BAJISTA", "DÉBIL BAJA"):
-            if _futures_on:
-                trading_mode = "FUTURES_SHORT"
-                mode_color = "#9b59b6"
-                mode_reason = f"BTC bajista: día {day_chg:+.1f}%, 7d={btc_7d_chg:+.1f}% — Futuros ACTIVOS"
-                mode_desc = "Shorts 2× en BTC/ETH/SOL/BNB. SL 3% arriba, TP 5% abajo. Máx 2 posiciones simultáneas."
-            else:
-                trading_mode = "PRESERVATION"
-                mode_color = "#e67e22"
-                mode_reason = f"BTC bajista, día {day_chg:+.1f}%, 7d={btc_7d_chg:+.1f}%"
-                mode_desc = "Modo defensivo. Entradas solo con señal FUERTE (strength>0.85). Kelly reducido 50%."
-        else:
-            trading_mode = "SPOT_BULL"
-            mode_color = "#4ecca3"
-            mode_reason = f"Sin régimen claro definido, día {day_chg:+.1f}%"
-            mode_desc = "Operando con parámetros estándar. Monitoreo activo de régimen."
+        # Mode descriptions (single source of truth)
+        _MODE_DESC = {
+            "SPOT_BULL":     "Compras en breakout con Kelly dinámico. Trailing stop activo. Scale-out en TP.",
+            "RANGE_SCALP":   "Compras en soporte BB inferior (RSI<40), venta en BB superior. TP ajustado 1.5%.",
+            "PRESERVATION":  "Capital 80%+ en USDT. Solo NARRATIVE con VolSpike≥2x. Kelly×0.5.",
+            "FUTURES_SHORT": "Shorts 2× en BTC/ETH/SOL/BNB. SL 3% arriba, TP 5% abajo. Máx 2 posiciones.",
+        }
+        _MODE_COLOR = {
+            "SPOT_BULL": "#4ecca3", "RANGE_SCALP": "#f39c12",
+            "PRESERVATION": "#e74c3c", "FUTURES_SHORT": "#9b59b6",
+        }
 
         result = {
-            "regime": regime,
-            "color": color,
-            "btc_trend": btc_trend,
-            "day_change_pct": round(day_chg, 2),
-            "vol_ratio": round(vol_ratio, 2),
-            "btc_7d_change_pct": round(btc_7d_chg, 2),
-            "trading_mode": trading_mode,
-            "mode_color": mode_color,
-            "mode_reason": mode_reason,
-            "mode_desc": mode_desc,
+            "regime":           r.regime,
+            "color":            r.color,
+            "btc_trend":        r.ema9_vs_ema21,
+            "day_change_pct":   r.btc_day_pct,
+            "vol_ratio":        r.vol_ratio,
+            "bb_bandwidth":     r.bb_bandwidth,
+            "btc_7d_change_pct": r.btc_7d_pct,
+            "btc_30d_change_pct": r.btc_30d_pct,
+            "trading_mode":     r.mode,
+            "mode_color":       _MODE_COLOR.get(r.mode, "#888"),
+            "mode_reason":      r.reason + (" [pendiente confirmación]" if not r.confirmed else ""),
+            "mode_desc":        _MODE_DESC.get(r.mode, ""),
+            "mode_confirmed":   r.confirmed,
+            "regime_sl_pct":    r.sl_pct,
+            "regime_tp_pct":    r.tp_pct,
+            "regime_kelly":     r.kelly_multiplier,
         }
     except Exception as e:
         result = {
             "regime": "?", "color": "#888", "btc_trend": "?",
-            "day_change_pct": 0.0, "vol_ratio": 0.0, "btc_7d_change_pct": 0.0,
+            "day_change_pct": 0.0, "vol_ratio": 0.0, "bb_bandwidth": 0.0,
+            "btc_7d_change_pct": 0.0, "btc_30d_change_pct": 0.0,
             "trading_mode": "SPOT_BULL", "mode_color": "#888",
-            "mode_reason": "Error al detectar régimen", "mode_desc": "",
+            "mode_reason": f"Error detectando régimen: {e}", "mode_desc": "",
+            "mode_confirmed": False, "regime_sl_pct": 1.5, "regime_tp_pct": 2.5, "regime_kelly": 1.0,
         }
 
     _regime_cache["data"] = result
@@ -1179,6 +1118,46 @@ async def get_open_positions_detail() -> Dict:
                 "timestamp": to_mexico_time(datetime.utcnow()).isoformat()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get open positions: {str(e)}")
+
+
+# ── Futures positions endpoint (C1) ──────────────────────────────────────────
+
+@app.get("/futures/positions")
+async def get_futures_positions() -> Dict:
+    """Return open futures SHORT positions from the FuturesClient singleton."""
+    try:
+        from run_trades import _get_futures_client
+        from config import get_settings as _get_s
+        _s = _get_s()
+        if not getattr(_s, 'futures_enabled', False):
+            return {"enabled": False, "positions": [], "count": 0}
+        _fc = _get_futures_client(_s)
+        positions = []
+        for sym, pos in list(_fc._open_positions.items()):
+            try:
+                cur_price = _fc._get_price(sym)
+            except Exception:
+                cur_price = pos.entry_price
+            upnl = pos.unrealized_pnl(cur_price)
+            sl_dist_pct = ((pos.sl_price - cur_price) / cur_price * 100) if cur_price > 0 else 0
+            tp_dist_pct = ((cur_price - pos.tp_price) / cur_price * 100) if cur_price > 0 else 0
+            positions.append({
+                "symbol":       sym,
+                "side":         pos.side,
+                "qty":          pos.qty,
+                "entry_price":  pos.entry_price,
+                "current_price": cur_price,
+                "sl_price":     pos.sl_price,
+                "tp_price":     pos.tp_price,
+                "sl_dist_pct":  round(sl_dist_pct, 2),
+                "tp_dist_pct":  round(tp_dist_pct, 2),
+                "unrealized_pnl": round(upnl, 4),
+                "opened_at":    pos.opened_at.isoformat() if pos.opened_at else None,
+            })
+        return {"enabled": True, "positions": positions, "count": len(positions),
+                "timestamp": datetime.utcnow().isoformat()}
+    except Exception as e:
+        return {"enabled": False, "positions": [], "count": 0, "error": str(e)}
 
 
 # ── Backtest endpoints ────────────────────────────────────────────────────────

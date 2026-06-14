@@ -513,21 +513,12 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         allocation = min(settings.max_per_trade_usdt, usdt / len(top_symbols))
         print(f"USDT available: {usdt}, allocation per symbol: {allocation}")
 
-    # ── Bear market mode — BTC 7d performance check ───────────────────────────
-    _bear_mode_active = False
-    if getattr(settings, 'bear_market_mode_enabled', True):
-        try:
-            _klines7 = client.get_klines('BTCUSDT', '1d', limit=8)
-            if _klines7 and len(_klines7) >= 7:
-                _btc_7d_open = float(_klines7[-7]['open'])
-                _btc_now = float(_klines7[-1]['close'])
-                _btc_7d_chg = (_btc_now - _btc_7d_open) / _btc_7d_open * 100
-                _bear_thresh = getattr(settings, 'bear_market_btc_7d_threshold', -10.0)
-                if _btc_7d_chg <= _bear_thresh:
-                    _bear_mode_active = True
-                    print(f"BEAR MARKET MODE: BTC 7d={_btc_7d_chg:.1f}% (<= {_bear_thresh}%) — Kelly×{getattr(settings,'bear_market_kelly_multiplier',0.5)}, stricter VolSpike")
-        except Exception as _bme:
-            print(f"Bear market check failed: {_bme}")
+    # ── Bear mode derived from market_regime (single source of truth) ──────────
+    # _bear_mode_active replaced by _regime.mode PRESERVATION/FUTURES_SHORT
+    # This eliminates the triple Kelly penalty bug (btc_trend×0.5 + bear×0.5 + regime×0.5 = $7.50)
+    _bear_mode_active = (_regime_mode in ("PRESERVATION", "FUTURES_SHORT")) and (_regime is not None and _regime.confirmed)
+    if _bear_mode_active:
+        print(f"[Regime] Bear mode active via {_regime_mode} (confirmed) — NARRATIVE-only filter enabled")
 
     # ── BTC dominance filter — skip altcoins if BTC.D too high ────────────────
     _btc_dom_high = False
@@ -585,14 +576,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             update_signal_decision(symbol, "rejected", "ERROR_PRECIO")
             continue
 
-        # ── Bear market mode — restrict non-NARRATIVE entries ────────────
+        # ── Bear mode (PRESERVATION/FUTURES_SHORT) — restrict non-NARRATIVE ──
         narrative_set = set(getattr(settings, 'narrative_tokens', []))
-        if _bear_mode_active and symbol not in narrative_set:
+        if _bear_mode_active and _regime_mode == "PRESERVATION" and symbol not in narrative_set:
             _bear_min_spike = getattr(settings, 'bear_market_volspike_min', 2.0)
             _meta_spike = float(signal_meta.get(symbol, {}).get('vol_spike', 0))
             if _meta_spike < _bear_min_spike:
-                print(f"Skipping buy {symbol}: BEAR MODE active, not NARRATIVE, vol_spike={_meta_spike:.2f} < {_bear_min_spike}")
-                update_signal_decision(symbol, "rejected", "BEAR_MODE")
+                print(f"Skipping buy {symbol}: PRESERVATION mode, not NARRATIVE, vol_spike={_meta_spike:.2f} < {_bear_min_spike}")
+                update_signal_decision(symbol, "rejected", "PRESERVATION")
                 continue
 
         # ── FUTURES_SHORT mode — open short via futures instead of spot buy ─
@@ -648,11 +639,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     print(f"Skipping buy {symbol}: RANGE_SCALP mode RSI={_meta_rsi:.1f} > {_rs_max_rsi} (not at BB lower)")
                     update_signal_decision(symbol, "rejected", "RANGE_RSI")
                     continue
-                # Optionally check BB lower band touch
+                # B1: Check real BB lower band touch (not just RSI proxy)
                 if getattr(settings, 'range_scalp_require_bb_lower', True):
-                    _meta_bb_pos = float(signal_meta.get(symbol, {}).get('bb_position', 0.5))
-                    if _meta_bb_pos > 0.35:  # must be in lower 35% of BB range
-                        print(f"Skipping buy {symbol}: RANGE_SCALP mode bb_pos={_meta_bb_pos:.2f} > 0.35 (not near BB lower)")
+                    _meta_bb_touch = signal_meta.get(symbol, {}).get('bb_lower_touch', None)
+                    if _meta_bb_touch is False:  # explicitly False (not None = unknown)
+                        print(f"Skipping buy {symbol}: RANGE_SCALP — price not at BB lower band")
                         update_signal_decision(symbol, "rejected", "RANGE_BB")
                         continue
 
@@ -797,12 +788,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         trade_allocation = _kelly_position_size(
             settings, strength, prediction, usdt_liquid_now, sl_pct, tp_pct
         )
-        if _bear_mode_active:
-            _bmult = getattr(settings, 'bear_market_kelly_multiplier', 0.5)
-            trade_allocation *= _bmult
-            print(f"BEAR MODE: Kelly reduced ×{_bmult} → ${trade_allocation:.2f} for {symbol}")
-        # Regime Kelly multiplier (additive with bear mode if both active)
-        if _regime and _regime.confirmed and _regime_mode != "SPOT_BULL" and not _bear_mode_active:
+        # Regime Kelly multiplier — single application, no double-counting
+        if _regime and _regime.confirmed and _regime_mode != "SPOT_BULL":
             _rmult = _regime.kelly_multiplier
             trade_allocation *= _rmult
             print(f"[Regime] {_regime_mode}: Kelly ×{_rmult} → ${trade_allocation:.2f} for {symbol}")
@@ -1046,9 +1033,30 @@ def execute_once():
     if getattr(settings, 'futures_enabled', False):
         try:
             _fc = _get_futures_client(settings)
-            futures_closes = _fc.check_positions()
-            if futures_closes:
-                print(f"[Futures] Closed {len(futures_closes)} position(s): {futures_closes}")
+            # A3: Auto-close ALL shorts if regime switched OUT of bear modes
+            # Prevents accumulating losses during market recovery
+            try:
+                from market_regime import get_regime as _gr_check
+                _current_r = _gr_check(client, settings=settings)
+                _current_mode = _current_r.mode if _current_r else "SPOT_BULL"
+                _open_shorts = list(_fc._open_positions.keys())
+                if _open_shorts and _current_mode not in ("PRESERVATION", "FUTURES_SHORT"):
+                    print(f"[Futures] Regime changed to {_current_mode} — closing ALL {len(_open_shorts)} shorts")
+                    for _sym in _open_shorts:
+                        try:
+                            _pos = _fc._open_positions[_sym]
+                            _result = _fc.close_short(_sym, _pos.qty, reason="regime_change")
+                            futures_closes.append({"symbol": _sym, "reason": "regime_change", "result": _result})
+                            print(f"[Futures] Closed short {_sym} due to regime change → {_current_mode}")
+                        except Exception as _ce:
+                            print(f"[Futures] Failed to close {_sym} on regime change: {_ce}")
+            except Exception as _rce:
+                print(f"[Futures] Regime change check failed: {_rce}")
+            # Normal SL/TP cycle check
+            _cycle_closes = _fc.check_positions()
+            if _cycle_closes:
+                futures_closes.extend(_cycle_closes)
+                print(f"[Futures] Closed {len(_cycle_closes)} position(s) via SL/TP: {_cycle_closes}")
         except Exception as _fce:
             print(f"[Futures] check_positions error: {_fce}")
 

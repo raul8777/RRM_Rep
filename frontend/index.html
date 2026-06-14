@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Trading Agent Dashboard</title>
-    <link rel="stylesheet" href="/frontend/styles.css?v=11">
+    <link rel="stylesheet" href="/frontend/styles.css?v=12">
 </head>
 <body>
     <div class="container">
@@ -84,6 +84,14 @@
                 </h2>
                 <div id="openPositionsData">
                     <p>Loading open positions...</p>
+                </div>
+            </div>
+
+            <!-- Futures SHORT Positions Card -->
+            <div class="card card-full" id="futuresCard">
+                <h2>📉 Posiciones Futuros SHORT (2×)</h2>
+                <div id="futuresPositionsData">
+                    <p class="loading">Cargando posiciones de futuros...</p>
                 </div>
             </div>
 
@@ -207,6 +215,6 @@
         </div>
     </div>
 
-    <script src="/frontend/dashboard.js?v=13"></script>
+    <script src="/frontend/dashboard.js?v=14"></script>
 </body>
 </html>

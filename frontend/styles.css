@@ -482,15 +482,6 @@ h1 {
     max-height: 280px;
     overflow-y: auto;
 }
-.signal-row {
-    display: grid;
-    grid-template-columns: 90px 52px 72px 110px 1fr auto;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 4px;
-    border-bottom: 1px solid #1e2530;
-    font-size: 13px;
-}
 .signal-row:last-child { border-bottom: none; }
 .signal-symbol { font-weight: 600; color: #e0e0e0; white-space: nowrap; }
 .signal-badge {
@@ -772,3 +763,26 @@ h1 {
 }
 .mc-progress-bar-fill { height: 100%; border-radius: 6px; transition: width 0.8s ease; }
 .mc-note { font-size: 11px; color: #666; margin-top: 10px; font-style: italic; }
+
+/* ── Strength badge (C3 — signal table) ─────────────────────────────────── */
+.strength-badge {
+    display: inline-block; font-size: 11px; font-weight: 700;
+    padding: 1px 7px; border-radius: 10px; min-width: 36px; text-align: center;
+    background: rgba(255,255,255,0.07); color: #aaa;
+}
+.strength-badge.positive { background: rgba(78,204,163,0.13); color: #4ecca3; }
+.strength-badge.negative { background: rgba(231,76,60,0.13);  color: #e74c3c; }
+
+/* ── Signal row grid: 7 cols (symbol|action|price|strength|decision|reason|time) ── */
+.signal-row {
+    display: grid;
+    grid-template-columns: 130px 70px 90px 52px 130px 1fr 50px;
+    align-items: center; gap: 8px;
+    padding: 6px 4px; border-bottom: 1px solid #1e1e2e; font-size: 13px;
+}
+.signal-row.signal-header { font-size: 11px; color: #666; font-weight: 600; }
+
+/* ── mode-warn border-left variant ───────────────────────────────────────── */
+.mode-warn {
+    border-left: 3px solid #ffc83c;
+}

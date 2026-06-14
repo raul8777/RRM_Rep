@@ -250,6 +250,37 @@ class AutonomousSignalGenerator:
             except Exception:
                 pass
 
+            # ── Bollinger Band analysis (B1 + A4) ────────────────────────────
+            # B1: expose bb_lower_touch so RANGE_SCALP can verify real price level
+            # A4: BB breakout detector — compression → expansion setup
+            try:
+                from technical_indicators import TechnicalIndicators as _TI_bb
+                _bb_closes = closes
+                if len(_bb_closes) >= 20:
+                    _bbu, _bbm, _bbl = _TI_bb.bollinger_bands(_bb_closes, period=20, std_multiplier=2.0)
+                    if _bbu and _bbl and _bbm:
+                        _last_price = _bb_closes[-1]
+                        _bw = (_bbu[-1] - _bbl[-1]) / _bbm[-1] if _bbm[-1] > 0 else 0.05
+                        # B1: price touching or below lower band → good RANGE_SCALP entry
+                        _bb_lower_touch = _last_price <= _bbl[-1] * 1.005  # within 0.5% of lower band
+                        analysis['bb_lower_touch'] = _bb_lower_touch
+                        analysis['bb_bandwidth'] = round(_bw, 4)
+                        analysis['bb_lower'] = _bbl[-1]
+                        analysis['bb_upper'] = _bbu[-1]
+                        # A4: BB squeeze breakout — prior compression + current vol spike
+                        if len(_bbu) >= 5:
+                            _prev_bw = [(_bbu[-i] - _bbl[-i]) / _bbm[-i] if _bbm[-i] > 0 else 0.05
+                                        for i in range(2, 6)]  # look back 4 bars
+                            _was_compressed = all(b < 0.04 for b in _prev_bw)  # compressed last 4 bars
+                            _vol_avg = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else None
+                            _vol_spike_now = (volumes[-1] / _vol_avg) if _vol_avg and _vol_avg > 0 else 0
+                            if _was_compressed and _vol_spike_now >= 1.5 and analysis['signal'] == 'BUY':
+                                analysis['strength'] = min(1.0, analysis['strength'] + 0.12)
+                                analysis['reason'] += f' [+BB_squeeze_breakout bw={_bw:.3f} vol={_vol_spike_now:.1f}x]'
+                                logger.info(f"BB Squeeze BREAKOUT {symbol}: bw={_bw:.3f}, vol={_vol_spike_now:.1f}x → +0.12 strength")
+            except Exception:
+                pass
+
             # ── Hourly momentum boost (breakout in progress) ─────────────────
             if analysis['signal'] == 'BUY' and len(klines) >= 2:
                 try:
