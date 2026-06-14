@@ -1023,35 +1023,54 @@ def execute_once():
         print("Agent mode is not auto. Skipping execute_once.")
         return {"top_symbols": [], "sell_orders": [], "buy_orders": []}
 
+    # ── Regime detection for execute_once (needed by Step 0.5 and Step 1) ──────
+    _regime_exe: MarketRegime = None
+    _regime_mode = "SPOT_BULL"
+    if getattr(settings, 'market_regime_enabled', True):
+        try:
+            _regime_exe = get_regime(client, settings=settings)
+            _regime_mode = _regime_exe.mode
+            print(f"[Regime] execute_once: {_regime_mode} | confirmed={_regime_exe.confirmed}")
+        except Exception as _re_exe:
+            print(f"[Regime] execute_once detection failed: {_re_exe}")
+
     # ── Step 0: SL/TP monitor — runs every cycle before any new trades ─────────
     sl_tp_closes = _check_sl_tp_positions(client, settings, position_manager)
     if sl_tp_closes:
         print(f"SL/TP closed {len(sl_tp_closes)} position(s): {[c['symbol'] for c in sl_tp_closes]}")
 
-    # ── Step 0.5: Futures positions check (SL/TP via fapi) ────────────────────
+    # ── Step 0.5: Futures positions check + auto-fund on FUTURES_SHORT ──────────
     futures_closes = []
     if getattr(settings, 'futures_enabled', False):
         try:
             _fc = _get_futures_client(settings)
+
+            # Auto-fund: when regime is FUTURES_SHORT, ensure futures wallet has enough margin
+            if _regime_mode == "FUTURES_SHORT" and _regime_exe and _regime_exe.confirmed:
+                _f_usdt_per_trade = getattr(settings, 'futures_usdt_per_trade', 20.0)
+                _f_max_shorts     = getattr(settings, 'futures_max_shorts', 2)
+                _f_required       = _f_usdt_per_trade * _f_max_shorts
+                _funded = _fc.check_and_fund(
+                    required_usdt  = _f_required,
+                    spot_api_key   = settings.binance_api_key,
+                    spot_api_secret= settings.binance_api_secret,
+                )
+                if not _funded:
+                    print(f"[Futures] WARNING: could not fund futures wallet (need ${_f_required:.2f}) — shorts will be skipped")
+
             # A3: Auto-close ALL shorts if regime switched OUT of bear modes
-            # Prevents accumulating losses during market recovery
-            try:
-                from market_regime import get_regime as _gr_check
-                _current_r = _gr_check(client, settings=settings)
-                _current_mode = _current_r.mode if _current_r else "SPOT_BULL"
-                _open_shorts = list(_fc._open_positions.keys())
-                if _open_shorts and _current_mode not in ("PRESERVATION", "FUTURES_SHORT"):
-                    print(f"[Futures] Regime changed to {_current_mode} — closing ALL {len(_open_shorts)} shorts")
-                    for _sym in _open_shorts:
-                        try:
-                            _pos = _fc._open_positions[_sym]
-                            _result = _fc.close_short(_sym, _pos.qty, reason="regime_change")
-                            futures_closes.append({"symbol": _sym, "reason": "regime_change", "result": _result})
-                            print(f"[Futures] Closed short {_sym} due to regime change → {_current_mode}")
-                        except Exception as _ce:
-                            print(f"[Futures] Failed to close {_sym} on regime change: {_ce}")
-            except Exception as _rce:
-                print(f"[Futures] Regime change check failed: {_rce}")
+            _open_shorts = list(_fc._open_positions.keys())
+            if _open_shorts and _regime_mode not in ("PRESERVATION", "FUTURES_SHORT"):
+                print(f"[Futures] Regime is {_regime_mode} — closing ALL {len(_open_shorts)} shorts")
+                for _sym in _open_shorts:
+                    try:
+                        _pos = _fc._open_positions[_sym]
+                        _result = _fc.close_short(_sym, _pos.qty, reason="regime_change")
+                        futures_closes.append({"symbol": _sym, "reason": "regime_change", "result": _result})
+                        print(f"[Futures] Closed short {_sym} due to regime change → {_regime_mode}")
+                    except Exception as _ce:
+                        print(f"[Futures] Failed to close {_sym} on regime change: {_ce}")
+
             # Normal SL/TP cycle check
             _cycle_closes = _fc.check_positions()
             if _cycle_closes:

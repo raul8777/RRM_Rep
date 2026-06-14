@@ -202,6 +202,66 @@ class FuturesClient:
             pass
         return 0.0
 
+    def transfer_to_futures(self, amount: float, spot_api_key: str = None, spot_api_secret: str = None) -> bool:
+        """
+        Transfer USDT from Spot wallet to Futures wallet.
+        Uses /sapi/v1/futures/transfer (type=1 = SPOT→USDT-M Futures).
+        Requires 'Universal Transfer' permission on the API key.
+        Returns True on success.
+        """
+        _key    = spot_api_key    or self.api_key
+        _secret = spot_api_secret or self.api_secret
+        if self.dry_run:
+            print(f"[Futures DRY] Transfer ${amount:.2f} USDT spot→futures")
+            return True
+        try:
+            params = {
+                "asset":     "USDT",
+                "amount":    str(round(amount, 4)),
+                "type":      "1",           # 1 = SPOT → USDT-M Futures
+                "timestamp": int(time.time() * 1000),
+            }
+            query = urllib.parse.urlencode(params)
+            sig   = hmac.new(_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+            url   = f"https://api.binance.com/sapi/v1/futures/transfer?{query}&signature={sig}"
+            req   = urllib.request.Request(
+                url, data=b"", method="POST",
+                headers={"X-MBX-APIKEY": _key, "Content-Type": "application/x-www-form-urlencoded"}
+            )
+            with urllib.request.urlopen(req, timeout=8) as r:
+                result = json.loads(r.read())
+            if result.get("tranId"):
+                print(f"[Futures] Transferred ${amount:.2f} USDT spot→futures (tranId={result['tranId']})")
+                return True
+            print(f"[Futures] Transfer failed: {result}")
+            return False
+        except Exception as e:
+            print(f"[Futures] transfer_to_futures error: {e}")
+            return False
+
+    def check_and_fund(self, required_usdt: float, spot_api_key: str = None, spot_api_secret: str = None) -> bool:
+        """
+        Check futures balance and auto-transfer from spot if needed.
+        Only transfers if futures balance < required_usdt.
+        Returns True if futures wallet has sufficient funds after check.
+        """
+        available = self.get_available_usdt()
+        if available >= required_usdt:
+            print(f"[Futures] Wallet funded: ${available:.2f} USDT available (need ${required_usdt:.2f})")
+            return True
+        shortfall = required_usdt - available
+        # Transfer a bit more to allow multiple positions (2× required)
+        transfer_amount = round(required_usdt * 2, 2)
+        print(f"[Futures] Insufficient balance: ${available:.2f} < ${required_usdt:.2f} — transferring ${transfer_amount:.2f} from spot")
+        ok = self.transfer_to_futures(transfer_amount, spot_api_key, spot_api_secret)
+        if ok:
+            # Small delay for balance to reflect
+            time.sleep(1.5)
+            new_balance = self.get_available_usdt()
+            print(f"[Futures] Post-transfer balance: ${new_balance:.2f} USDT")
+            return new_balance >= required_usdt
+        return False
+
     # ── Leverage management ───────────────────────────────────────────────────
 
     def set_leverage(self, symbol: str, leverage: int = LEVERAGE_MAX) -> bool:
