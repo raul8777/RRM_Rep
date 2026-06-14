@@ -104,6 +104,43 @@ class Settings(BaseSettings):
         'FETUSDT', 'TAOUSDT', 'RENDERUSDT', 'NEARUSDT', 'WLDUSDT',
         'AGIXUSDT', 'OCEANUSDT',
     ], env="NARRATIVE_TOKENS")
+
+    # ── Token classification 2D ───────────────────────────────────────────────
+    # Dimension A: market_behavior (cómo se mueve)
+    # Dimension B: origin (por qué existe)
+    token_categories: dict = Field(default={
+        "BTCUSDT":    {"market_behavior": "LARGE_CAP",   "origin": "STORE_OF_VALUE"},
+        "ETHUSDT":    {"market_behavior": "LARGE_CAP",   "origin": "INFRASTRUCTURE"},
+        "BNBUSDT":    {"market_behavior": "LARGE_CAP",   "origin": "INFRASTRUCTURE"},
+        "SOLUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},
+        "AVAXUSDT":   {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},
+        "DOTUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},
+        "LINKUSDT":   {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},
+        "SUIUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},
+        "ADAUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},
+        "XRPUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},
+        "FETUSDT":    {"market_behavior": "NARRATIVE",   "origin": "AI_DATA"},
+        "TAOUSDT":    {"market_behavior": "NARRATIVE",   "origin": "AI_DATA"},
+        "RENDERUSDT": {"market_behavior": "NARRATIVE",   "origin": "AI_DATA"},
+        "NEARUSDT":   {"market_behavior": "NARRATIVE",   "origin": "AI_DATA"},
+        "WLDUSDT":    {"market_behavior": "NARRATIVE",   "origin": "AI_DATA"},
+        "AGIXUSDT":   {"market_behavior": "NARRATIVE",   "origin": "AI_DATA"},
+        "OCEANUSDT":  {"market_behavior": "NARRATIVE",   "origin": "AI_DATA"},
+        "DOGEUSDT":   {"market_behavior": "MEME",        "origin": "MEME_POLITICAL"},
+        "PEPEUSDT":   {"market_behavior": "MEME",        "origin": "MEME_POLITICAL"},
+        "WIFUSDT":    {"market_behavior": "MEME",        "origin": "MEME_POLITICAL"},
+    }, env="TOKEN_CATEGORIES")
+
+    # Win-rate thresholds per market_behavior category
+    # min_prob: mínima probabilidad de éxito requerida
+    # min_pnl:  mínimo PnL esperado (USDT) — negativo permitido para NARRATIVE
+    # min_volspike: VolSpike mínimo para confirmar señal (informativo, no enforcement aquí)
+    category_thresholds: dict = Field(default={
+        "LARGE_CAP":  {"min_prob": 0.55, "min_pnl": 0.10, "min_volspike": 1.2},
+        "MIDCAP_ALT": {"min_prob": 0.50, "min_pnl": 0.00, "min_volspike": 1.5},
+        "NARRATIVE":  {"min_prob": 0.42, "min_pnl": -5.0, "min_volspike": 1.5},
+        "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5},
+    }, env="CATEGORY_THRESHOLDS")
     
     # Binance commission configuration
     binance_commission_rate: float = Field(default=0.001, env="BINANCE_COMMISSION_RATE")  # 0.1% default

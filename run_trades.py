@@ -396,7 +396,7 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
     return final
 
 
-def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: List, portfolio_manager=None, position_manager=None, precomputed_predictions: Dict = None) -> List[Dict]:
+def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: List, portfolio_manager=None, position_manager=None, precomputed_predictions: Dict = None, news_client=None) -> List[Dict]:
     # Accept either plain symbol strings or dicts with metadata (for aggressive mode)
     if top_signals_with_meta and isinstance(top_signals_with_meta[0], dict):
         top_symbols = [s['symbol'] for s in top_signals_with_meta]
@@ -489,7 +489,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             prediction, formatted_indicators = pnl_service.predict_for_symbol(
                 symbol, client, settings, allocation
             )
-        is_valid, reason = pnl_service.validate(prediction, settings)
+        is_valid, reason = pnl_service.validate(prediction, settings, symbol=symbol, news_client=news_client)
         if not is_valid:
             ep = prediction.get('expected_pnl', 0) if prediction else 0
             sp = prediction.get('success_probability', 0) if prediction else 0
@@ -520,8 +520,24 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         _min_spike = getattr(settings, 'volspike_override_min_spike', 1.5)
                         _max_rsi   = getattr(settings, 'volspike_override_max_rsi', 65.0)
                         _need_trend = getattr(settings, 'volspike_override_trend_required', True)
+                        # ── Funding Rate filter ────────────────────────────────
+                        _funding_ok = True
+                        try:
+                            _fr_url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={symbol}&limit=1"
+                            import urllib.request as _ureq
+                            with _ureq.urlopen(_fr_url, timeout=4) as _fr_resp:
+                                _fr_data = __import__('json').loads(_fr_resp.read())
+                            if _fr_data:
+                                _fr_val = float(_fr_data[0].get('fundingRate', 0))
+                                if _fr_val > 0.0005:  # > 0.05% = longs muy apalancados → peligro
+                                    _funding_ok = False
+                                    print(f"VolSpike OVERRIDE {symbol}: funding rate={_fr_val:.4%} > 0.05% — skip (overleveraged longs)")
+                                else:
+                                    print(f"VolSpike OVERRIDE {symbol}: funding rate={_fr_val:.4%} ✓")
+                        except Exception:
+                            pass  # no futures pair or API error → allow entry
                         if (_spike >= _min_spike and _rsi < _max_rsi
-                                and (not _need_trend or _trend_up)):
+                                and (not _need_trend or _trend_up) and _funding_ok):
                             # Check cooldown — no re-entry within 4h of last override
                             _last = _VOLSPIKE_COOLDOWN.get(symbol)
                             from datetime import datetime as _dt
@@ -556,6 +572,15 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 continue
         if prediction and is_valid:
             print(f"Prediction OK for {symbol}: {prediction['expected_pnl']:.2f} USDT, prob={prediction['success_probability']:.2f}")
+
+        # ── CoinGecko Trending boost ────────────────────────────────────
+        if news_client:
+            try:
+                if news_client.is_trending(symbol):
+                    strength = min(1.0, strength + 0.15)
+                    print(f"CoinGecko Trending BOOST {symbol}: strength → {strength:.2f}")
+            except Exception:
+                pass
 
         # ── Kelly dynamic position sizing ───────────────────────────────
         sl_pct = getattr(settings, 'stop_loss_pct', 1.5) / 100.0
@@ -766,6 +791,17 @@ def execute_once():
 
     print(f"DRY_RUN={settings.dry_run}  ALLOW_REAL_TRADING={settings.allow_real_trading}  MAX_PER_TRADE_USDT={settings.max_per_trade_usdt}")
 
+    # ── Log Fear & Greed state ──────────────────────────────────────────────
+    try:
+        _fng = news_client.get_fear_greed()
+        _fng_mod = news_client.get_fear_greed_modifier()
+        print(f"Fear & Greed Index: {_fng.get('value')} ({_fng.get('label')}) → prob_modifier={_fng_mod:+.2f}")
+        _trending = news_client.get_trending_symbols()
+        if _trending:
+            print(f"CoinGecko Trending: {_trending}")
+    except Exception as _fng_err:
+        print(f"F&G/Trending check skipped: {_fng_err}")
+
     if not settings.binance_use_testnet and not settings.allow_real_trading:
         print("Real trading is disabled. Skipping execute_once.")
         return {"top_symbols": [], "sell_orders": [], "buy_orders": []}
@@ -806,7 +842,7 @@ def execute_once():
         print("Balances after sells:", balances)
 
     # ── Step 5: Buy top symbols — pass full signal dicts for aggressive mode ───
-    buy_orders = _buy_top_symbols(client, settings, top_signals, portfolio_manager, position_manager, precomputed_predictions=predictions)
+    buy_orders = _buy_top_symbols(client, settings, top_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client)
 
     print("Completed cycle.")
     return {"top_symbols": top_symbols, "sell_orders": sell_orders,

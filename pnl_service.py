@@ -72,9 +72,11 @@ def predict_for_symbol(
         return None, None
 
 
-def validate(prediction: Dict, settings) -> Tuple[bool, str]:
+def validate(prediction: Dict, settings, symbol: str = None,
+             news_client=None) -> Tuple[bool, str]:
     """
     Validate a prediction dict against the thresholds defined in settings.
+    Applies Fear & Greed modifier and per-category thresholds when available.
 
     Returns:
         (is_valid, reason_string)
@@ -86,12 +88,39 @@ def validate(prediction: Dict, settings) -> Tuple[bool, str]:
     if prediction.get("bootstrap_mode"):
         return True, "bootstrap mode – thresholds relaxed until trade history builds"
     predictor = get_predictor()
-    min_pnl = getattr(settings, "min_expected_pnl", 0.0)
+    min_pnl  = getattr(settings, "min_expected_pnl", 0.0)
     min_prob = getattr(settings, "min_success_probability", 0.5)
     max_risk = getattr(settings, "max_risk_percentage", 10.0)
+
+    # ── Per-category thresholds ────────────────────────────────────────────────
+    if symbol:
+        categories      = getattr(settings, "token_categories", {})
+        thresholds_map  = getattr(settings, "category_thresholds", {})
+        cat = categories.get(symbol, {}).get("market_behavior", "MIDCAP_ALT")
+        cat_th = thresholds_map.get(cat, {})
+        if cat_th:
+            min_prob = cat_th.get("min_prob", min_prob)
+            min_pnl  = cat_th.get("min_pnl",  min_pnl)
+
+    # ── Fear & Greed modifier ─────────────────────────────────────────────────
+    fng_modifier = 0.0
+    fng_label    = "Neutral"
+    if news_client is not None:
+        try:
+            fng_modifier = news_client.get_fear_greed_modifier()
+            fng_label    = news_client.get_fear_greed().get("label", "Neutral")
+        except Exception:
+            pass
+    effective_min_prob = min_prob + fng_modifier
+    if fng_modifier != 0.0:
+        logger.debug(
+            f"validate {symbol}: F&G={fng_label} → min_prob {min_prob:.2f}"
+            f" → {effective_min_prob:.2f} (delta={fng_modifier:+.2f})"
+        )
+
     return predictor.validate_prediction(
         prediction,
         min_expected_pnl=min_pnl,
-        min_success_probability=min_prob,
+        min_success_probability=effective_min_prob,
         max_risk_percentage=max_risk,
     )
