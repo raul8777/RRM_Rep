@@ -488,10 +488,24 @@ class PortfolioManager:
         
         # Close positions in Position Manager if available
         if symbols_to_close and self.position_manager:
+            _settings = getattr(self, 'settings', None)
+            _protect = getattr(_settings, 'protect_profitable_positions', True) if _settings else True
+            _min_pct = getattr(_settings, 'protect_profit_min_pct', 2.5) if _settings else 2.5
             for symbol in symbols_to_close:
                 try:
                     # Get current price for closing
                     price = self.binance_client.get_symbol_price(symbol)
+                    # Protect profitable positions from premature rebalancing
+                    if _protect:
+                        pos_list = self.position_manager.get_all_positions().get(symbol, [])
+                        is_protected = any(
+                            float(p.entry_price) > 0 and
+                            (price - float(p.entry_price)) / float(p.entry_price) * 100 >= _min_pct
+                            for p in pos_list
+                        )
+                        if is_protected:
+                            logger.info(f"Protecting profitable position {symbol} from rebalancing (>={_min_pct}% gain)")
+                            continue
                     self.position_manager.close_position(symbol, price, "portfolio_rebalancing")
                 except Exception as e:
                     logger.error(f"Failed to close position {symbol} in Position Manager: {e}")

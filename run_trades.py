@@ -21,6 +21,11 @@ _INVALID_SYMBOLS: set = {"EONUSDT", "ADDUSDT", "MEETONEUSDT", "ATDUSDT", "EOPUSD
 _VOLSPIKE_COOLDOWN: Dict[str, datetime] = {}
 _VOLSPIKE_COOLDOWN_HOURS = 4.0
 
+# NARRATIVE token buy cooldown: prevent buying the same symbol multiple times
+# within a single block of cycles (prevents 3 FET entries in 10 minutes)
+_NARRATIVE_BUY_COOLDOWN: Dict[str, datetime] = {}
+_NARRATIVE_BUY_COOLDOWN_HOURS = 4.0
+
 
 def _get_news_scores(symbols: List[str], news_client: NewsClient, settings) -> Dict[str, float]:
     if not symbols:
@@ -189,14 +194,16 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
     if not position_manager:
         return closed
 
-    sl_pct = getattr(settings, 'stop_loss_pct', 1.5) / 100.0
-    tp_pct = getattr(settings, 'take_profit_pct', 2.5) / 100.0
+    _global_sl_pct = getattr(settings, 'stop_loss_pct', 1.5)
+    _global_tp_pct = getattr(settings, 'take_profit_pct', 2.5)
     trailing_enabled = getattr(settings, 'trailing_stop_enabled', True)
-    trail_activate = getattr(settings, 'trailing_stop_activation_pct', 2.0) / 100.0
-    trail_dist = getattr(settings, 'trailing_stop_distance_pct', 1.0) / 100.0
+    _global_trail_act = getattr(settings, 'trailing_stop_activation_pct', 2.0)
+    _global_trail_dist = getattr(settings, 'trailing_stop_distance_pct', 1.0)
     commission_rate = getattr(settings, 'binance_commission_rate', 0.001)
     if getattr(settings, 'use_bnb_for_commission', False):
         commission_rate = 0.0005
+    _token_categories = getattr(settings, 'token_categories', {})
+    _cat_thresholds = getattr(settings, 'category_thresholds', {})
 
     try:
         all_positions = position_manager.get_all_positions()
@@ -205,6 +212,14 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
         return closed
 
     for symbol, pos_list in all_positions.items():
+        # ── Per-category SL/TP/trailing thresholds ────────────────────────
+        _cat_beh = _token_categories.get(symbol, {}).get('market_behavior', 'MIDCAP_ALT')
+        _cat_th = _cat_thresholds.get(_cat_beh, {})
+        sl_pct = _cat_th.get('stop_loss_pct', _global_sl_pct) / 100.0
+        tp_pct = _cat_th.get('take_profit_pct', _global_tp_pct) / 100.0
+        trail_activate = _cat_th.get('trailing_activation_pct', _global_trail_act) / 100.0
+        trail_dist = _cat_th.get('trailing_distance_pct', _global_trail_dist) / 100.0
+
         for pos in pos_list:
             try:
                 current_price = client.get_symbol_price(symbol)
@@ -478,6 +493,18 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             update_signal_decision(symbol, "rejected", "ERROR_PRECIO")
             continue
 
+        # ── NARRATIVE token buy cooldown ─────────────────────────────────
+        narrative_set = set(getattr(settings, 'narrative_tokens', []))
+        if symbol in narrative_set:
+            from datetime import datetime as _dt2
+            _last_buy = _NARRATIVE_BUY_COOLDOWN.get(symbol)
+            if _last_buy:
+                _h_since = (_dt2.now(timezone.utc) - _last_buy).total_seconds() / 3600
+                if _h_since < _NARRATIVE_BUY_COOLDOWN_HOURS:
+                    print(f"Skipping buy {symbol}: NARRATIVE cooldown active ({_h_since:.1f}h < {_NARRATIVE_BUY_COOLDOWN_HOURS}h)")
+                    update_signal_decision(symbol, "rejected", "NARRATIVE_CD")
+                    continue
+
         # ── Signal metadata ───────────────────────────────────────────────
         meta = signal_meta.get(symbol, {})
         strength = float(meta.get('strength', 0.0))
@@ -608,6 +635,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             continue
 
         try:
+            # Register NARRATIVE cooldown BEFORE placing order to prevent race condition
+            if symbol in narrative_set:
+                from datetime import datetime as _dt3
+                _NARRATIVE_BUY_COOLDOWN[symbol] = _dt3.now(timezone.utc)
+
             order = client.create_market_order(symbol=symbol, side="BUY", quantity=qty)
             orders.append({"symbol": symbol, "side": "BUY", "quantity": qty, "order": order})
             print(f"Bought {qty} {symbol}")

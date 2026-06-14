@@ -250,6 +250,10 @@ class PnLPredictor:
         # Longer cycles = more potential movement
         time_factor = np.sqrt(cycle_duration_minutes / 60)  # Square root of hours
         adjusted_volatility = volatility * time_factor
+
+        # Cap adjusted volatility to realistic intraday range (max 5% per 4h horizon)
+        # This prevents the price_range from inflating PnL estimates unrealistically
+        adjusted_volatility = min(adjusted_volatility, 0.05)
         
         # Estimate price range
         min_price = current_price * (1 - adjusted_volatility)

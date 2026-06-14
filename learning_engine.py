@@ -13,7 +13,7 @@ Self-learning loop:
 import json
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -152,14 +152,17 @@ class LearningEngine:
             from init_components import get_components
             pm = get_components().position_manager
             positions = pm.get_closed_positions(limit=500)
-            cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
             filtered = []
             for p in positions:
                 try:
                     et = p.exit_time
                     if isinstance(et, str):
                         et = datetime.fromisoformat(et.replace("Z", "+00:00"))
-                    if et and et.replace(tzinfo=None) >= cutoff:
+                    if isinstance(et, datetime):
+                        if et.tzinfo is None:
+                            et = et.replace(tzinfo=timezone.utc)
+                    if et and et >= cutoff:
                         filtered.append(p)
                 except Exception:
                     filtered.append(p)

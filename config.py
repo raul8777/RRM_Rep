@@ -136,10 +136,10 @@ class Settings(BaseSettings):
     # min_pnl:  mínimo PnL esperado (USDT) — negativo permitido para NARRATIVE
     # min_volspike: VolSpike mínimo para confirmar señal (informativo, no enforcement aquí)
     category_thresholds: dict = Field(default={
-        "LARGE_CAP":  {"min_prob": 0.55, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 1.5, "take_profit_pct": 2.5},
-        "MIDCAP_ALT": {"min_prob": 0.50, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 1.5, "take_profit_pct": 2.5},
-        "NARRATIVE":  {"min_prob": 0.42, "min_pnl": -5.0, "min_volspike": 1.5, "stop_loss_pct": 2.5, "take_profit_pct": 4.0},
-        "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.0, "take_profit_pct": 3.5},
+        "LARGE_CAP":  {"min_prob": 0.55, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 1.5, "take_profit_pct": 2.5, "trailing_activation_pct": 1.5, "trailing_distance_pct": 1.0},
+        "MIDCAP_ALT": {"min_prob": 0.50, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 1.5, "take_profit_pct": 2.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.2},
+        "NARRATIVE":  {"min_prob": 0.42, "min_pnl": -5.0, "min_volspike": 1.5, "stop_loss_pct": 2.5, "take_profit_pct": 4.0, "trailing_activation_pct": 3.0, "trailing_distance_pct": 1.5},
+        "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.0, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.5},
     }, env="CATEGORY_THRESHOLDS")
     
     # Binance commission configuration

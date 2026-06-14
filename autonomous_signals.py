@@ -179,6 +179,28 @@ class AutonomousSignalGenerator:
             analysis = TechnicalIndicators.analyze_signal(closes, highs, lows, volumes)
             logger.info(f"Analysis result for {symbol}: {analysis['signal']} (strength: {analysis['strength']})")
 
+            # ── RSI divergence detection ──────────────────────────────────────
+            try:
+                from technical_indicators import TechnicalIndicators as _TI
+                _rsi_vals = _TI.rsi(closes, 14)
+                if _rsi_vals and len(_rsi_vals) >= 5 and len(closes) >= 5:
+                    _price_hi = closes[-1] > closes[-5]   # price made higher high in last 5 bars
+                    _rsi_hi   = _rsi_vals[-1] > _rsi_vals[-5]  # RSI also moved higher
+                    _price_lo = closes[-1] < closes[-5]   # price made lower low
+                    _rsi_lo   = _rsi_vals[-1] < _rsi_vals[-5]  # RSI also moved lower
+                    # Bearish divergence: price up but RSI down → weakening momentum
+                    if _price_hi and not _rsi_hi and analysis['signal'] == 'BUY':
+                        analysis['strength'] = max(0.0, analysis['strength'] - 0.08)
+                        analysis['reason'] += ' [-bearish RSI div]'
+                        logger.debug(f"Bearish RSI divergence {symbol}: price↑ RSI↓")
+                    # Bullish divergence: price down but RSI up → potential reversal
+                    elif _price_lo and not _rsi_lo and analysis['signal'] == 'BUY':
+                        analysis['strength'] = min(1.0, analysis['strength'] + 0.05)
+                        analysis['reason'] += ' [+bullish RSI div]'
+                        logger.debug(f"Bullish RSI divergence {symbol}: price↓ RSI↑")
+            except Exception:
+                pass
+
             # ── Multi-timeframe filter ────────────────────────────────────────
             higher_trend = 'FLAT'
             if use_multi_timeframe:
@@ -227,6 +249,43 @@ class AutonomousSignalGenerator:
                         analysis['reason'] += ' [EMA200 DOWN -15%]'
             except Exception:
                 pass
+
+            # ── Hourly momentum boost (breakout in progress) ─────────────────
+            if analysis['signal'] == 'BUY' and len(klines) >= 2:
+                try:
+                    last_candle = klines[-1]
+                    prev_close  = klines[-2]['close']
+                    last_chg    = (last_candle['close'] - prev_close) / prev_close if prev_close > 0 else 0
+                    avg_vol20   = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else None
+                    vol_ratio   = last_candle['volume'] / avg_vol20 if avg_vol20 and avg_vol20 > 0 else 0
+                    if last_chg >= 0.015 and vol_ratio >= 1.2:
+                        analysis['strength'] = min(1.0, analysis['strength'] + 0.05)
+                        analysis['reason'] += f' [+momentum {last_chg*100:.1f}% vol={vol_ratio:.1f}x]'
+                        logger.info(f"Momentum BOOST {symbol}: candle={last_chg*100:.2f}%, vol={vol_ratio:.1f}x")
+                except Exception:
+                    pass
+
+            # ── Time-of-day filter for NARRATIVE tokens ───────────────────────
+            if analysis['signal'] == 'BUY':
+                try:
+                    from datetime import datetime as _dtnow, timezone as _tz
+                    _hour_utc = _dtnow.now(_tz.utc).hour
+                    _narrative_syms = set()
+                    try:
+                        from config import Settings as _S
+                        _narrative_syms = set(_S.__fields__['narrative_tokens'].default)
+                    except Exception:
+                        _narrative_syms = {'FETUSDT','TAOUSDT','RENDERUSDT','NEARUSDT','WLDUSDT','AGIXUSDT','OCEANUSDT'}
+                    if symbol in _narrative_syms:
+                        _avg_vol = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else None
+                        _last_vol = volumes[-1] if volumes else 0
+                        _vs = (_last_vol / _avg_vol) if _avg_vol and _avg_vol > 0 else 0
+                        if 0 <= _hour_utc < 8 and _vs < 1.2:
+                            analysis['strength'] = max(0.0, analysis['strength'] * 0.85)
+                            analysis['reason'] += f' [-low-vol night {_hour_utc:02d}h UTC ×0.85]'
+                            logger.debug(f"Time-of-day penalty {symbol}: UTC hour={_hour_utc}, vol_spike={_vs:.2f}")
+                except Exception:
+                    pass
 
             # ── Social trending boost (Fase 2 — activa solo con CRYPTOCOMPARE_ENABLED) ──
             if news_client and analysis['signal'] == 'BUY':
