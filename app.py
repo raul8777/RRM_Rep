@@ -672,12 +672,22 @@ def _get_market_regime() -> Dict:
         day_chg = (cur_p - open_p) / open_p * 100 if open_p else 0.0
 
         # Volume ratio: last 1h vs avg of previous 23h
-        klines = bc.client.get_klines(symbol="BTCUSDT", interval="1h", limit=25)
-        vols = [float(k[5]) for k in klines]
+        klines_1h = bc.client.get_klines(symbol="BTCUSDT", interval="1h", limit=25)
+        vols = [float(k[5]) for k in klines_1h]
         avg_vol = sum(vols[:-1]) / len(vols[:-1]) if len(vols) > 1 else 1
         vol_ratio = vols[-1] / avg_vol if avg_vol > 0 else 1.0
 
-        # Classify
+        # BTC 7-day change %
+        try:
+            klines_7d = bc.client.get_klines(symbol="BTCUSDT", interval="1d", limit=8)
+            btc_7d_chg = (float(klines_7d[-1]["close"] if isinstance(klines_7d[-1], dict) else klines_7d[-1][4])
+                          - float(klines_7d[-7]["open"] if isinstance(klines_7d[-7], dict) else klines_7d[-7][1])) \
+                         / float(klines_7d[-7]["open"] if isinstance(klines_7d[-7], dict) else klines_7d[-7][1]) * 100 \
+                         if len(klines_7d) >= 7 else 0.0
+        except Exception:
+            btc_7d_chg = 0.0
+
+        # Classify regime
         if btc_trend == "UP" and day_chg > 0.8 and vol_ratio >= 0.8:
             regime, color = "ALCISTA", "#4ecca3"
         elif btc_trend == "DOWN" and day_chg < -0.8:
@@ -691,15 +701,52 @@ def _get_market_regime() -> Dict:
         else:
             regime, color = "LATERAL", "#f39c12"
 
+        # Derive trading mode from regime + 7d change
+        if regime in ("ALCISTA", "DÉBIL ALZA"):
+            trading_mode = "SPOT_BULL"
+            mode_color = "#4ecca3"
+            mode_reason = f"BTC tendencia UP, día {day_chg:+.1f}%"
+            mode_desc = "Compras en breakout con Kelly dinámico. Trailing stop activo. Scale-out en TP."
+        elif regime == "LATERAL":
+            trading_mode = "RANGE_SCALP"
+            mode_color = "#f39c12"
+            mode_reason = f"Mercado lateral, vol {vol_ratio:.1f}x, día {day_chg:+.1f}%"
+            mode_desc = "Compras en soporte BB inferior (RSI<35), venta en BB superior (RSI>65). TP ajustado 1.5%."
+        elif btc_7d_chg <= -10:
+            trading_mode = "PRESERVATION"
+            mode_color = "#e74c3c"
+            mode_reason = f"Bear market: BTC 7d={btc_7d_chg:+.1f}%"
+            mode_desc = "Capital 80%+ en USDT. Solo NARRATIVE con VolSpike≥2x. Kelly×0.5. Sin futuros habilitados."
+        elif regime in ("BAJISTA", "DÉBIL BAJA"):
+            trading_mode = "PRESERVATION"
+            mode_color = "#e67e22"
+            mode_reason = f"BTC bajista, día {day_chg:+.1f}%, 7d={btc_7d_chg:+.1f}%"
+            mode_desc = "Modo defensivo. Entradas solo con señal FUERTE (strength>0.85). Kelly reducido 50%."
+        else:
+            trading_mode = "SPOT_BULL"
+            mode_color = "#4ecca3"
+            mode_reason = f"Sin régimen claro definido, día {day_chg:+.1f}%"
+            mode_desc = "Operando con parámetros estándar. Monitoreo activo de régimen."
+
         result = {
             "regime": regime,
             "color": color,
             "btc_trend": btc_trend,
             "day_change_pct": round(day_chg, 2),
             "vol_ratio": round(vol_ratio, 2),
+            "btc_7d_change_pct": round(btc_7d_chg, 2),
+            "trading_mode": trading_mode,
+            "mode_color": mode_color,
+            "mode_reason": mode_reason,
+            "mode_desc": mode_desc,
         }
     except Exception as e:
-        result = {"regime": "?", "color": "#888", "btc_trend": "?", "day_change_pct": 0.0, "vol_ratio": 0.0}
+        result = {
+            "regime": "?", "color": "#888", "btc_trend": "?",
+            "day_change_pct": 0.0, "vol_ratio": 0.0, "btc_7d_change_pct": 0.0,
+            "trading_mode": "SPOT_BULL", "mode_color": "#888",
+            "mode_reason": "Error al detectar régimen", "mode_desc": "",
+        }
 
     _regime_cache["data"] = result
     _regime_cache["ts"] = now
@@ -1026,6 +1073,32 @@ async def get_dashboard_summary() -> Dict:
         result["daily_ticker"] = ticker_data
     except Exception as e:
         result["daily_ticker"] = []
+
+    # Monte Carlo projection (static results from last backtest_90d.py run — 2026-06-14)
+    result["monte_carlo_projection"] = {
+        "generated_at": "2026-06-14",
+        "initial_capital": 346.13,
+        "months": 6,
+        "trades_per_month": 11,
+        "win_rate_current": 51.5,
+        "win_rate_improved": 53.5,
+        "monthly_breakdown": [
+            {"month": 1, "capital_pre": 345.71, "pnl_pre": -0.42, "capital_post": 347.73, "pnl_post": 1.60},
+            {"month": 2, "capital_pre": 345.29, "pnl_pre": -0.42, "capital_post": 349.29, "pnl_post": 1.56},
+            {"month": 3, "capital_pre": 344.91, "pnl_pre": -0.38, "capital_post": 350.90, "pnl_post": 1.61},
+            {"month": 4, "capital_pre": 344.49, "pnl_pre": -0.42, "capital_post": 352.56, "pnl_post": 1.65},
+            {"month": 5, "capital_pre": 344.07, "pnl_pre": -0.41, "capital_post": 354.14, "pnl_post": 1.58},
+            {"month": 6, "capital_pre": 343.73, "pnl_pre": -0.34, "capital_post": 355.74, "pnl_post": 1.60},
+        ],
+        "total_pnl_pre": -2.40,
+        "total_pnl_post": 9.61,
+        "p5_pre": 334.76,
+        "p95_pre": 352.82,
+        "p5_post": 347.53,
+        "p95_post": 364.43,
+        "btc_hodl_180d_pct": -29.3,
+        "btc_hodl_final": 244.80,
+    }
 
     result["timestamp"] = to_mexico_time(datetime.utcnow()).isoformat()
     return result

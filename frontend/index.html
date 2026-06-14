@@ -4,13 +4,18 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Trading Agent Dashboard</title>
-    <link rel="stylesheet" href="/frontend/styles.css?v=10">
+    <link rel="stylesheet" href="/frontend/styles.css?v=11">
 </head>
 <body>
     <div class="container">
         <header>
             <h1>Crypto Trading Agent Dashboard</h1>
             <div style="display:flex;align-items:center;gap:16px">
+                <div class="trading-mode-badge" id="tradingModeBadge" title="">
+                    <span class="mode-dot" id="tradingModeDot"></span>
+                    <span class="mode-label">Modo</span>
+                    <span class="mode-text" id="tradingModeText">...</span>
+                </div>
                 <div class="market-regime-badge" id="marketRegime" title="">
                     <span class="regime-dot" id="marketRegimeDot"></span>
                     <span class="regime-label" id="marketRegimeLabel">Mercado</span>
@@ -106,6 +111,14 @@
                 </div>
             </div>
 
+            <!-- Modo de Trading Activo Card -->
+            <div class="card card-wide">
+                <h2>⚙️ Modo de Trading Activo</h2>
+                <div id="tradingModeData">
+                    <p class="loading">Detectando régimen...</p>
+                </div>
+            </div>
+
             <!-- Contexto de Mercado Card -->
             <div class="card card-wide">
                 <h2>🌡️ Contexto de Mercado</h2>
@@ -131,6 +144,14 @@
                 <h2>Estrategia Activa</h2>
                 <div id="strategyData">
                     <p class="loading">Cargando estrategia...</p>
+                </div>
+            </div>
+
+            <!-- Monte Carlo Proyección Card -->
+            <div class="card card-full">
+                <h2>📊 Proyección Monte Carlo — 180 días</h2>
+                <div id="monteCarloData">
+                    <p class="loading">Cargando proyección...</p>
                 </div>
             </div>
 
@@ -186,6 +207,6 @@
         </div>
     </div>
 
-    <script src="/frontend/dashboard.js?v=12"></script>
+    <script src="/frontend/dashboard.js?v=13"></script>
 </body>
 </html>

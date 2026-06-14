@@ -697,6 +697,186 @@ function renderMarketContext(ctx) {
     `;
 }
 
+// ── Trading Mode Badge (header) ─────────────────────────────────────────────────
+const MODE_CFG = {
+    'SPOT_BULL':    { icon: '📈', label: 'SPOT BULL',   color: '#4ecca3' },
+    'RANGE_SCALP':  { icon: '↔️',  label: 'LATERAL',    color: '#f39c12' },
+    'PRESERVATION': { icon: '🛡',  label: 'PRESERVAR',  color: '#e74c3c' },
+    'FUTURES_SHORT':{ icon: '📉',  label: 'SHORT 2×',   color: '#9b59b6' },
+};
+
+function renderTradingModeBadge(r) {
+    const dot  = document.getElementById('tradingModeDot');
+    const text = document.getElementById('tradingModeText');
+    const badge = document.getElementById('tradingModeBadge');
+    if (!r || !dot || !text) return;
+    const mode = r.trading_mode || 'SPOT_BULL';
+    const cfg  = MODE_CFG[mode] || MODE_CFG['SPOT_BULL'];
+    dot.style.background  = cfg.color;
+    dot.style.boxShadow   = `0 0 6px ${cfg.color}80`;
+    text.textContent      = `${cfg.icon} ${cfg.label}`;
+    text.style.color      = cfg.color;
+    badge.title           = r.mode_reason || '';
+}
+
+// ── Trading Mode Card ─────────────────────────────────────────────────────────────
+function renderTradingModeCard(r) {
+    const el = document.getElementById('tradingModeData');
+    if (!el || !r) return;
+    const mode    = r.trading_mode || 'SPOT_BULL';
+    const cfg     = MODE_CFG[mode] || MODE_CFG['SPOT_BULL'];
+    const chg7    = r.btc_7d_change_pct != null ? r.btc_7d_change_pct : 0;
+    const chgDay  = r.day_change_pct    != null ? r.day_change_pct    : 0;
+    const vol     = r.vol_ratio         != null ? r.vol_ratio         : 0;
+    const trend   = r.btc_trend         || '?';
+    const desc    = r.mode_desc         || '';
+
+    const chgCls7   = chg7  >= 0 ? 'up'   : 'down';
+    const chgClsDay = chgDay >= 0 ? 'up'   : 'down';
+    const volCls    = vol   >= 1 ? 'up'   : vol >= 0.6 ? 'flat' : 'down';
+    const trendCls  = trend === 'UP' ? 'up' : trend === 'DOWN' ? 'down' : 'flat';
+
+    const futuresWarn = (mode === 'PRESERVATION')
+        ? `<div class="mode-warn">⚠️ Modo PRESERVATION activo — Futuros SHORT no implementados aún. Operando en modo defensivo spot.</div>`
+        : '';
+
+    el.innerHTML = `
+        <div class="mode-banner" style="background:${cfg.color}15; border-color:${cfg.color}40">
+            <div class="mode-banner-icon">${cfg.icon}</div>
+            <div>
+                <div class="mode-banner-title" style="color:${cfg.color}">${cfg.label}</div>
+                <div class="mode-banner-reason">${r.mode_reason || ''}</div>
+            </div>
+        </div>
+        <div class="mode-indicators">
+            <div class="mode-ind-item">
+                <div class="mode-ind-label">BTC 7 días</div>
+                <div class="mode-ind-val ${chgCls7}">${chg7 >= 0 ? '+' : ''}${chg7.toFixed(1)}%</div>
+            </div>
+            <div class="mode-ind-item">
+                <div class="mode-ind-label">BTC hoy</div>
+                <div class="mode-ind-val ${chgClsDay}">${chgDay >= 0 ? '+' : ''}${chgDay.toFixed(2)}%</div>
+            </div>
+            <div class="mode-ind-item">
+                <div class="mode-ind-label">Vol ratio</div>
+                <div class="mode-ind-val ${volCls}">${vol.toFixed(2)}×</div>
+            </div>
+            <div class="mode-ind-item">
+                <div class="mode-ind-label">Tendencia 4h</div>
+                <div class="mode-ind-val ${trendCls}">${trend === 'UP' ? '⬆ UP' : trend === 'DOWN' ? '⬇ DOWN' : '→ FLAT'}</div>
+            </div>
+        </div>
+        <div class="mode-strategy-box" style="border-left-color:${cfg.color}">
+            <strong>Estrategia activa:</strong> ${desc}
+        </div>
+        ${futuresWarn}
+    `;
+}
+
+// ── Monte Carlo Projection Card ────────────────────────────────────────────────────
+function renderMonteCarlo(mc) {
+    const el = document.getElementById('monteCarloData');
+    if (!el || !mc) return;
+
+    const breakdown = mc.monthly_breakdown || [];
+    const cap0      = mc.initial_capital || 346.13;
+    const btcFinal  = mc.btc_hodl_final  || 0;
+    const btcPct    = mc.btc_hodl_180d_pct != null ? mc.btc_hodl_180d_pct : 0;
+
+    const rows = breakdown.map(m => {
+        const pnlPreCls  = m.pnl_pre  >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
+        const pnlPostCls = m.pnl_post >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
+        const signPre    = m.pnl_pre  >= 0 ? '+' : '';
+        const signPost   = m.pnl_post >= 0 ? '+' : '';
+        return `<tr>
+            <td>Mes ${m.month}</td>
+            <td class="right">${mc.trades_per_month}</td>
+            <td class="right">$${m.capital_pre.toFixed(2)}</td>
+            <td class="right ${pnlPreCls}">${signPre}$${m.pnl_pre.toFixed(2)}</td>
+            <td class="right">$${m.capital_post.toFixed(2)}</td>
+            <td class="right ${pnlPostCls}">${signPost}$${m.pnl_post.toFixed(2)}</td>
+        </tr>`;
+    }).join('');
+
+    const totalPreCls  = mc.total_pnl_pre  >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
+    const totalPostCls = mc.total_pnl_post >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
+    const sPre  = mc.total_pnl_pre  >= 0 ? '+' : '';
+    const sPost = mc.total_pnl_post >= 0 ? '+' : '';
+
+    // Progress bar: improved final vs BTC final vs initial (scale 0=btcFinal, 100=p95_post)
+    const rangeMin = Math.min(btcFinal, cap0 * 0.85);
+    const rangeMax = mc.p95_post || cap0 * 1.10;
+    const rangeDiff = rangeMax - rangeMin;
+    const pctBtc  = rangeDiff > 0 ? ((btcFinal  - rangeMin) / rangeDiff * 100).toFixed(1) : 0;
+    const pctPost = rangeDiff > 0 ? (((mc.total_pnl_post + cap0) - rangeMin) / rangeDiff * 100).toFixed(1) : 50;
+
+    el.innerHTML = `
+        <div class="mc-header">
+            <span class="mc-subtitle">10,000 simulaciones · WR actual: ${mc.win_rate_current}% · WR mejorado: ${mc.win_rate_improved}%</span>
+            <span class="mc-subtitle">Generado: ${mc.generated_at}</span>
+        </div>
+        <div style="overflow-x:auto">
+        <table class="mc-table">
+            <thead><tr>
+                <th>Mes</th>
+                <th class="right">Trades</th>
+                <th class="right">Capital actual</th>
+                <th class="right">PnL mes</th>
+                <th class="right">Capital mejorado</th>
+                <th class="right">PnL mes</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+            <tfoot><tr class="mc-total-row">
+                <td>TOTAL 180d</td>
+                <td class="right">${(mc.trades_per_month || 11) * (mc.months || 6)}</td>
+                <td class="right">$${(cap0 + mc.total_pnl_pre).toFixed(2)}</td>
+                <td class="right ${totalPreCls}">${sPre}$${mc.total_pnl_pre.toFixed(2)}</td>
+                <td class="right">$${(cap0 + mc.total_pnl_post).toFixed(2)}</td>
+                <td class="right ${totalPostCls}">${sPost}$${mc.total_pnl_post.toFixed(2)}</td>
+            </tr></tfoot>
+        </table>
+        </div>
+        <div class="mc-summary">
+            <div class="mc-summary-item">
+                <div class="mc-summary-label">Peor caso P5</div>
+                <div class="mc-summary-val" style="color:#e74c3c">$${mc.p5_post.toFixed(2)}</div>
+            </div>
+            <div class="mc-summary-item">
+                <div class="mc-summary-label">Mejor caso P95</div>
+                <div class="mc-summary-val" style="color:#4ecca3">$${mc.p95_post.toFixed(2)}</div>
+            </div>
+            <div class="mc-summary-item">
+                <div class="mc-summary-label">HODL BTC 180d</div>
+                <div class="mc-summary-val" style="color:#e74c3c">$${btcFinal.toFixed(2)} (${btcPct >= 0 ? '+' : ''}${btcPct.toFixed(1)}%)</div>
+            </div>
+            <div class="mc-summary-item">
+                <div class="mc-summary-label">Ventaja vs BTC</div>
+                <div class="mc-summary-val" style="color:#4ecca3">+$${((cap0 + mc.total_pnl_post) - btcFinal).toFixed(2)}</div>
+            </div>
+        </div>
+        <div class="mc-progress-wrap">
+            <div class="mc-progress-label">Comparativa capital final (escala relativa)</div>
+            <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px">
+                <div style="display:flex;align-items:center;gap:10px;font-size:12px">
+                    <span style="width:110px;color:#888">HODL BTC</span>
+                    <div class="mc-progress-bar-bg" style="flex:1">
+                        <div class="mc-progress-bar-fill" style="width:${pctBtc}%;background:#e74c3c"></div>
+                    </div>
+                    <span style="width:60px;text-align:right;color:#e74c3c">$${btcFinal.toFixed(0)}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px;font-size:12px">
+                    <span style="width:110px;color:#888">Sist. mejorado</span>
+                    <div class="mc-progress-bar-bg" style="flex:1">
+                        <div class="mc-progress-bar-fill" style="width:${pctPost}%;background:#4ecca3"></div>
+                    </div>
+                    <span style="width:60px;text-align:right;color:#4ecca3">$${(cap0 + mc.total_pnl_post).toFixed(0)}</span>
+                </div>
+            </div>
+        </div>
+        <div class="mc-note">* Basado en 33 trades reales observados como distribución de referencia. El Monte Carlo no incluye compounding completo (Kelly dinámico → retorno real podría ser mayor).</div>
+    `;
+}
+
 // ── Market Regime Badge ─────────────────────────────────────────────────────────
 function renderMarketRegime(r) {
     const dot  = document.getElementById('marketRegimeDot');
@@ -773,6 +953,9 @@ async function updateDashboard() {
     renderAnalysisSummary(data.performance, data.closed_positions);
     renderLearning(data.learning);
     renderStrategy(data.learning, data.effective_thresholds);
+    renderTradingModeBadge(data.market_regime);
+    renderTradingModeCard(data.market_regime);
+    renderMonteCarlo(data.monte_carlo_projection);
     renderMarketRegime(data.market_regime);
     renderFngBadge(data.market_context);
     renderMarketContext(data.market_context);
