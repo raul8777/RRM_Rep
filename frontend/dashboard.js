@@ -397,7 +397,7 @@ function renderLearning(d) {
 }
 
 // ── Render: Estrategia Activa ──────────────────────────────────────────────────
-function renderStrategy(d) {
+function renderStrategy(d, effectiveThresholds) {
     const el = document.getElementById('strategyData');
     if (!d) { el.innerHTML = '<p class="loading">Sin datos de estrategia</p>'; return; }
     if (d.error) { el.innerHTML = `<p class="loading">${d.error}</p>`; return; }
@@ -405,6 +405,32 @@ function renderStrategy(d) {
     const w = d.active_weights || {};
     const bias = parseFloat(d.bias_correction || 1.0);
     const DEFAULTS = { rsi: 0.15, macd: 0.10, bb: 0.10, ema: 0.10, volume: 0.05 };
+
+    // Effective thresholds section
+    const th = effectiveThresholds || {};
+    const catOrder = ['LARGE_CAP','MIDCAP_ALT','NARRATIVE','MEME'];
+    const thRows = catOrder.filter(c => th[c]).map(c => {
+        const t = th[c];
+        const base  = parseFloat(t.base_prob  || 0);
+        const eff   = parseFloat(t.effective_prob || 0);
+        const delta = parseFloat(t.delta || 0);
+        const deltaCls = delta < 0 ? 't-delta-good' : delta > 0 ? 't-delta-bad' : 't-delta-warn';
+        const deltaStr = delta !== 0 ? `${delta > 0 ? '+' : ''}${(delta*100).toFixed(0)}%` : '—';
+        const effCls   = eff < 0.42 ? 't-eff-aggressive' : eff > 0.55 ? 't-eff-strict' : 't-eff-normal';
+        return `<tr>
+            <td class="threshold-cat">${CAT_ICON[c] || ''} ${CAT_LABEL[c] || c}</td>
+            <td class="threshold-base">${(base*100).toFixed(0)}%</td>
+            <td class="threshold-arrow">→</td>
+            <td class="threshold-eff ${effCls}">${(eff*100).toFixed(0)}%</td>
+            <td class="threshold-delta ${deltaCls}">${deltaStr}</td>
+        </tr>`;
+    }).join('');
+
+    const thSection = thRows ? `
+        <div class="threshold-section">
+            <div class="threshold-title">Umbrales efectivos hoy (con F&amp;G)</div>
+            <table class="threshold-table">${thRows}</table>
+        </div>` : '';
 
     el.innerHTML = `
         <div class="weight-section">
@@ -417,7 +443,8 @@ function renderStrategy(d) {
         <div class="data-item" style="margin-top:8px">
             <span class="data-label">Corrección sesgo</span>
             <span class="data-value ${bias > 1.05 ? 'positive' : bias < 0.95 ? 'negative' : ''}">${bias.toFixed(3)}x</span>
-        </div>`;
+        </div>
+        ${thSection}`;
 }
 
 // ── Render: Backtesting Results ───────────────────────────────────────────────
@@ -709,6 +736,7 @@ function renderTickerBar(items) {
     // Duplicate content for seamless infinite loop
     const html = items.map(buildItem).join('');
     track.innerHTML = html + html;
+    track.style.width = 'max-content';
 }
 
 // ── Main update loop (single fetch per cycle) ─────────────────────────────────
@@ -718,7 +746,6 @@ async function updateDashboard() {
 
     renderSystemStatus(data.system_status);
     renderSignals(data.signals);
-    renderHealth(data.health);
     renderBalance(data.balance);
     renderPnlHistory(data.pnl_history);
     renderOpenPositions(data.open_positions);
