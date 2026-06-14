@@ -154,6 +154,18 @@ class Settings(BaseSettings):
         "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.0, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.5},
     }, env="CATEGORY_THRESHOLDS")
     
+    # ── Futures trading (USDM, fapi.binance.com) ─────────────────────────────
+    futures_enabled: bool = Field(default=False, env="FUTURES_ENABLED")  # must opt-in explicitly
+    futures_leverage: int = Field(default=2, env="FUTURES_LEVERAGE")           # hard max 2x
+    futures_max_shorts: int = Field(default=2, env="FUTURES_MAX_SHORTS")       # max simultaneous shorts
+    futures_usdt_per_trade: float = Field(default=20.0, env="FUTURES_USDT_PER_TRADE")  # margin per short
+    futures_sl_pct: float = Field(default=3.0, env="FUTURES_SL_PCT")           # SL % above entry
+    futures_tp_pct: float = Field(default=5.0, env="FUTURES_TP_PCT")           # TP % below entry
+    futures_min_btc_7d_drop: float = Field(default=-7.0, env="FUTURES_MIN_BTC_7D_DROP")  # only short in bear
+    futures_symbols: list = Field(default=[
+        'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT',
+    ], env="FUTURES_SYMBOLS")   # symbols eligible for shorting
+
     # ── Market Regime adaptive mode ──────────────────────────────────────────
     market_regime_enabled: bool = Field(default=True, env="MARKET_REGIME_ENABLED")
     # RANGE_SCALP mode parameters

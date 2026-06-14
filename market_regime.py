@@ -224,6 +224,13 @@ def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
         max_rsi        = 65.0
         narrative_only = True   # only NARRATIVE tokens allowed
 
+    elif mode == "FUTURES_SHORT":
+        # Active bear market shorting via futures (2x leverage)
+        sl_pct         = 3.0    # 3% above entry → 6% loss on margin at 2x
+        tp_pct         = 5.0    # 5% below entry → 10% gain on margin at 2x
+        kelly_mult     = 0.3    # conservative: use only 30% of normal Kelly for futures margin
+        max_rsi        = 70.0   # enter shorts when RSI not yet extremely oversold
+
     return MarketRegime(
         mode             = mode,
         regime           = raw["regime"],
@@ -246,10 +253,13 @@ def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
     )
 
 
-def get_regime(binance_client, force_refresh: bool = False) -> MarketRegime:
+def get_regime(binance_client, force_refresh: bool = False, settings=None) -> MarketRegime:
     """
     Detect current market regime with anti-whipsaw (2-cycle confirmation).
     Cached for _CACHE_TTL_SECONDS.
+
+    If settings.futures_enabled=True and regime is PRESERVATION,
+    upgrades mode to FUTURES_SHORT (active shorting instead of just preserving).
 
     Returns a MarketRegime with confirmed=True only after 2 consecutive
     cycles detect the same mode. During confirmation, returns current
@@ -295,6 +305,24 @@ def get_regime(binance_client, force_refresh: bool = False) -> MarketRegime:
         _cache["pending_count"] = 1
         confirmed_regime = current_regime if current_regime else _build_regime(raw, confirmed=False)
         print(f"[MarketRegime] Proposed {proposed_mode} (1/{_CONFIRM_CYCLES}) | holding {current_mode} | {raw['reason']}")
+
+    # ── Upgrade PRESERVATION → FUTURES_SHORT when futures enabled ────────────
+    futures_on = settings is not None and getattr(settings, 'futures_enabled', False)
+    if futures_on and confirmed_regime.mode == "PRESERVATION" and confirmed_regime.confirmed:
+        raw_upgraded = dict(
+            mode          = "FUTURES_SHORT",
+            regime        = confirmed_regime.regime,
+            color         = "#9b59b6",
+            btc_7d_pct    = confirmed_regime.btc_7d_pct,
+            btc_30d_pct   = confirmed_regime.btc_30d_pct,
+            btc_day_pct   = confirmed_regime.btc_day_pct,
+            vol_ratio     = confirmed_regime.vol_ratio,
+            bb_bandwidth  = confirmed_regime.bb_bandwidth,
+            ema9_vs_ema21 = confirmed_regime.ema9_vs_ema21,
+            reason        = confirmed_regime.reason + " [FUTURES SHORT activo]",
+        )
+        confirmed_regime = _build_regime(raw_upgraded, confirmed=True)
+        print(f"[MarketRegime] FUTURES_SHORT mode active (futures_enabled=True)")
 
     _cache["regime"] = confirmed_regime
     _cache["ts"]     = now

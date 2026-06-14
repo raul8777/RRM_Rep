@@ -702,6 +702,14 @@ def _get_market_regime() -> Dict:
             regime, color = "LATERAL", "#f39c12"
 
         # Derive trading mode from regime + 7d change
+        # Check if futures are enabled to decide between PRESERVATION and FUTURES_SHORT
+        from init_components import get_components as _get_comp
+        _futures_on = False
+        try:
+            _futures_on = getattr(_get_comp().settings, 'futures_enabled', False)
+        except Exception:
+            pass
+
         if regime in ("ALCISTA", "DÉBIL ALZA"):
             trading_mode = "SPOT_BULL"
             mode_color = "#4ecca3"
@@ -712,16 +720,28 @@ def _get_market_regime() -> Dict:
             mode_color = "#f39c12"
             mode_reason = f"Mercado lateral, vol {vol_ratio:.1f}x, día {day_chg:+.1f}%"
             mode_desc = "Compras en soporte BB inferior (RSI<35), venta en BB superior (RSI>65). TP ajustado 1.5%."
-        elif btc_7d_chg <= -10:
-            trading_mode = "PRESERVATION"
-            mode_color = "#e74c3c"
-            mode_reason = f"Bear market: BTC 7d={btc_7d_chg:+.1f}%"
-            mode_desc = "Capital 80%+ en USDT. Solo NARRATIVE con VolSpike≥2x. Kelly×0.5. Sin futuros habilitados."
+        elif btc_7d_chg <= -7:
+            if _futures_on:
+                trading_mode = "FUTURES_SHORT"
+                mode_color = "#9b59b6"
+                mode_reason = f"Bear market: BTC 7d={btc_7d_chg:+.1f}% — Futuros ACTIVOS"
+                mode_desc = "Shorts 2× en BTC/ETH/SOL/BNB. SL 3% arriba, TP 5% abajo. Máx 2 posiciones simultáneas."
+            else:
+                trading_mode = "PRESERVATION"
+                mode_color = "#e74c3c"
+                mode_reason = f"Bear market: BTC 7d={btc_7d_chg:+.1f}%"
+                mode_desc = "Capital 80%+ en USDT. Solo NARRATIVE con VolSpike≥2x. Kelly×0.5. Activa FUTURES_ENABLED para shorts."
         elif regime in ("BAJISTA", "DÉBIL BAJA"):
-            trading_mode = "PRESERVATION"
-            mode_color = "#e67e22"
-            mode_reason = f"BTC bajista, día {day_chg:+.1f}%, 7d={btc_7d_chg:+.1f}%"
-            mode_desc = "Modo defensivo. Entradas solo con señal FUERTE (strength>0.85). Kelly reducido 50%."
+            if _futures_on:
+                trading_mode = "FUTURES_SHORT"
+                mode_color = "#9b59b6"
+                mode_reason = f"BTC bajista: día {day_chg:+.1f}%, 7d={btc_7d_chg:+.1f}% — Futuros ACTIVOS"
+                mode_desc = "Shorts 2× en BTC/ETH/SOL/BNB. SL 3% arriba, TP 5% abajo. Máx 2 posiciones simultáneas."
+            else:
+                trading_mode = "PRESERVATION"
+                mode_color = "#e67e22"
+                mode_reason = f"BTC bajista, día {day_chg:+.1f}%, 7d={btc_7d_chg:+.1f}%"
+                mode_desc = "Modo defensivo. Entradas solo con señal FUERTE (strength>0.85). Kelly reducido 50%."
         else:
             trading_mode = "SPOT_BULL"
             mode_color = "#4ecca3"

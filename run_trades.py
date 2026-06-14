@@ -5,6 +5,7 @@ from typing import Dict, List
 import error_collector as ec
 from binance_client import BinanceClient
 from market_regime import get_regime, MarketRegime
+from futures_client import FuturesClient
 from news_client import NewsClient
 from signal_store import get_signals, add_signal, mark_signal_as_processed, update_signal_decision, expire_stale_signals
 from strategy import rank_buy_signals, rank_with_technical, normalize_symbol, rank_for_portfolio_manager
@@ -20,6 +21,24 @@ _INVALID_SYMBOLS: set = {"EONUSDT", "ADDUSDT", "MEETONEUSDT", "ATDUSDT", "EOPUSD
 # VolSpike override cooldown: {symbol: datetime_of_last_override_entry}
 # Prevents re-entering the same narrative token breakout every 5min cycle
 _VOLSPIKE_COOLDOWN: Dict[str, datetime] = {}
+
+# Futures client singleton (lazy-initialized)
+_futures_client: FuturesClient = None
+
+
+def _get_futures_client(settings) -> FuturesClient:
+    """Lazy singleton for FuturesClient. Reuses instance across cycles."""
+    global _futures_client
+    if _futures_client is None:
+        _futures_client = FuturesClient(
+            api_key    = settings.binance_api_key,
+            api_secret = settings.binance_api_secret,
+            dry_run    = settings.dry_run,
+        )
+        print("[Futures] FuturesClient initialized")
+    return _futures_client
+
+
 _VOLSPIKE_COOLDOWN_HOURS = 4.0
 
 # NARRATIVE token buy cooldown: prevent buying the same symbol multiple times
@@ -470,7 +489,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     _regime_mode = "SPOT_BULL"
     if getattr(settings, 'market_regime_enabled', True):
         try:
-            _regime = get_regime(client)
+            _regime = get_regime(client, settings=settings)
             _regime_mode = _regime.mode
             print(f"[Regime] {_regime_mode} | {_regime.regime} | {_regime.reason} | confirmed={_regime.confirmed}")
         except Exception as _re:
@@ -575,6 +594,35 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 print(f"Skipping buy {symbol}: BEAR MODE active, not NARRATIVE, vol_spike={_meta_spike:.2f} < {_bear_min_spike}")
                 update_signal_decision(symbol, "rejected", "BEAR_MODE")
                 continue
+
+        # ── FUTURES_SHORT mode — open short via futures instead of spot buy ─
+        if _regime and _regime.confirmed and _regime_mode == "FUTURES_SHORT":
+            if getattr(settings, 'futures_enabled', False):
+                _futures_symbols = list(getattr(settings, 'futures_symbols', ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']))
+                if symbol in _futures_symbols:
+                    _fc = _get_futures_client(settings)
+                    _f_usdt  = getattr(settings, 'futures_usdt_per_trade', 20.0)
+                    _f_sl    = getattr(settings, 'futures_sl_pct', 3.0)
+                    _f_tp    = getattr(settings, 'futures_tp_pct', 5.0)
+                    _f_lev   = getattr(settings, 'futures_leverage', 2)
+                    print(f"[Futures] FUTURES_SHORT mode: opening short {symbol} margin=${_f_usdt}")
+                    _pos = _fc.open_short(symbol, usdt_amount=_f_usdt,
+                                          sl_pct=_f_sl, tp_pct=_f_tp, leverage=_f_lev)
+                    if _pos:
+                        orders.append({"symbol": symbol, "side": "SHORT_FUTURES",
+                                        "qty": _pos.qty, "entry_price": _pos.entry_price,
+                                        "sl": _pos.sl_price, "tp": _pos.tp_price})
+                        update_signal_decision(symbol, "executed", "FUTURES_SHORT")
+                    else:
+                        update_signal_decision(symbol, "rejected", "FUTURES_BLOCKED")
+                    continue  # skip spot buy for this symbol
+                else:
+                    print(f"[Futures] {symbol} not in futures_symbols — skipping short, no spot entry in FUTURES_SHORT mode")
+                    update_signal_decision(symbol, "rejected", "NOT_FUTURES_SYM")
+                    continue
+            else:
+                # futures_enabled=False but mode is FUTURES_SHORT → treat as PRESERVATION
+                _regime_mode = "PRESERVATION"
 
         # ── Market Regime gate — mode-specific entry filters ─────────────
         if _regime and _regime.confirmed:
@@ -993,6 +1041,17 @@ def execute_once():
     if sl_tp_closes:
         print(f"SL/TP closed {len(sl_tp_closes)} position(s): {[c['symbol'] for c in sl_tp_closes]}")
 
+    # ── Step 0.5: Futures positions check (SL/TP via fapi) ────────────────────
+    futures_closes = []
+    if getattr(settings, 'futures_enabled', False):
+        try:
+            _fc = _get_futures_client(settings)
+            futures_closes = _fc.check_positions()
+            if futures_closes:
+                print(f"[Futures] Closed {len(futures_closes)} position(s): {futures_closes}")
+        except Exception as _fce:
+            print(f"[Futures] check_positions error: {_fce}")
+
     # ── Step 1: Determine top symbols ─────────────────────────────────────────
     top_signals = _select_symbols(settings, news_client, client, portfolio_manager)
     if not top_signals:
@@ -1024,7 +1083,8 @@ def execute_once():
 
     print("Completed cycle.")
     return {"top_symbols": top_symbols, "sell_orders": sell_orders,
-            "buy_orders": buy_orders, "sl_tp_closes": sl_tp_closes}
+            "buy_orders": buy_orders, "sl_tp_closes": sl_tp_closes,
+            "futures_closes": futures_closes}
 
 
 if __name__ == '__main__':
