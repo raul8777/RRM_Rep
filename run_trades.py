@@ -643,10 +643,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
 
                     # Fallback to percentage-based if ATR unavailable
                     if sl_price is None:
-                        sl_pct = getattr(settings, 'stop_loss_pct', 1.5) / 100.0
-                        tp_pct = getattr(settings, 'take_profit_pct', 2.5) / 100.0
+                        _tok_cat = getattr(settings, 'token_categories', {}).get(symbol, {})
+                        _cat_beh = _tok_cat.get('market_behavior', 'MIDCAP_ALT')
+                        _cat_th  = getattr(settings, 'category_thresholds', {}).get(_cat_beh, {})
+                        sl_pct = _cat_th.get('stop_loss_pct',  getattr(settings, 'stop_loss_pct',  1.5)) / 100.0
+                        tp_pct = _cat_th.get('take_profit_pct', getattr(settings, 'take_profit_pct', 2.5)) / 100.0
                         sl_price = price * (1 - sl_pct)
                         tp_price = price * (1 + tp_pct)
+                        print(f"Category SL/TP for {symbol} ({_cat_beh}): SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}%")
 
                     # Prepare metadata with prediction
                     metadata = {"order_id": order.get("orderId")}

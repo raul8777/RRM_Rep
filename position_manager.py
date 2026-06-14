@@ -9,10 +9,20 @@ import logging
 import time
 import uuid
 from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 
+
 import error_collector as ec
+
+
+def _parse_exit_time(t) -> datetime:
+    """Normalize exit_time to a timezone-aware UTC datetime regardless of input type."""
+    if isinstance(t, datetime):
+        return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
+    if isinstance(t, str):
+        return datetime.fromisoformat(t.replace('Z', '+00:00'))
+    return datetime.min.replace(tzinfo=timezone.utc)
 
 logger = logging.getLogger(__name__)
 
@@ -295,8 +305,13 @@ class PositionManager:
                 if value_usdt < min_value_usdt:
                     continue
 
-                sl_price = price * (1 - settings.stop_loss_pct / 100)
-                tp_price = price * (1 + settings.take_profit_pct / 100)
+                _tok_cat = getattr(settings, 'token_categories', {}).get(symbol, {})
+                _cat_beh = _tok_cat.get('market_behavior', 'MIDCAP_ALT')
+                _cat_th  = getattr(settings, 'category_thresholds', {}).get(_cat_beh, {})
+                _sl_pct  = _cat_th.get('stop_loss_pct',  getattr(settings, 'stop_loss_pct',  1.5))
+                _tp_pct  = _cat_th.get('take_profit_pct', getattr(settings, 'take_profit_pct', 2.5))
+                sl_price = price * (1 - _sl_pct / 100)
+                tp_price = price * (1 + _tp_pct / 100)
                 commission_rate = getattr(settings, 'binance_commission_rate', 0.001)
                 entry_commission = amount * price * commission_rate
 
@@ -622,7 +637,7 @@ class PositionManager:
         # Fallback: in-memory sorted slice
         sorted_positions = sorted(
             self._closed_positions,
-            key=lambda x: x.exit_time,
+            key=lambda x: _parse_exit_time(x.exit_time),
             reverse=True
         )
         return sorted_positions[:limit]
@@ -649,9 +664,10 @@ class PositionManager:
             cutoff = now - timedelta(days=1)  # Default to day
         
         # Filter closed positions within the period
+        _cutoff_aware = cutoff.replace(tzinfo=timezone.utc)
         period_positions = [
             pos for pos in self._closed_positions
-            if datetime.fromisoformat(pos.exit_time) >= cutoff
+            if _parse_exit_time(pos.exit_time) >= _cutoff_aware
         ]
         
         total_pnl = sum(pos.pnl for pos in period_positions)
@@ -715,7 +731,7 @@ class PositionManager:
         # Sort by exit_time to calculate drawdown chronologically
         sorted_positions = sorted(
             self._closed_positions,
-            key=lambda x: x.exit_time
+            key=lambda x: _parse_exit_time(x.exit_time)
         )
         
         for pos in sorted_positions:
