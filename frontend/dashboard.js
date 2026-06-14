@@ -807,84 +807,99 @@ function renderTradingModeCard(r) {
 }
 
 // ── Monte Carlo Projection Card ────────────────────────────────────────────────────
+async function recalculateMonteCarlo() {
+    const btn = document.getElementById('mcRecalcBtn');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Calculando...'; }
+    try {
+        const res = await apiFetch('/monte-carlo/recalculate', { method: 'POST' });
+        if (res && res.monte_carlo_projection) renderMonteCarlo(res.monte_carlo_projection);
+    } catch(e) { console.error('MC recalc error:', e); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = '🔄 Recalcular'; } }
+}
+
 function renderMonteCarlo(mc) {
     const el = document.getElementById('monteCarloData');
     if (!el || !mc) return;
 
     const breakdown = mc.monthly_breakdown || [];
-    const cap0      = mc.initial_capital || 346.13;
-    const btcFinal  = mc.btc_hodl_final  || 0;
-    const btcPct    = mc.btc_hodl_180d_pct != null ? mc.btc_hodl_180d_pct : 0;
+    const cap0      = mc.initial_capital  || 346.13;
+    const btcFinal  = mc.btc_hodl_final   || cap0;
+    const btcPct    = mc.btc_hodl_pct     != null ? mc.btc_hodl_pct : (mc.btc_hodl_180d_pct ?? 0);
+    const totalPnl  = mc.total_pnl        != null ? mc.total_pnl    : (mc.total_pnl_post ?? 0);
+    const p5        = mc.p5               ?? mc.p5_post  ?? cap0;
+    const p50       = mc.p50              ?? cap0;
+    const p95       = mc.p95              ?? mc.p95_post ?? cap0;
+    const winRate   = mc.win_rate         ?? mc.win_rate_improved ?? 51.5;
+    const nTrades   = mc.n_trades_used    ?? 0;
+    const genAt     = mc.generated_at     ?? '—';
 
     const rows = breakdown.map(m => {
-        const pnlPreCls  = m.pnl_pre  >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
-        const pnlPostCls = m.pnl_post >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
-        const signPre    = m.pnl_pre  >= 0 ? '+' : '';
-        const signPost   = m.pnl_post >= 0 ? '+' : '';
+        // Support both old format (pnl_pre/pnl_post) and new live format (pnl/capital)
+        const cap    = m.capital  ?? m.capital_post ?? (cap0 + (m.pnl ?? 0));
+        const pnl    = m.pnl      ?? m.pnl_post     ?? 0;
+        const pnlCls = pnl >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
         return `<tr>
             <td>Mes ${m.month}</td>
             <td class="right">${mc.trades_per_month}</td>
-            <td class="right">$${m.capital_pre.toFixed(2)}</td>
-            <td class="right ${pnlPreCls}">${signPre}$${m.pnl_pre.toFixed(2)}</td>
-            <td class="right">$${m.capital_post.toFixed(2)}</td>
-            <td class="right ${pnlPostCls}">${signPost}$${m.pnl_post.toFixed(2)}</td>
+            <td class="right">$${cap.toFixed(2)}</td>
+            <td class="right ${pnlCls}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)}</td>
         </tr>`;
     }).join('');
 
-    const totalPreCls  = mc.total_pnl_pre  >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
-    const totalPostCls = mc.total_pnl_post >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
-    const sPre  = mc.total_pnl_pre  >= 0 ? '+' : '';
-    const sPost = mc.total_pnl_post >= 0 ? '+' : '';
+    const totalCls = totalPnl >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
 
-    // Progress bar: improved final vs BTC final vs initial (scale 0=btcFinal, 100=p95_post)
+    // Progress bar: system final vs BTC final
     const rangeMin = Math.min(btcFinal, cap0 * 0.85);
-    const rangeMax = mc.p95_post || cap0 * 1.10;
+    const rangeMax = p95 || cap0 * 1.10;
     const rangeDiff = rangeMax - rangeMin;
     const pctBtc  = rangeDiff > 0 ? ((btcFinal  - rangeMin) / rangeDiff * 100).toFixed(1) : 0;
-    const pctPost = rangeDiff > 0 ? (((mc.total_pnl_post + cap0) - rangeMin) / rangeDiff * 100).toFixed(1) : 50;
+    const pctPost = rangeDiff > 0 ? (((totalPnl + cap0) - rangeMin) / rangeDiff * 100).toFixed(1) : 50;
 
     el.innerHTML = `
         <div class="mc-header">
-            <span class="mc-subtitle">10,000 simulaciones · WR actual: ${mc.win_rate_current}% · WR mejorado: ${mc.win_rate_improved}%</span>
-            <span class="mc-subtitle">Generado: ${mc.generated_at}</span>
+            <span class="mc-subtitle">10,000 sims · WR: ${winRate}% · ${nTrades} trades reales · ${(mc.trades_per_month||11)} trades/mes</span>
+            <span class="mc-subtitle" style="display:flex;align-items:center;gap:8px">
+                <span>Generado: ${genAt}</span>
+                <button id="mcRecalcBtn" class="btn btn-primary btn-sm" onclick="recalculateMonteCarlo()">🔄 Recalcular</button>
+            </span>
         </div>
         <div style="overflow-x:auto">
         <table class="mc-table">
             <thead><tr>
                 <th>Mes</th>
                 <th class="right">Trades</th>
-                <th class="right">Capital actual</th>
-                <th class="right">PnL mes</th>
-                <th class="right">Capital mejorado</th>
+                <th class="right">Capital esperado</th>
                 <th class="right">PnL mes</th>
             </tr></thead>
             <tbody>${rows}</tbody>
             <tfoot><tr class="mc-total-row">
-                <td>TOTAL 180d</td>
+                <td>TOTAL ${mc.months || 6} meses</td>
                 <td class="right">${(mc.trades_per_month || 11) * (mc.months || 6)}</td>
-                <td class="right">$${(cap0 + mc.total_pnl_pre).toFixed(2)}</td>
-                <td class="right ${totalPreCls}">${sPre}$${mc.total_pnl_pre.toFixed(2)}</td>
-                <td class="right">$${(cap0 + mc.total_pnl_post).toFixed(2)}</td>
-                <td class="right ${totalPostCls}">${sPost}$${mc.total_pnl_post.toFixed(2)}</td>
+                <td class="right">$${(cap0 + totalPnl).toFixed(2)}</td>
+                <td class="right ${totalCls}">${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(4)}</td>
             </tr></tfoot>
         </table>
         </div>
         <div class="mc-summary">
             <div class="mc-summary-item">
                 <div class="mc-summary-label">Peor caso P5</div>
-                <div class="mc-summary-val" style="color:#e74c3c">$${mc.p5_post.toFixed(2)}</div>
+                <div class="mc-summary-val" style="color:#e74c3c">$${p5.toFixed(2)}</div>
+            </div>
+            <div class="mc-summary-item">
+                <div class="mc-summary-label">Mediana P50</div>
+                <div class="mc-summary-val" style="color:#f39c12">$${p50.toFixed(2)}</div>
             </div>
             <div class="mc-summary-item">
                 <div class="mc-summary-label">Mejor caso P95</div>
-                <div class="mc-summary-val" style="color:#4ecca3">$${mc.p95_post.toFixed(2)}</div>
+                <div class="mc-summary-val" style="color:#4ecca3">$${p95.toFixed(2)}</div>
             </div>
             <div class="mc-summary-item">
-                <div class="mc-summary-label">HODL BTC 180d</div>
-                <div class="mc-summary-val" style="color:#e74c3c">$${btcFinal.toFixed(2)} (${btcPct >= 0 ? '+' : ''}${btcPct.toFixed(1)}%)</div>
+                <div class="mc-summary-label">HODL BTC (proyectado)</div>
+                <div class="mc-summary-val" style="color:#e74c3c">$${btcFinal.toFixed(2)} (${btcPct >= 0 ? '+' : ''}${parseFloat(btcPct).toFixed(1)}%)</div>
             </div>
             <div class="mc-summary-item">
                 <div class="mc-summary-label">Ventaja vs BTC</div>
-                <div class="mc-summary-val" style="color:#4ecca3">+$${((cap0 + mc.total_pnl_post) - btcFinal).toFixed(2)}</div>
+                <div class="mc-summary-val" style="color:#4ecca3">+$${((cap0 + totalPnl) - btcFinal).toFixed(2)}</div>
             </div>
         </div>
         <div class="mc-progress-wrap">
@@ -902,11 +917,11 @@ function renderMonteCarlo(mc) {
                     <div class="mc-progress-bar-bg" style="flex:1">
                         <div class="mc-progress-bar-fill" style="width:${pctPost}%;background:#4ecca3"></div>
                     </div>
-                    <span style="width:60px;text-align:right;color:#4ecca3">$${(cap0 + mc.total_pnl_post).toFixed(0)}</span>
+                    <span style="width:60px;text-align:right;color:#4ecca3">$${(cap0 + totalPnl).toFixed(0)}</span>
                 </div>
             </div>
         </div>
-        <div class="mc-note">* Basado en 33 trades reales observados como distribución de referencia. El Monte Carlo no incluye compounding completo (Kelly dinámico → retorno real podría ser mayor).</div>
+        <div class="mc-note">* Basado en trades reales cerrados como distribución. El Monte Carlo no incluye compounding completo (Kelly dinámico → retorno real podría ser mayor).</div>
     `;
 }
 

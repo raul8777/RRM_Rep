@@ -647,6 +647,120 @@ async def get_analysis_summary() -> Dict:
         raise HTTPException(status_code=500, detail=f"Failed to get analysis summary: {str(e)}")
 
 
+# ── Monte Carlo projection (C5) ──────────────────────────────────────────────
+_mc_cache: Dict = {"data": None, "ts": 0.0}
+_MC_CACHE_TTL = 3600  # 1 hour default; reset via /monte-carlo/recalculate
+
+
+def _run_monte_carlo(closed_trades: list, initial_capital: float,
+                     months: int = 6, trades_per_month: int = 11,
+                     n_sims: int = 10_000) -> Dict:
+    """
+    Run Monte Carlo projection using REAL closed-trade PnL distribution.
+    Returns monthly breakdown + P5/P50/P95 percentiles.
+    """
+    import random, time as _t
+    rng = random.Random(_t.time())
+
+    wins  = [t["pnl"] for t in closed_trades if t.get("pnl", 0) > 0]
+    losses= [t["pnl"] for t in closed_trades if t.get("pnl", 0) <= 0]
+    if not wins:
+        wins = [0.59]
+    if not losses:
+        losses = [-0.70]
+
+    win_rate = len(wins) / max(len(closed_trades), 1)
+    avg_win  = sum(wins)  / len(wins)
+    avg_loss = sum(losses)/ len(losses)
+
+    # Simulate total PnL across all months
+    finals = []
+    for _ in range(n_sims):
+        cap = initial_capital
+        for _m in range(months):
+            for _t2 in range(trades_per_month):
+                if rng.random() < win_rate:
+                    cap += rng.choice(wins)
+                else:
+                    cap += rng.choice(losses)
+        finals.append(cap)
+
+    finals.sort()
+    p5  = finals[int(n_sims * 0.05)]
+    p50 = finals[int(n_sims * 0.50)]
+    p95 = finals[int(n_sims * 0.95)]
+    mean_final = sum(finals) / n_sims
+
+    # Monthly breakdown (expected value walk)
+    ev_per_trade = win_rate * avg_win + (1 - win_rate) * avg_loss
+    monthly_breakdown = []
+    cap = initial_capital
+    for m in range(1, months + 1):
+        pnl = ev_per_trade * trades_per_month
+        cap += pnl
+        monthly_breakdown.append({"month": m, "capital": round(cap, 2), "pnl": round(pnl, 4)})
+
+    # BTC HODL comparison (7d pct as proxy for forward outlook)
+    try:
+        bc = get_components().binance_client
+        kd = bc.client.get_klines(symbol="BTCUSDT", interval="1d", limit=8)
+        btc_7d = (float(kd[-1][4]) - float(kd[-7][1])) / float(kd[-7][1]) * 100 if len(kd) >= 7 else 0.0
+        btc_hodl_final = round(initial_capital * (1 + btc_7d / 100 * months / 0.25), 2)  # scaled to 6m
+        btc_hodl_pct   = round(btc_7d * months / 0.25, 1)
+    except Exception:
+        btc_7d = 0.0
+        btc_hodl_final = initial_capital
+        btc_hodl_pct   = 0.0
+
+    return {
+        "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        "initial_capital": initial_capital,
+        "months": months,
+        "trades_per_month": trades_per_month,
+        "n_trades_used": len(closed_trades),
+        "win_rate": round(win_rate * 100, 1),
+        "avg_win": round(avg_win, 4),
+        "avg_loss": round(avg_loss, 4),
+        "monthly_breakdown": monthly_breakdown,
+        "total_pnl": round(mean_final - initial_capital, 4),
+        "mean_final": round(mean_final, 2),
+        "p5":  round(p5,  2),
+        "p50": round(p50, 2),
+        "p95": round(p95, 2),
+        "btc_hodl_pct":   btc_hodl_pct,
+        "btc_hodl_final": btc_hodl_final,
+    }
+
+
+def _get_monte_carlo_projection(force: bool = False) -> Dict:
+    import time as _time
+    now = _time.monotonic()
+    if not force and _mc_cache["data"] and now - _mc_cache["ts"] < _MC_CACHE_TTL:
+        return _mc_cache["data"]
+    try:
+        closed = position_manager.get_closed_positions() if position_manager else []
+        usdt_bal = float(binance_client.get_account_balance().get("USDT", 346.13))
+        data = _run_monte_carlo(
+            closed_trades=closed,
+            initial_capital=usdt_bal,
+            months=6,
+            trades_per_month=max(len(closed) // max(1, len(closed) // 11), 5) if closed else 11,
+        )
+    except Exception as _e:
+        data = {
+            "generated_at": "—", "initial_capital": 346.13, "months": 6,
+            "trades_per_month": 11, "n_trades_used": 0, "win_rate": 51.5,
+            "avg_win": 0.59, "avg_loss": -0.70,
+            "monthly_breakdown": [], "total_pnl": 0.0, "mean_final": 346.13,
+            "p5": 340.0, "p50": 346.0, "p95": 353.0,
+            "btc_hodl_pct": 0.0, "btc_hodl_final": 346.13,
+            "error": str(_e),
+        }
+    _mc_cache["data"] = data
+    _mc_cache["ts"] = now
+    return data
+
+
 # ── Market regime cache (5 min) ──────────────────────────────────────────────
 _regime_cache: Dict = {"data": None, "ts": 0.0}
 
@@ -1033,31 +1147,7 @@ async def get_dashboard_summary() -> Dict:
     except Exception as e:
         result["daily_ticker"] = []
 
-    # Monte Carlo projection (static results from last backtest_90d.py run — 2026-06-14)
-    result["monte_carlo_projection"] = {
-        "generated_at": "2026-06-14",
-        "initial_capital": 346.13,
-        "months": 6,
-        "trades_per_month": 11,
-        "win_rate_current": 51.5,
-        "win_rate_improved": 53.5,
-        "monthly_breakdown": [
-            {"month": 1, "capital_pre": 345.71, "pnl_pre": -0.42, "capital_post": 347.73, "pnl_post": 1.60},
-            {"month": 2, "capital_pre": 345.29, "pnl_pre": -0.42, "capital_post": 349.29, "pnl_post": 1.56},
-            {"month": 3, "capital_pre": 344.91, "pnl_pre": -0.38, "capital_post": 350.90, "pnl_post": 1.61},
-            {"month": 4, "capital_pre": 344.49, "pnl_pre": -0.42, "capital_post": 352.56, "pnl_post": 1.65},
-            {"month": 5, "capital_pre": 344.07, "pnl_pre": -0.41, "capital_post": 354.14, "pnl_post": 1.58},
-            {"month": 6, "capital_pre": 343.73, "pnl_pre": -0.34, "capital_post": 355.74, "pnl_post": 1.60},
-        ],
-        "total_pnl_pre": -2.40,
-        "total_pnl_post": 9.61,
-        "p5_pre": 334.76,
-        "p95_pre": 352.82,
-        "p5_post": 347.53,
-        "p95_post": 364.43,
-        "btc_hodl_180d_pct": -29.3,
-        "btc_hodl_final": 244.80,
-    }
+    result["monte_carlo_projection"] = _get_monte_carlo_projection()
 
     result["timestamp"] = to_mexico_time(datetime.utcnow()).isoformat()
     return result
@@ -1121,6 +1211,13 @@ async def get_open_positions_detail() -> Dict:
 
 
 # ── Futures positions endpoint (C1) ──────────────────────────────────────────
+
+@app.post("/monte-carlo/recalculate")
+async def recalculate_monte_carlo(_auth: None = Depends(_require_api_key)) -> Dict:
+    """Force-recalculate the Monte Carlo projection using current closed trades and USDT balance."""
+    data = _get_monte_carlo_projection(force=True)
+    return {"ok": True, "monte_carlo_projection": data}
+
 
 @app.get("/futures/positions")
 async def get_futures_positions() -> Dict:
@@ -1392,6 +1489,33 @@ async def get_health_status() -> Dict:
                 overall = "warning"
     except Exception as e:
         checks["position_sync"] = {"status": "error", "detail": str(e)}
+
+    # C6: Futures API (fapi.binance.com) health check
+    try:
+        _futures_enabled = getattr(settings, 'futures_enabled', False)
+        if _futures_enabled:
+            import urllib.request as _ur, time as _time
+            t0 = _time.monotonic()
+            with _ur.urlopen('https://fapi.binance.com/fapi/v1/ping', timeout=5) as _r:
+                _r.read()
+            _fapi_lat = round((_time.monotonic() - t0) * 1000, 1)
+            try:
+                from run_trades import _get_futures_client
+                _fc = _get_futures_client(settings)
+                _open_shorts = len(_fc._open_positions)
+            except Exception:
+                _open_shorts = 0
+            checks["futures_api"] = {
+                "status": "ok", "latency_ms": _fapi_lat,
+                "open_shorts": _open_shorts, "leverage_max": 2,
+            }
+        else:
+            checks["futures_api"] = {"status": "disabled"}
+    except Exception as _fe:
+        checks["futures_api"] = {"status": "error", "detail": str(_fe)}
+        ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_ERROR, f"Futures API health check failed: {_fe}")
+        if overall != "error":
+            overall = "warning"
 
     # Error summary
     err_summary = ec.get_summary(minutes=5)

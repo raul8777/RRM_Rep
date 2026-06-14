@@ -61,7 +61,7 @@ def _get_news_scores(symbols: List[str], news_client: NewsClient, settings) -> D
     return scores
 
 
-def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClient, portfolio_manager=None) -> List[Dict]:
+def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClient, portfolio_manager=None, regime: str = "SPOT_BULL") -> List[Dict]:
     # Expire autonomous signals older than 30 min with no decision (housekeeping)
     expired = expire_stale_signals(max_age_minutes=30)
     if expired:
@@ -186,7 +186,7 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
         # Use Portfolio Manager ranking
         signal_scores = rank_for_portfolio_manager(
             external_signals, news_scores, technical_scores, risk_metrics,
-            min_confidence=settings.min_pair_confidence_score
+            min_confidence=settings.min_pair_confidence_score, regime=regime
         )
         
         # Convert to list of dicts sorted by score
@@ -197,7 +197,7 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
     else:
         # Use existing ranking logic
         if any(v != 50.0 for v in technical_scores.values()):
-            top_signals = rank_with_technical(external_signals, news_scores, technical_scores, settings.max_positions)
+            top_signals = rank_with_technical(external_signals, news_scores, technical_scores, settings.max_positions, regime=regime)
         else:
             top_signals = rank_buy_signals(external_signals, news_scores, settings.max_positions)
     
@@ -893,9 +893,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     return orders
 
 
-def _select_symbols(settings, news_client: NewsClient, client: BinanceClient, portfolio_manager) -> List[Dict]:
+def _select_symbols(settings, news_client: NewsClient, client: BinanceClient, portfolio_manager, regime: str = "SPOT_BULL") -> List[Dict]:
     """Step 1: Resolve top buy symbols (as signal dicts) from signals or autonomous generation."""
-    top_signals = _get_top_buy_symbols(settings, news_client, client, portfolio_manager)
+    top_signals = _get_top_buy_symbols(settings, news_client, client, portfolio_manager, regime=regime)
     symbols = [s["symbol"] for s in top_signals]
     print("Top buy symbols:", symbols)
     return top_signals
@@ -1061,7 +1061,7 @@ def execute_once():
             print(f"[Futures] check_positions error: {_fce}")
 
     # ── Step 1: Determine top symbols ─────────────────────────────────────────
-    top_signals = _select_symbols(settings, news_client, client, portfolio_manager)
+    top_signals = _select_symbols(settings, news_client, client, portfolio_manager, regime=_regime_mode)
     if not top_signals:
         print("No buy signals available; skipping new buys this cycle.")
         return {"top_symbols": [], "sell_orders": [], "buy_orders": [], "sl_tp_closes": sl_tp_closes}
