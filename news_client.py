@@ -20,9 +20,11 @@ _TRENDING_TTL = 3600.0         # 1h — CoinGecko trending updates hourly
 _SOCIAL_CACHE: Dict = {}       # {symbol: {"score": float, "fetched_at": float}}
 _SOCIAL_TTL = 3600.0           # 1h — social stats don't change faster
 
-# ── CryptoCompare Social — DISABLED until API key is configured ───────────────
-# To enable: set CRYPTOCOMPARE_API_KEY in .env and flip this flag to True
-CRYPTOCOMPARE_ENABLED: bool = False
+# ── CryptoCompare Social — auto-enabled when CRYPTOCOMPARE_API_KEY is in env ──
+def _cryptocompare_enabled() -> bool:
+    return bool(os.environ.get("CRYPTOCOMPARE_API_KEY", "").strip())
+
+CRYPTOCOMPARE_ENABLED: bool = _cryptocompare_enabled()  # evaluated at import
 
 # Baseline social activity per symbol (avg Reddit posts/24h)
 # Used to detect abnormal spikes (score > baseline * 3 = significant)
@@ -144,16 +146,16 @@ class NewsClient:
         except Exception:
             return _TRENDING_CACHE.get("symbols", [])
 
-    # ── CryptoCompare Social Score (Fase 2 — DESACTIVADO) ────────────────────
+    # ── CryptoCompare Social Score (auto-enabled via CRYPTOCOMPARE_API_KEY) ─────
 
     def get_social_score(self, symbol: str) -> Dict:
         """
         Fetch social stats from CryptoCompare for the given symbol.
         Returns dict with 'reddit_posts_24h', 'twitter_posts_24h', 'score'.
-        DISABLED (CRYPTOCOMPARE_ENABLED=False) — returns {"score": 0, "disabled": True}.
-        Enable by: set CRYPTOCOMPARE_ENABLED=True and CRYPTOCOMPARE_API_KEY in env.
+        Returns {"score": 0, "disabled": True} if CRYPTOCOMPARE_API_KEY is not set.
+        Auto-enabled when CRYPTOCOMPARE_API_KEY env var is present.
         """
-        if not CRYPTOCOMPARE_ENABLED:
+        if not _cryptocompare_enabled():
             return {"score": 0, "disabled": True}
         coin_id = _COINGECKO_IDS.get(symbol.upper())
         if not coin_id:
@@ -189,9 +191,9 @@ class NewsClient:
     def is_social_trending(self, symbol: str) -> bool:
         """
         Return True if social activity for this symbol is 3x above its baseline.
-        Always returns False if CRYPTOCOMPARE_ENABLED=False.
+        Always returns False if CRYPTOCOMPARE_API_KEY is not set.
         """
-        if not CRYPTOCOMPARE_ENABLED:
+        if not _cryptocompare_enabled():
             return False
         data = self.get_social_score(symbol)
         score = data.get("score", 0)

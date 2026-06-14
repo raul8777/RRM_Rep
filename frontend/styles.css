@@ -670,6 +670,14 @@ h1 {
     white-space: nowrap;
 }
 
+/* ── Social trending badge in signals (CryptoCompare) ───────────────────── */
+.signal-social {
+    font-size: 10px; font-weight: 700; color: #a29bfe;
+    padding: 1px 5px; border-radius: 8px;
+    background: rgba(162,155,254,0.12); border: 1px solid rgba(162,155,254,0.3);
+    white-space: nowrap;
+}
+
 /* ── Subtle row PnL tinting ──────────────────────────────────────────────── */
 .row-pnl-pos { background: rgba(78,204,163,0.04); }
 .row-pnl-neg { background: rgba(231,76,60,0.04); }

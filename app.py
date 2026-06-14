@@ -1517,6 +1517,25 @@ async def get_health_status() -> Dict:
         if overall != "error":
             overall = "warning"
 
+    # Social score (CryptoCompare) health check
+    try:
+        from news_client import _cryptocompare_enabled, _SOCIAL_BASELINES
+        _cc_enabled = _cryptocompare_enabled()
+        if _cc_enabled:
+            _nc_tmp = NewsClient()
+            _trending_count = sum(
+                1 for sym in _SOCIAL_BASELINES if _nc_tmp.is_social_trending(sym)
+            )
+            checks["social_score"] = {
+                "status": "ok", "enabled": True,
+                "trending_count": _trending_count,
+                "symbols_monitored": len(_SOCIAL_BASELINES),
+            }
+        else:
+            checks["social_score"] = {"status": "disabled", "enabled": False}
+    except Exception as _se:
+        checks["social_score"] = {"status": "error", "enabled": False, "detail": str(_se)}
+
     # Error summary
     err_summary = ec.get_summary(minutes=5)
     checks["errors"] = err_summary

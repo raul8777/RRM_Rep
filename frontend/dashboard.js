@@ -107,7 +107,8 @@ function renderSignals(d) {
         const reason = s.reason ? `<span class="signal-reason">${s.reason}</span>` : '<span class="signal-reason" style="color:#555">—</span>';
         const ts = s.received_at ? relativeTime(s.received_at) : '';
         const catIco = catIcon(s.category || 'MIDCAP_ALT');
-        const trendingBadge = s.trending_boost ? '<span class="signal-trending">🔥 TRENDING</span>' : '';
+        const trendingBadge = s.trending_boost ? '<span class="signal-trending">🔥 CG</span>' : '';
+        const socialBadge = (s.reason || '').includes('[+social trending]') ? '<span class="signal-social">📣 SOCIAL</span>' : '';
         // Decision badge
         let decisionBadge;
         if (s.decision === 'executed') {
@@ -133,7 +134,7 @@ function renderSignals(d) {
             <span class="signal-price">${price}</span>
             ${strengthBadge}
             ${decisionBadge}
-            <span style="display:flex;gap:4px;align-items:center;overflow:hidden">${reason}${trendingBadge}</span>
+            <span style="display:flex;gap:4px;align-items:center;overflow:hidden">${reason}${trendingBadge}${socialBadge}</span>
             <span class="signal-ts">${ts}</span>
         </div>`;
     }).join('');
@@ -571,6 +572,8 @@ function renderHealthChecks(data) {
         if (key === 'binance')      detail = c.latency_ms != null ? `${c.latency_ms} ms${c.testnet ? ' (testnet)' : ''}` : (c.detail || '');
         if (key === 'trade_cycle')  detail = c.last_cycle_at ? `Último: ${new Date(c.last_cycle_at).toLocaleTimeString('es-MX')} (${c.age_minutes}min ago)` : (c.detail || 'Sin datos');
         if (key === 'position_sync')detail = `DB: ${c.db_open_positions ?? '?'} | Binance: ${c.binance_holdings ?? '?'}${c.mismatch ? ` | ⚠ Dif: ${c.mismatch}` : ''}`;
+        if (key === 'futures_api')  detail = c.latency_ms != null ? `${c.latency_ms} ms${c.open_shorts != null ? ` | ${c.open_shorts} shorts` : ''}` : (c.detail || '');
+        if (key === 'social_score') detail = c.enabled ? `✅ activo — ${c.trending_count ?? 0} tokens trending` : '⚪ sin API key';
         if (key === 'errors')       detail = `${c.errors_last_5min || 0} err / ${c.warnings_last_5min || 0} warn (5min) | Total: ${c.total_records || 0}`;
         return `<div class="data-item">
             <span class="data-label">${_healthIcon(c.status || c.health)} ${key}</span>

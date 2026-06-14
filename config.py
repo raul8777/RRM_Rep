@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     default_trade_size: float = Field(default=10.0, env="DEFAULT_TRADE_SIZE")
     default_symbol: str = Field(default="BTCUSDT", env="DEFAULT_SYMBOL")
     news_lookback_hours: int = Field(default=24, env="NEWS_LOOKBACK_HOURS")
+    cryptocompare_api_key: str = Field(default="", env="CRYPTOCOMPARE_API_KEY")
     
     # Portfolio Manager configuration
     portfolio_allocation_pct: float = Field(default=100.0, env="PORTFOLIO_ALLOCATION_PCT")
