@@ -127,6 +127,19 @@ class Settings(BaseSettings):
     # Smart exit: rebalance skips if predictor sees upside
     rebalance_skip_if_positive_prediction: bool = Field(default=True, env="REBALANCE_SKIP_IF_POSITIVE_PREDICTION")
     rebalance_min_hold_prob: float = Field(default=0.55, env="REBALANCE_MIN_HOLD_PROB")  # skip rebalance if prob >= this AND epnl > 0
+    # Dynamic max positions by regime (replaces single MAX_POSITIONS when regime is known)
+    max_positions_spot_bull: int = Field(default=15, env="MAX_POSITIONS_SPOT_BULL")
+    max_positions_range_scalp: int = Field(default=8, env="MAX_POSITIONS_RANGE_SCALP")
+    max_positions_preservation: int = Field(default=5, env="MAX_POSITIONS_PRESERVATION")
+    max_positions_futures_short: int = Field(default=4, env="MAX_POSITIONS_FUTURES_SHORT")
+    # Active replacement: swap weakest open position for a better new signal
+    replace_only_losing: bool = Field(default=True, env="REPLACE_ONLY_LOSING")  # only replace positions in loss/flat
+    replace_ev_min_ratio: float = Field(default=1.3, env="REPLACE_EV_MIN_RATIO")  # new EV must be >= worst_open_EV * this
+    replace_strength_min_delta: float = Field(default=0.15, env="REPLACE_STRENGTH_MIN_DELTA")  # new strength must exceed avg open strength by this
+    # Overflow slots: allow extra positions beyond regime max when signal quality is exceptional
+    overflow_min_strength: float = Field(default=0.80, env="OVERFLOW_MIN_STRENGTH")  # Kelly FUERTE tier threshold
+    overflow_min_prob: float = Field(default=0.65, env="OVERFLOW_MIN_PROB")          # Kelly FUERTE tier threshold
+    overflow_max_extra: int = Field(default=3, env="OVERFLOW_MAX_EXTRA")             # max simultaneous overflow slots
     # Dynamic cycle by regime (v2)
     cycle_spot_bull: int = Field(default=15, env="CYCLE_SPOT_BULL")            # minutes per cycle in SPOT_BULL
     cycle_range_scalp: int = Field(default=5, env="CYCLE_RANGE_SCALP")         # minutes per cycle in RANGE_SCALP

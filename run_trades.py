@@ -54,6 +54,174 @@ _VOLSPIKE_COOLDOWN_HOURS = 4.0
 _NARRATIVE_BUY_COOLDOWN: Dict[str, datetime] = {}
 _NARRATIVE_BUY_COOLDOWN_HOURS = 4.0
 
+# Overflow positions: symbols opened beyond the regime max via the quality-overflow mechanism.
+# Cleared on Docker restart — slots replenish organically on the next cycle.
+_overflow_positions: set = set()
+
+
+def _get_max_positions_for_regime(settings, regime: str) -> int:
+    """Return the optimal max-open-positions for the current market regime.
+    Falls back to settings.max_positions if regime is unknown."""
+    _mapping = {
+        "SPOT_BULL":     getattr(settings, 'max_positions_spot_bull',    15),
+        "RANGE_SCALP":   getattr(settings, 'max_positions_range_scalp',   8),
+        "PRESERVATION":  getattr(settings, 'max_positions_preservation',  5),
+        "FUTURES_SHORT": getattr(settings, 'max_positions_futures_short', 4),
+    }
+    return _mapping.get(regime, getattr(settings, 'max_positions', 12))
+
+
+def _is_overflow_eligible(symbol: str, strength: float, prediction: dict, settings) -> bool:
+    """Return True if the signal qualifies for an extra slot beyond the regime max.
+    Requires Kelly FUERTE tier quality: strength >= overflow_min_strength AND
+    success_probability >= overflow_min_prob AND expected_pnl > 0."""
+    _min_str  = getattr(settings, 'overflow_min_strength', 0.80)
+    _min_prob = getattr(settings, 'overflow_min_prob', 0.65)
+    _max_extra = getattr(settings, 'overflow_max_extra', 3)
+    if len(_overflow_positions) >= _max_extra:
+        print(f"[Overflow] {symbol}: all {_max_extra} overflow slots occupied")
+        return False
+    if strength < _min_str:
+        print(f"[Overflow] {symbol}: strength={strength:.2f} < min={_min_str} — not eligible")
+        return False
+    _prob = float((prediction or {}).get('success_probability', 0))
+    _epnl = float((prediction or {}).get('expected_pnl', 0))
+    if _prob < _min_prob:
+        print(f"[Overflow] {symbol}: prob={_prob:.2f} < min={_min_prob} — not eligible")
+        return False
+    if _epnl <= 0:
+        print(f"[Overflow] {symbol}: expected_pnl={_epnl:.3f} <= 0 — not eligible")
+        return False
+    return True
+
+
+def _try_replace_weakest_position(
+    new_symbol: str,
+    new_strength: float,
+    new_prediction: dict,
+    position_manager,
+    portfolio_manager,
+    client,
+    settings,
+    regime_mode: str,
+) -> bool:
+    """Attempt to replace the weakest open position with a better new signal.
+    Returns True if a replacement was executed (sell done), False otherwise.
+
+    Conditions (all must pass):
+    1. new EV >= worst_open_ev * replace_ev_min_ratio
+    2. new strength > avg_strength_open + replace_strength_min_delta
+    3. new success_probability > worst_open success_probability
+    4. worst position held >= min_hold_minutes
+    5. worst position is not in profit (replace_only_losing=True by default)
+    """
+    if not position_manager or not portfolio_manager:
+        return False
+    try:
+        _all_pos = position_manager.get_all_positions()
+        if not _all_pos:
+            return False
+
+        # Build current positions dict for prediction
+        _current_pos = {}
+        for _sym, _plist in _all_pos.items():
+            if _plist:
+                _p = _plist[0]
+                _current_pos[_sym] = {'quantity': float(_p.quantity), 'entry_price': float(_p.entry_price)}
+
+        if not _current_pos:
+            return False
+
+        # Get predictor EV for all open positions
+        _open_preds = portfolio_manager.get_position_predictions(_current_pos)
+        if not _open_preds:
+            return False
+
+        # Identify worst position by expected_pnl
+        _worst_sym = min(_open_preds, key=lambda s: _open_preds[s].get('expected_pnl', 0))
+        _worst_pred = _open_preds[_worst_sym]
+        _worst_ev   = float(_worst_pred.get('expected_pnl', 0))
+        _worst_prob = float(_worst_pred.get('success_probability', 0.5))
+
+        # Avg strength of open positions (use entry metadata if available)
+        _avg_strength = 0.5  # conservative default if no metadata
+
+        # Check: new EV vs worst open EV
+        _ev_ratio = getattr(settings, 'replace_ev_min_ratio', 1.3)
+        _new_ev = float((new_prediction or {}).get('expected_pnl', 0))
+        _new_prob = float((new_prediction or {}).get('success_probability', 0))
+
+        if _worst_ev >= 0 and _new_ev < _worst_ev * _ev_ratio:
+            print(f"[Replace] {new_symbol}: new_ev={_new_ev:.3f} < worst_ev={_worst_ev:.3f}×{_ev_ratio} — skip")
+            return False
+        if _new_prob <= _worst_prob:
+            print(f"[Replace] {new_symbol}: new_prob={_new_prob:.2f} <= worst_prob={_worst_prob:.2f} — skip")
+            return False
+
+        # Check: strength delta
+        _str_delta = getattr(settings, 'replace_strength_min_delta', 0.15)
+        if new_strength < _avg_strength + _str_delta:
+            print(f"[Replace] {new_symbol}: strength={new_strength:.2f} < avg+delta={_avg_strength+_str_delta:.2f} — skip")
+            return False
+
+        # Check: worst position must have been held >= min_hold_minutes
+        _min_hold = getattr(settings, 'min_hold_minutes', 60)
+        _worst_pos_list = _all_pos.get(_worst_sym, [])
+        if _worst_pos_list:
+            _wp = _worst_pos_list[0]
+            _entry_ts = getattr(_wp, 'entry_time', None)
+            if _entry_ts is not None:
+                try:
+                    _age_min = (datetime.now(timezone.utc) - _entry_ts).total_seconds() / 60
+                    if _age_min < _min_hold:
+                        print(f"[Replace] {_worst_sym}: age={_age_min:.1f}min < min_hold={_min_hold}min — protected")
+                        return False
+                except Exception:
+                    pass
+
+        # Check: replace_only_losing — skip if worst position is in profit
+        if getattr(settings, 'replace_only_losing', True):
+            try:
+                _current_price = client.get_symbol_price(_worst_sym)
+                _entry_price = float(_worst_pos_list[0].entry_price) if _worst_pos_list else 0
+                if _entry_price > 0 and _current_price > _entry_price:
+                    print(f"[Replace] {_worst_sym}: in profit ({(_current_price/_entry_price-1)*100:+.2f}%) — protected by replace_only_losing")
+                    return False
+            except Exception:
+                pass
+
+        # All checks passed — execute the replacement sell
+        print(f"[Replace] Replacing {_worst_sym} (ev={_worst_ev:.3f}) with {new_symbol} (ev={_new_ev:.3f}, str={new_strength:.2f})")
+        from trade_utils import get_symbol_filters, align_quantity_to_step, is_quantity_valid
+        try:
+            _balances = client.get_account_balance()
+            _asset = _worst_sym.replace("USDT", "")
+            _qty_held = float(_balances.get(_asset, 0))
+            if _qty_held <= 0:
+                print(f"[Replace] {_worst_sym}: no balance to sell")
+                return False
+            _filters = get_symbol_filters(client, _worst_sym)
+            _qty = align_quantity_to_step(_qty_held, _filters["step"])
+            _valid, _reason = is_quantity_valid(_qty, client.get_symbol_price(_worst_sym), _filters)
+            if not _valid:
+                print(f"[Replace] {_worst_sym}: invalid qty — {_reason}")
+                return False
+            _order = client.create_market_order(symbol=_worst_sym, side="SELL", quantity=_qty)
+            _exit_price = client.get_symbol_price(_worst_sym)
+            commission_rate = getattr(settings, 'binance_commission_rate', 0.001)
+            position_manager.close_all_positions_for_symbol(_worst_sym, _exit_price, "active_replacement", commission_rate)
+            add_signal({"symbol": _worst_sym, "action": "SELL", "price": _exit_price,
+                        "reason": f"active_replacement→{new_symbol}", "source": "replacement"})
+            print(f"[Replace] Sold {_qty} {_worst_sym} @ {_exit_price:.4f} — slot freed for {new_symbol}")
+            return True
+        except Exception as _sell_err:
+            print(f"[Replace] Sell failed for {_worst_sym}: {_sell_err}")
+            return False
+
+    except Exception as _e:
+        print(f"[Replace] Error in _try_replace_weakest_position: {_e}")
+        return False
+
 
 def _get_news_scores(symbols: List[str], news_client: NewsClient, settings) -> Dict[str, float]:
     if not symbols:
@@ -128,10 +296,11 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                 symbols = _static_symbols
 
             signal_generator = AutonomousSignalGenerator(client, symbols)  # reuse shared client
+            _sel_max = _get_max_positions_for_regime(settings, regime or 'SPOT_BULL')
             autonomous_signals = signal_generator.get_top_buy_signals(
                 interval='1h',
                 min_strength=getattr(settings, 'min_signal_strength', 0.5),
-                limit=getattr(settings, 'max_positions', 5),
+                limit=_sel_max + 5,  # +5 buffer: candidates for replacement/overflow evaluation
                 news_client=news_client,
                 regime_mode=regime,
             )
@@ -219,16 +388,18 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
         )
         
         # Convert to list of dicts sorted by score
+        _sel_max_ext = _get_max_positions_for_regime(settings, regime or 'SPOT_BULL')
         top_signals = [
             {"symbol": symbol, "score": score}
             for symbol, score in sorted(signal_scores.items(), key=lambda x: x[1], reverse=True)
-        ][:settings.max_positions]
+        ][:_sel_max_ext + 5]  # +5 buffer for replacement/overflow candidates
     else:
         # Use existing ranking logic
+        _sel_max_fb = _get_max_positions_for_regime(settings, regime or 'SPOT_BULL')
         if any(v != 50.0 for v in technical_scores.values()):
-            top_signals = rank_with_technical(external_signals, news_scores, technical_scores, settings.max_positions, regime=regime)
+            top_signals = rank_with_technical(external_signals, news_scores, technical_scores, _sel_max_fb + 5, regime=regime)
         else:
-            top_signals = rank_buy_signals(external_signals, news_scores, settings.max_positions)
+            top_signals = rank_buy_signals(external_signals, news_scores, _sel_max_fb + 5)
     
     return top_signals
 
@@ -359,6 +530,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
                         position_manager.close_all_positions_for_symbol(
                             symbol, current_price, close_reason.split(" ")[0], commission_rate
                         )
+                        _overflow_positions.discard(symbol)  # free overflow slot if used
                         add_signal({
                             "symbol": symbol, "action": "SELL",
                             "price": current_price,
@@ -469,6 +641,7 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
         try:
             order = client.create_market_order(symbol=symbol, side="SELL", quantity=qty)
             orders.append({"symbol": symbol, "side": "SELL", "quantity": qty, "order": order})
+            _overflow_positions.discard(symbol)  # free overflow slot if used
             _rebalance_count += 1
             print(f"Sold {qty} {symbol} [rebalance {_rebalance_count}/{_max_rebalance}]")
             add_signal({
@@ -649,14 +822,42 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         usdt = float(balances.get("USDT", 0.0))
         print(f"USDT after selling non-top assets: {usdt}")
 
+    _regime_max = _get_max_positions_for_regime(settings, _regime_mode)
     for symbol in top_symbols:
-        # Enforce global MAX_POSITIONS limit
+        # Enforce global MAX_POSITIONS limit (dynamic by regime)
         if position_manager:
             total_open = sum(len(v) for v in position_manager.get_all_positions().values())
-            if total_open >= settings.max_positions:
-                print(f"Skipping buy {symbol}: global max positions ({total_open}/{settings.max_positions}) reached")
-                update_signal_decision(symbol, "rejected", "MAX_POSIC")
-                break
+            if total_open >= _regime_max:
+                # — Compute prediction for this candidate (needed by replace + overflow) —
+                _cand_meta     = signal_meta.get(symbol, {})
+                _cand_strength = float(_cand_meta.get('strength', 0.0))
+                if precomputed_predictions and symbol in precomputed_predictions:
+                    _cand_pred = precomputed_predictions[symbol]
+                else:
+                    _cand_pred, _ = pnl_service.predict_for_symbol(symbol, client, settings,
+                                                                    getattr(settings, 'max_per_trade_usdt', 50.0))
+
+                # Step A: try active replacement of the weakest open position
+                _replaced = _try_replace_weakest_position(
+                    symbol, _cand_strength, _cand_pred,
+                    position_manager, portfolio_manager, client, settings, _regime_mode
+                )
+                if _replaced:
+                    print(f"[Replace] Slot freed — proceeding to buy {symbol}")
+                    # fall through to normal buy logic below
+                else:
+                    # Step B: try overflow slot if signal quality is exceptional
+                    if _is_overflow_eligible(symbol, _cand_strength, _cand_pred, settings):
+                        _overflow_positions.add(symbol)
+                        print(f"[Overflow] Opening extra slot for {symbol} "
+                              f"(str={_cand_strength:.2f}, prob={float((_cand_pred or {}).get('success_probability',0)):.2f}). "
+                              f"Overflow slots used: {len(_overflow_positions)}/{getattr(settings,'overflow_max_extra',3)}")
+                        # fall through to normal buy logic below
+                    else:
+                        print(f"Skipping buy {symbol}: regime max ({total_open}/{_regime_max}) reached, "
+                              f"no replacement or overflow eligible")
+                        update_signal_decision(symbol, "rejected", "MAX_POSIC")
+                        continue
         # Enforce per-symbol MAX_POSITIONS_PER_SYMBOL limit
         if position_manager:
             count = position_manager.get_positions_count(symbol)
@@ -1199,6 +1400,7 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
                         pnl=pnl,
                         close_reason="prediction_reallocation",
                     )
+                _overflow_positions.discard(sym)  # free overflow slot if used
                 print(f"Prediction close {sym}: sold {qty} @ {exit_price:.4f}, pnl estimated")
             except Exception as sell_err:
                 print(f"Prediction close {sym}: sell failed — {sell_err}")
@@ -1370,7 +1572,8 @@ def execute_once():
     print(f"Completed cycle. Next cycle in {_next_cycle} min (regime={_regime_mode})")
     return {"top_symbols": top_symbols, "sell_orders": sell_orders,
             "buy_orders": buy_orders, "sl_tp_closes": sl_tp_closes,
-            "futures_closes": futures_closes, "next_cycle_minutes": _next_cycle}
+            "futures_closes": futures_closes, "next_cycle_minutes": _next_cycle,
+            "regime_mode": _regime_mode}
 
 
 if __name__ == '__main__':

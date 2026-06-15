@@ -537,9 +537,10 @@ function renderOpenPositions(d) {
                     const pnlDisplay = showMxn
                         ? `${fmt(p.unrealized_pnl)} USDT<br><small>${fmt(p.unrealized_pnl_mxn ?? 0, 1)} MXN</small>`
                         : `${fmt(p.unrealized_pnl)} USDT`;
+                    const overflowBadge = p.is_overflow ? ' <span class="badge-overflow" title="Posición extra por señal excepcional">⚡OVF</span>' : '';
                     return `
                     <tr class="${rowCls}">
-                        <td><strong>${p.symbol}</strong></td>
+                        <td><strong>${p.symbol}</strong>${overflowBadge}</td>
                         <td>${catIcon(p.category || 'MIDCAP_ALT')}</td>
                         <td>${fmt(p.quantity, 4)}</td>
                         <td>$${fmt(p.entry_price)}</td>
@@ -874,7 +875,8 @@ function renderHealthChecks(data) {
         if (key === 'binance')      detail = c.latency_ms != null ? `${c.latency_ms} ms${c.testnet ? ' (testnet)' : ''}` : (c.detail || '');
         if (key === 'trade_cycle')  {
             const lastAt = c.last_trade_cycle_at ? new Date(c.last_trade_cycle_at).toLocaleTimeString('es-MX') : '-';
-            detail = `Ciclo: ${c.current_cycle_minutes ?? '?'} min | Último: ${lastAt}`;
+            const ovfStr = c.overflow_slots_used != null ? ` | ⚡ OVF: ${c.overflow_slots_used}/${c.overflow_max_extra ?? 3}` : '';
+            detail = `Ciclo: ${c.current_cycle_minutes ?? '?'} min | Max pos: ${c.max_positions_current ?? '?'} (${c.regime ?? '?'})${ovfStr} | Último: ${lastAt}`;
         }
         if (key === 'position_sync')detail = `DB: ${c.db_open_positions ?? '?'} | Binance: ${c.binance_holdings ?? '?'}${c.mismatch ? ` | ⚠ Dif: ${c.mismatch}` : ''}`;
         if (key === 'futures_api')  detail = c.latency_ms != null ? `${c.latency_ms} ms${c.open_shorts != null ? ` | ${c.open_shorts} S / ${c.open_longs ?? 0} L` : ''}` : (c.detail || '');

@@ -1033,6 +1033,10 @@ async def get_dashboard_summary() -> Dict:
 
     # Open Positions (with pnl_prediction)
     try:
+        try:
+            from run_trades import _overflow_positions as _ov_positions
+        except Exception:
+            _ov_positions = set()
         positions = position_manager.get_all_positions()
         open_list = []
         for symbol, pos_list in positions.items():
@@ -1090,6 +1094,7 @@ async def get_dashboard_summary() -> Dict:
                     "stop_loss": float(position.stop_loss) if position.stop_loss else None,
                     "take_profit": float(position.take_profit) if position.take_profit else None,
                     "pnl_prediction": position.pnl_prediction,
+                    "is_overflow": symbol in _ov_positions,
                 })
         result["open_positions"] = {"positions": open_list, "count": len(open_list)}
     except Exception as e:
@@ -1668,10 +1673,22 @@ async def get_health_status() -> Dict:
     except Exception as _pe:
         checks["portfolio_exposure"] = {"status": "error", "detail": str(_pe)}
 
-    # Ciclo dinámico actual
+    # Ciclo dinámico actual + posiciones dinámicas
+    _regime_now = getattr(orchestrator, 'current_regime_mode', 'SPOT_BULL') or 'SPOT_BULL'
+    try:
+        from run_trades import _get_max_positions_for_regime, _overflow_positions as _ov_set
+        _max_pos_now = _get_max_positions_for_regime(settings, _regime_now)
+        _overflow_used = len(_ov_set)
+    except Exception:
+        _max_pos_now = getattr(settings, 'max_positions', 12)
+        _overflow_used = 0
     checks["trade_cycle"] = {
         "current_cycle_minutes": orchestrator.current_cycle_minutes,
         "last_trade_cycle_at": orchestrator.last_trade_cycle_at.isoformat() if orchestrator.last_trade_cycle_at else None,
+        "regime": _regime_now,
+        "max_positions_current": _max_pos_now,
+        "overflow_slots_used": _overflow_used,
+        "overflow_max_extra": getattr(settings, 'overflow_max_extra', 3),
     }
 
     return {

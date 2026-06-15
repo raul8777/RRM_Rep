@@ -49,6 +49,7 @@ class Orchestrator:
         self.should_run = False
         self.last_trade_cycle_at: Optional[datetime] = None
         self.current_cycle_minutes: int = 5  # updated dynamically per regime
+        self.current_regime_mode: str = 'SPOT_BULL'  # updated dynamically per cycle
         
         # Callbacks
         self.on_state_change: Optional[Callable] = None
@@ -362,6 +363,8 @@ class Orchestrator:
                         _next_interval = int(result['next_cycle_minutes'])
                         if cycle_func == getattr(self, '_trade_cycle_func', None):
                             self.current_cycle_minutes = _next_interval
+                            if 'regime_mode' in result:
+                                self.current_regime_mode = result['regime_mode']
                     else:
                         _next_interval = interval_minutes
                 elif self.can_monitor_positions():
