@@ -460,6 +460,7 @@ class FuturesClient:
                         "symbol": symbol, "side": "BUY",
                         "algoType": "CONDITIONAL", "type": "STOP_MARKET",
                         "triggerPrice": str(_sl_trigger), "closePosition": "true",
+                        "timeInForce": "GTC",
                     })
                     sl_order_id = str(sl_order.get("algoId", sl_order.get("orderId", "")))
                     sl_price = _sl_trigger
@@ -486,6 +487,7 @@ class FuturesClient:
                     "symbol": symbol, "side": "BUY",
                     "algoType": "CONDITIONAL", "type": "TAKE_PROFIT_MARKET",
                     "triggerPrice": str(tp_price), "closePosition": "true",
+                    "timeInForce": "GTC",
                 })
                 tp_order_id = str(tp_order.get("algoId", tp_order.get("orderId", "")))
                 print(f"[Futures] TP algo order placed: triggerPrice={tp_price:.4f} (algoId={tp_order_id})")
