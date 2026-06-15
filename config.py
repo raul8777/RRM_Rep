@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     bear_market_btc_7d_threshold: float = Field(default=-10.0, env="BEAR_MARKET_BTC_7D_THRESHOLD")  # % change
     bear_market_kelly_multiplier: float = Field(default=0.5, env="BEAR_MARKET_KELLY_MULTIPLIER")  # reduce Kelly
     bear_market_volspike_min: float = Field(default=2.0, env="BEAR_MARKET_VOLSPIKE_MIN")  # stricter spike req
+    # SPOT_BULL PnL boost — relax predictor thresholds when market is in confirmed uptrend
+    spot_bull_pnl_boost_enabled: bool = Field(default=True, env="SPOT_BULL_PNL_BOOST_ENABLED")
+    spot_bull_pnl_boost_large_cap: float = Field(default=0.0, env="SPOT_BULL_PNL_BOOST_LARGE_CAP")    # BTC/ETH: allow up to 0 PnL
+    spot_bull_pnl_boost_midcap: float = Field(default=-0.10, env="SPOT_BULL_PNL_BOOST_MIDCAP")        # alts: allow -0.10
+    spot_bull_btc_4h_up_required: bool = Field(default=True, env="SPOT_BULL_BTC_4H_UP_REQUIRED")      # only apply when BTC 4h=UP
+    # Regime whipsaw protection — minimum consecutive PRESERVATION cycles before closing shorts
+    min_cycles_before_close_shorts: int = Field(default=3, env="MIN_CYCLES_BEFORE_CLOSE_SHORTS")
+    # Futures: no short when BTC 4h candle just moved up strongly (avoid shorting into momentum)
+    futures_no_short_btc_4h_threshold: float = Field(default=2.0, env="FUTURES_NO_SHORT_BTC_4H_THRESHOLD")  # %
     # Scale-out on take-profit
     scale_out_enabled: bool = Field(default=True, env="SCALE_OUT_ENABLED")
     scale_out_first_close_pct: float = Field(default=0.5, env="SCALE_OUT_FIRST_CLOSE_PCT")  # close 50% at TP

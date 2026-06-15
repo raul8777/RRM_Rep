@@ -23,7 +23,7 @@ from typing import Optional
 # ── Constants ────────────────────────────────────────────────────────────────
 _CACHE_TTL_SECONDS        = 240   # Re-detect every 4 minutes
 _CONFIRM_CYCLES           = 2    # Anti-whipsaw: 2 consecutive detections before switching
-_CONFIRM_CYCLES_FAST      = 1    # Accelerated: 1 cycle in severe structural bear
+_CONFIRM_CYCLES_FAST      = 2    # Was 1 (caused whipsaw every 5 min in bear+7d rebound)
 _BEAR_7D_THRESHOLD        = -7.0  # BTC 7d < -7% → potential bear
 _BEAR_30D_THRESHOLD       = -15.0 # BTC 30d < -15% → structural bear (faster confirmation)
 _BEAR_SEVERE_30D          = -15.0 # Accelerate FUTURES_SHORT confirmation when 30d < this

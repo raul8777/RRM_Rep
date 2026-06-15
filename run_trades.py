@@ -25,6 +25,10 @@ _VOLSPIKE_COOLDOWN: Dict[str, datetime] = {}
 # Futures client singleton (lazy-initialized)
 _futures_client: FuturesClient = None
 
+# Whipsaw protection: count consecutive cycles where regime is NOT a short-friendly mode.
+# Shorts are only closed when this counter reaches min_cycles_before_close_shorts (config).
+_non_short_regime_cycles: int = 0
+
 
 def _get_futures_client(settings) -> FuturesClient:
     """Lazy singleton for FuturesClient. Reuses instance across cycles."""
@@ -478,10 +482,15 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
 
     # ── BTC macro trend filter ─────────────────────────────────────────────────
     btc_trend = 'FLAT'
+    btc_4h_chg_pct = 0.0  # last closed 4h candle change %
     try:
         sig_gen = AutonomousSignalGenerator(client, ['BTCUSDT'])
         btc_trend = sig_gen.get_btc_market_trend(interval='4h')
-        print(f"BTC 4h trend: {btc_trend}")
+        _btc_kl = client.client.get_klines(symbol='BTCUSDT', interval='4h', limit=3)
+        if _btc_kl and len(_btc_kl) >= 2:
+            _prev = _btc_kl[-2]  # last fully closed candle
+            btc_4h_chg_pct = (float(_prev[4]) - float(_prev[1])) / float(_prev[1]) * 100
+        print(f"BTC 4h trend: {btc_trend} | last 4h candle: {btc_4h_chg_pct:+.2f}%")
     except Exception as e:
         print(f"BTC trend check failed: {e}")
 
@@ -610,6 +619,12 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                 print(f"[Futures] F&G Extreme Greed ({_fng_val}) → reduced short margin ${_f_usdt}")
                     except Exception:
                         pass
+                    # Fix #2: avoid opening shorts into strong BTC 4h upward momentum
+                    _no_short_threshold = getattr(settings, 'futures_no_short_btc_4h_threshold', 2.0)
+                    if btc_4h_chg_pct >= _no_short_threshold:
+                        print(f"[Futures] SHORT {symbol} SKIPPED: BTC 4h candle={btc_4h_chg_pct:+.2f}% >= {_no_short_threshold}% — no shorting into BTC momentum")
+                        update_signal_decision(symbol, "rejected", "BTC_MOMENTUM")
+                        continue
                     print(f"[Futures] FUTURES_SHORT mode: opening short {symbol} margin=${_f_usdt}")
                     _pos = _fc.open_short(symbol, usdt_amount=_f_usdt,
                                           sl_pct=_f_sl, tp_pct=_f_tp, leverage=_f_lev)
@@ -690,7 +705,29 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             prediction, formatted_indicators = pnl_service.predict_for_symbol(
                 symbol, client, settings, allocation
             )
-        is_valid, reason = pnl_service.validate(prediction, settings, symbol=symbol, news_client=news_client)
+        # ── SPOT_BULL PnL boost — relax predictor thresholds in confirmed uptrend ─
+        _pnl_boosted_settings = settings
+        if (getattr(settings, 'spot_bull_pnl_boost_enabled', True)
+                and _regime_mode == "SPOT_BULL"
+                and _regime is not None and _regime.confirmed
+                and (not getattr(settings, 'spot_bull_btc_4h_up_required', True) or btc_trend == 'UP')):
+            _large_cap_set = {'BTCUSDT', 'ETHUSDT', 'BNBUSDT'}
+            _boost_pnl = (getattr(settings, 'spot_bull_pnl_boost_large_cap', 0.0)
+                          if symbol in _large_cap_set
+                          else getattr(settings, 'spot_bull_pnl_boost_midcap', -0.10))
+            _cat_th = getattr(settings, 'category_thresholds', {})
+            _sym_cat = getattr(settings, 'token_categories', {}).get(symbol, {}).get('market_behavior', 'MIDCAP_ALT')
+            _cur_min_pnl = _cat_th.get(_sym_cat, {}).get('min_pnl', 0.0)
+            if _boost_pnl < _cur_min_pnl:
+                import copy
+                _pnl_boosted_settings = copy.copy(settings)
+                _new_th = copy.deepcopy(_cat_th)
+                if _sym_cat not in _new_th:
+                    _new_th[_sym_cat] = {}
+                _new_th[_sym_cat]['min_pnl'] = _boost_pnl
+                _pnl_boosted_settings.category_thresholds = _new_th
+                print(f"[SPOT_BULL boost] {symbol} ({_sym_cat}): min_pnl {_cur_min_pnl:.2f}→{_boost_pnl:.2f} (BTC 4h={btc_4h_chg_pct:+.2f}%)")
+        is_valid, reason = pnl_service.validate(prediction, _pnl_boosted_settings, symbol=symbol, news_client=news_client)
         if not is_valid:
             ep = prediction.get('expected_pnl', 0) if prediction else 0
             sp = prediction.get('success_probability', 0) if prediction else 0
@@ -1073,20 +1110,31 @@ def execute_once():
                     print(f"[Futures] WARNING: could not fund futures wallet (need ${_f_required:.2f}) — shorts will be skipped")
 
             # A3: Auto-close ALL shorts if regime switched OUT of bear modes
+            # Whipsaw guard: only close after N consecutive non-short cycles
+            global _non_short_regime_cycles
             _open_shorts = list(_fc._open_positions.keys())
-            if _open_shorts and _regime_mode not in ("PRESERVATION", "FUTURES_SHORT"):
-                print(f"[Futures] Regime is {_regime_mode} — closing ALL {len(_open_shorts)} shorts")
-                for _sym in _open_shorts:
-                    try:
-                        _pos = _fc._open_positions[_sym]
-                        _result = _fc.close_short(_sym, _pos.qty, reason="regime_change")
-                        futures_closes.append({"symbol": _sym, "reason": "regime_change", "result": _result})
-                        print(f"[Futures] Closed short {_sym} due to regime change → {_regime_mode}")
-                    except Exception as _ce:
-                        print(f"[Futures] Failed to close {_sym} on regime change: {_ce}")
-
-            # Bidirectional: return idle futures funds to spot when not in SHORT mode
+            _min_cycles = getattr(settings, 'min_cycles_before_close_shorts', 3)
             if _regime_mode not in ("PRESERVATION", "FUTURES_SHORT"):
+                _non_short_regime_cycles += 1
+            else:
+                _non_short_regime_cycles = 0  # reset — still in short-friendly mode
+            if _open_shorts and _regime_mode not in ("PRESERVATION", "FUTURES_SHORT"):
+                if _non_short_regime_cycles >= _min_cycles:
+                    print(f"[Futures] Regime is {_regime_mode} for {_non_short_regime_cycles} cycles (>={_min_cycles}) — closing ALL {len(_open_shorts)} shorts")
+                    for _sym in _open_shorts:
+                        try:
+                            _pos = _fc._open_positions[_sym]
+                            _result = _fc.close_short(_sym, _pos.qty, reason="regime_change")
+                            futures_closes.append({"symbol": _sym, "reason": "regime_change", "result": _result})
+                            print(f"[Futures] Closed short {_sym} due to regime change → {_regime_mode}")
+                        except Exception as _ce:
+                            print(f"[Futures] Failed to close {_sym} on regime change: {_ce}")
+                    _non_short_regime_cycles = 0
+                else:
+                    print(f"[Futures] Regime is {_regime_mode} ({_non_short_regime_cycles}/{_min_cycles} cycles) — holding shorts (whipsaw guard)")
+
+            # Bidirectional: return idle futures funds to spot — only after shorts are closed
+            if _regime_mode not in ("PRESERVATION", "FUTURES_SHORT") and _non_short_regime_cycles >= _min_cycles:
                 try:
                     _fc.return_idle_funds_to_spot(
                         reserve_usdt    = 5.0,
