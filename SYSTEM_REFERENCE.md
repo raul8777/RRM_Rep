@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 15 2026 13:21 UTC-6 | Nuevos roles R1-R6: Behavioral Finance, Microestructura, Correlaciones, Circuit Breaker, On-chain | Dynamic max pos + overflow | Smart exit | Dashboard v18
+> Última actualización: jun 15 2026 13:47 UTC-6 | Fix posiciones cerradas vacías (datetime offset-naive) | R1-R6 roles | Dynamic max pos + overflow | Smart exit | Dashboard v18
 
 ---
 
@@ -34,7 +34,7 @@
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 15 2026 10:05 UTC-6 |
+| Fecha última actualización | jun 15 2026 13:47 UTC-6 |
 | Capital total | ~$3,080 USDT |
 | Capital spot líquido | ~$1,316 USDT |
 | Capital invertido spot | ~$1,756 USDT (57.2%) — cap 75% |
@@ -46,12 +46,12 @@
 | BTC 30d | -17.7% (bear estructural — SPOT_BULL de rebote corto plazo) |
 | Screener dinámico | ✅ ACTIVO — 46 spot / 8 futures |
 | Hedge mode Binance | ✅ ACTIVADO (`dualSidePosition=true`) |
-| Docker | live, sin errores |
+| Docker | live, sin errores — commit 1de240e |
 | dry_run | False |
 | allow_real_trading | True |
 | Posiciones abiertas spot (12) | FETUSDT, LTCUSDT, ZECUSDT, MEGAUSDT, TRUMPUSDT, WLDUSDT, XLMUSDT, ZROUSDT, JTOUSDT, SOLUSDT, BNBUSDT, AVAXUSDT + más |
 | Ciclo activo | 20 min (SPOT_BULL dinámico) |
-| Win rate DB | 34% (22W/42L — degradado por portfolio_rebalancing excesivo, ya corregido) |
+| Win rate DB | 29.5% (83 trades totales — incluye rebalanceos forzados) |
 
 ---
 
@@ -277,12 +277,13 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 
 ### Activos (no resueltos)
 
-**Sin bugs activos conocidos** — todos verificados y resueltos al jun 15 2026 10:00 UTC-6.
+**Sin bugs activos conocidos** — todos verificados y resueltos al jun 15 2026 13:47 UTC-6.
 
 ### Resueltos (historial)
 
 | Fecha | Bug | Fix |
 |-------|-----|-----|
+| jun 15 13:47 | Dashboard mostraba 0 posiciones cerradas — `close_position()` guardaba `exit_time` como datetime naive (sin UTC) vs DB que retorna aware; comparación en `calculate_performance_metrics` y `get_closed_positions` lanzaba `TypeError: can't compare offset-naive and offset-aware datetimes`. `_get_monte_carlo_projection` pasaba objetos `ClosedPosition` a función que esperaba dicts `t["pnl"]` | Fix: `datetime.now(timezone.utc).isoformat()` en `position_manager.py:447` + conversión a dicts en `app.py:741`. `83 trades` ahora visibles. |
 | jun 15 11:41 | `_STALE_CYCLE_MINUTES=15` hardcoded → falso positivo con SPOT_BULL 15min; warning spameaba error_collector en cada poll | Fix: umbral dinámico `orchestrator.current_cycle_minutes × 1.5` + dedup por `last_cycle` timestamp. `app.py` línea ~1500 |
 | jun 15 11:41 | `portfolio_manager.get_position_predictions()` usaba `trade_cycle_minutes=5` fijo → predicción a 5min en vez del ciclo real 15min SPOT_BULL → sesgo contra posiciones abiertas en prediction-reallocation | Fix: usa `orchestrator.current_cycle_minutes` con fallback a config. `portfolio_manager.py` línea ~351 |
 | jun 15 10:00 | `MAX_PER_TRADE_USDT=15` → predictor calculaba PnL con $15 pero Kelly compraba $150 (10× subestimado) | `MAX_PER_TRADE_USDT=350` en `.env` + `docker-compose.yml` línea 63. Requiere `up -d`, no `restart` |
@@ -403,6 +404,7 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | N12 | Filtro liquidez R3: verificar que no bloquea pares del screener (todos deben tener vol>$3M) |
 | N13 | Filtro categorias R4: con 12 posiciones abiertas verificar distribución MEME≤2 / NARRATIVE≤4 |
 | N14 | Circuit breaker: verificar en logs que solo se activa por errores API, NO por pérdidas de mercado |
+| N15 | Verificar win rate real con 83 trades en dashboard — actualmente 29.5% (bajo por rebalanceos). Monitorear si sube con nuevos filtros R1-R6 |
 
 ---
 
