@@ -738,7 +738,8 @@ def _get_monte_carlo_projection(force: bool = False) -> Dict:
     if not force and _mc_cache["data"] and now - _mc_cache["ts"] < _MC_CACHE_TTL:
         return _mc_cache["data"]
     try:
-        closed = position_manager.get_closed_positions() if position_manager else []
+        closed_objs = position_manager.get_closed_positions(limit=200) if position_manager else []
+        closed = [{"pnl": float(p.pnl)} for p in closed_objs if p.pnl is not None]
         usdt_bal = float(binance_client.get_account_balance().get("USDT", 346.13))
         data = _run_monte_carlo(
             closed_trades=closed,

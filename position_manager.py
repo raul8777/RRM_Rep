@@ -444,7 +444,7 @@ class PositionManager:
             entry_price=entry_p,
             exit_price=exit_p,
             entry_time=target.entry_time,
-            exit_time=datetime.utcnow().isoformat(),
+            exit_time=datetime.now(timezone.utc).isoformat(),
             pnl=pnl,
             pnl_percentage=pnl_pct,
             close_reason=close_reason,
