@@ -72,6 +72,8 @@ class FuturesClient:
         self._open_positions: Dict[str, FuturesPosition] = {}
         self._price_cache: Dict[str, Tuple[float, float]] = {}  # {symbol: (price, ts)}
         self._leverage_set: set = set()   # symbols with leverage already configured
+        if not dry_run:
+            self._sync_open_positions()
 
     # ── Internal HTTP helpers ─────────────────────────────────────────────────
 
@@ -210,6 +212,34 @@ class FuturesClient:
         """All open futures positions (non-zero positionAmt)."""
         account = self.get_account_info()
         return [p for p in account.get("positions", []) if float(p.get("positionAmt", 0)) != 0]
+
+    def _sync_open_positions(self) -> None:
+        """Rebuild _open_positions from Binance on startup (survives restarts)."""
+        try:
+            positions = self.get_positions()
+            for p in positions:
+                sym = p.get("symbol", "")
+                amt = float(p.get("positionAmt", 0))
+                entry = float(p.get("entryPrice", 0))
+                if amt >= 0 or entry <= 0:
+                    continue  # only SHORT (negative amt)
+                qty = abs(amt)
+                tick = self._get_tick_size(sym)
+                sl_price = self._align_price(entry * 1.03, tick)   # 3% above entry
+                tp_price = self._align_price(entry * 0.94, tick)   # 6% below entry
+                pos = FuturesPosition(
+                    symbol=sym, side="SHORT", qty=qty,
+                    entry_price=entry, sl_price=sl_price, tp_price=tp_price,
+                    order_id=f"SYNC_{sym}", sl_order_id=None, tp_order_id=None,
+                )
+                self._open_positions[sym] = pos
+                print(f"[Futures] Synced position: SHORT {sym} qty={qty} entry={entry:.4f} (SL={sl_price}, TP={tp_price})")
+            if self._open_positions:
+                print(f"[Futures] FuturesClient initialized — synced {len(self._open_positions)} open short(s)")
+            else:
+                print(f"[Futures] FuturesClient initialized")
+        except Exception as e:
+            print(f"[Futures] FuturesClient initialized (sync failed: {e})")
 
     def count_open_shorts(self) -> int:
         try:
