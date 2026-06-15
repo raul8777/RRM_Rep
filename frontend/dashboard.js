@@ -660,11 +660,24 @@ function renderHealthChecks(data) {
         let detail = '';
         if (key === 'db')           detail = c.latency_ms != null ? `${c.latency_ms} ms` : (c.detail || '');
         if (key === 'binance')      detail = c.latency_ms != null ? `${c.latency_ms} ms${c.testnet ? ' (testnet)' : ''}` : (c.detail || '');
-        if (key === 'trade_cycle')  detail = c.last_cycle_at ? `Último: ${new Date(c.last_cycle_at).toLocaleTimeString('es-MX')} (${c.age_minutes}min ago)` : (c.detail || 'Sin datos');
+        if (key === 'trade_cycle')  {
+            const lastAt = c.last_trade_cycle_at ? new Date(c.last_trade_cycle_at).toLocaleTimeString('es-MX') : '-';
+            detail = `Ciclo: ${c.current_cycle_minutes ?? '?'} min | Último: ${lastAt}`;
+        }
         if (key === 'position_sync')detail = `DB: ${c.db_open_positions ?? '?'} | Binance: ${c.binance_holdings ?? '?'}${c.mismatch ? ` | ⚠ Dif: ${c.mismatch}` : ''}`;
-        if (key === 'futures_api')  detail = c.latency_ms != null ? `${c.latency_ms} ms${c.open_shorts != null ? ` | ${c.open_shorts} shorts` : ''}` : (c.detail || '');
+        if (key === 'futures_api')  detail = c.latency_ms != null ? `${c.latency_ms} ms${c.open_shorts != null ? ` | ${c.open_shorts} S / ${c.open_longs ?? 0} L` : ''}` : (c.detail || '');
         if (key === 'social_score') detail = c.enabled ? `✅ activo — ${c.trending_count ?? 0} tokens trending` : '⚪ sin API key';
         if (key === 'errors')       detail = `${c.errors_last_5min || 0} err / ${c.warnings_last_5min || 0} warn (5min) | Total: ${c.total_records || 0}`;
+        if (key === 'portfolio_exposure') {
+            const expPct = c.exposure_pct ?? 0;
+            const maxPct = c.max_exposure_pct ?? 65;
+            const expColor = expPct >= maxPct ? '#f44336' : expPct >= maxPct * 0.85 ? '#ff9800' : '#4caf50';
+            const barWidth = Math.min(100, (expPct / maxPct) * 100).toFixed(0);
+            detail = `<span style="color:${expColor};font-weight:bold">${expPct}%</span> / ${maxPct}% cap` +
+                ` | inv: $${c.invested_usdt ?? '?'} | liq: $${c.liquid_usdt ?? '?'}` +
+                `<div style="margin-top:3px;height:4px;background:#333;border-radius:2px;width:100px;display:inline-block;vertical-align:middle;margin-left:6px">` +
+                `<div style="height:4px;width:${barWidth}%;background:${expColor};border-radius:2px"></div></div>`;
+        }
         return `<div class="data-item">
             <span class="data-label">${_healthIcon(c.status || c.health)} ${key}</span>
             <span class="data-value" style="color:${_healthColor(c.status || c.health)}">${detail || c.status || c.health}</span>

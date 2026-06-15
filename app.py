@@ -786,7 +786,7 @@ def _get_market_regime() -> Dict:
             "SPOT_BULL":     "Compras en breakout con Kelly dinámico. Trailing stop activo. Scale-out en TP.",
             "RANGE_SCALP":   "Compras en soporte BB inferior (RSI<40), venta en BB superior. TP ajustado 1.5%.",
             "PRESERVATION":  "Capital 80%+ en USDT. Solo NARRATIVE con VolSpike≥2x. Kelly×0.5.",
-            "FUTURES_SHORT": "Shorts 2× en BTC/ETH/SOL/BNB. SL 3% arriba, TP 5% abajo. Máx 2 posiciones.",
+            "FUTURES_SHORT": "Shorts 2× en pares Tier A screener (BTCUSDT, ETHUSDT, SOLUSDT…). LONG en soporte. SL SHORT 3% / LONG 2.5% | TP 5%. Hedge mode activo.",
         }
         _MODE_COLOR = {
             "SPOT_BULL": "#4ecca3", "RANGE_SCALP": "#f39c12",
@@ -1597,12 +1597,14 @@ async def get_health_status() -> Dict:
             try:
                 from run_trades import _get_futures_client
                 _fc = _get_futures_client(settings)
-                _open_shorts = len(_fc._open_positions)
+                _open_shorts = _fc.count_open_shorts()
+                _open_longs  = _fc.count_open_longs()
             except Exception:
                 _open_shorts = 0
+                _open_longs  = 0
             checks["futures_api"] = {
                 "status": "ok", "latency_ms": _fapi_lat,
-                "open_shorts": _open_shorts, "leverage_max": 2,
+                "open_shorts": _open_shorts, "open_longs": _open_longs, "leverage_max": 2,
             }
         else:
             checks["futures_api"] = {"status": "disabled"}
@@ -1614,10 +1616,10 @@ async def get_health_status() -> Dict:
 
     # Social score (CryptoCompare) health check
     try:
-        from news_client import _cryptocompare_enabled, _SOCIAL_BASELINES
+        from news_client import _cryptocompare_enabled, _SOCIAL_BASELINES, NewsClient as _NewsClient
         _cc_enabled = _cryptocompare_enabled()
         if _cc_enabled:
-            _nc_tmp = NewsClient()
+            _nc_tmp = _NewsClient()
             _trending_count = sum(
                 1 for sym in _SOCIAL_BASELINES if _nc_tmp.is_social_trending(sym)
             )
@@ -1636,6 +1638,35 @@ async def get_health_status() -> Dict:
     checks["errors"] = err_summary
     if err_summary["errors_last_5min"] > 0 and overall == "ok":
         overall = "warning"
+
+    # Fase D: portfolio exposure + ciclo dinámico actual
+    try:
+        comp = get_components()
+        _bal = comp.portfolio_manager.get_total_balance()
+        _total = float(_bal.get("total_usdt", 0))
+        _liquid = float(_bal.get("usdt_available", 0))
+        _invested = _total - _liquid
+        _exp_pct = _invested / _total if _total > 0 else 0.0
+        _max_exp = getattr(settings, 'max_total_exposure_pct', 0.65)
+        _exp_status = "ok" if _exp_pct < _max_exp * 0.85 else ("warning" if _exp_pct < _max_exp else "cap_reached")
+        checks["portfolio_exposure"] = {
+            "status": _exp_status,
+            "invested_usdt": round(_invested, 2),
+            "liquid_usdt": round(_liquid, 2),
+            "total_usdt": round(_total, 2),
+            "exposure_pct": round(_exp_pct * 100, 1),
+            "max_exposure_pct": round(_max_exp * 100, 1),
+        }
+        if _exp_status == "cap_reached" and overall == "ok":
+            overall = "warning"
+    except Exception as _pe:
+        checks["portfolio_exposure"] = {"status": "error", "detail": str(_pe)}
+
+    # Ciclo dinámico actual
+    checks["trade_cycle"] = {
+        "current_cycle_minutes": orchestrator.current_cycle_minutes,
+        "last_trade_cycle_at": orchestrator.last_trade_cycle_at.isoformat() if orchestrator.last_trade_cycle_at else None,
+    }
 
     return {
         "overall": overall,

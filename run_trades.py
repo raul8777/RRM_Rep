@@ -39,7 +39,10 @@ def _get_futures_client(settings) -> FuturesClient:
             api_secret = settings.binance_api_secret,
             dry_run    = settings.dry_run,
             max_shorts = getattr(settings, 'futures_max_shorts', 2),
+            max_longs  = getattr(settings, 'futures_max_longs', 3),
         )
+        if getattr(settings, 'futures_hedge_mode_enabled', True):
+            _futures_client.enable_hedge_mode()
         print("[Futures] FuturesClient initialized")
     return _futures_client
 
@@ -67,10 +70,13 @@ def _get_news_scores(symbols: List[str], news_client: NewsClient, settings) -> D
 
 
 def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClient, portfolio_manager=None, regime: str = "SPOT_BULL") -> List[Dict]:
-    # Expire autonomous signals older than 10 min with no decision (B3: matches SIGNAL_CACHE_TTL)
-    expired = expire_stale_signals(max_age_minutes=10)
+    # Expire autonomous signals — TTL aligned to regime cycle (B-v2)
+    _regime_for_ttl = regime if regime else "SPOT_BULL"
+    _ttl_by_regime = {"SPOT_BULL": 45, "RANGE_SCALP": 15, "PRESERVATION": 90, "FUTURES_SHORT": 24}
+    _signal_ttl = _ttl_by_regime.get(_regime_for_ttl, 30)
+    expired = expire_stale_signals(max_age_minutes=_signal_ttl)
     if expired:
-        print(f"Expired {expired} stale autonomous signal(s)")
+        print(f"Expired {expired} stale autonomous signal(s) (TTL={_signal_ttl}min for {_regime_for_ttl})")
 
     # First try to get signals from external sources (TradingView webhook)
     # Filter out autonomous signals to avoid using stale autonomous signals
@@ -98,18 +104,36 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
     if not external_signals:
         print("No external signals found, using autonomous signal generation...")
         try:
-            # Configure symbols for analysis
-            symbols = getattr(settings, 'analysis_symbols', [
+            # Configure symbols for analysis — merge static list with dynamic screener
+            _static_symbols = getattr(settings, 'analysis_symbols', [
                 'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
                 'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT'
             ])
-            
+            if getattr(settings, 'screener_enabled', True):
+                try:
+                    from pair_screener import get_screened_pairs, merge_with_static
+                    _screened = get_screened_pairs(settings=settings)
+                    symbols = merge_with_static(
+                        _screened["spot"],
+                        _static_symbols,
+                        max_total=getattr(settings, 'screener_max_pairs', 50),
+                    )
+                    _new = [s for s in symbols if s not in _static_symbols]
+                    if _new:
+                        print(f"[Screener] Added {len(_new)} dynamic pairs: {_new[:10]}")
+                except Exception as _se:
+                    print(f"[Screener] Error, falling back to static list: {_se}")
+                    symbols = _static_symbols
+            else:
+                symbols = _static_symbols
+
             signal_generator = AutonomousSignalGenerator(client, symbols)  # reuse shared client
             autonomous_signals = signal_generator.get_top_buy_signals(
                 interval='1h',
                 min_strength=getattr(settings, 'min_signal_strength', 0.5),
                 limit=getattr(settings, 'max_positions', 5),
-                news_client=news_client
+                news_client=news_client,
+                regime_mode=regime,
             )
             
             # Convert autonomous signals to expected format and add to signal store
@@ -342,9 +366,17 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
 
 def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[str, float], top_symbols: List[str], portfolio_manager=None, position_manager=None) -> List[Dict]:
     orders = []
+    _rebalance_count = 0
+    _max_rebalance = getattr(settings, 'max_rebalance_per_cycle', 2)
+    _min_hold_min  = getattr(settings, 'min_hold_minutes', 60)
     for asset, amount in balances.items():
         if asset.upper() == "USDT" or amount <= 0:
             continue
+
+        # Cap: no más de max_rebalance_per_cycle sells por ciclo
+        if _rebalance_count >= _max_rebalance:
+            print(f"[Rebalance] max_rebalance_per_cycle={_max_rebalance} reached — deferring remaining sells")
+            break
 
         symbol = f"{asset.upper()}USDT"
         if symbol in _INVALID_SYMBOLS:
@@ -352,6 +384,25 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
         if symbol in top_symbols:
             print(f"Keeping asset {asset} because {symbol} is in top symbols")
             continue
+
+        # min_hold_minutes: no rebalancear posición con menos de N minutos de vida
+        if position_manager and _min_hold_min > 0:
+            try:
+                pos_list = position_manager.get_all_positions().get(symbol, [])
+                if pos_list:
+                    _ts_list = [
+                        (getattr(p, 'entry_time', None) or getattr(p, 'created_at', None))
+                        for p in pos_list
+                        if (getattr(p, 'entry_time', None) or getattr(p, 'created_at', None)) is not None
+                    ]
+                    _entry_ts = min(_ts_list) if _ts_list else None
+                    if _entry_ts is not None:
+                        _age_min = (datetime.now(timezone.utc) - _entry_ts).total_seconds() / 60
+                        if _age_min < _min_hold_min:
+                            print(f"[Rebalance] Holding {symbol}: age={_age_min:.1f}min < min_hold={_min_hold_min}min")
+                            continue
+            except Exception:
+                pass
 
         # Protect profitable positions from forced rebalancing
         if getattr(settings, 'protect_profitable_positions', True) and position_manager:
@@ -389,7 +440,8 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
         try:
             order = client.create_market_order(symbol=symbol, side="SELL", quantity=qty)
             orders.append({"symbol": symbol, "side": "SELL", "quantity": qty, "order": order})
-            print(f"Sold {qty} {symbol}")
+            _rebalance_count += 1
+            print(f"Sold {qty} {symbol} [rebalance {_rebalance_count}/{_max_rebalance}]")
             add_signal({
                 "symbol": symbol, "action": "SELL",
                 "price": price,
@@ -514,8 +566,15 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         balance = portfolio_manager.get_total_balance()
         # Use liquid USDT as the actual cap — not total portfolio value
         usdt_liquid = float(balance.get("usdt_available", usdt))
+        _total_portfolio = float(balance.get("total_usdt", usdt_liquid))
+        _invested = _total_portfolio - usdt_liquid
+        _exposure_pct = _invested / _total_portfolio if _total_portfolio > 0 else 0.0
+        _max_exposure = getattr(settings, 'max_total_exposure_pct', 0.65)
+        print(f"USDT liquid: {usdt_liquid:.2f}, total: {_total_portfolio:.2f}, invested: {_invested:.2f} ({_exposure_pct:.1%}) — cap: {_max_exposure:.0%}")
+        if _exposure_pct >= _max_exposure:
+            print(f"[Exposure] Portfolio {_exposure_pct:.1%} >= cap {_max_exposure:.0%} — skipping new spot buys this cycle")
+            return orders
         allocation = min(settings.max_per_trade_usdt, usdt_liquid / max(len(top_symbols), 1))
-        print(f"USDT liquid: {usdt_liquid}, total portfolio: {balance['total_usdt']:.2f}, allocation per symbol: {allocation:.4f}")
     else:
         if usdt <= 0:
             print("No USDT available for buys")
@@ -545,11 +604,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         except Exception:
             pass
 
-    # ── BTC bearish market: reduce allocation 50% ──────────────────────────────
-    if btc_trend == 'DOWN':
-        allocation *= 0.5
-        print(f"BTC bearish — allocation reduced 50% to {allocation:.4f} USDT per symbol")
-    
+    # ── BTC bearish market: allocation handled by regime Kelly multiplier ────────
+    # Removed: allocation *= 0.5 on btc_trend==DOWN — regime.kelly_multiplier already
+    # applies the correct reduction (PRESERVATION×0.5, FUTURES_SHORT×0.3) without
+    # double-penalizing with an additional 50% cut on top.
+
     # If USDT is too low, try to sell non-top assets first to get more USDT
     if usdt < allocation * len(top_symbols) and portfolio_manager:
         print(f"USDT available ({usdt}) is less than needed ({allocation * len(top_symbols)}), selling non-top assets...")
@@ -600,12 +659,26 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         if _regime and _regime.confirmed and _regime_mode == "FUTURES_SHORT":
             if getattr(settings, 'futures_enabled', False):
                 _futures_symbols = list(getattr(settings, 'futures_symbols', ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']))
+                if getattr(settings, 'screener_enabled', True):
+                    try:
+                        from pair_screener import get_screened_pairs
+                        _sf = get_screened_pairs(settings=settings)["futures"]
+                        _futures_symbols = list(dict.fromkeys(_futures_symbols + _sf))
+                    except Exception:
+                        pass
                 if symbol in _futures_symbols:
                     _fc = _get_futures_client(settings)
-                    _f_usdt  = getattr(settings, 'futures_usdt_per_trade', 20.0)
                     _f_sl    = getattr(settings, 'futures_sl_pct', 3.0)
                     _f_tp    = getattr(settings, 'futures_tp_pct', 5.0)
                     _f_lev   = getattr(settings, 'futures_leverage', 2)
+                    # Fase C: Kelly calcula sizing sobre riesgo real (sl*lev%) del margin
+                    _f_pred  = {'success_probability': 0.45}  # conservador para shorts
+                    _f_usdt  = _kelly_position_size(
+                        settings, strength=float(signal_meta.get(symbol, {}).get('strength', 0.5)),
+                        prediction=_f_pred, usdt_liquid=usdt_liquid,
+                        sl_pct=_f_sl * _f_lev / 100, tp_pct=_f_tp * _f_lev / 100)
+                    # Cap: futuros max $75 para limitar exposición apalancada
+                    _f_usdt = min(_f_usdt, getattr(settings, 'futures_usdt_per_trade', 50.0))
                     # Fear & Greed boost: Extreme Fear (<25) → larger short margin (better entry)
                     try:
                         if news_client:
@@ -675,6 +748,62 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         print(f"Skipping buy {symbol}: RANGE_SCALP — price not at BB lower band")
                         update_signal_decision(symbol, "rejected", "RANGE_BB")
                         continue
+                # LONG futuros: si precio en BB inferior + futures habilitado, abrir LONG en futuros
+                if (getattr(settings, 'futures_enabled', False)
+                        and getattr(settings, 'futures_long_enabled', True)
+                        and getattr(settings, 'futures_long_in_range_scalp', True)
+                        and signal_meta.get(symbol, {}).get('bb_lower_touch', False)):
+                    _f_sym_list = list(getattr(settings, 'futures_symbols', []))
+                    if getattr(settings, 'screener_enabled', True):
+                        try:
+                            from pair_screener import get_screened_pairs
+                            _f_sym_list = list(dict.fromkeys(_f_sym_list + get_screened_pairs(settings=settings)["futures"]))
+                        except Exception:
+                            pass
+                    if symbol in _f_sym_list:
+                        _fc_l = _get_futures_client(settings)
+                        _l_usdt = getattr(settings, 'futures_usdt_per_trade', 20.0)
+                        _l_sl   = getattr(settings, 'futures_long_sl_pct', 2.5)
+                        _l_tp   = getattr(settings, 'futures_long_tp_pct', 5.0)
+                        _l_lev  = getattr(settings, 'futures_leverage', 2)
+                        print(f"[Futures] RANGE_SCALP BB-lower: opening LONG {symbol} margin=${_l_usdt}")
+                        _lpos = _fc_l.open_long(symbol, usdt_amount=_l_usdt,
+                                                sl_pct=_l_sl, tp_pct=_l_tp, leverage=_l_lev)
+                        if _lpos:
+                            orders.append({"symbol": symbol, "side": "LONG_FUTURES",
+                                           "qty": _lpos.qty, "entry_price": _lpos.entry_price,
+                                           "sl": _lpos.sl_price, "tp": _lpos.tp_price})
+                            update_signal_decision(symbol, "executed", "FUTURES_LONG")
+
+        # ── SPOT_BULL + RSI oversold: LONG futuros más eficiente que spot ──
+        if (_regime_mode == "SPOT_BULL" and _regime is not None and _regime.confirmed
+                and getattr(settings, 'futures_enabled', False)
+                and getattr(settings, 'futures_long_enabled', True)
+                and getattr(settings, 'futures_long_in_spot_bull', True)):
+            _l_rsi_thresh = getattr(settings, 'futures_long_rsi_threshold', 35.0)
+            _l_rsi_val    = float(signal_meta.get(symbol, {}).get('rsi', 50))
+            if _l_rsi_val < _l_rsi_thresh and btc_trend == 'UP':
+                _l_sym_list = list(getattr(settings, 'futures_symbols', []))
+                if getattr(settings, 'screener_enabled', True):
+                    try:
+                        from pair_screener import get_screened_pairs
+                        _l_sym_list = list(dict.fromkeys(_l_sym_list + get_screened_pairs(settings=settings)["futures"]))
+                    except Exception:
+                        pass
+                if symbol in _l_sym_list:
+                    _fc_sb = _get_futures_client(settings)
+                    _l_usdt = getattr(settings, 'futures_usdt_per_trade', 20.0)
+                    _l_sl   = getattr(settings, 'futures_long_sl_pct', 2.5)
+                    _l_tp   = getattr(settings, 'futures_long_tp_pct', 5.0)
+                    _l_lev  = getattr(settings, 'futures_leverage', 2)
+                    print(f"[Futures] SPOT_BULL oversold LONG {symbol}: RSI={_l_rsi_val:.1f}<{_l_rsi_thresh}, BTC={btc_trend}")
+                    _lpos_sb = _fc_sb.open_long(symbol, usdt_amount=_l_usdt,
+                                                sl_pct=_l_sl, tp_pct=_l_tp, leverage=_l_lev)
+                    if _lpos_sb:
+                        orders.append({"symbol": symbol, "side": "LONG_FUTURES",
+                                       "qty": _lpos_sb.qty, "entry_price": _lpos_sb.entry_price,
+                                       "sl": _lpos_sb.sl_price, "tp": _lpos_sb.tp_price})
+                        update_signal_decision(symbol, "executed", "FUTURES_LONG_BULL")
 
         # ── BTC dominance filter — restrict non-NARRATIVE when BTC.D high ─
         if _btc_dom_high and symbol not in narrative_set:
@@ -821,10 +950,13 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 pass
 
         # ── Kelly dynamic position sizing ───────────────────────────────
-        sl_pct = getattr(settings, 'stop_loss_pct', 1.5) / 100.0
-        tp_pct = getattr(settings, 'take_profit_pct', 2.5) / 100.0
+        # Fase E: SL/TP base from category_thresholds (per token type) — fallback to global settings
+        _sym_cat_e = getattr(settings, 'token_categories', {}).get(symbol, {}).get('market_behavior', 'MIDCAP_ALT')
+        _cat_th_e  = getattr(settings, 'category_thresholds', {}).get(_sym_cat_e, {})
+        sl_pct = _cat_th_e.get('stop_loss_pct', getattr(settings, 'stop_loss_pct', 1.5)) / 100.0
+        tp_pct = _cat_th_e.get('take_profit_pct', getattr(settings, 'take_profit_pct', 2.5)) / 100.0
 
-        # Apply regime-specific SL/TP overrides
+        # Apply regime-specific SL/TP overrides (régimen sobreescribe categoría)
         if _regime and _regime.confirmed:
             if _regime_mode == "RANGE_SCALP":
                 sl_pct = getattr(settings, 'range_scalp_sl_pct', 1.2) / 100.0
@@ -834,6 +966,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 sl_pct = getattr(settings, 'preservation_sl_pct', 1.5) / 100.0
                 tp_pct = getattr(settings, 'preservation_tp_pct', 3.0) / 100.0
                 print(f"[Regime] PRESERVATION: SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}%")
+            else:
+                print(f"[Kelly] {symbol} ({_sym_cat_e}): SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}%")
 
         usdt_liquid_now = float(client.get_account_balance().get("USDT", usdt_liquid))
         trade_allocation = _kelly_position_size(
@@ -1112,19 +1246,20 @@ def execute_once():
             # A3: Auto-close ALL shorts if regime switched OUT of bear modes
             # Whipsaw guard: only close after N consecutive non-short cycles
             global _non_short_regime_cycles
-            _open_shorts = list(_fc._open_positions.keys())
+            _open_short_keys = [k for k, p in _fc._open_positions.items() if not p.closed and p.side == "SHORT"]
             _min_cycles = getattr(settings, 'min_cycles_before_close_shorts', 3)
             if _regime_mode not in ("PRESERVATION", "FUTURES_SHORT"):
                 _non_short_regime_cycles += 1
             else:
                 _non_short_regime_cycles = 0  # reset — still in short-friendly mode
-            if _open_shorts and _regime_mode not in ("PRESERVATION", "FUTURES_SHORT"):
+            if _open_short_keys and _regime_mode not in ("PRESERVATION", "FUTURES_SHORT"):
                 if _non_short_regime_cycles >= _min_cycles:
-                    print(f"[Futures] Regime is {_regime_mode} for {_non_short_regime_cycles} cycles (>={_min_cycles}) — closing ALL {len(_open_shorts)} shorts")
-                    for _sym in _open_shorts:
+                    print(f"[Futures] Regime is {_regime_mode} for {_non_short_regime_cycles} cycles (>={_min_cycles}) — closing ALL {len(_open_short_keys)} shorts")
+                    for _key in _open_short_keys:
+                        _pos = _fc._open_positions.get(_key)
+                        _sym = _pos.symbol if _pos else _key.replace("_SHORT", "")
                         try:
-                            _pos = _fc._open_positions[_sym]
-                            _result = _fc.close_short(_sym, _pos.qty, reason="regime_change")
+                            _result = _fc.close_short(_sym, _pos.qty if _pos else None, reason="regime_change")
                             futures_closes.append({"symbol": _sym, "reason": "regime_change", "result": _result})
                             print(f"[Futures] Closed short {_sym} due to regime change → {_regime_mode}")
                         except Exception as _ce:
@@ -1160,6 +1295,12 @@ def execute_once():
         if (_regime_mode == "FUTURES_SHORT" and _regime_exe is not None
                 and _regime_exe.confirmed and getattr(settings, 'futures_enabled', False)):
             _f_syms = list(getattr(settings, 'futures_symbols', ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']))
+            if getattr(settings, 'screener_enabled', True):
+                try:
+                    from pair_screener import get_screened_pairs
+                    _f_syms = list(dict.fromkeys(_f_syms + get_screened_pairs(settings=settings)["futures"]))
+                except Exception:
+                    pass
             print(f"[Futures] No long signals but FUTURES_SHORT confirmed — injecting {_f_syms} for short entry")
             top_signals = [{"symbol": s, "score": 50, "strength": 0.5, "reason": "FUTURES_SHORT_AUTO"} for s in _f_syms]
         else:
@@ -1189,10 +1330,18 @@ def execute_once():
     # ── Step 5: Buy top symbols — pass full signal dicts for aggressive mode ───
     buy_orders = _buy_top_symbols(client, settings, top_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client)
 
-    print("Completed cycle.")
+    # ── Dynamic cycle scheduling — return next interval based on active regime ──
+    _cycle_by_regime = {
+        "SPOT_BULL":     getattr(settings, 'cycle_spot_bull',    15),
+        "RANGE_SCALP":   getattr(settings, 'cycle_range_scalp',   5),
+        "PRESERVATION":  getattr(settings, 'cycle_preservation',  30),
+        "FUTURES_SHORT": getattr(settings, 'cycle_futures_short',  8),
+    }
+    _next_cycle = _cycle_by_regime.get(_regime_mode, getattr(settings, 'trade_cycle_minutes', 5))
+    print(f"Completed cycle. Next cycle in {_next_cycle} min (regime={_regime_mode})")
     return {"top_symbols": top_symbols, "sell_orders": sell_orders,
             "buy_orders": buy_orders, "sl_tp_closes": sl_tp_closes,
-            "futures_closes": futures_closes}
+            "futures_closes": futures_closes, "next_cycle_minutes": _next_cycle}
 
 
 if __name__ == '__main__':
