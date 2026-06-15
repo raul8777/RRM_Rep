@@ -449,24 +449,22 @@ class FuturesClient:
             sl_price = round(filled_price * (1 + sl_pct / 100), 6)
             tp_price = round(filled_price * (1 - tp_pct / 100), 6)
 
-            # 2. Stop-loss order
-            # Use STOP (limit-stop) with reduceOnly — compatible with all account types
-            # For SHORT: BUY STOP fires when price rises to stopPrice
-            # price (limit) = stopPrice * 1.003 to guarantee fill on fast moves
+            # 2. Stop-loss order via Algo Orders API (required since Binance API change 2025-12-09)
+            # POST /fapi/v1/algoOrder with algoType=CONDITIONAL + orderType=STOP_MARKET
+            # For SHORT: BUY STOP_MARKET triggers when price rises to triggerPrice
             sl_order_id = None
             for _sl_attempt in range(2):
                 try:
-                    _sl_stop = round(self.get_price(symbol) * (1 + sl_pct / 100), 6) if _sl_attempt > 0 else sl_price
-                    _sl_limit = round(_sl_stop * 1.003, 6)  # 0.3% above stop = guaranteed fill
-                    sl_order = self._post("/fapi/v1/order", {
-                        "symbol": symbol, "side": "BUY", "type": "STOP",
-                        "quantity": str(qty), "stopPrice": str(_sl_stop),
-                        "price": str(_sl_limit), "reduceOnly": "true",
-                        "timeInForce": "GTC",
+                    _sl_trigger = round(self.get_price(symbol) * (1 + sl_pct / 100), 6) if _sl_attempt > 0 else sl_price
+                    sl_order = self._post("/fapi/v1/algoOrder", {
+                        "symbol": symbol, "side": "BUY",
+                        "algoType": "CONDITIONAL", "orderType": "STOP_MARKET",
+                        "quantity": str(qty), "triggerPrice": str(_sl_trigger),
+                        "reduceOnly": "true",
                     })
-                    sl_order_id = str(sl_order.get("orderId", ""))
-                    sl_price = _sl_stop
-                    print(f"[Futures] SL order placed: stop={sl_price:.4f} limit={_sl_limit:.4f} (id={sl_order_id})")
+                    sl_order_id = str(sl_order.get("algoId", sl_order.get("orderId", "")))
+                    sl_price = _sl_trigger
+                    print(f"[Futures] SL algo order placed: triggerPrice={sl_price:.4f} (algoId={sl_order_id})")
                     break
                 except Exception as se:
                     if _sl_attempt == 0:
@@ -480,21 +478,19 @@ class FuturesClient:
                         })
                         return None
 
-            # 3. Take-profit order
-            # Use TAKE_PROFIT (limit-tp) with reduceOnly — compatible with all account types
-            # For SHORT: BUY TAKE_PROFIT fires when price falls to stopPrice
-            # price (limit) = stopPrice * 0.997 to guarantee fill
+            # 3. Take-profit order via Algo Orders API
+            # POST /fapi/v1/algoOrder with algoType=CONDITIONAL + orderType=TAKE_PROFIT_MARKET
+            # For SHORT: BUY TAKE_PROFIT_MARKET triggers when price falls to triggerPrice
             tp_order_id = None
             try:
-                _tp_limit = round(tp_price * 0.997, 6)  # 0.3% below TP = guaranteed fill
-                tp_order = self._post("/fapi/v1/order", {
-                    "symbol": symbol, "side": "BUY", "type": "TAKE_PROFIT",
-                    "quantity": str(qty), "stopPrice": str(tp_price),
-                    "price": str(_tp_limit), "reduceOnly": "true",
-                    "timeInForce": "GTC",
+                tp_order = self._post("/fapi/v1/algoOrder", {
+                    "symbol": symbol, "side": "BUY",
+                    "algoType": "CONDITIONAL", "orderType": "TAKE_PROFIT_MARKET",
+                    "quantity": str(qty), "triggerPrice": str(tp_price),
+                    "reduceOnly": "true",
                 })
-                tp_order_id = str(tp_order.get("orderId", ""))
-                print(f"[Futures] TP order placed: stop={tp_price:.4f} limit={_tp_limit:.4f} (id={tp_order_id})")
+                tp_order_id = str(tp_order.get("algoId", tp_order.get("orderId", "")))
+                print(f"[Futures] TP algo order placed: triggerPrice={tp_price:.4f} (algoId={tp_order_id})")
             except Exception as te:
                 print(f"[Futures] TP order failed for {symbol}: {te} — continuing with SL only")
 
