@@ -1691,6 +1691,21 @@ async def get_health_status() -> Dict:
         "overflow_max_extra": getattr(settings, 'overflow_max_extra', 3),
     }
 
+    # Circuit breaker status
+    try:
+        from run_trades import _circuit_breaker_until, _consecutive_failures
+        _cb_active = _circuit_breaker_until is not None
+        checks["circuit_breaker"] = {
+            "status": "paused" if _cb_active else "ok",
+            "consecutive_failures": _consecutive_failures,
+            "paused_until": _circuit_breaker_until.isoformat() if _cb_active else None,
+            "threshold": getattr(settings, 'circuit_breaker_consecutive_failures', 5),
+        }
+        if _cb_active and overall == "ok":
+            overall = "warning"
+    except Exception:
+        checks["circuit_breaker"] = {"status": "ok", "consecutive_failures": 0}
+
     return {
         "overall": overall,
         "checks": checks,

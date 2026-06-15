@@ -58,6 +58,13 @@ _NARRATIVE_BUY_COOLDOWN_HOURS = 4.0
 # Cleared on Docker restart — slots replenish organically on the next cycle.
 _overflow_positions: set = set()
 
+# ── Circuit breaker: consecutive order failures (technical errors only) ──────
+_consecutive_failures: int = 0
+_circuit_breaker_until: datetime = None  # UTC — None = not paused
+
+# ── Funding rate cache: {symbol: (rate_float, fetched_at_monotonic)} ─────────
+_funding_rate_cache: Dict[str, tuple] = {}
+
 
 def _get_max_positions_for_regime(settings, regime: str) -> int:
     """Return the optimal max-open-positions for the current market regime.
@@ -69,6 +76,159 @@ def _get_max_positions_for_regime(settings, regime: str) -> int:
         "FUTURES_SHORT": getattr(settings, 'max_positions_futures_short', 4),
     }
     return _mapping.get(regime, getattr(settings, 'max_positions', 12))
+
+
+def _apply_fng_kelly_boost(trade_allocation: float, fng_value: int, settings) -> float:
+    """R1: Behavioral Finance — scale Kelly size by Fear & Greed reading.
+    Capitulation (<= fng_capitulation_threshold): max boost (captures fear bottoms aggressively).
+    Extreme Fear (<= fng_extreme_fear_threshold): strong boost.
+    Extreme Greed (>= fng_extreme_greed_threshold): reduce (avoid buying tops).
+    All other values: no change.
+    """
+    if not getattr(settings, 'fng_kelly_boost_enabled', True):
+        return trade_allocation
+    cap_thr  = getattr(settings, 'fng_capitulation_threshold', 15)
+    fear_thr = getattr(settings, 'fng_extreme_fear_threshold', 20)
+    greed_thr = getattr(settings, 'fng_extreme_greed_threshold', 75)
+    if fng_value <= cap_thr:
+        mult = getattr(settings, 'fng_capitulation_multiplier', 1.50)
+        label = f"CAPITULACION F&G={fng_value}"
+    elif fng_value <= fear_thr:
+        mult = getattr(settings, 'fng_extreme_fear_multiplier', 1.35)
+        label = f"EXTREME_FEAR F&G={fng_value}"
+    elif fng_value >= greed_thr:
+        mult = getattr(settings, 'fng_extreme_greed_multiplier', 0.65)
+        label = f"EXTREME_GREED F&G={fng_value}"
+    else:
+        return trade_allocation
+    boosted = round(trade_allocation * mult, 2)
+    print(f"[F&G Kelly] {label} → ${trade_allocation:.2f} × {mult} = ${boosted:.2f}")
+    return boosted
+
+
+def _get_funding_rate(symbol: str, settings) -> float:
+    """R6: On-chain — fetch & cache funding rate for a symbol.
+    Returns 0.0 on error (fail-open: don't block trade on API failure).
+    Cache TTL = funding_rate_cache_minutes (default 10 min).
+    """
+    global _funding_rate_cache
+    ttl_sec = getattr(settings, 'funding_rate_cache_minutes', 10) * 60
+    now = time.monotonic()
+    cached = _funding_rate_cache.get(symbol)
+    if cached and (now - cached[1]) < ttl_sec:
+        return cached[0]
+    try:
+        import urllib.request as _ureq, json as _json
+        url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={symbol}&limit=1"
+        with _ureq.urlopen(url, timeout=4) as resp:
+            data = _json.loads(resp.read())
+        rate = float(data[0].get('fundingRate', 0)) if data else 0.0
+        _funding_rate_cache[symbol] = (rate, now)
+        return rate
+    except Exception:
+        return 0.0
+
+
+def _check_liquidity_and_slippage(symbol: str, vol_24h_usdt: float,
+                                   price: float, tp_pct: float, settings) -> tuple:
+    """R3: Microestructura — returns (ok: bool, reason: str).
+    Filters:
+      1. vol_24h_usdt < min_liquidity_vol_usdt → illiquid, skip
+      2. estimated_spread / TP > max_slippage_tp_ratio → slippage eats profit
+    Estimated spread uses a conservative 0.05% of price (Binance USDT pairs).
+    """
+    if not getattr(settings, 'liquidity_filter_enabled', True):
+        return True, ""
+    min_vol = getattr(settings, 'min_liquidity_vol_usdt', 3_000_000.0)
+    if vol_24h_usdt > 0 and vol_24h_usdt < min_vol:
+        return False, f"BAJA_LIQUIDEZ vol24h=${vol_24h_usdt/1e6:.1f}M < ${min_vol/1e6:.0f}M"
+    max_ratio = getattr(settings, 'max_slippage_tp_ratio', 0.25)
+    est_spread_pct = 0.0005  # 0.05% conservative spread for Binance spot
+    if tp_pct > 0 and (est_spread_pct / tp_pct) > max_ratio:
+        return False, f"SLIPPAGE_ALTO spread={est_spread_pct*100:.2f}% > {max_ratio*100:.0f}% of TP={tp_pct*100:.1f}%"
+    return True, ""
+
+
+def _check_category_limit(symbol: str, position_manager, settings) -> tuple:
+    """R4: Correlaciones — returns (ok: bool, reason: str).
+    Enforces per-category position limits to avoid over-concentration in
+    correlated buckets (e.g. 4 MEMEs crashing together).
+    """
+    if not getattr(settings, 'category_max_positions_enabled', True):
+        return True, ""
+    if position_manager is None:
+        return True, ""
+    cat_limits = getattr(settings, 'category_max_positions', {
+        "LARGE_CAP": 3, "MIDCAP_ALT": 5, "NARRATIVE": 4, "MEME": 2,
+    })
+    sym_cat = getattr(settings, 'token_categories', {}).get(symbol, {}).get('market_behavior', 'MIDCAP_ALT')
+    max_cat = cat_limits.get(sym_cat, 99)
+    all_positions = position_manager.get_all_positions()
+    cat_map = getattr(settings, 'token_categories', {})
+    count_cat = sum(
+        1 for sym in all_positions
+        if all_positions[sym] and cat_map.get(sym, {}).get('market_behavior', 'MIDCAP_ALT') == sym_cat
+    )
+    if count_cat >= max_cat:
+        return False, f"LÍM_CATEGORÍA {sym_cat} ({count_cat}/{max_cat})"
+    return True, ""
+
+
+def _circuit_breaker_check(settings) -> bool:
+    """R5: Circuit breaker — returns True if system is paused due to consecutive failures.
+    Only reacts to technical errors (API failures), NOT to market losses.
+    """
+    global _circuit_breaker_until
+    if not getattr(settings, 'circuit_breaker_enabled', True):
+        return False
+    if _circuit_breaker_until is None:
+        return False
+    now_utc = datetime.now(timezone.utc)
+    if _circuit_breaker_until.tzinfo is None:
+        _circuit_breaker_until = _circuit_breaker_until.replace(tzinfo=timezone.utc)
+    if now_utc >= _circuit_breaker_until:
+        _circuit_breaker_until = None
+        print("[CircuitBreaker] Pause expired — resuming normal operation")
+        return False
+    remaining = (_circuit_breaker_until - now_utc).total_seconds() / 60
+    print(f"[CircuitBreaker] PAUSED — {remaining:.1f} min remaining")
+    return True
+
+
+def _record_order_failure(settings) -> None:
+    """Increment consecutive failure counter; trigger circuit breaker if threshold reached."""
+    global _consecutive_failures, _circuit_breaker_until
+    if not getattr(settings, 'circuit_breaker_enabled', True):
+        return
+    _consecutive_failures += 1
+    threshold = getattr(settings, 'circuit_breaker_consecutive_failures', 5)
+    if _consecutive_failures >= threshold:
+        pause_min = getattr(settings, 'circuit_breaker_pause_minutes', 10)
+        _circuit_breaker_until = datetime.now(timezone.utc).replace(
+            second=0, microsecond=0
+        ).__class__(
+            datetime.now(timezone.utc).year,
+            datetime.now(timezone.utc).month,
+            datetime.now(timezone.utc).day,
+            datetime.now(timezone.utc).hour,
+            datetime.now(timezone.utc).minute + pause_min,
+            tzinfo=timezone.utc,
+        )
+        from datetime import timedelta
+        _circuit_breaker_until = datetime.now(timezone.utc) + timedelta(minutes=pause_min)
+        ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_WARNING,
+                     f"Circuit breaker TRIGGERED: {_consecutive_failures} consecutive failures → "
+                     f"pausing {pause_min} min until {_circuit_breaker_until.strftime('%H:%M')} UTC")
+        print(f"[CircuitBreaker] TRIGGERED after {_consecutive_failures} failures — "
+              f"pausing {pause_min} min")
+
+
+def _record_order_success() -> None:
+    """Reset consecutive failure counter on any successful order."""
+    global _consecutive_failures
+    if _consecutive_failures > 0:
+        print(f"[CircuitBreaker] Resetting failure counter (was {_consecutive_failures})")
+        _consecutive_failures = 0
 
 
 def _is_overflow_eligible(symbol: str, strength: float, prediction: dict, settings) -> bool:
@@ -806,6 +966,23 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         except Exception:
             pass
 
+    # ── R5: Circuit breaker — abort buys if system has consecutive API failures ──
+    if _circuit_breaker_check(settings):
+        return orders  # buys paused — SL/TP and closes are unaffected
+
+    # ── R1/R2: Fetch F&G once per cycle (cached 1h by news_client) ────────────
+    _fng_value = 50  # default: Neutral
+    try:
+        if news_client:
+            _fng_data = news_client.get_fear_greed()
+            _fng_value = int(_fng_data.get('value', 50))
+    except Exception:
+        pass
+
+    # ── R2: Capitulation PnL boost — relax min_pnl further when F&G ≤ 15 ──────
+    # Applied in pnl_service.validate() via news_client.get_fear_greed_modifier(),
+    # but here we also track the value for the Kelly boost below.
+
     # ── BTC bearish market: allocation handled by regime Kelly multiplier ────────
     # Removed: allocation *= 0.5 on btc_trend==DOWN — regime.kelly_multiplier already
     # applies the correct reduction (PRESERVATION×0.5, FUTURES_SHORT×0.3) without
@@ -867,6 +1044,13 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 update_signal_decision(symbol, "rejected", "LÍM_SÍMBOLO")
                 continue
 
+        # ── R4: Correlaciones — límite por categoría ─────────────────────────
+        _cat_ok, _cat_reason = _check_category_limit(symbol, position_manager, settings)
+        if not _cat_ok:
+            print(f"Skipping buy {symbol}: {_cat_reason}")
+            update_signal_decision(symbol, "rejected", _cat_reason)
+            continue
+
         try:
             price = client.get_symbol_price(symbol)
             filters = get_symbol_filters(client, symbol)
@@ -874,6 +1058,25 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             print(f"Skip buy {symbol}: {exc}")
             update_signal_decision(symbol, "rejected", "ERROR_PRECIO")
             continue
+
+        # ── R3: Microestructura — liquidez y slippage implícito ──────────────
+        _vol_24h = float(signal_meta.get(symbol, {}).get('volume_24h_usdt', 0))
+        _tp_pct_filter = float(signal_meta.get(symbol, {}).get('tp_pct', 0.025))
+        _liq_ok, _liq_reason = _check_liquidity_and_slippage(symbol, _vol_24h, price, _tp_pct_filter, settings)
+        if not _liq_ok:
+            print(f"Skipping buy {symbol}: {_liq_reason}")
+            update_signal_decision(symbol, "rejected", "LIQUIDEZ")
+            continue
+
+        # ── R6: On-chain — funding rate filter (spot long vs sobreapalancamiento) ─
+        if (getattr(settings, 'funding_rate_spot_filter_enabled', True)
+                and _regime_mode in ('SPOT_BULL', 'RANGE_SCALP')):
+            _fr = _get_funding_rate(symbol, settings)
+            _fr_max = getattr(settings, 'funding_rate_spot_max', 0.0008)
+            if _fr > _fr_max:
+                print(f"Skipping buy {symbol}: funding_rate={_fr:.4%} > {_fr_max:.4%} — longs sobreapalancados")
+                update_signal_decision(symbol, "rejected", "FUNDING_RATE")
+                continue
 
         # ── Bear mode (PRESERVATION/FUTURES_SHORT) — restrict non-NARRATIVE ──
         narrative_set = set(getattr(settings, 'narrative_tokens', []))
@@ -1209,6 +1412,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             trade_allocation *= _rmult
             print(f"[Regime] {_regime_mode}: Kelly ×{_rmult} → ${trade_allocation:.2f} for {symbol}")
 
+        # ── R1: Behavioral Finance — F&G Kelly boost ─────────────────────────
+        trade_allocation = _apply_fng_kelly_boost(trade_allocation, _fng_value, settings)
+
         qty = align_quantity_to_step(trade_allocation / price, filters["step"])
         valid, reason = is_quantity_valid(qty, price, filters)
         if not valid:
@@ -1232,6 +1438,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 _NARRATIVE_BUY_COOLDOWN[symbol] = _dt3.now(timezone.utc)
 
             order = client.create_market_order(symbol=symbol, side="BUY", quantity=qty)
+            _record_order_success()  # R5: reset circuit breaker on success
             orders.append({"symbol": symbol, "side": "BUY", "quantity": qty, "order": order})
             print(f"Bought {qty} {symbol}")
             ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_INFO, f"Bought {qty} {symbol} @ ~{price:.4f} USDT")
@@ -1304,6 +1511,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         except Exception as exc:
             print(f"Buy order failed for {symbol}: {exc}")
             ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_ERROR, f"Buy order failed for {symbol}: {exc}")
+            _record_order_failure(settings)  # R5: track consecutive failures
             update_signal_decision(symbol, "rejected", "ERROR_ORDEN")
     return orders
 

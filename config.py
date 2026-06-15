@@ -140,6 +140,40 @@ class Settings(BaseSettings):
     overflow_min_strength: float = Field(default=0.80, env="OVERFLOW_MIN_STRENGTH")  # Kelly FUERTE tier threshold
     overflow_min_prob: float = Field(default=0.65, env="OVERFLOW_MIN_PROB")          # Kelly FUERTE tier threshold
     overflow_max_extra: int = Field(default=3, env="OVERFLOW_MAX_EXTRA")             # max simultaneous overflow slots
+    # ── Behavioral Finance: F&G Kelly multiplier (agresivo) ─────────────────
+    fng_kelly_boost_enabled: bool = Field(default=True, env="FNG_KELLY_BOOST_ENABLED")
+    fng_extreme_fear_threshold: int = Field(default=20, env="FNG_EXTREME_FEAR_THRESHOLD")   # <= this → boost
+    fng_capitulation_threshold: int = Field(default=15, env="FNG_CAPITULATION_THRESHOLD")   # <= this → max boost
+    fng_extreme_greed_threshold: int = Field(default=75, env="FNG_EXTREME_GREED_THRESHOLD") # >= this → reduce
+    fng_extreme_fear_multiplier: float = Field(default=1.35, env="FNG_EXTREME_FEAR_MULTIPLIER")    # Extreme Fear: +35%
+    fng_capitulation_multiplier: float = Field(default=1.50, env="FNG_CAPITULATION_MULTIPLIER")   # Capitulacion: +50%
+    fng_extreme_greed_multiplier: float = Field(default=0.65, env="FNG_EXTREME_GREED_MULTIPLIER") # Extreme Greed: -35%
+    fng_capitulation_pnl_boost: float = Field(default=-0.25, env="FNG_CAPITULATION_PNL_BOOST")    # relax min_pnl hasta -$0.25 en capitulacion
+
+    # ── Microestructura: liquidez mínima y slippage implícito ───────────────
+    liquidity_filter_enabled: bool = Field(default=True, env="LIQUIDITY_FILTER_ENABLED")
+    min_liquidity_vol_usdt: float = Field(default=3_000_000.0, env="MIN_LIQUIDITY_VOL_USDT")  # vol 24h mínimo
+    max_slippage_tp_ratio: float = Field(default=0.25, env="MAX_SLIPPAGE_TP_RATIO")           # spread/TP max (0.25 = 25% del TP)
+
+    # ── Correlaciones: límite de posiciones por categoría ──────────────────
+    category_max_positions_enabled: bool = Field(default=True, env="CATEGORY_MAX_POSITIONS_ENABLED")
+    category_max_positions: dict = Field(default={
+        "LARGE_CAP":  3,   # BTC/ETH/BNB — max 3
+        "MIDCAP_ALT": 5,   # SOL/AVAX/DOT — max 5
+        "NARRATIVE":  4,   # FET/TAO/RENDER — max 4 (concentración temática)
+        "MEME":       2,   # DOGE/PEPE/WIF — max 2 (alta correlación)
+    }, env="CATEGORY_MAX_POSITIONS")
+
+    # ── Circuit breaker técnico (solo fallas de sistema, no pérdidas) ───────
+    circuit_breaker_enabled: bool = Field(default=True, env="CIRCUIT_BREAKER_ENABLED")
+    circuit_breaker_consecutive_failures: int = Field(default=5, env="CIRCUIT_BREAKER_CONSECUTIVE_FAILURES")
+    circuit_breaker_pause_minutes: int = Field(default=10, env="CIRCUIT_BREAKER_PAUSE_MINUTES")
+
+    # ── On-chain: funding rate como señal de sobrecompra para spot ──────────
+    funding_rate_spot_filter_enabled: bool = Field(default=True, env="FUNDING_RATE_SPOT_FILTER_ENABLED")
+    funding_rate_spot_max: float = Field(default=0.0008, env="FUNDING_RATE_SPOT_MAX")  # > 0.08% = longs sobreapal.
+    funding_rate_cache_minutes: int = Field(default=10, env="FUNDING_RATE_CACHE_MINUTES")
+
     # Dynamic cycle by regime (v2)
     cycle_spot_bull: int = Field(default=15, env="CYCLE_SPOT_BULL")            # minutes per cycle in SPOT_BULL
     cycle_range_scalp: int = Field(default=5, env="CYCLE_RANGE_SCALP")         # minutes per cycle in RANGE_SCALP

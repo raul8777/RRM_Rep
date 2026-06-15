@@ -882,6 +882,13 @@ function renderHealthChecks(data) {
         if (key === 'futures_api')  detail = c.latency_ms != null ? `${c.latency_ms} ms${c.open_shorts != null ? ` | ${c.open_shorts} S / ${c.open_longs ?? 0} L` : ''}` : (c.detail || '');
         if (key === 'social_score') detail = c.enabled ? `✅ activo — ${c.trending_count ?? 0} tokens trending` : '⚪ sin API key';
         if (key === 'errors')       detail = `${c.errors_last_5min || 0} err / ${c.warnings_last_5min || 0} warn (5min) | Total: ${c.total_records || 0}`;
+        if (key === 'circuit_breaker') {
+            const cb = c.consecutive_failures ?? 0;
+            const thr = c.threshold ?? 5;
+            detail = c.status === 'paused'
+                ? `🛑 PAUSED hasta ${c.paused_until ? new Date(c.paused_until).toLocaleTimeString('es-MX') : '?'}`
+                : `✅ OK — fallos consecutivos: ${cb}/${thr}`;
+        }
         if (key === 'portfolio_exposure') {
             const expPct = c.exposure_pct ?? 0;
             const maxPct = c.max_exposure_pct ?? 65;
