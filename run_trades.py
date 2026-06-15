@@ -34,6 +34,7 @@ def _get_futures_client(settings) -> FuturesClient:
             api_key    = settings.binance_api_key,
             api_secret = settings.binance_api_secret,
             dry_run    = settings.dry_run,
+            max_shorts = getattr(settings, 'futures_max_shorts', 2),
         )
         print("[Futures] FuturesClient initialized")
     return _futures_client

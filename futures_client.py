@@ -64,10 +64,11 @@ class FuturesPosition:
 
 
 class FuturesClient:
-    def __init__(self, api_key: str, api_secret: str, dry_run: bool = False):
+    def __init__(self, api_key: str, api_secret: str, dry_run: bool = False, max_shorts: int = MAX_SHORTS):
         self.api_key    = api_key
         self.api_secret = api_secret
         self.dry_run    = dry_run
+        self.max_shorts = max_shorts       # configurable via settings.futures_max_shorts
         self._open_positions: Dict[str, FuturesPosition] = {}
         self._price_cache: Dict[str, Tuple[float, float]] = {}  # {symbol: (price, ts)}
         self._leverage_set: set = set()   # symbols with leverage already configured
@@ -170,6 +171,18 @@ class FuturesClient:
             if f.get("filterType") == "LOT_SIZE":
                 return float(f.get("stepSize", 0.001))
         return 0.001
+
+    def _get_price_precision(self, symbol: str) -> int:
+        """Return decimal places for price/triggerPrice from exchangeInfo."""
+        info = self.get_symbol_info(symbol)
+        if info:
+            return int(info.get("pricePrecision", 2))
+        # Fallback: infer from PRICE_FILTER tickSize
+        for f in info.get("filters", []):
+            if f.get("filterType") == "PRICE_FILTER":
+                tick = f.get("tickSize", "0.01")
+                return max(0, len(tick.rstrip('0').split('.')[-1]) if '.' in tick else 0)
+        return 2
 
     def _align_qty(self, qty: float, step: float) -> float:
         from decimal import Decimal
@@ -351,8 +364,9 @@ class FuturesClient:
             return True
         except Exception as e:
             err = str(e)
-            if "No need to change margin type" in err or "-4046" in err or "already" in err.lower():
-                return True  # already isolated — not an error
+            if ("No need to change margin type" in err or "-4046" in err
+                    or "already" in err.lower() or "-4047" in err):
+                return True  # already isolated, or open orders block change — not an error
             print(f"[Futures] Set isolated margin failed {symbol}: {e}")
             return False
 
@@ -362,8 +376,8 @@ class FuturesClient:
         """Run all safety checks before opening a short. Returns (ok, reason)."""
         # 1. Max open shorts
         n_shorts = self.count_open_shorts()
-        if n_shorts >= MAX_SHORTS:
-            return False, f"MAX_SHORTS reached ({n_shorts}/{MAX_SHORTS})"
+        if n_shorts >= self.max_shorts:
+            return False, f"MAX_SHORTS reached ({n_shorts}/{self.max_shorts})"
 
         # 2. Already have short on this symbol
         if symbol in self._open_positions and not self._open_positions[symbol].closed:
@@ -418,8 +432,9 @@ class FuturesClient:
             print(f"[Futures] SHORT {symbol}: qty=0 after alignment (usdt={usdt_amount}, price={price})")
             return None
 
-        sl_price = round(price * (1 + sl_pct / 100), 6)
-        tp_price = round(price * (1 - tp_pct / 100), 6)
+        price_prec = self._get_price_precision(symbol)
+        sl_price = round(price * (1 + sl_pct / 100), price_prec)
+        tp_price = round(price * (1 - tp_pct / 100), price_prec)
 
         print(f"[Futures] Opening SHORT {symbol}: qty={qty}, entry~{price:.4f}, "
               f"SL={sl_price:.4f} (+{sl_pct}%), TP={tp_price:.4f} (-{tp_pct}%), "
