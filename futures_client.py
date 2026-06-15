@@ -53,27 +53,43 @@ class FuturesPosition:
     pnl: Optional[float] = None
 
     def unrealized_pnl(self, current_price: float) -> float:
-        """For SHORT: profit when price falls."""
+        if self.side == "LONG":
+            return (current_price - self.entry_price) * self.qty
         return (self.entry_price - current_price) * self.qty
 
     def is_sl_hit(self, current_price: float) -> bool:
-        return current_price >= self.sl_price
+        if self.side == "LONG":
+            return current_price <= self.sl_price   # LONG SL is below entry
+        return current_price >= self.sl_price       # SHORT SL is above entry
 
     def is_tp_hit(self, current_price: float) -> bool:
-        return current_price <= self.tp_price
+        if self.side == "LONG":
+            return current_price >= self.tp_price   # LONG TP is above entry
+        return current_price <= self.tp_price       # SHORT TP is below entry
 
 
 class FuturesClient:
-    def __init__(self, api_key: str, api_secret: str, dry_run: bool = False, max_shorts: int = MAX_SHORTS):
+    def __init__(self, api_key: str, api_secret: str, dry_run: bool = False,
+                 max_shorts: int = MAX_SHORTS, max_longs: int = 3):
         self.api_key    = api_key
         self.api_secret = api_secret
         self.dry_run    = dry_run
         self.max_shorts = max_shorts       # configurable via settings.futures_max_shorts
+        self.max_longs  = max_longs        # configurable via settings.futures_max_longs
+        # Key format: "{SYMBOL}_{SIDE}" e.g. "BTCUSDT_SHORT", "ETHUSDT_LONG"
         self._open_positions: Dict[str, FuturesPosition] = {}
         self._price_cache: Dict[str, Tuple[float, float]] = {}  # {symbol: (price, ts)}
         self._leverage_set: set = set()   # symbols with leverage already configured
+        self._hedge_mode: Optional[bool] = None  # None = unknown until checked
         if not dry_run:
             self._sync_open_positions()
+
+    # ── Position key helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _pos_key(symbol: str, side: str) -> str:
+        """Canonical key for _open_positions dict: 'BTCUSDT_SHORT' or 'BTCUSDT_LONG'."""
+        return f"{symbol}_{side.upper()}"
 
     # ── Internal HTTP helpers ─────────────────────────────────────────────────
 
@@ -213,6 +229,68 @@ class FuturesClient:
         account = self.get_account_info()
         return [p for p in account.get("positions", []) if float(p.get("positionAmt", 0)) != 0]
 
+    def enable_hedge_mode(self) -> bool:
+        """
+        Activate Binance hedge mode (dualSidePosition=true).
+        Must be called before opening LONG positions to avoid netting.
+        Returns True if already in hedge mode or successfully activated.
+        Safe to call multiple times (idempotent).
+        """
+        if self.dry_run:
+            print("[Futures DRY] Hedge mode enabled (simulated)")
+            self._hedge_mode = True
+            return True
+        try:
+            status = self._get("/fapi/v1/positionSide/dual", signed=True)
+            if status.get("dualSidePosition") is True:
+                self._hedge_mode = True
+                print("[Futures] Hedge mode already active")
+                return True
+        except Exception as e:
+            print(f"[Futures] Hedge mode check failed: {e}")
+        try:
+            self._post("/fapi/v1/positionSide/dual", {"dualSidePosition": "true"})
+            self._hedge_mode = True
+            print("[Futures] Hedge mode activated (dualSidePosition=true)")
+            return True
+        except Exception as e:
+            err = str(e)
+            if "-4067" in err or "open orders" in err.lower():
+                # Binance rejects mode change when algo orders (SL/TP) exist on any symbol.
+                # Cancel all open algo orders first, then retry.
+                print(f"[Futures] Hedge mode blocked by open orders (-4067) — attempting algo order cleanup")
+                try:
+                    # Cancel regular open orders per symbol
+                    for _sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT"]:
+                        try:
+                            self._delete("/fapi/v1/allOpenOrders", {"symbol": _sym})
+                        except Exception:
+                            pass
+                    # Cancel ALL open algo orders (SL/TP) — correct endpoint per Binance docs
+                    try:
+                        _algo_resp = self._get("/fapi/v1/openAlgoOrders", signed=True)
+                        _algo_list = _algo_resp if isinstance(_algo_resp, list) else _algo_resp.get("orders", _algo_resp.get("algoOrders", []))
+                        for _ao in _algo_list:
+                            try:
+                                self._delete("/fapi/v1/algoOrder", {"symbol": _ao.get("symbol"), "algoId": str(_ao.get("algoId"))})
+                            except Exception:
+                                pass
+                        if _algo_list:
+                            print(f"[Futures] Cleaned {len(_algo_list)} open algo orders")
+                    except Exception as _ae:
+                        print(f"[Futures] Algo order cleanup error: {_ae}")
+                    self._post("/fapi/v1/positionSide/dual", {"dualSidePosition": "true"})
+                    self._hedge_mode = True
+                    print("[Futures] Hedge mode activated after cleanup")
+                    return True
+                except Exception as e2:
+                    print(f"[Futures] Hedge mode activation failed after cleanup: {e2} — running in one-way mode (LONG disabled)")
+                    self._hedge_mode = False
+                    return False
+            print(f"[Futures] Hedge mode activation failed: {e}")
+            self._hedge_mode = False
+            return False
+
     def _sync_open_positions(self) -> None:
         """Rebuild _open_positions from Binance on startup (survives restarts)."""
         try:
@@ -221,21 +299,32 @@ class FuturesClient:
                 sym = p.get("symbol", "")
                 amt = float(p.get("positionAmt", 0))
                 entry = float(p.get("entryPrice", 0))
-                if amt >= 0 or entry <= 0:
-                    continue  # only SHORT (negative amt)
+                if amt == 0 or entry <= 0:
+                    continue
+                # Determine side from positionAmt sign AND positionSide field
+                ps = p.get("positionSide", "BOTH")
+                if ps == "BOTH":
+                    side = "SHORT" if amt < 0 else "LONG"
+                else:
+                    side = ps  # LONG or SHORT from hedge mode
                 qty = abs(amt)
                 tick = self._get_tick_size(sym)
-                sl_price = self._align_price(entry * 1.03, tick)   # 3% above entry
-                tp_price = self._align_price(entry * 0.94, tick)   # 6% below entry
+                if side == "SHORT":
+                    sl_price = self._align_price(entry * 1.03, tick)
+                    tp_price = self._align_price(entry * 0.94, tick)
+                else:  # LONG
+                    sl_price = self._align_price(entry * 0.97, tick)
+                    tp_price = self._align_price(entry * 1.06, tick)
                 pos = FuturesPosition(
-                    symbol=sym, side="SHORT", qty=qty,
+                    symbol=sym, side=side, qty=qty,
                     entry_price=entry, sl_price=sl_price, tp_price=tp_price,
-                    order_id=f"SYNC_{sym}", sl_order_id=None, tp_order_id=None,
+                    order_id=f"SYNC_{sym}_{side}", sl_order_id=None, tp_order_id=None,
                 )
-                self._open_positions[sym] = pos
-                print(f"[Futures] Synced position: SHORT {sym} qty={qty} entry={entry:.4f} (SL={sl_price}, TP={tp_price})")
+                key = self._pos_key(sym, side)
+                self._open_positions[key] = pos
+                print(f"[Futures] Synced position: {side} {sym} qty={qty} entry={entry:.4f} (SL={sl_price}, TP={tp_price})")
             if self._open_positions:
-                print(f"[Futures] FuturesClient initialized — synced {len(self._open_positions)} open short(s)")
+                print(f"[Futures] FuturesClient initialized — synced {len(self._open_positions)} open position(s)")
             else:
                 print(f"[Futures] FuturesClient initialized")
         except Exception as e:
@@ -246,7 +335,16 @@ class FuturesClient:
             positions = self.get_positions()
             return sum(1 for p in positions if float(p.get("positionAmt", 0)) < 0)
         except Exception:
-            return len([p for p in self._open_positions.values() if not p.closed])
+            return sum(1 for p in self._open_positions.values() if not p.closed and p.side == "SHORT")
+
+    def count_open_longs(self) -> int:
+        try:
+            positions = self.get_positions()
+            return sum(1 for p in positions
+                       if float(p.get("positionAmt", 0)) > 0
+                       and p.get("positionSide", "BOTH") in ("LONG", "BOTH"))
+        except Exception:
+            return sum(1 for p in self._open_positions.values() if not p.closed and p.side == "LONG")
 
     def get_available_usdt(self) -> float:
         try:
@@ -410,21 +508,32 @@ class FuturesClient:
 
     # ── Pre-entry safety checks ───────────────────────────────────────────────
 
-    def _pre_entry_checks(self, symbol: str, usdt_amount: float) -> Tuple[bool, str]:
-        """Run all safety checks before opening a short. Returns (ok, reason)."""
-        # 1. Max open shorts
-        n_shorts = self.count_open_shorts()
-        if n_shorts >= self.max_shorts:
-            return False, f"MAX_SHORTS reached ({n_shorts}/{self.max_shorts})"
+    def _pre_entry_checks(self, symbol: str, usdt_amount: float, side: str = "SHORT") -> Tuple[bool, str]:
+        """Run all safety checks before opening a position. Returns (ok, reason)."""
+        side = side.upper()
 
-        # 2. Already have short on this symbol
-        if symbol in self._open_positions and not self._open_positions[symbol].closed:
-            return False, f"Already have open SHORT on {symbol}"
+        # 1. Max open positions per side
+        if side == "SHORT":
+            n = self.count_open_shorts()
+            if n >= self.max_shorts:
+                return False, f"MAX_SHORTS reached ({n}/{self.max_shorts})"
+        else:  # LONG
+            n = self.count_open_longs()
+            if n >= self.max_longs:
+                return False, f"MAX_LONGS reached ({n}/{self.max_longs})"
 
-        # 3. Funding rate check
+        # 2. Already have same-side position on this symbol
+        key = self._pos_key(symbol, side)
+        if key in self._open_positions and not self._open_positions[key].closed:
+            return False, f"Already have open {side} on {symbol}"
+
+        # 3. Funding rate check (inverted logic for LONG vs SHORT)
         funding = self.get_funding_rate(symbol)
-        if funding > FUNDING_LIMIT:
+        if side == "SHORT" and funding > FUNDING_LIMIT:
             return False, f"Funding rate {funding:.4%} > {FUNDING_LIMIT:.4%} — skip (overleveraged longs)"
+        # For LONG: very negative funding = shorts very apalancados = dangerous for longs
+        if side == "LONG" and funding < -FUNDING_LIMIT:
+            return False, f"Funding rate {funding:.4%} < -{FUNDING_LIMIT:.4%} — skip (overleveraged shorts)"
 
         # 4. Available margin
         if not self.dry_run:
@@ -452,7 +561,7 @@ class FuturesClient:
           SL 3% move → 6% loss on margin
           TP 5% move → 10% gain on margin
         """
-        ok, reason = self._pre_entry_checks(symbol, usdt_amount)
+        ok, reason = self._pre_entry_checks(symbol, usdt_amount, side="SHORT")
         if not ok:
             print(f"[Futures] SHORT {symbol} blocked: {reason}")
             return None
@@ -485,7 +594,7 @@ class FuturesClient:
                 order_id=f"DRY_{symbol}_{int(time.time())}",
                 sl_order_id=None, tp_order_id=None,
             )
-            self._open_positions[symbol] = pos
+            self._open_positions[self._pos_key(symbol, "SHORT")] = pos
             return pos
 
         # ── Live order execution ──────────────────────────────────────────────
@@ -552,7 +661,7 @@ class FuturesClient:
                 entry_price=filled_price, sl_price=sl_price, tp_price=tp_price,
                 order_id=order_id, sl_order_id=sl_order_id, tp_order_id=tp_order_id,
             )
-            self._open_positions[symbol] = pos
+            self._open_positions[self._pos_key(symbol, "SHORT")] = pos
             print(f"[Futures] SHORT {symbol} OPEN: entry={filled_price:.4f}, "
                   f"SL={sl_price:.4f}, TP={tp_price:.4f}")
             return pos
@@ -561,13 +670,166 @@ class FuturesClient:
             print(f"[Futures] Failed to open SHORT {symbol}: {e}")
             return None
 
+    def open_long(
+        self,
+        symbol: str,
+        usdt_amount: float,
+        sl_pct: float = 2.5,   # % below entry — stop loss
+        tp_pct: float = 5.0,   # % above entry — take profit
+        leverage: int = LEVERAGE_MAX,
+    ) -> Optional[FuturesPosition]:
+        """
+        Open a LONG position with mandatory SL and TP orders.
+        Requires hedge mode enabled (enable_hedge_mode() called first).
+
+        Risk math at 2x leverage:
+          SL 2.5% move down → 5% loss on margin
+          TP 5.0% move up   → 10% gain on margin
+        """
+        if not self._hedge_mode:
+            if not self.enable_hedge_mode():
+                print(f"[Futures] LONG {symbol} blocked: hedge mode not available")
+                return None
+
+        ok, reason = self._pre_entry_checks(symbol, usdt_amount, side="LONG")
+        if not ok:
+            print(f"[Futures] LONG {symbol} blocked: {reason}")
+            return None
+
+        self.set_isolated_margin(symbol)
+        self.set_leverage(symbol, min(leverage, LEVERAGE_MAX))
+
+        price    = self.get_price(symbol)
+        notional = usdt_amount * min(leverage, LEVERAGE_MAX)
+        step     = self._get_step_size(symbol)
+        qty      = self._align_qty(notional / price, step)
+
+        if qty <= 0:
+            print(f"[Futures] LONG {symbol}: qty=0 after alignment")
+            return None
+
+        tick     = self._get_tick_size(symbol)
+        sl_price = self._align_price(price * (1 - sl_pct / 100), tick)  # below entry
+        tp_price = self._align_price(price * (1 + tp_pct / 100), tick)  # above entry
+
+        print(f"[Futures] Opening LONG {symbol}: qty={qty}, entry~{price:.4f}, "
+              f"SL={sl_price:.4f} (-{sl_pct}%), TP={tp_price:.4f} (+{tp_pct}%), "
+              f"leverage={leverage}×, notional=${notional:.2f}")
+
+        if self.dry_run:
+            pos = FuturesPosition(
+                symbol=symbol, side="LONG", qty=qty,
+                entry_price=price, sl_price=sl_price, tp_price=tp_price,
+                order_id=f"DRY_LONG_{symbol}_{int(time.time())}",
+                sl_order_id=None, tp_order_id=None,
+            )
+            self._open_positions[self._pos_key(symbol, "LONG")] = pos
+            return pos
+
+        try:
+            # 1. Market LONG (BUY) order with positionSide=LONG for hedge mode
+            entry_order = self._post("/fapi/v1/order", {
+                "symbol": symbol, "side": "BUY", "type": "MARKET",
+                "quantity": str(qty), "positionSide": "LONG",
+            })
+            order_id    = str(entry_order.get("orderId", "?"))
+            filled_price = float(entry_order.get("avgPrice", price)) or price
+
+            sl_price = self._align_price(filled_price * (1 - sl_pct / 100), tick)
+            tp_price = self._align_price(filled_price * (1 + tp_pct / 100), tick)
+
+            # 2. Stop-loss: SELL STOP_MARKET with positionSide=LONG
+            sl_order_id = None
+            try:
+                sl_order = self._post("/fapi/v1/algoOrder", {
+                    "symbol": symbol, "side": "SELL",
+                    "algoType": "CONDITIONAL", "type": "STOP_MARKET",
+                    "quantity": str(qty), "triggerPrice": str(sl_price),
+                    "positionSide": "LONG", "reduceOnly": "true", "timeInForce": "GTC",
+                })
+                sl_order_id = str(sl_order.get("algoId", sl_order.get("orderId", "")))
+                print(f"[Futures] LONG SL placed: triggerPrice={sl_price:.4f} (algoId={sl_order_id})")
+            except Exception as se:
+                print(f"[Futures] LONG SL order failed {symbol}: {se} — closing immediately")
+                self._post("/fapi/v1/order", {
+                    "symbol": symbol, "side": "SELL", "type": "MARKET",
+                    "quantity": str(qty), "positionSide": "LONG", "reduceOnly": "true",
+                })
+                return None
+
+            # 3. Take-profit: SELL TAKE_PROFIT_MARKET with positionSide=LONG
+            tp_order_id = None
+            try:
+                tp_order = self._post("/fapi/v1/algoOrder", {
+                    "symbol": symbol, "side": "SELL",
+                    "algoType": "CONDITIONAL", "type": "TAKE_PROFIT_MARKET",
+                    "quantity": str(qty), "triggerPrice": str(tp_price),
+                    "positionSide": "LONG", "reduceOnly": "true", "timeInForce": "GTC",
+                })
+                tp_order_id = str(tp_order.get("algoId", tp_order.get("orderId", "")))
+                print(f"[Futures] LONG TP placed: triggerPrice={tp_price:.4f} (algoId={tp_order_id})")
+            except Exception as te:
+                print(f"[Futures] LONG TP order failed {symbol}: {te} — continuing with SL only")
+
+            pos = FuturesPosition(
+                symbol=symbol, side="LONG", qty=qty,
+                entry_price=filled_price, sl_price=sl_price, tp_price=tp_price,
+                order_id=order_id, sl_order_id=sl_order_id, tp_order_id=tp_order_id,
+            )
+            self._open_positions[self._pos_key(symbol, "LONG")] = pos
+            print(f"[Futures] LONG {symbol} OPEN: entry={filled_price:.4f}, "
+                  f"SL={sl_price:.4f}, TP={tp_price:.4f}")
+            return pos
+
+        except Exception as e:
+            print(f"[Futures] Failed to open LONG {symbol}: {e}")
+            return None
+
+    def close_long(self, symbol: str, qty: float = None, reason: str = "manual") -> Optional[dict]:
+        """Close a LONG position with a SELL MARKET order."""
+        key = self._pos_key(symbol, "LONG")
+        pos = self._open_positions.get(key)
+        close_qty = qty or (pos.qty if pos else 0)
+        if close_qty <= 0:
+            return None
+        current_price = self.get_price(symbol)
+        pnl = (current_price - pos.entry_price) * close_qty if pos else 0.0
+        print(f"[Futures] Closing LONG {symbol}: entry={pos.entry_price if pos else '?':.4f}, "
+              f"current={current_price:.4f}, PnL~${pnl:.2f}, reason={reason}")
+        if self.dry_run:
+            if pos:
+                pos.closed = True; pos.exit_price = current_price; pos.pnl = pnl
+            return {"simulated": True, "symbol": symbol, "pnl": pnl}
+        if pos:
+            for oid in [pos.sl_order_id, pos.tp_order_id]:
+                if oid:
+                    try:
+                        self._delete("/fapi/v1/algoOrder", {"symbol": symbol, "algoId": oid})
+                    except Exception:
+                        pass
+        try:
+            step = self._get_step_size(symbol)
+            aligned_qty = self._align_qty(close_qty, step)
+            result = self._post("/fapi/v1/order", {
+                "symbol": symbol, "side": "SELL", "type": "MARKET",
+                "quantity": str(aligned_qty), "positionSide": "LONG", "reduceOnly": "true",
+            })
+            if pos:
+                pos.closed = True; pos.exit_price = current_price; pos.pnl = pnl
+            print(f"[Futures] LONG {symbol} CLOSED: PnL~${pnl:.2f}")
+            return result
+        except Exception as e:
+            print(f"[Futures] close_long {symbol} failed: {e}")
+            return None
+
     def close_short(self, symbol: str, qty: float = None, reason: str = "manual") -> Optional[dict]:
         """
         Close a SHORT position with a BUY MARKET order.
         If qty is None, uses the tracked position qty.
         Cancels any open SL/TP orders before closing.
         """
-        pos = self._open_positions.get(symbol)
+        key = self._pos_key(symbol, "SHORT")
+        pos = self._open_positions.get(key) or self._open_positions.get(symbol)  # legacy compat
         close_qty = qty or (pos.qty if pos else 0)
 
         if close_qty <= 0:
@@ -588,12 +850,12 @@ class FuturesClient:
                 pos.pnl        = pnl
             return {"simulated": True, "symbol": symbol, "pnl": pnl}
 
-        # Cancel open SL/TP orders first
+        # Cancel open SL/TP algo orders first
         if pos:
             for oid in [pos.sl_order_id, pos.tp_order_id]:
                 if oid:
                     try:
-                        self._delete("/fapi/v1/order", {"symbol": symbol, "orderId": oid})
+                        self._delete("/fapi/v1/algoOrder", {"symbol": symbol, "algoId": oid})
                     except Exception:
                         pass
 
@@ -617,55 +879,60 @@ class FuturesClient:
 
     def check_positions(self) -> List[dict]:
         """
-        Check all tracked positions for SL/TP hits.
+        Check all tracked positions (LONG and SHORT) for SL/TP hits.
         Returns list of closed positions with PnL.
         Called from run_trades.py each cycle.
         """
         closed = []
-        for symbol, pos in list(self._open_positions.items()):
+        for key, pos in list(self._open_positions.items()):
             if pos.closed:
                 continue
+            symbol = pos.symbol
             try:
                 price = self.get_price(symbol)
                 unr   = pos.unrealized_pnl(price)
-                print(f"[Futures] {symbol} SHORT check: price={price:.4f}, "
+                print(f"[Futures] {symbol} {pos.side} check: price={price:.4f}, "
                       f"entry={pos.entry_price:.4f}, unr_pnl=${unr:.2f}")
 
                 if pos.is_sl_hit(price):
-                    result = self.close_short(symbol, reason="stop_loss")
+                    result = (self.close_long(symbol, reason="stop_loss")
+                              if pos.side == "LONG"
+                              else self.close_short(symbol, reason="stop_loss"))
                     if result:
-                        closed.append({"symbol": symbol, "reason": "stop_loss",
-                                       "pnl": pos.pnl or unr})
+                        closed.append({"symbol": symbol, "side": pos.side,
+                                       "reason": "stop_loss", "pnl": pos.pnl or unr})
                 elif pos.is_tp_hit(price):
-                    result = self.close_short(symbol, reason="take_profit")
+                    result = (self.close_long(symbol, reason="take_profit")
+                              if pos.side == "LONG"
+                              else self.close_short(symbol, reason="take_profit"))
                     if result:
-                        closed.append({"symbol": symbol, "reason": "take_profit",
-                                       "pnl": pos.pnl or unr})
+                        closed.append({"symbol": symbol, "side": pos.side,
+                                       "reason": "take_profit", "pnl": pos.pnl or unr})
             except Exception as e:
-                print(f"[Futures] check_positions {symbol}: {e}")
+                print(f"[Futures] check_positions {key}: {e}")
         return closed
 
     def get_open_positions_summary(self) -> List[dict]:
-        """Summary of all tracked open short positions for dashboard."""
+        """Summary of all tracked open positions (LONG and SHORT) for dashboard."""
         result = []
-        for symbol, pos in self._open_positions.items():
+        for key, pos in self._open_positions.items():
             if pos.closed:
                 continue
             try:
-                price = self.get_price(symbol)
+                price = self.get_price(pos.symbol)
                 unr   = pos.unrealized_pnl(price)
             except Exception:
                 price = pos.entry_price
                 unr   = 0.0
             result.append({
-                "symbol":      symbol,
-                "side":        "SHORT",
-                "qty":         pos.qty,
-                "entry_price": pos.entry_price,
-                "current_price": price,
-                "sl_price":    pos.sl_price,
-                "tp_price":    pos.tp_price,
+                "symbol":         pos.symbol,
+                "side":           pos.side,
+                "qty":            pos.qty,
+                "entry_price":    pos.entry_price,
+                "current_price":  price,
+                "sl_price":       pos.sl_price,
+                "tp_price":       pos.tp_price,
                 "unrealized_pnl": round(unr, 4),
-                "opened_at":   pos.opened_at.isoformat(),
+                "opened_at":      pos.opened_at.isoformat(),
             })
         return result

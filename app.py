@@ -1497,7 +1497,7 @@ async def get_strategy_params(symbol: str = "__global__") -> Dict:
 
 # ── Health & Error monitoring endpoints ─────────────────────────────────────
 
-_STALE_CYCLE_MINUTES = 15  # warn if last trade cycle was more than this long ago
+_last_stale_reported_cycle = None  # dedup: track which last_cycle timestamp was already reported
 
 
 @app.get("/health/status")
@@ -1536,16 +1536,22 @@ async def get_health_status() -> Dict:
     last_cycle = orchestrator.last_trade_cycle_at
     if last_cycle:
         age_min = (datetime.utcnow() - last_cycle).total_seconds() / 60
-        stale = age_min > _STALE_CYCLE_MINUTES
+        _stale_threshold = orchestrator.current_cycle_minutes * 1.5
+        stale = age_min > _stale_threshold
         checks["trade_cycle"] = {
             "status": "warning" if stale else "ok",
             "last_cycle_at": to_mexico_time_str(last_cycle.isoformat()),
             "age_minutes": round(age_min, 1),
+            "stale_threshold_minutes": round(_stale_threshold, 1),
             "cycle_running": orchestrator.trade_cycle_thread.is_alive() if orchestrator.trade_cycle_thread else False,
         }
         if stale:
-            ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_WARNING,
-                         f"Trade cycle may be stale: last run {age_min:.1f} min ago")
+            global _last_stale_reported_cycle
+            if _last_stale_reported_cycle != last_cycle:
+                ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_WARNING,
+                             f"Trade cycle may be stale: last run {age_min:.1f} min ago "
+                             f"(threshold={_stale_threshold:.0f} min, regime={orchestrator.current_cycle_minutes}min)")
+                _last_stale_reported_cycle = last_cycle
             if overall != "error":
                 overall = "warning"
     else:

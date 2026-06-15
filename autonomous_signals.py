@@ -395,7 +395,7 @@ class AutonomousSignalGenerator:
 
     def get_top_buy_signals(self, interval: str = '1h', min_strength: float = 0.6,
                             limit: int = 5, use_multi_timeframe: bool = True,
-                            news_client=None) -> List[Dict]:
+                            news_client=None, regime_mode: str = 'SPOT_BULL') -> List[Dict]:
         """
         Get top BUY signals, filtered by min_strength.
 
@@ -404,6 +404,10 @@ class AutonomousSignalGenerator:
             min_strength: Minimum signal strength to include
             limit: Maximum number of signals to return
             use_multi_timeframe: Apply 4h trend filter (recommended)
+            regime_mode: Active market regime — adjusts ranking weights:
+                FUTURES_SHORT → rank by RSI (high = overbought = better short) + vol spike
+                RANGE_SCALP   → rank by bb_lower_touch + RSI low
+                default       → rank by strength (original behavior)
 
         Returns:
             List of top BUY signal dicts
@@ -420,6 +424,28 @@ class AutonomousSignalGenerator:
             if s['signal'] == 'BUY' and s['strength'] >= min_strength
         ]
         logger.info(f"Buy signals above threshold {min_strength}: {len(buy_signals)}")
+
+        # ── Regime-aware ranking ─────────────────────────────────────────────
+        if regime_mode == 'FUTURES_SHORT':
+            # Rank by RSI (descending: overbought candidates first for short entry)
+            # + vol spike (confirms momentum exhaustion)
+            def _short_score(s):
+                rsi = float(s.get('rsi', 50) or 50)
+                vol_spike = float(s.get('vol_spike', 1.0) or 1.0)
+                return rsi * 0.7 + min(vol_spike, 3.0) * 10 * 0.3
+            buy_signals.sort(key=_short_score, reverse=True)
+            logger.info(f"[Regime] FUTURES_SHORT ranking applied (RSI-weighted)")
+        elif regime_mode == 'RANGE_SCALP':
+            # Rank by bb_lower_touch first, then by RSI ascending (most oversold)
+            def _scalp_score(s):
+                bb_touch = 1 if s.get('bb_lower_touch') else 0
+                rsi = float(s.get('rsi', 50) or 50)
+                return bb_touch * 100 + (100 - rsi)
+            buy_signals.sort(key=_scalp_score, reverse=True)
+            logger.info(f"[Regime] RANGE_SCALP ranking applied (BB-lower + low RSI)")
+        else:
+            buy_signals.sort(key=lambda s: s.get('strength', 0), reverse=True)
+
         return buy_signals[:limit]
 
     def get_top_sell_signals(self, interval: str = '1h', min_strength: float = 0.6,

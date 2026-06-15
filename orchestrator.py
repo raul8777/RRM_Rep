@@ -48,6 +48,7 @@ class Orchestrator:
         self.learning_cycle_thread = None
         self.should_run = False
         self.last_trade_cycle_at: Optional[datetime] = None
+        self.current_cycle_minutes: int = 5  # updated dynamically per regime
         
         # Callbacks
         self.on_state_change: Optional[Callable] = None
@@ -344,19 +345,25 @@ class Orchestrator:
     def _run_cycle(self, cycle_func: Callable, interval_minutes: int) -> None:
         """
         Run a cycle function periodically.
-        
-        Args:
-            cycle_func: Function to run
-            interval_minutes: Interval between runs
+        interval_minutes is used as default; trade cycle may override it dynamically
+        from the returned result's 'next_cycle_minutes' key.
         """
         first_run = True
+        _next_interval = interval_minutes
         while self.should_run:
             if not first_run:
-                time.sleep(max(1, interval_minutes) * 60)
+                time.sleep(max(1, _next_interval) * 60)
             first_run = False
             try:
                 if self.can_execute_trades():
-                    cycle_func()
+                    result = cycle_func()
+                    # Dynamic cycle: trade cycle may return next_cycle_minutes
+                    if isinstance(result, dict) and 'next_cycle_minutes' in result:
+                        _next_interval = int(result['next_cycle_minutes'])
+                        if cycle_func == getattr(self, '_trade_cycle_func', None):
+                            self.current_cycle_minutes = _next_interval
+                    else:
+                        _next_interval = interval_minutes
                 elif self.can_monitor_positions():
                     logger.debug("System paused, skipping trade execution")
                 else:

@@ -62,6 +62,216 @@ function catIcon(cat) {
     return `<span class="cat-icon" title="${label}">${icon}</span>`;
 }
 
+// ── Trading Mode config (global — used by renderExecutiveSummary and renderTradingMode*) ──
+const MODE_CFG = {
+    'SPOT_BULL':    { icon: '📈', label: 'SPOT BULL',   color: '#4ecca3' },
+    'RANGE_SCALP':  { icon: '↔️',  label: 'LATERAL',    color: '#f39c12' },
+    'PRESERVATION': { icon: '🛡',  label: 'PRESERVAR',  color: '#e74c3c' },
+    'FUTURES_SHORT':{ icon: '📉',  label: 'SHORT 2×',   color: '#9b59b6' },
+};
+
+// ── Collapsible sections ─────────────────────────────────────────────────────
+function toggleSection(bodyId, chevronId) {
+    const body = document.getElementById(bodyId);
+    const chev = document.getElementById(chevronId);
+    if (!body) return;
+    const isCollapsed = body.classList.toggle('collapsed');
+    if (chev) chev.textContent = isCollapsed ? '▶' : '▼';
+}
+
+// ── Executive Summary ─────────────────────────────────────────────────────────
+function renderExecutiveSummary(data) {
+    const el = document.getElementById('executiveSummaryData');
+    if (!el || !data) return;
+
+    const balance  = data.balance       || {};
+    const regime   = data.market_regime || {};
+    const ctx      = data.market_context|| {};
+    const openPos  = data.open_positions|| {};
+    const perf     = data.performance   || {};
+    const signals  = data.signals       || {};
+    const cycle    = data.next_cycle    || {};
+    const pnlH     = data.pnl_history   || {};
+
+    const totalUsdt   = parseFloat(balance.total_usdt || 0);
+    const liquidUsdt  = parseFloat(balance.usdt_available || balance.total_usdt || 0);
+    const positions   = openPos.positions || [];
+    const invested    = positions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
+    const exposurePct = totalUsdt > 0 ? ((invested / totalUsdt) * 100).toFixed(1) : '0.0';
+    const unrealPnl   = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
+    const pnlToday    = parseFloat((pnlH.day && pnlH.day.total_pnl) || 0);
+    const mode        = regime.trading_mode || 'SPOT_BULL';
+    const modeInfo    = MODE_CFG[mode] || MODE_CFG['SPOT_BULL'];
+    const fng         = ctx.fear_greed_value ?? 50;
+    const fngLabel    = ctx.fear_greed_label || 'Neutral';
+    const btc7d       = regime.btc_7d_change_pct != null ? regime.btc_7d_change_pct : null;
+    const btc4h       = regime.btc_trend || '?';
+    const m           = perf.metrics || {};
+    const wr          = parseFloat(m.win_rate || 0);
+    const pf          = parseFloat(m.profit_factor || 0);
+    const cycleMins   = cycle.interval_minutes;
+    const cycleSecsLeft = cycle.seconds_until_next;
+
+    // Recent actions from signals
+    const signalList = (Array.isArray(signals) ? signals : (signals.signals || []));
+    const executed   = signalList.filter(s => s.decision === 'executed').slice(0, 4);
+    const lastActHtml = executed.length
+        ? executed.map(s => {
+            const isBuy = (s.action || '').toUpperCase() === 'BUY';
+            const badge = isBuy ? '<span class="exec-buy">BUY</span>' : '<span class="exec-sell">SELL</span>';
+            const ago   = s.received_at ? relativeTime(s.received_at) : '';
+            return `${badge} <strong>${s.symbol}</strong>${ago ? ' <span class="exec-ago">' + ago + '</span>' : ''}`;
+        }).join(' &nbsp;·&nbsp; ')
+        : '<span style="color:#555">Sin acciones recientes</span>';
+
+    // Alerts
+    const alerts = [];
+    const maxExpPct = 75;
+    const expNum = parseFloat(exposurePct);
+    if (expNum >= maxExpPct * 0.90) alerts.push(`⚠️ Exposición al ${expNum.toFixed(0)}% del cap máximo (${maxExpPct}%)`);
+    const closeSL = positions.filter(p => {
+        const cur = parseFloat(p.current_price || 0);
+        const sl  = parseFloat(p.stop_loss     || 0);
+        return sl > 0 && cur > 0 && Math.abs((sl - cur) / cur * 100) < 1.0;
+    });
+    if (closeSL.length > 0) alerts.push(`🔴 ${closeSL.length} posición(es) con <1% al SL: ${closeSL.map(p => p.symbol).join(', ')}`);
+    if (fng < 20) alerts.push(`😰 Fear &amp; Greed: ${fng} — Miedo Extremo (señales más difíciles de aprobar)`);
+    const alertHtml = alerts.length
+        ? `<div class="exec-alerts">${alerts.map(a => `<div class="exec-alert">${a}</div>`).join('')}</div>`
+        : '';
+
+    // BTC change display
+    const btc7dHtml = btc7d != null
+        ? `BTC 7d <span class="${btc7d >= 0 ? 'positive' : 'negative'}">${btc7d >= 0 ? '+' : ''}${btc7d.toFixed(1)}%</span>`
+        : '';
+
+    const wrCls   = wr >= 50 ? 'positive' : wr >= 40 ? 'exec-warn' : 'negative';
+    const pnlHCls = pnlToday >= 0 ? 'positive' : 'negative';
+    const unrealCls = unrealPnl >= 0 ? 'positive' : 'negative';
+
+    // Cycle bar
+    const maxSecs = (cycleMins || 20) * 60;
+    const progPct = cycleSecsLeft != null ? Math.max(0, Math.min(100, ((maxSecs - cycleSecsLeft) / maxSecs * 100))).toFixed(0) : 0;
+    const cycleBarColor = cycleSecsLeft != null && cycleSecsLeft < 60 ? '#e74c3c' : '#4ecca3';
+
+    el.innerHTML = `
+        <div class="exec-grid">
+            <div class="exec-section exec-market">
+                <div class="exec-section-title">📊 MERCADO</div>
+                <div class="exec-line">
+                    <span class="exec-badge" style="background:${modeInfo.color}22;color:${modeInfo.color};border:1px solid ${modeInfo.color}44">${modeInfo.icon} ${modeInfo.label}</span>
+                    &nbsp; BTC 4h <span class="${btc4h === 'UP' ? 'positive' : btc4h === 'DOWN' ? 'negative' : ''}">${btc4h === 'UP' ? '⬆ UP' : btc4h === 'DOWN' ? '⬇ DOWN' : '→ FLAT'}</span>
+                    &nbsp; ${btc7dHtml}
+                    &nbsp; F&amp;G <span style="color:${fng < 25 ? '#e74c3c' : fng < 45 ? '#ff7c4d' : fng < 56 ? '#aaa' : '#4ecca3'}">${fng} ${fngLabel}</span>
+                </div>
+            </div>
+            <div class="exec-section exec-portfolio">
+                <div class="exec-section-title">💼 SISTEMA</div>
+                <div class="exec-line">
+                    <span class="exec-badge exec-badge-green">✅ ${positions.length} posiciones</span>
+                    &nbsp; Exp: <strong>${exposurePct}%</strong> / ${maxExpPct}%
+                    &nbsp; Líquido: <strong>$${fmt(liquidUsdt)}</strong>
+                    &nbsp; Total: <strong>$${fmt(totalUsdt)}</strong>
+                </div>
+            </div>
+            <div class="exec-section exec-actions">
+                <div class="exec-section-title">⚡ ÚLTIMAS ACCIONES</div>
+                <div class="exec-line">${lastActHtml}</div>
+            </div>
+            <div class="exec-section exec-pnl">
+                <div class="exec-section-title">📈 PnL</div>
+                <div class="exec-line">
+                    Abierto: <span class="${unrealCls}"><strong>${unrealPnl >= 0 ? '+' : ''}$${fmt(unrealPnl)} USDT</strong></span>
+                    &nbsp; Hoy: <span class="${pnlHCls}">${pnlToday >= 0 ? '+' : ''}$${fmt(pnlToday)}</span>
+                    &nbsp; WR: <span class="${wrCls}">${fmt(wr, 1)}%</span>
+                    &nbsp; PF: <span class="${pf >= 1.5 ? 'positive' : pf >= 1.0 ? 'exec-warn' : 'negative'}">${fmt(pf)}</span>
+                </div>
+            </div>
+            <div class="exec-section exec-cycle">
+                <div class="exec-section-title">⏱ PRÓXIMO CICLO</div>
+                <div class="exec-line exec-cycle-line">
+                    <span class="exec-cycle-val countdown" id="execCountdown">${cycleSecsLeft != null ? Math.floor(cycleSecsLeft/60)+':'+(String(cycleSecsLeft%60).padStart(2,'0')) : '—:——'}</span>
+                    <div class="exec-cycle-bar-bg"><div class="exec-cycle-bar" style="width:${progPct}%;background:${cycleBarColor}"></div></div>
+                    <span style="color:#555;font-size:11px">${cycleMins ? cycleMins + ' min / ' + mode : ''}</span>
+                </div>
+            </div>
+        </div>
+        ${alertHtml}
+    `;
+}
+
+// ── KPI Row ───────────────────────────────────────────────────────────────────
+function renderKPIRow(data) {
+    if (!data) return;
+    const balance  = data.balance       || {};
+    const openPos  = data.open_positions|| {};
+    const perf     = data.performance   || {};
+    const cycle    = data.next_cycle    || {};
+    const pnlH     = data.pnl_history   || {};
+    const regime   = data.market_regime || {};
+
+    const totalUsdt  = parseFloat(balance.total_usdt || 0);
+    const liquidUsdt = parseFloat(balance.usdt_available || balance.total_usdt || 0);
+    const positions  = openPos.positions || [];
+    const invested   = positions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
+    const expPct     = totalUsdt > 0 ? ((invested / totalUsdt) * 100) : 0;
+    const maxExpPct  = 75;
+    const unrealPnl  = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
+    const pnlToday   = parseFloat((pnlH.day && pnlH.day.total_pnl) || 0);
+    const m          = perf.metrics || {};
+    const wr         = parseFloat(m.win_rate || 0);
+    const pf         = parseFloat(m.profit_factor || 0);
+    const cycleMins  = cycle.interval_minutes || '—';
+    const secsLeft   = cycle.seconds_until_next;
+    const mode       = regime.trading_mode || '—';
+    const maxPos     = 12;
+
+    const expColor   = expPct >= maxExpPct ? '#f44336' : expPct >= maxExpPct * 0.85 ? '#ff9800' : '#4ecca3';
+    const unrealCls  = unrealPnl >= 0 ? 'positive' : 'negative';
+    const pnlHCls    = pnlToday  >= 0 ? 'positive' : 'negative';
+    const wrCls      = wr >= 50  ? 'positive' : wr >= 40 ? '' : 'negative';
+    const pfCls      = pf >= 1.5 ? 'positive' : pf >= 1.0 ? '' : 'negative';
+
+    const countdownStr = secsLeft != null
+        ? `${Math.floor(secsLeft/60)}:${String(secsLeft%60).padStart(2,'0')}`
+        : '—:——';
+
+    // Update header elements
+    const hLiquid = document.getElementById('headerLiquid');
+    const hTotal  = document.getElementById('headerTotal');
+    const hCd     = document.getElementById('headerCountdownValue');
+    if (hLiquid) hLiquid.textContent = `$${fmt(liquidUsdt)}`;
+    if (hTotal)  hTotal.textContent  = `$${fmt(totalUsdt)}`;
+    if (hCd)     hCd.textContent     = countdownStr;
+
+    // KPI tiles
+    const kpiTotal    = document.getElementById('kpiTotal');
+    const kpiLiquid   = document.getElementById('kpiLiquid');
+    const kpiExp      = document.getElementById('kpiExposure');
+    const kpiExpCap   = document.getElementById('kpiExposureCap');
+    const kpiUnreal   = document.getElementById('kpiUnrealPnl');
+    const kpiPnlHoy   = document.getElementById('kpiPnlHoy');
+    const kpiWr       = document.getElementById('kpiWr');
+    const kpiPf       = document.getElementById('kpiPf');
+    const kpiPos      = document.getElementById('kpiPositions');
+    const kpiPosSub   = document.getElementById('kpiPositionsSub');
+    const kpiCd       = document.getElementById('kpiCountdown');
+    const kpiCycleSub = document.getElementById('kpiCycleSub');
+
+    if (kpiTotal)   { kpiTotal.textContent = `$${fmt(totalUsdt)}`; kpiTotal.className = 'kpi-value'; }
+    if (kpiLiquid)  kpiLiquid.textContent  = `Líquido: $${fmt(liquidUsdt)}`;
+    if (kpiExp)     { kpiExp.textContent = `${expPct.toFixed(1)}%`; kpiExp.style.color = expColor; }
+    if (kpiExpCap)  kpiExpCap.textContent  = `Cap: ${maxExpPct}% | inv $${fmt(invested)}`;
+    if (kpiUnreal)  { kpiUnreal.textContent = `${unrealPnl >= 0 ? '+' : ''}$${fmt(unrealPnl)}`; kpiUnreal.className = `kpi-value ${unrealCls}`; }
+    if (kpiPnlHoy)  { kpiPnlHoy.textContent = `Hoy: ${pnlToday >= 0 ? '+' : ''}$${fmt(pnlToday)}`; kpiPnlHoy.className = `kpi-sub ${pnlHCls}`; }
+    if (kpiWr)      { kpiWr.textContent = `${fmt(wr, 1)}%`; kpiWr.className = `kpi-value ${wrCls}`; }
+    if (kpiPf)      { kpiPf.textContent = `PF: ${fmt(pf)}`; kpiPf.className = `kpi-sub ${pfCls}`; }
+    if (kpiPos)     { kpiPos.textContent = `${positions.length}/${maxPos}`; kpiPos.className = `kpi-value ${positions.length >= maxPos ? 'negative' : 'positive'}`; }
+    if (kpiPosSub)  kpiPosSub.textContent  = `Abiertas (max ${maxPos})`;
+    if (kpiCd)      kpiCd.textContent      = countdownStr;
+    if (kpiCycleSub)kpiCycleSub.textContent = `${mode} · ${cycleMins}min`;
+}
+
 // ── Render functions (pure – no fetch) ───────────────────────────────────────
 function renderSystemStatus(d) {
     if (!d) return;
@@ -288,69 +498,71 @@ function renderOpenPositions(d) {
         el.innerHTML = '<p class="loading">Sin posiciones abiertas</p>';
         return;
     }
+    const showMxn = document.getElementById('toggleMxn') && document.getElementById('toggleMxn').checked;
+    const totalUnreal = d.positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
+    const totalInvested = d.positions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
+
     el.innerHTML = `
         <div class="table-scroll-10">
         <table class="positions-table">
             <thead>
                 <tr>
-                    <th>#</th>
                     <th>Símbolo</th>
                     <th>Cat</th>
-                    <th>Lado</th>
                     <th>Qty</th>
                     <th>Entrada</th>
                     <th>Actual</th>
-                    <th>Invertido (MXN)</th>
-                    <th>Valor actual (MXN)</th>
+                    <th>Invertido</th>
                     <th>PnL No Real.</th>
                     <th>PnL Pred.</th>
                     <th>SL / TP</th>
                     <th>%→SL</th>
                     <th>%→TP</th>
-                    <th>Horas</th>
+                    <th>Edad</th>
                 </tr>
             </thead>
             <tbody>
                 ${d.positions.map(p => {
                     const rowCls = parseFloat(p.unrealized_pnl||0) > 0 ? 'row-pnl-pos' : parseFloat(p.unrealized_pnl||0) < -0.01 ? 'row-pnl-neg' : '';
                     const curP = parseFloat(p.current_price || 0);
-                    const slDistPct = p.stop_loss && curP > 0
-                        ? ((parseFloat(p.stop_loss) - curP) / curP * 100)
-                        : null;
-                    const tpDistPct = p.take_profit && curP > 0
-                        ? ((parseFloat(p.take_profit) - curP) / curP * 100)
-                        : null;
+                    const slDistPct = p.stop_loss && curP > 0 ? ((parseFloat(p.stop_loss) - curP) / curP * 100) : null;
+                    const tpDistPct = p.take_profit && curP > 0 ? ((parseFloat(p.take_profit) - curP) / curP * 100) : null;
                     const slCls = slDistPct != null && Math.abs(slDistPct) < 1.0 ? 'negative' : '';
                     const tpCls = tpDistPct != null && Math.abs(tpDistPct) < 1.0 ? 'positive' : '';
+                    const hrs = parseFloat(p.hours_held || 0);
+                    const ageCls = hrs < 2 ? 'age-fresh' : hrs < 8 ? 'age-mid' : 'age-old';
+                    const investedDisplay = showMxn
+                        ? `$${fmt(p.invested_mxn ?? (p.invested_usdt * 17.5), 0)} MXN`
+                        : `$${fmt(p.invested_usdt || 0)}`;
+                    const pnlDisplay = showMxn
+                        ? `${fmt(p.unrealized_pnl)} USDT<br><small>${fmt(p.unrealized_pnl_mxn ?? 0, 1)} MXN</small>`
+                        : `${fmt(p.unrealized_pnl)} USDT`;
                     return `
                     <tr class="${rowCls}">
-                        <td title="ID: ${p.position_id || ''}">E${p.entry_number || 1}</td>
-                        <td>${p.symbol}</td>
+                        <td><strong>${p.symbol}</strong></td>
                         <td>${catIcon(p.category || 'MIDCAP_ALT')}</td>
-                        <td>${p.side}</td>
                         <td>${fmt(p.quantity, 4)}</td>
                         <td>$${fmt(p.entry_price)}</td>
                         <td>$${fmt(p.current_price)}</td>
-                        <td>$${fmt(p.invested_mxn ?? (p.invested_usdt * 17.5), 2)} MXN</td>
-                        <td>$${fmt(p.current_value_mxn ?? 0, 2)} MXN</td>
-                        <td class="${pnlClass(p.unrealized_pnl)}">${fmt(p.unrealized_pnl)} USDT<br><small class="${pnlClass(p.unrealized_pnl_mxn)}">${fmt(p.unrealized_pnl_mxn ?? 0, 2)} MXN</small></td>
+                        <td>${investedDisplay}</td>
+                        <td class="${pnlClass(p.unrealized_pnl)}">${pnlDisplay}</td>
                         <td>${fmtPrediction(p.pnl_prediction)}</td>
                         <td class="sl-tp">${p.stop_loss ? '$' + fmt(p.stop_loss) : '—'} / ${p.take_profit ? '$' + fmt(p.take_profit) : '—'}</td>
-                        <td class="${slCls}" title="Distancia al Stop-Loss">${slDistPct != null ? (slDistPct >= 0 ? '+' : '') + slDistPct.toFixed(2) + '%' : '—'}</td>
-                        <td class="${tpCls}" title="Distancia al Take-Profit">${tpDistPct != null ? (tpDistPct >= 0 ? '+' : '') + tpDistPct.toFixed(2) + '%' : '—'}</td>
-                        <td>${p.hours_held ?? '—'}h</td>
+                        <td class="${slCls}">${slDistPct != null ? (slDistPct >= 0 ? '+' : '') + slDistPct.toFixed(2) + '%' : '—'}</td>
+                        <td class="${tpCls}">${tpDistPct != null ? (tpDistPct >= 0 ? '+' : '') + tpDistPct.toFixed(2) + '%' : '—'}</td>
+                        <td class="${ageCls}">${hrs < 1 ? '<1h' : hrs.toFixed(0) + 'h'}</td>
                     </tr>`;
                 }).join('')}
             </tbody>
         </table>
         </div>
         <div class="positions-summary">
-            Total invertido: <strong>$${fmt(d.positions.reduce((s, p) => s + parseFloat(p.invested_mxn || 0), 0), 2)} MXN</strong>
+            ${d.positions.length} posiciones &nbsp;|&nbsp;
+            Invertido: <strong>$${fmt(totalInvested)} USDT</strong>
             &nbsp;|&nbsp;
-            Total PnL No Realizado:
-            <span class="${pnlClass(d.positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0))}">
-                ${fmt(d.positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0))} USDT
-                / $${fmt(d.positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl_mxn || 0), 0), 2)} MXN
+            PnL No Realizado:
+            <span class="${pnlClass(totalUnreal)}">
+                <strong>${totalUnreal >= 0 ? '+' : ''}${fmt(totalUnreal)} USDT</strong>
             </span>
         </div>
     `;
@@ -404,13 +616,13 @@ function renderClosedPositions(d) {
 
 function renderNextCycle(d) {
     if (!d || d.error) return;
-    const min = Math.floor(d.seconds_until_next / 60);
-    const sec = d.seconds_until_next % 60;
-    document.getElementById('nextCycleData').innerHTML = `
-        <div class="data-item"><span class="data-label">Intervalo</span><span class="data-value">${d.interval_minutes} min</span></div>
-        <div class="data-item"><span class="data-label">Tiempo Restante</span><span class="data-value countdown">${min}:${String(sec).padStart(2, '0')}</span></div>
-        <div class="data-item"><span class="data-label">Próximo Ciclo</span><span class="data-value">${d.next_cycle_time ? new Date(d.next_cycle_time).toLocaleTimeString('es-MX') : '—'}</span></div>
-    `;
+    const min = Math.floor((d.seconds_until_next || 0) / 60);
+    const sec = (d.seconds_until_next || 0) % 60;
+    const countdownStr = `${min}:${String(sec).padStart(2, '0')}`;
+    // Update ALL countdown elements
+    document.querySelectorAll('.countdown').forEach(el => { el.textContent = countdownStr; });
+    const hCd = document.getElementById('headerCountdownValue');
+    if (hCd) hCd.textContent = countdownStr;
 }
 
 function renderAnalysisSummary(d, closedPositions) {
@@ -701,12 +913,12 @@ function renderErrors(data) {
             <td style="word-break:break-word">${e.message}${ctx}</td>
         </tr>`;
     }).join('');
-    el.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:0.82rem">
-        <thead><tr style="color:#aaa;text-align:left">
-            <th style="padding:2px 8px">Hora</th>
-            <th style="padding:2px 8px">Nivel</th>
-            <th style="padding:2px 8px">Fuente</th>
-            <th style="padding:2px 8px">Mensaje</th>
+    el.innerHTML = `<table>
+        <thead><tr>
+            <th>Hora</th>
+            <th>Nivel</th>
+            <th>Fuente</th>
+            <th>Mensaje</th>
         </tr></thead>
         <tbody>${rows}</tbody>
     </table>`;
@@ -825,13 +1037,6 @@ function renderMarketContext(ctx) {
 }
 
 // ── Trading Mode Badge (header) ─────────────────────────────────────────────────
-const MODE_CFG = {
-    'SPOT_BULL':    { icon: '📈', label: 'SPOT BULL',   color: '#4ecca3' },
-    'RANGE_SCALP':  { icon: '↔️',  label: 'LATERAL',    color: '#f39c12' },
-    'PRESERVATION': { icon: '🛡',  label: 'PRESERVAR',  color: '#e74c3c' },
-    'FUTURES_SHORT':{ icon: '📉',  label: 'SHORT 2×',   color: '#9b59b6' },
-};
-
 function renderTradingModeBadge(r) {
     const dot  = document.getElementById('tradingModeDot');
     const text = document.getElementById('tradingModeText');
@@ -1161,6 +1366,8 @@ async function updateDashboard() {
     if (!data) return;
 
     renderSystemStatus(data.system_status);
+    renderExecutiveSummary(data);
+    renderKPIRow(data);
     renderSignals(data.signals);
     renderBalance(data.balance);
     renderPnlHistory(data.pnl_history);
@@ -1189,14 +1396,18 @@ async function updateDashboard() {
 
 // ── Countdown ticker (local – no API call) ────────────────────────────────────
 function tickCountdown() {
-    const el = document.querySelector('.countdown');
-    if (!el) return;
-    const parts = el.textContent.split(':');
-    let total = parseInt(parts[0]) * 60 + parseInt(parts[1]);
+    const els = document.querySelectorAll('.countdown');
+    if (!els.length) return;
+    const first = els[0];
+    const parts = first.textContent.split(':');
+    let total = parseInt(parts[0] || 0) * 60 + parseInt(parts[1] || 0);
     if (total > 0) total--;
     const m = Math.floor(total / 60);
     const s = total % 60;
-    el.textContent = `${m}:${String(s).padStart(2, '0')}`;
+    const str = `${m}:${String(s).padStart(2, '0')}`;
+    els.forEach(el => { el.textContent = str; });
+    const hCd = document.getElementById('headerCountdownValue');
+    if (hCd) hCd.textContent = str;
 }
 
 // ── Control buttons ───────────────────────────────────────────────────────────
@@ -1334,5 +1545,11 @@ document.addEventListener('DOMContentLoaded', () => {
     pollBacktestResults();
     setInterval(updateDashboard, POLL_INTERVAL_MS);
     setInterval(updateHealthAndErrors, 60000);  // Health & errors refresh every 60s
+    // Toggle MXN re-renders open positions
+    const toggleMxnEl = document.getElementById('toggleMxn');
+    if (toggleMxnEl) toggleMxnEl.addEventListener('change', () => {
+        if (_cachedData) renderOpenPositions(_cachedData.open_positions);
+    });
+
     setInterval(tickCountdown, 1000);
 });

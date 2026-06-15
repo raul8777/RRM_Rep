@@ -347,8 +347,12 @@ class PortfolioManager:
                         }
                     }
                     
-                    # Calculate prediction
-                    cycle_duration = getattr(self.settings, 'trade_cycle_minutes', 5)
+                    # Calculate prediction — use dynamic cycle from orchestrator if available
+                    try:
+                        from app import orchestrator as _orch
+                        cycle_duration = _orch.current_cycle_minutes
+                    except Exception:
+                        cycle_duration = getattr(self.settings, 'trade_cycle_minutes', 5)
                     position_size = position_data.get('quantity', 0) * current_price
                     
                     prediction = self.pnl_predictor.predict_pnl(

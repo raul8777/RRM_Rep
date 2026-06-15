@@ -304,6 +304,19 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
                         close_reason = f"trailing_stop (peak={peak_price:.4f}, trail={trail_stop_price:.4f})"
 
                 if close_reason:
+                    # ── Anti-wick: confirm SL with last closed candle ──────────
+                    if close_reason.startswith("stop_loss"):
+                        _confirm_n = getattr(settings, 'sl_confirmation_candles', 1)
+                        if _confirm_n > 0:
+                            try:
+                                _klines = client.client.get_klines(symbol=symbol, interval='1m', limit=2)
+                                _last_close = float(_klines[-2][4]) if len(_klines) >= 2 else current_price
+                                if _last_close > entry_price * (1.0 - sl_pct):
+                                    print(f"[AntiWick] SL skip {symbol}: spot={current_price:.6f} < SL threshold "
+                                          f"but last 1m close={_last_close:.6f} > SL — wick detected, holding")
+                                    continue
+                            except Exception as _aw_err:
+                                print(f"[AntiWick] klines fetch failed for {symbol}: {_aw_err} — proceeding with SL")
                     try:
                         filters = get_symbol_filters(client, symbol)
                         full_qty = float(pos.quantity)
@@ -420,6 +433,22 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
                         continue
             except Exception:
                 pass
+
+        # Smart rebalance: skip if predictor sees positive upside on this position
+        if getattr(settings, 'rebalance_skip_if_positive_prediction', True) and portfolio_manager:
+            try:
+                _pm = getattr(portfolio_manager, 'position_manager', None)
+                _pos_data = {symbol: {'quantity': amount}}
+                _preds = portfolio_manager.get_position_predictions(_pos_data)
+                _pred = _preds.get(symbol, {})
+                _epnl = _pred.get('expected_pnl', 0)
+                _prob = _pred.get('success_probability', 0)
+                _min_prob = getattr(settings, 'rebalance_min_hold_prob', 0.55)
+                if _epnl > 0 and _prob >= _min_prob:
+                    print(f"[Rebalance] Holding {symbol}: predictor epnl={_epnl:.3f} USDT, prob={_prob:.2f} >= {_min_prob} — skip sell")
+                    continue
+            except Exception as _pred_err:
+                print(f"[Rebalance] prediction check skipped for {symbol}: {_pred_err}")
 
         try:
             filters = get_symbol_filters(client, symbol)

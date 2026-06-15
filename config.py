@@ -117,7 +117,21 @@ class Settings(BaseSettings):
     trailing_stop_activation_pct: float = Field(default=2.0, env="TRAILING_STOP_ACTIVATION_PCT")  # activate trailing after +2%
     trailing_stop_distance_pct: float = Field(default=1.0, env="TRAILING_STOP_DISTANCE_PCT")      # trail 1% below peak
     protect_profitable_positions: bool = Field(default=True, env="PROTECT_PROFITABLE_POSITIONS")  # skip rebalance if PnL>1%
-    protect_profit_min_pct: float = Field(default=2.5, env="PROTECT_PROFIT_MIN_PCT")              # minimum PnL% to protect
+    protect_profit_min_pct: float = Field(default=0.8, env="PROTECT_PROFIT_MIN_PCT")              # minimum PnL% to protect (v2: 2.5→0.8)
+    # Rebalancing controls (v2)
+    min_hold_minutes: int = Field(default=60, env="MIN_HOLD_MINUTES")          # min time before rebalancing out a position
+    max_rebalance_per_cycle: int = Field(default=2, env="MAX_REBALANCE_PER_CYCLE")  # max sells per rebalance cycle
+    max_total_exposure_pct: float = Field(default=0.65, env="MAX_TOTAL_EXPOSURE_PCT")  # max portfolio % in open spot positions
+    # Smart exit: anti-wick SL confirmation
+    sl_confirmation_candles: int = Field(default=1, env="SL_CONFIRMATION_CANDLES")  # 0=immediate, 1=require last 1m candle close below SL
+    # Smart exit: rebalance skips if predictor sees upside
+    rebalance_skip_if_positive_prediction: bool = Field(default=True, env="REBALANCE_SKIP_IF_POSITIVE_PREDICTION")
+    rebalance_min_hold_prob: float = Field(default=0.55, env="REBALANCE_MIN_HOLD_PROB")  # skip rebalance if prob >= this AND epnl > 0
+    # Dynamic cycle by regime (v2)
+    cycle_spot_bull: int = Field(default=15, env="CYCLE_SPOT_BULL")            # minutes per cycle in SPOT_BULL
+    cycle_range_scalp: int = Field(default=5, env="CYCLE_RANGE_SCALP")         # minutes per cycle in RANGE_SCALP
+    cycle_preservation: int = Field(default=30, env="CYCLE_PRESERVATION")      # minutes per cycle in PRESERVATION
+    cycle_futures_short: int = Field(default=8, env="CYCLE_FUTURES_SHORT")     # minutes per cycle in FUTURES_SHORT
 
     # Signal quality filter
     min_signal_strength: float = Field(default=0.35, env="MIN_SIGNAL_STRENGTH")  # 0.0 = accept all, 0.5 = moderate filter
@@ -177,6 +191,24 @@ class Settings(BaseSettings):
     futures_symbols: list = Field(default=[
         'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT',
     ], env="FUTURES_SYMBOLS")   # symbols eligible for shorting
+
+    # ── Dynamic pair screener ─────────────────────────────────────────────────
+    screener_enabled: bool = Field(default=True, env="SCREENER_ENABLED")
+    screener_min_vol_usdt: float = Field(default=10_000_000, env="SCREENER_MIN_VOL_USDT")   # $10M spot min
+    screener_futures_min_vol: float = Field(default=100_000_000, env="SCREENER_FUTURES_MIN_VOL")  # $100M futures min
+    screener_max_pairs: int = Field(default=50, env="SCREENER_MAX_PAIRS")           # max dynamic pairs for spot
+    screener_cache_minutes: int = Field(default=15, env="SCREENER_CACHE_MINUTES")   # TTL for screener cache
+    screener_merge_with_static: bool = Field(default=True, env="SCREENER_MERGE_WITH_STATIC")
+
+    # ── Futures LONG / hedge bidireccional ────────────────────────────────────
+    futures_hedge_mode_enabled: bool = Field(default=True, env="FUTURES_HEDGE_MODE_ENABLED")
+    futures_long_enabled: bool = Field(default=True, env="FUTURES_LONG_ENABLED")
+    futures_max_longs: int = Field(default=3, env="FUTURES_MAX_LONGS")
+    futures_long_sl_pct: float = Field(default=2.5, env="FUTURES_LONG_SL_PCT")
+    futures_long_tp_pct: float = Field(default=5.0, env="FUTURES_LONG_TP_PCT")
+    futures_long_in_range_scalp: bool = Field(default=True, env="FUTURES_LONG_IN_RANGE_SCALP")
+    futures_long_in_spot_bull: bool = Field(default=True, env="FUTURES_LONG_IN_SPOT_BULL")
+    futures_long_rsi_threshold: float = Field(default=35.0, env="FUTURES_LONG_RSI_THRESHOLD")
 
     # ── Market Regime adaptive mode ──────────────────────────────────────────
     market_regime_enabled: bool = Field(default=True, env="MARKET_REGIME_ENABLED")

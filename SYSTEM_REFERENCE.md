@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 15 2026 10:17 UTC-6 | Plan v2 arquitectura COMPLETO | Kelly agresivo aplicado | 12 posiciones abiertas | 9 compras último ciclo
+> Última actualización: jun 15 2026 11:41 UTC-6 | Dashboard redesign completo v18 | Smart exit re-evaluation implementado | Stale cycle warning fix | 12 posiciones abiertas
 
 ---
 
@@ -230,6 +230,8 @@ Para cambiarlas: editar `docker-compose.yml` + `docker compose up -d app` (NO us
 
 | Fecha | Bug | Fix |
 |-------|-----|-----|
+| jun 15 11:41 | `_STALE_CYCLE_MINUTES=15` hardcoded → falso positivo con SPOT_BULL 15min; warning spameaba error_collector en cada poll | Fix: umbral dinámico `orchestrator.current_cycle_minutes × 1.5` + dedup por `last_cycle` timestamp. `app.py` línea ~1500 |
+| jun 15 11:41 | `portfolio_manager.get_position_predictions()` usaba `trade_cycle_minutes=5` fijo → predicción a 5min en vez del ciclo real 15min SPOT_BULL → sesgo contra posiciones abiertas en prediction-reallocation | Fix: usa `orchestrator.current_cycle_minutes` con fallback a config. `portfolio_manager.py` línea ~351 |
 | jun 15 10:00 | `MAX_PER_TRADE_USDT=15` → predictor calculaba PnL con $15 pero Kelly compraba $150 (10× subestimado) | `MAX_PER_TRADE_USDT=350` en `.env` + `docker-compose.yml` línea 63. Requiere `up -d`, no `restart` |
 | jun 15 10:00 | `MAX_POSITIONS` y `MAX_PER_TRADE_USDT` ignoraban el `.env` del contenedor | Variables inyectadas por `docker-compose.yml` con `${VAR:-default}` tienen prioridad sobre `/app/.env`; fix en compose |
 | jun 15 09:35 | `SyntaxError` en `run_trades.py` — `min(generator, default=None)` requiere paréntesis extra en Python 3.11 | Convertido a lista: `_ts_list = [...]; min(_ts_list) if _ts_list else None` |
@@ -295,11 +297,13 @@ Para cambiarlas: editar `docker-compose.yml` + `docker compose up -d app` (NO us
 
 ## 8. PENDIENTES PRIORIZADOS
 
-### ✅ TODO completado al jun 15 2026 10:05 UTC-6
+### ✅ TODO completado al jun 15 2026 11:41 UTC-6
 
 **Plan arquitectura v1** (P1–P14): todos completados.
 **Plan arquitectura v2** (Fases A–E): todos completados.
 **Ajuste agresivo Kelly + ciclos**: completado.
+**Dashboard redesign v18**: completado.
+**Smart exit re-evaluation**: completado.
 
 | # | Tarea | Estado |
 |---|-------|--------|
@@ -310,6 +314,11 @@ Para cambiarlas: editar `docker-compose.yml` + `docker compose up -d app` (NO us
 | D | Dashboard: `/health` con `portfolio_exposure` + `trade_cycle` + barra progreso | ✅ `app.py` + `dashboard.js` |
 | E | Kelly por categoría: usa `category_thresholds[cat].sl_pct/tp_pct` | ✅ `run_trades.py` |
 | K | Kelly agresivo: base 12%, max $350, max_per_trade $350 (bug fix) | ✅ `.env` + `docker-compose.yml` |
+| U1 | Dashboard redesign v18: Resumen Ejecutivo, KPI row, scroll errores, colapsables | ✅ `index.html` + `dashboard.js` + `styles.css` |
+| U2 | Stale cycle warning: umbral dinámico × 1.5 + dedup una vez por ciclo | ✅ `app.py` |
+| U3 | Smart exit — Fix A: anti-wick SL (confirma último candle 1m antes de cerrar) | ✅ `run_trades.py` + `config.py` |
+| U4 | Smart exit — Fix B: horizonte predicción dinámico en prediction-reallocation | ✅ `portfolio_manager.py` |
+| U5 | Smart exit — Fix C: rebalanceo consciente del predictor (epnl>0 + prob≥0.55 → hold) | ✅ `run_trades.py` + `config.py` |
 
 ### � En observación
 
@@ -318,6 +327,8 @@ Para cambiarlas: editar `docker-compose.yml` + `docker compose up -d app` (NO us
 | N2 | Verificar BTCUSDT short qty>0 cuando régimen cambie a FUTURES_SHORT |
 | N4 | Monitorear WR durante próximas 48h con nuevos parámetros agresivos — objetivo ≥ 45% |
 | N5 | Predictor en bootstrap_mode para todos los pares nuevos del screener — acumulará datos con el tiempo |
+| N6 | Monitorear que Fix C (rebalanceo + predictor) no retiene posiciones en caída real — revisar si `rebalance_min_hold_prob=0.55` es apropiado o necesita ajuste |
+| N7 | Monitorear que Fix A (anti-wick candle 1m) no retrase SL en caídas reales > 2min |
 
 ---
 
@@ -352,6 +363,14 @@ STABLECOIN_PREFIXES = ["USDC", "BUSD", "TUSD", "DAI", "FDUSD", "USDP"]
 - Kelly dinámico con tiers por categoría de token
 - Trailing stop con `protect_profitable_positions`
 - Screener dinámico 46 pares (vs 10 estáticos): más oportunidades
+
+### Nuevas protecciones implementadas (jun 15 2026 11:41)
+| Mejora | Descripción | Archivo |
+|--------|-------------|--------|
+| **Anti-wick SL** | Antes de cerrar por SL, verifica último candle 1m. Si cerró sobre el SL → wick → no vende. Param: `sl_confirmation_candles=1` | `run_trades.py` |
+| **Horizonte dinámico predictor** | `get_position_predictions()` usa `orchestrator.current_cycle_minutes` (15min SPOT_BULL) en vez del fijo 5min de config | `portfolio_manager.py` |
+| **Rebalanceo consciente** | Si predictor dice `epnl > 0 AND prob ≥ 0.55` → no vende en rebalanceo aunque no esté en top-N. Param: `rebalance_skip_if_positive_prediction=True` | `run_trades.py` |
+| **Stale cycle dedup** | Warning `TRADING_CYCLE` se registra una sola vez por ciclo estancado, no en cada poll del health (era 15×/ciclo) | `app.py` |
 
 ### Lo que destruye valor (CORREGIDO jun 15)
 | Problema | Impacto | Fix aplicado |

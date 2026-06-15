@@ -4,13 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Trading Agent Dashboard</title>
-    <link rel="stylesheet" href="/frontend/styles.css?v=15">
+    <link rel="stylesheet" href="/frontend/styles.css?v=18">
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>Crypto Trading Agent Dashboard</h1>
-            <div style="display:flex;align-items:center;gap:16px">
+            <h1>Crypto Trading Agent</h1>
+            <div class="header-right">
                 <div class="trading-mode-badge" id="tradingModeBadge" title="">
                     <span class="mode-dot" id="tradingModeDot"></span>
                     <span class="mode-label">Modo</span>
@@ -25,6 +25,18 @@
                     <span class="fng-dot" id="fngDot"></span>
                     <span class="fng-label">F&amp;G</span>
                     <span class="fng-value" id="fngValue">—</span>
+                </div>
+                <!-- Capital summary in header -->
+                <div class="header-capital" id="headerCapital" title="Capital disponible vs total">
+                    <span class="header-capital-label">Líquido</span>
+                    <span class="header-capital-value" id="headerLiquid">—</span>
+                    <span class="header-capital-sep">/</span>
+                    <span class="header-capital-total" id="headerTotal">—</span>
+                </div>
+                <!-- Prominent cycle countdown -->
+                <div class="header-countdown" id="headerCountdown" title="Próximo ciclo de trading">
+                    <span class="header-countdown-label">Ciclo</span>
+                    <span class="header-countdown-value" id="headerCountdownValue">—:——</span>
                 </div>
                 <div class="status-indicator" id="systemStatus">
                     <span class="status-dot"></span>
@@ -51,91 +63,52 @@
         </div>
 
         <div class="dashboard-grid">
-            <!-- Balance Card -->
-            <div class="card">
-                <h2>Balance</h2>
-                <div id="balanceData">
-                    <p>Loading balance data...</p>
+
+            <!-- ══ ZONA 1: RESUMEN EJECUTIVO ══════════════════════════════════ -->
+            <div class="card card-full card-executive" id="executiveSummaryCard">
+                <h2>🧠 Resumen Ejecutivo</h2>
+                <div id="executiveSummaryData">
+                    <p class="loading">Generando resumen...</p>
                 </div>
             </div>
 
-            <!-- PnL History Card -->
-            <div class="card">
-                <h2>PnL Histórico</h2>
-                <div id="pnlHistoryData">
-                    <p>Loading PnL history...</p>
+            <!-- ══ ZONA 2: KPI ROW ════════════════════════════════════════════ -->
+            <div class="card card-full card-kpi-row">
+                <div class="kpi-grid" id="kpiRow">
+                    <div class="kpi-item">
+                        <div class="kpi-label">Capital Total</div>
+                        <div class="kpi-value" id="kpiTotal">—</div>
+                        <div class="kpi-sub" id="kpiLiquid">Líquido: —</div>
+                    </div>
+                    <div class="kpi-item">
+                        <div class="kpi-label">Exposición</div>
+                        <div class="kpi-value" id="kpiExposure">—</div>
+                        <div class="kpi-sub" id="kpiExposureCap">Cap: —</div>
+                    </div>
+                    <div class="kpi-item">
+                        <div class="kpi-label">PnL No Realizado</div>
+                        <div class="kpi-value" id="kpiUnrealPnl">—</div>
+                        <div class="kpi-sub" id="kpiPnlHoy">Hoy: —</div>
+                    </div>
+                    <div class="kpi-item">
+                        <div class="kpi-label">Win Rate</div>
+                        <div class="kpi-value" id="kpiWr">—</div>
+                        <div class="kpi-sub" id="kpiPf">Profit Factor: —</div>
+                    </div>
+                    <div class="kpi-item">
+                        <div class="kpi-label">Posiciones</div>
+                        <div class="kpi-value" id="kpiPositions">—</div>
+                        <div class="kpi-sub" id="kpiPositionsSub">Abiertas</div>
+                    </div>
+                    <div class="kpi-item">
+                        <div class="kpi-label">Próximo Ciclo</div>
+                        <div class="kpi-value kpi-countdown countdown" id="kpiCountdown">—:——</div>
+                        <div class="kpi-sub" id="kpiCycleSub">Régimen: —</div>
+                    </div>
                 </div>
             </div>
 
-            <!-- Profit Projection Card -->
-            <div class="card card-wide">
-                <h2>📈 Proyección de Ganancias</h2>
-                <div id="profitProjectionData">
-                    <p class="loading">Calculando proyección...</p>
-                </div>
-            </div>
-
-            <!-- Recent Signals Card -->
-            <div class="card card-wide">
-                <h2>Señales Recientes <span style="font-size:12px;font-weight:400;color:#888">(BUY &amp; SELL)</span></h2>
-                <div id="signalsData">
-                    <p>Cargando señales...</p>
-                </div>
-            </div>
-
-            <!-- Open Positions Card -->
-            <div class="card card-full">
-                <h2>Posiciones Abiertas
-                    <span style="float:right">
-                        <button class="btn btn-primary btn-sm" id="syncBalanceBtn" title="Importar activos de Binance no rastreados como posiciones gestionables">⇄ Sincronizar Saldo</button>
-                    </span>
-                </h2>
-                <div id="openPositionsData">
-                    <p>Loading open positions...</p>
-                </div>
-            </div>
-
-            <!-- Futures SHORT Positions Card -->
-            <div class="card card-full" id="futuresCard">
-                <h2>📉 Posiciones Futuros SHORT (2×)</h2>
-                <div id="futuresPositionsData">
-                    <p class="loading">Cargando posiciones de futuros...</p>
-                </div>
-            </div>
-
-            <!-- Closed Positions Card -->
-            <div class="card card-full">
-                <h2>Posiciones Cerradas (Últimas 20)</h2>
-                <div id="closedPositionsData">
-                    <p>Loading closed positions...</p>
-                </div>
-            </div>
-
-            <!-- Next Cycle Card -->
-            <div class="card">
-                <h2>Próximo Ciclo</h2>
-                <div id="nextCycleData">
-                    <p>Loading cycle info...</p>
-                </div>
-            </div>
-
-            <!-- Analysis Summary Card -->
-            <div class="card">
-                <h2>Resumen de Análisis</h2>
-                <div id="analysisSummaryData">
-                    <p>Loading analysis summary...</p>
-                </div>
-            </div>
-
-            <!-- Modo de Trading Activo Card -->
-            <div class="card card-wide">
-                <h2>⚙️ Modo de Trading Activo</h2>
-                <div id="tradingModeData">
-                    <p class="loading">Detectando régimen...</p>
-                </div>
-            </div>
-
-            <!-- Contexto de Mercado Card -->
+            <!-- ══ ZONA 3: MERCADO + MODO (fusionados) ════════════════════════ -->
             <div class="card card-wide">
                 <h2>🌡️ Contexto de Mercado</h2>
                 <div id="marketContextData">
@@ -143,70 +116,165 @@
                 </div>
             </div>
 
-            <!-- Aprendizaje del Sistema Card -->
-            <div class="card">
-                <h2>Aprendizaje del Sistema</h2>
-                <div id="learningData">
-                    <p class="loading">Cargando datos de aprendizaje...</p>
-                </div>
-                <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
-                    <button class="btn btn-primary btn-sm" id="triggerLearningBtn">⚡ Re-Aprender</button>
-                    <button class="btn btn-success btn-sm" id="bootstrapBtn" title="Cargar 90 días de historia de Binance para calibrar el predictor de PnL">📊 Bootstrap Predictor (90d)</button>
+            <div class="card card-wide">
+                <h2>⚙️ Régimen de Trading</h2>
+                <div id="tradingModeData">
+                    <p class="loading">Detectando régimen...</p>
                 </div>
             </div>
 
-            <!-- Estrategia Activa Card -->
-            <div class="card">
-                <h2>Estrategia Activa</h2>
-                <div id="strategyData">
-                    <p class="loading">Cargando estrategia...</p>
-                </div>
-            </div>
-
-            <!-- Monte Carlo Proyección Card -->
+            <!-- ══ ZONA 4: SEÑALES ════════════════════════════════════════════ -->
             <div class="card card-full">
-                <h2>📊 Proyección Monte Carlo — 180 días</h2>
-                <div id="monteCarloData">
-                    <p class="loading">Cargando proyección...</p>
+                <h2>📡 Señales Recientes <span style="font-size:12px;font-weight:400;color:#888">(BUY &amp; SELL)</span></h2>
+                <div id="signalsData">
+                    <p>Cargando señales...</p>
                 </div>
             </div>
 
-            <!-- Backtesting Card -->
+            <!-- ══ ZONA 5: POSICIONES ABIERTAS ════════════════════════════════ -->
             <div class="card card-full">
-                <h2>Backtesting
-                    <span class="backtest-controls">
-                        <select id="backtestSymbol" class="bt-select">
-                            <option value="BTCUSDT">BTCUSDT</option>
-                            <option value="ETHUSDT">ETHUSDT</option>
-                            <option value="BNBUSDT">BNBUSDT</option>
-                            <option value="SOLUSDT">SOLUSDT</option>
-                            <option value="XRPUSDT">XRPUSDT</option>
-                        </select>
-                        <select id="backtestDays" class="bt-select">
-                            <option value="14">14d</option>
-                            <option value="30" selected>30d</option>
-                            <option value="60">60d</option>
-                            <option value="90">90d</option>
-                        </select>
-                        <button class="btn btn-success btn-sm" id="runBacktestBtn">▶ Ejecutar</button>
+                <h2>📂 Posiciones Abiertas
+                    <span style="display:flex;align-items:center;gap:8px">
+                        <label class="toggle-mxn-label">
+                            <input type="checkbox" id="toggleMxn"> Ver MXN
+                        </label>
+                        <button class="btn btn-primary btn-sm" id="syncBalanceBtn" title="Importar activos de Binance no rastreados como posiciones gestionables">⇄ Sincronizar</button>
                     </span>
                 </h2>
-                <div id="backtestData">
-                    <p class="loading">Sin backtests ejecutados aún.</p>
+                <div id="openPositionsData">
+                    <p>Loading open positions...</p>
                 </div>
             </div>
 
-            <!-- Parámetros Optimizados Card -->
-            <div class="card">
-                <h2>Parámetros Optimizados</h2>
-                <div id="optimizedParamsData">
-                    <p class="loading">Cargando parámetros...</p>
+            <!-- ══ ZONA 6: FUTUROS SHORT ═══════════════════════════════════════ -->
+            <div class="card card-full" id="futuresCard">
+                <h2>📉 Posiciones Futuros SHORT (2×)</h2>
+                <div id="futuresPositionsData">
+                    <p class="loading">Cargando posiciones de futuros...</p>
                 </div>
             </div>
 
-            <!-- Sistema & Errores Card -->
+            <!-- ══ ZONA 7: PERFORMANCE HISTÓRICA (PnL + Análisis fusionados) ══ -->
+            <div class="card card-wide">
+                <h2>📊 Performance Histórica</h2>
+                <div id="pnlHistoryData">
+                    <p>Loading PnL history...</p>
+                </div>
+            </div>
+
+            <div class="card card-wide">
+                <h2>📈 Estadísticas del Sistema</h2>
+                <div id="analysisSummaryData">
+                    <p>Loading analysis summary...</p>
+                </div>
+            </div>
+
+            <!-- ══ ZONA 8: POSICIONES CERRADAS ════════════════════════════════ -->
+            <div class="card card-full">
+                <h2>✅ Posiciones Cerradas (Últimas 20)</h2>
+                <div id="closedPositionsData">
+                    <p>Loading closed positions...</p>
+                </div>
+            </div>
+
+            <!-- ══ ZONA 9: BALANCE DETALLADO ══════════════════════════════════ -->
+            <div class="card card-wide">
+                <h2>💼 Balance</h2>
+                <div id="balanceData">
+                    <p>Loading balance data...</p>
+                </div>
+            </div>
+
+            <!-- ══ ZONA 10: PROYECCIÓN DE GANANCIAS ═══════════════════════════ -->
+            <div class="card card-wide">
+                <h2>💰 Proyección de Ganancias</h2>
+                <div id="profitProjectionData">
+                    <p class="loading">Calculando proyección...</p>
+                </div>
+            </div>
+
+            <!-- ══ ZONA 11: MONTE CARLO (colapsable) ══════════════════════════ -->
+            <div class="card card-full card-collapsible" id="mcCard">
+                <h2 class="collapsible-header" onclick="toggleSection('mcBody', 'mcChevron')">
+                    📊 Proyección Monte Carlo — 180 días
+                    <span class="chevron" id="mcChevron">▶</span>
+                </h2>
+                <div id="mcBody" class="collapsible-body collapsed">
+                    <div id="monteCarloData">
+                        <p class="loading">Cargando proyección...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ══ ZONA 12: ANÁLISIS AVANZADO (colapsable) ════════════════════ -->
+            <div class="card card-full card-collapsible card-advanced">
+                <h2 class="collapsible-header" onclick="toggleSection('advancedBody', 'advChevron')">
+                    ⚙️ Análisis Avanzado
+                    <span class="chevron" id="advChevron">▶</span>
+                </h2>
+                <div id="advancedBody" class="collapsible-body collapsed">
+                    <div class="advanced-grid">
+
+                        <!-- Aprendizaje -->
+                        <div class="adv-card">
+                            <h3>🤖 Aprendizaje del Sistema</h3>
+                            <div id="learningData">
+                                <p class="loading">Cargando datos de aprendizaje...</p>
+                            </div>
+                            <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+                                <button class="btn btn-primary btn-sm" id="triggerLearningBtn">⚡ Re-Aprender</button>
+                                <button class="btn btn-success btn-sm" id="bootstrapBtn" title="Cargar 90 días de historia de Binance para calibrar el predictor de PnL">📊 Bootstrap Predictor (90d)</button>
+                            </div>
+                        </div>
+
+                        <!-- Estrategia Activa -->
+                        <div class="adv-card">
+                            <h3>🎯 Estrategia Activa</h3>
+                            <div id="strategyData">
+                                <p class="loading">Cargando estrategia...</p>
+                            </div>
+                        </div>
+
+                        <!-- Parámetros Optimizados -->
+                        <div class="adv-card">
+                            <h3>� Parámetros Optimizados</h3>
+                            <div id="optimizedParamsData">
+                                <p class="loading">Cargando parámetros...</p>
+                            </div>
+                        </div>
+
+                    </div>
+
+                    <!-- Backtesting -->
+                    <div class="adv-backtest">
+                        <h3>🔬 Backtesting
+                            <span class="backtest-controls">
+                                <select id="backtestSymbol" class="bt-select">
+                                    <option value="BTCUSDT">BTCUSDT</option>
+                                    <option value="ETHUSDT">ETHUSDT</option>
+                                    <option value="BNBUSDT">BNBUSDT</option>
+                                    <option value="SOLUSDT">SOLUSDT</option>
+                                    <option value="XRPUSDT">XRPUSDT</option>
+                                </select>
+                                <select id="backtestDays" class="bt-select">
+                                    <option value="14">14d</option>
+                                    <option value="30" selected>30d</option>
+                                    <option value="60">60d</option>
+                                    <option value="90">90d</option>
+                                </select>
+                                <button class="btn btn-success btn-sm" id="runBacktestBtn">▶ Ejecutar</button>
+                            </span>
+                        </h3>
+                        <div id="backtestData">
+                            <p class="loading">Sin backtests ejecutados aún.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ══ ZONA 13: SISTEMA & ERRORES ═════════════════════════════════ -->
             <div class="card card-full" id="errorCard">
-                <h2>Sistema &amp; Errores
+                <h2>🔧 Sistema &amp; Errores
                     <span style="float:right;display:flex;gap:8px">
                         <button class="btn btn-primary btn-sm" id="refreshHealthBtn">&#x21bb; Actualizar</button>
                         <button class="btn btn-warning btn-sm" id="clearErrorsBtn">&#x1F9F9; Limpiar</button>
@@ -215,14 +283,15 @@
                 <div id="healthChecksData">
                     <p class="loading">Cargando health checks...</p>
                 </div>
-                <h3 style="margin-top:16px">Errores recientes</h3>
-                <div id="errorsData">
+                <h3 style="margin-top:16px;color:#aaa;font-size:14px">Errores recientes</h3>
+                <div id="errorsData" class="errors-scroll">
                     <p class="loading">Cargando errores...</p>
                 </div>
             </div>
+
         </div>
     </div>
 
-    <script src="/frontend/dashboard.js?v=17"></script>
+    <script src="/frontend/dashboard.js?v=18"></script>
 </body>
 </html>
