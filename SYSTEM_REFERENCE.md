@@ -210,11 +210,30 @@ SCREENER_MIN_VOL_USDT=10000000      # $10M para spot
 SCREENER_FUTURES_MIN_VOL=100000000  # $100M para futuros
 SCREENER_MAX_PAIRS=50
 SCREENER_CACHE_MINUTES=15
+
+# ── Dynamic max positions por régimen (jun 15 12:56) ─────────────────────────
+MAX_POSITIONS_SPOT_BULL=15          # default: 15 (amplio en bull + 46 pares disponibles)
+MAX_POSITIONS_RANGE_SCALP=8         # default: 8  (scalping controlado)
+MAX_POSITIONS_PRESERVATION=5        # default: 5  (solo NARRATIVE en bajista)
+MAX_POSITIONS_FUTURES_SHORT=4       # default: 4  (alineado con FUTURES_MAX_SHORTS=3)
+# MAX_POSITIONS=12 se mantiene como FALLBACK si régimen no disponible
+
+# ── Reemplazo activo de posición débil ───────────────────────────────────────
+REPLACE_ONLY_LOSING=true            # solo reemplaza posiciones en pérdida/flat
+REPLACE_EV_MIN_RATIO=1.3            # nuevo EV debe ser ≥ peor_actual × 1.3
+REPLACE_STRENGTH_MIN_DELTA=0.15     # nueva strength debe superar promedio open en +0.15
+
+# ── Overflow slots (señales excepcionales beyond max) ───────────────────────
+OVERFLOW_MIN_STRENGTH=0.80          # Kelly FUERTE tier: str ≥ 0.80
+OVERFLOW_MIN_PROB=0.65              # Kelly FUERTE tier: prob ≥ 0.65
+OVERFLOW_MAX_EXTRA=3                # máximo 3 slots extra simultáneos
 ```
 
 ### ⚠️ Nota crítica: docker-compose.yml inyecta variables por encima del .env
 `MAX_PER_TRADE_USDT` y `MAX_POSITIONS` están declaradas en `docker-compose.yml` líneas 63-64.
 Para cambiarlas: editar `docker-compose.yml` + `docker compose up -d app` (NO usar `restart`).
+Los nuevos params D1–D4 (MAX_POSITIONS_SPOT_BULL, etc.) solo tienen defaults en `config.py`.
+Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${VAR:-default}`.
 
 ### Sin pendientes de ajuste — todos aplicados
 
