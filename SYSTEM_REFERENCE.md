@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 15 2026 12:56 UTC-6 | Dynamic max positions + active replacement + overflow slots | Smart exit re-evaluation | Dashboard redesign v18 | 12 posiciones abiertas
+> Última actualización: jun 15 2026 13:21 UTC-6 | Nuevos roles R1-R6: Behavioral Finance, Microestructura, Correlaciones, Circuit Breaker, On-chain | Dynamic max pos + overflow | Smart exit | Dashboard v18
 
 ---
 
@@ -12,6 +12,11 @@
 | Rol | Aplicación en este sistema |
 |-----|---------------------------|
 | **Experto en criptomonedas** | Conocimiento de mercados, tokenomics, ciclos macro BTC/alts, narrativas, liquidez |
+| **Behavioral Finance** | F&G como señal de tamaño de posición: capitulación (+50% Kelly), greed extremo (-35% Kelly) |
+| **Actuario / Riesgo sistémico** | Circuit breaker técnico (5 fallos API = pausa 10min), no bloquea por pérdidas de mercado |
+| **Microestructura de mercados** | Filtro volumen 24h ≥$3M + slippage implícito ≤ 25% del TP antes de entrar |
+| **Teoría de portafolios (correlaciones)** | Limite por bucket: LARGE_CAP≤3, MIDCAP≤5, NARRATIVE≤4, MEME≤2 — diversificación forzada |
+| **On-chain / microestructura derivados** | Funding rate spot filter: si FR>0.08% = longs sobreapalancados = skip compra |
 | **Experto en trading** | Gestión de riesgo, Kelly sizing, SL/TP, R:R, position sizing, rebalanceo, señales técnicas |
 | **Experto en estadísticas** | Win rate, profit factor, EV por trade, distribuciones, bootstrap, Monte Carlo, sesgo en datos |
 | **Experto en inversiones y tendencias** | Macro BTC dominance, Fear & Greed, momentum sectorial, rotación de capital |
@@ -227,6 +232,35 @@ REPLACE_STRENGTH_MIN_DELTA=0.15     # nueva strength debe superar promedio open 
 OVERFLOW_MIN_STRENGTH=0.80          # Kelly FUERTE tier: str ≥ 0.80
 OVERFLOW_MIN_PROB=0.65              # Kelly FUERTE tier: prob ≥ 0.65
 OVERFLOW_MAX_EXTRA=3                # máximo 3 slots extra simultáneos
+
+# ── Behavioral Finance: F&G Kelly boost (R1) ─────────────────────────────────
+FNG_KELLY_BOOST_ENABLED=true
+FNG_CAPITULATION_THRESHOLD=15       # F&G ≤ 15 → capitulación total
+FNG_EXTREME_FEAR_THRESHOLD=20       # F&G ≤ 20 → miedo extremo (actual: 20)
+FNG_EXTREME_GREED_THRESHOLD=75      # F&G ≥ 75 → euforia peligrosa
+FNG_CAPITULATION_MULTIPLIER=1.50    # +50% Kelly en capitulación
+FNG_EXTREME_FEAR_MULTIPLIER=1.35    # +35% Kelly en miedo extremo
+FNG_EXTREME_GREED_MULTIPLIER=0.65   # -35% Kelly en euforia
+FNG_CAPITULATION_PNL_BOOST=-0.25    # relax min_pnl hasta -$0.25 en capitulación
+
+# ── Microestructura (R3) ──────────────────────────────────────────────────────
+LIQUIDITY_FILTER_ENABLED=true
+MIN_LIQUIDITY_VOL_USDT=3000000      # $3M vol 24h mínimo para spot (todos los pares screener pasan)
+MAX_SLIPPAGE_TP_RATIO=0.25          # spread implícito no puede consumir > 25% del TP
+
+# ── Correlaciones por categoría (R4) ─────────────────────────────────────────
+CATEGORY_MAX_POSITIONS_ENABLED=true
+# category_max_positions: {"LARGE_CAP":3,"MIDCAP_ALT":5,"NARRATIVE":4,"MEME":2} — en config.py defaults
+
+# ── Circuit breaker técnico (R5) ──────────────────────────────────────────────
+CIRCUIT_BREAKER_ENABLED=true
+CIRCUIT_BREAKER_CONSECUTIVE_FAILURES=5   # 5 errores API consecutivos → pausa
+CIRCUIT_BREAKER_PAUSE_MINUTES=10         # pausa de 10 min (buys sólo, SL/TP no se ven afectados)
+
+# ── On-chain funding rate (R6) ────────────────────────────────────────────────
+FUNDING_RATE_SPOT_FILTER_ENABLED=true
+FUNDING_RATE_SPOT_MAX=0.0008        # > 0.08% = longs sobreapalancados → skip spot buy
+FUNDING_RATE_CACHE_MINUTES=10       # cache funding rate 10min (fapi.binance.com)
 ```
 
 ### ⚠️ Nota crítica: docker-compose.yml inyecta variables por encima del .env
@@ -324,6 +358,7 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 **Dashboard redesign v18**: completado.
 **Smart exit re-evaluation**: completado.
 **Dynamic max positions + replacement + overflow**: completado.
+**Nuevos roles R1-R6 (Behavioral Finance, Microestructura, Correlaciones, Circuit Breaker, On-chain)**: completado.
 
 | # | Tarea | Estado |
 |---|-------|--------|
@@ -345,6 +380,12 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | D4 | Overflow slots `_is_overflow_eligible()`: abre slot extra si strength≥0.80 + prob≥0.65 + epnl>0 (max 3) | ✅ `run_trades.py` |
 | D5 | `orchestrator.current_regime_mode` sincronizado por ciclo; `/health/status` expone `max_positions_current` + `overflow_slots_used` | ✅ `orchestrator.py` + `app.py` |
 | D6 | Dashboard: badge ⚡OVF naranja en posiciones overflow; health `trade_cycle` muestra régimen + max + slots | ✅ `dashboard.js` + `styles.css` |
+| R1 | F&G Kelly boost: Capitulacion(≤15)×1.50, Extreme Fear(≤20)×1.35, Extreme Greed(≥75)×0.65 | ✅ `run_trades.py` + `config.py` |
+| R2 | Capitulacion PnL boost: `pnl_service.validate()` ya usa `fng_modifier` agresivo de `news_client` | ✅ `pnl_service.py` (preexistente + config) |
+| R3 | Microestructura: `_check_liquidity_and_slippage()` — vol_24h<$3M o spread>25% TP → skip | ✅ `run_trades.py` + `config.py` |
+| R4 | Correlaciones: `_check_category_limit()` — LARGE_CAP:3, MIDCAP_ALT:5, NARRATIVE:4, MEME:2 | ✅ `run_trades.py` + `config.py` |
+| R5 | Circuit breaker técnico: 5 fallos API consecutivos → pausa 10min (no bloquea por pérdidas) | ✅ `run_trades.py` + `app.py` + `dashboard.js` |
+| R6 | On-chain funding rate: `_get_funding_rate()` cacheado 10min, skip si FR>0.08% en SPOT_BULL | ✅ `run_trades.py` + `config.py` |
 
 ### � En observación
 
@@ -358,6 +399,10 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | N8 | Primera activación de reemplazo activo: verificar logs `[Replace]` con ratio correcto y que no vende posiciones en profit |
 | N9 | Primera activación overflow: verificar logs `[Overflow]` con strength/prob correctos; monitorear si las 3 posiciones extra son rentables |
 | N10 | SPOT_BULL=15 posiciones: verificar que `max_total_exposure_pct=0.75` actúa como verdadero techo; Kelly sizes deben ser ~$80-100 con 15 posiciones |
+| N11 | Primera activación F&G Kelly boost: con F&G=20 (Extreme Fear actual) debería boost ×1.35 en cada buy |
+| N12 | Filtro liquidez R3: verificar que no bloquea pares del screener (todos deben tener vol>$3M) |
+| N13 | Filtro categorias R4: con 12 posiciones abiertas verificar distribución MEME≤2 / NARRATIVE≤4 |
+| N14 | Circuit breaker: verificar en logs que solo se activa por errores API, NO por pérdidas de mercado |
 
 ---
 
