@@ -1107,8 +1107,16 @@ def execute_once():
     # ── Step 1: Determine top symbols ─────────────────────────────────────────
     top_signals = _select_symbols(settings, news_client, client, portfolio_manager, regime=_regime_mode)
     if not top_signals:
-        print("No buy signals available; skipping new buys this cycle.")
-        return {"top_symbols": [], "sell_orders": [], "buy_orders": [], "sl_tp_closes": sl_tp_closes}
+        # FUTURES_SHORT mode: inject futures_symbols directly so shorts are opened
+        # even when the long-signal generator finds nothing (expected in bear markets)
+        if (_regime_mode == "FUTURES_SHORT" and _regime_exe is not None
+                and _regime_exe.confirmed and getattr(settings, 'futures_enabled', False)):
+            _f_syms = list(getattr(settings, 'futures_symbols', ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']))
+            print(f"[Futures] No long signals but FUTURES_SHORT confirmed — injecting {_f_syms} for short entry")
+            top_signals = [{"symbol": s, "score": 50, "strength": 0.5, "reason": "FUTURES_SHORT_AUTO"} for s in _f_syms]
+        else:
+            print("No buy signals available; skipping new buys this cycle.")
+            return {"top_symbols": [], "sell_orders": [], "buy_orders": [], "sl_tp_closes": sl_tp_closes}
 
     # Normalize: _select_symbols may return dicts or strings
     if top_signals and isinstance(top_signals[0], dict):
