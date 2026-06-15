@@ -172,17 +172,25 @@ class FuturesClient:
                 return float(f.get("stepSize", 0.001))
         return 0.001
 
-    def _get_price_precision(self, symbol: str) -> int:
-        """Return decimal places for price/triggerPrice from exchangeInfo."""
+    def _get_tick_size(self, symbol: str) -> float:
+        """Return PRICE_FILTER tickSize for triggerPrice alignment."""
         info = self.get_symbol_info(symbol)
-        if info:
-            return int(info.get("pricePrecision", 2))
-        # Fallback: infer from PRICE_FILTER tickSize
         for f in info.get("filters", []):
             if f.get("filterType") == "PRICE_FILTER":
-                tick = f.get("tickSize", "0.01")
-                return max(0, len(tick.rstrip('0').split('.')[-1]) if '.' in tick else 0)
-        return 2
+                return float(f.get("tickSize", "0.01"))
+        # Fallback: derive from pricePrecision
+        prec = int(info.get("pricePrecision", 2))
+        return 10 ** (-prec)
+
+    def _align_price(self, price: float, tick: float) -> float:
+        """Align price to tickSize (same logic as _align_qty for stepSize)."""
+        from decimal import Decimal
+        if tick <= 0:
+            return round(price, 2)
+        p = Decimal(str(price))
+        t = Decimal(str(tick))
+        aligned = (p / t).to_integral_value() * t
+        return float(aligned)
 
     def _align_qty(self, qty: float, step: float) -> float:
         from decimal import Decimal
@@ -432,9 +440,9 @@ class FuturesClient:
             print(f"[Futures] SHORT {symbol}: qty=0 after alignment (usdt={usdt_amount}, price={price})")
             return None
 
-        price_prec = self._get_price_precision(symbol)
-        sl_price = round(price * (1 + sl_pct / 100), price_prec)
-        tp_price = round(price * (1 - tp_pct / 100), price_prec)
+        tick = self._get_tick_size(symbol)
+        sl_price = self._align_price(price * (1 + sl_pct / 100), tick)
+        tp_price = self._align_price(price * (1 - tp_pct / 100), tick)
 
         print(f"[Futures] Opening SHORT {symbol}: qty={qty}, entry~{price:.4f}, "
               f"SL={sl_price:.4f} (+{sl_pct}%), TP={tp_price:.4f} (-{tp_pct}%), "
