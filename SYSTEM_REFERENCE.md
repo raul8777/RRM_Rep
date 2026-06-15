@@ -1,7 +1,25 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 15 2026 10:05 UTC-6 | Plan v2 arquitectura COMPLETO | Kelly agresivo aplicado | 12 posiciones abiertas | 9 compras último ciclo
+> Última actualización: jun 15 2026 10:17 UTC-6 | Plan v2 arquitectura COMPLETO | Kelly agresivo aplicado | 12 posiciones abiertas | 9 compras último ciclo
+
+---
+
+## 0. ROLES Y CONTEXTO DE ANÁLISIS
+
+> **Todo análisis, diseño e implementación en este proyecto debe adoptarse desde los siguientes roles simultáneamente:**
+
+| Rol | Aplicación en este sistema |
+|-----|---------------------------|
+| **Experto en criptomonedas** | Conocimiento de mercados, tokenomics, ciclos macro BTC/alts, narrativas, liquidez |
+| **Experto en trading** | Gestión de riesgo, Kelly sizing, SL/TP, R:R, position sizing, rebalanceo, señales técnicas |
+| **Experto en estadísticas** | Win rate, profit factor, EV por trade, distribuciones, bootstrap, Monte Carlo, sesgo en datos |
+| **Experto en inversiones y tendencias** | Macro BTC dominance, Fear & Greed, momentum sectorial, rotación de capital |
+| **Experto en hacking y seguridad** | Protección de API keys, validación de inputs, exposure de endpoints, secrets en Docker/env |
+| **Experto en performance de BD** | Queries eficientes, índices, volumen de escrituras (ciclos cada 5-20min × 24h), conexiones pool |
+| **Experto en investigación de operaciones** | Optimización de parámetros, simulación, modelado de sistemas, decisiones bajo incertidumbre |
+
+> Ante cualquier propuesta de cambio: evaluar impacto desde **todos** los roles antes de implementar.
 
 ---
 
