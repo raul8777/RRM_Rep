@@ -458,7 +458,7 @@ class FuturesClient:
                     _sl_trigger = round(self.get_price(symbol) * (1 + sl_pct / 100), 6) if _sl_attempt > 0 else sl_price
                     sl_order = self._post("/fapi/v1/algoOrder", {
                         "symbol": symbol, "side": "BUY",
-                        "algoType": "CONDITIONAL", "orderType": "STOP_MARKET",
+                        "algoType": "CONDITIONAL", "type": "STOP_MARKET",
                         "triggerPrice": str(_sl_trigger), "closePosition": "true",
                     })
                     sl_order_id = str(sl_order.get("algoId", sl_order.get("orderId", "")))
@@ -484,7 +484,7 @@ class FuturesClient:
             try:
                 tp_order = self._post("/fapi/v1/algoOrder", {
                     "symbol": symbol, "side": "BUY",
-                    "algoType": "CONDITIONAL", "orderType": "TAKE_PROFIT_MARKET",
+                    "algoType": "CONDITIONAL", "type": "TAKE_PROFIT_MARKET",
                     "triggerPrice": str(tp_price), "closePosition": "true",
                 })
                 tp_order_id = str(tp_order.get("algoId", tp_order.get("orderId", "")))
