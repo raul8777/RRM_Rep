@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 15 2026 11:41 UTC-6 | Dashboard redesign completo v18 | Smart exit re-evaluation implementado | Stale cycle warning fix | 12 posiciones abiertas
+> Última actualización: jun 15 2026 12:56 UTC-6 | Dynamic max positions + active replacement + overflow slots | Smart exit re-evaluation | Dashboard redesign v18 | 12 posiciones abiertas
 
 ---
 
@@ -297,13 +297,14 @@ Para cambiarlas: editar `docker-compose.yml` + `docker compose up -d app` (NO us
 
 ## 8. PENDIENTES PRIORIZADOS
 
-### ✅ TODO completado al jun 15 2026 11:41 UTC-6
+### ✅ TODO completado al jun 15 2026 12:56 UTC-6
 
 **Plan arquitectura v1** (P1–P14): todos completados.
 **Plan arquitectura v2** (Fases A–E): todos completados.
 **Ajuste agresivo Kelly + ciclos**: completado.
 **Dashboard redesign v18**: completado.
 **Smart exit re-evaluation**: completado.
+**Dynamic max positions + replacement + overflow**: completado.
 
 | # | Tarea | Estado |
 |---|-------|--------|
@@ -319,6 +320,12 @@ Para cambiarlas: editar `docker-compose.yml` + `docker compose up -d app` (NO us
 | U3 | Smart exit — Fix A: anti-wick SL (confirma último candle 1m antes de cerrar) | ✅ `run_trades.py` + `config.py` |
 | U4 | Smart exit — Fix B: horizonte predicción dinámico en prediction-reallocation | ✅ `portfolio_manager.py` |
 | U5 | Smart exit — Fix C: rebalanceo consciente del predictor (epnl>0 + prob≥0.55 → hold) | ✅ `run_trades.py` + `config.py` |
+| D1 | Dynamic max positions: `_get_max_positions_for_regime()` — SPOT_BULL=15, RANGE_SCALP=8, PRESERVATION=5, FUTURES_SHORT=4 | ✅ `run_trades.py` + `config.py` |
+| D2 | Selector buffer +5: siempre evalúa candidatos de reemplazo aunque límite lleno | ✅ `run_trades.py` |
+| D3 | Reemplazo activo `_try_replace_weakest_position()`: cierra peor EV si nueva señal supera ratio 1.3× + solo en pérdida | ✅ `run_trades.py` |
+| D4 | Overflow slots `_is_overflow_eligible()`: abre slot extra si strength≥0.80 + prob≥0.65 + epnl>0 (max 3) | ✅ `run_trades.py` |
+| D5 | `orchestrator.current_regime_mode` sincronizado por ciclo; `/health/status` expone `max_positions_current` + `overflow_slots_used` | ✅ `orchestrator.py` + `app.py` |
+| D6 | Dashboard: badge ⚡OVF naranja en posiciones overflow; health `trade_cycle` muestra régimen + max + slots | ✅ `dashboard.js` + `styles.css` |
 
 ### � En observación
 
@@ -329,6 +336,9 @@ Para cambiarlas: editar `docker-compose.yml` + `docker compose up -d app` (NO us
 | N5 | Predictor en bootstrap_mode para todos los pares nuevos del screener — acumulará datos con el tiempo |
 | N6 | Monitorear que Fix C (rebalanceo + predictor) no retiene posiciones en caída real — revisar si `rebalance_min_hold_prob=0.55` es apropiado o necesita ajuste |
 | N7 | Monitorear que Fix A (anti-wick candle 1m) no retrase SL en caídas reales > 2min |
+| N8 | Primera activación de reemplazo activo: verificar logs `[Replace]` con ratio correcto y que no vende posiciones en profit |
+| N9 | Primera activación overflow: verificar logs `[Overflow]` con strength/prob correctos; monitorear si las 3 posiciones extra son rentables |
+| N10 | SPOT_BULL=15 posiciones: verificar que `max_total_exposure_pct=0.75` actúa como verdadero techo; Kelly sizes deben ser ~$80-100 con 15 posiciones |
 
 ---
 
