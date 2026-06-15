@@ -459,8 +459,7 @@ class FuturesClient:
                     sl_order = self._post("/fapi/v1/algoOrder", {
                         "symbol": symbol, "side": "BUY",
                         "algoType": "CONDITIONAL", "orderType": "STOP_MARKET",
-                        "quantity": str(qty), "triggerPrice": str(_sl_trigger),
-                        "reduceOnly": "true",
+                        "triggerPrice": str(_sl_trigger), "closePosition": "true",
                     })
                     sl_order_id = str(sl_order.get("algoId", sl_order.get("orderId", "")))
                     sl_price = _sl_trigger
@@ -486,8 +485,7 @@ class FuturesClient:
                 tp_order = self._post("/fapi/v1/algoOrder", {
                     "symbol": symbol, "side": "BUY",
                     "algoType": "CONDITIONAL", "orderType": "TAKE_PROFIT_MARKET",
-                    "quantity": str(qty), "triggerPrice": str(tp_price),
-                    "reduceOnly": "true",
+                    "triggerPrice": str(tp_price), "closePosition": "true",
                 })
                 tp_order_id = str(tp_order.get("algoId", tp_order.get("orderId", "")))
                 print(f"[Futures] TP algo order placed: triggerPrice={tp_price:.4f} (algoId={tp_order_id})")
