@@ -14,12 +14,17 @@ logger = logging.getLogger(__name__)
 
 
 # Default fixed weights (used when no learned weights are available)
+# vol_spike, atr_pct, trend_4h, weekly_range added as validated predictors (jun-16-2026)
 _DEFAULT_WEIGHTS = {
-    "rsi":   0.15,
-    "macd":  0.10,
-    "bb":    0.10,
-    "ema":   0.10,
-    "volume": 0.05,
+    "rsi":          0.12,
+    "macd":         0.10,
+    "bb":           0.08,
+    "ema":          0.08,
+    "volume":       0.04,
+    "vol_spike":    0.15,   # volume breakout — strongest single predictor
+    "atr_pct":      0.08,   # volatility regime — higher ATR = wider expected move
+    "trend_4h":     0.15,   # macro trend EMA9>EMA21 on 4h
+    "weekly_range": 0.08,   # price position vs 7d range (low = support)
     "bias_correction": 1.0,
 }
 
@@ -161,14 +166,18 @@ class PnLPredictor:
         if weights is None:
             weights = _DEFAULT_WEIGHTS
 
-        w_rsi  = weights.get("rsi",  0.15)
-        w_macd = weights.get("macd", 0.10)
-        w_bb   = weights.get("bb",   0.10)
-        w_ema  = weights.get("ema",  0.10)
+        w_rsi         = weights.get("rsi",          0.12)
+        w_macd        = weights.get("macd",         0.10)
+        w_bb          = weights.get("bb",           0.08)
+        w_ema         = weights.get("ema",          0.08)
+        w_vol_spike   = weights.get("vol_spike",    0.15)
+        w_atr         = weights.get("atr_pct",      0.08)
+        w_trend_4h    = weights.get("trend_4h",     0.15)
+        w_weekly_rng  = weights.get("weekly_range", 0.08)
 
         probability = 0.5  # Base probability
 
-        # RSI analysis (scaled by learned weight)
+        # ── RSI analysis ────────────────────────────────────────────────────
         rsi = indicators.get('rsi', {})
         if rsi:
             rsi_value = rsi.get('value', 50)
@@ -181,7 +190,7 @@ class PnLPredictor:
             elif rsi_value > 60:
                 probability -= w_rsi * 0.67
 
-        # MACD analysis
+        # ── MACD analysis ───────────────────────────────────────────────────
         macd = indicators.get('macd', {})
         if macd:
             macd_value = macd.get('macd', 0)
@@ -194,7 +203,7 @@ class PnLPredictor:
             elif histogram < 0:
                 probability -= w_macd * 0.33
 
-        # EMA vs SMA
+        # ── EMA vs SMA ──────────────────────────────────────────────────────
         sma = indicators.get('sma', {})
         ema = indicators.get('ema', {})
         if sma and ema:
@@ -203,7 +212,7 @@ class PnLPredictor:
             else:
                 probability -= w_ema * 0.5
 
-        # Bollinger Bands
+        # ── Bollinger Bands ─────────────────────────────────────────────────
         bollinger = indicators.get('bollinger_bands', {})
         if bollinger:
             upper  = bollinger.get('upper', 0)
@@ -215,6 +224,46 @@ class PnLPredictor:
                     probability += w_bb
                 elif position_in_band > 0.8:
                     probability -= w_bb
+
+        # ── Vol Spike (strongest validated predictor) ───────────────────────
+        vol_spike_d = indicators.get('vol_spike', {})
+        if vol_spike_d:
+            spike = vol_spike_d.get('value', 1.0)
+            if spike >= 2.0:
+                probability += w_vol_spike          # strong breakout confirmation
+            elif spike >= 1.5:
+                probability += w_vol_spike * 0.60
+            elif spike < 0.5:
+                probability -= w_vol_spike * 0.80   # very thin volume = avoid
+            elif spike < 0.8:
+                probability -= w_vol_spike * 0.40
+
+        # ── ATR% — adjust for volatility regime ─────────────────────────────
+        atr_d = indicators.get('atr_pct', {})
+        if atr_d:
+            atr_pct = atr_d.get('value', 2.0)
+            if atr_pct >= 3.0:
+                probability += w_atr * 0.50    # high vol = bigger potential move
+            elif atr_pct < 0.5:
+                probability -= w_atr * 0.50    # very compressed = low reward
+
+        # ── Trend 4h (macro context) ─────────────────────────────────────────
+        trend_d = indicators.get('trend_4h', {})
+        if trend_d:
+            trend = trend_d.get('value', 0)
+            if trend > 0:                        # EMA9 > EMA21 on 4h → bullish
+                probability += w_trend_4h
+            elif trend < 0:                      # bearish 4h context
+                probability -= w_trend_4h * 0.80
+
+        # ── Weekly range position (buy at support, not resistance) ────────────
+        wr_d = indicators.get('weekly_range', {})
+        if wr_d:
+            wr = wr_d.get('value', 0.5)
+            if wr <= 0.30:
+                probability += w_weekly_rng         # near weekly support
+            elif wr >= 0.85:
+                probability -= w_weekly_rng * 0.90  # near weekly resistance
 
         return max(0.0, min(1.0, probability))
     

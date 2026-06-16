@@ -62,8 +62,14 @@ def format_indicators_for_predictor(indicators: dict, price: float) -> dict:
     """
     Normalise the raw indicator dict returned by AutonomousSignalGenerator
     into the structure expected by PnLPredictor.predict_pnl.
+
+    Extended fields (when present):
+      vol_spike    — volume ratio vs 20-candle average (e.g. 1.8 = 180% of avg)
+      atr_pct      — ATR14 / price * 100 (% volatility expected)
+      trend_4h     — +1 (EMA9>EMA21 on 4h), 0 (neutral), -1 (bearish)
+      weekly_range — price position in 7-day range: 0.0 (support) .. 1.0 (resistance)
     """
-    return {
+    formatted = {
         "rsi": {"value": indicators.get("rsi", 50)},
         "macd": {
             "macd": indicators.get("macd", 0),
@@ -78,3 +84,13 @@ def format_indicators_for_predictor(indicators: dict, price: float) -> dict:
             "lower": indicators.get("lower_band", price * 0.98),
         },
     }
+    # Extended features — included only when the caller provides them
+    if "vol_spike" in indicators:
+        formatted["vol_spike"] = {"value": float(indicators["vol_spike"])}
+    if "atr_pct" in indicators:
+        formatted["atr_pct"] = {"value": float(indicators["atr_pct"])}
+    if "trend_4h" in indicators:
+        formatted["trend_4h"] = {"value": float(indicators["trend_4h"])}
+    if "weekly_range" in indicators:
+        formatted["weekly_range"] = {"value": float(indicators["weekly_range"])}
+    return formatted

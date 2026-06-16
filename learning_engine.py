@@ -146,8 +146,17 @@ class LearningEngine:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
+    # close_reasons that indicate corrupted/rebalancing trades — excluded from learning
+    _CORRUPTED_REASONS = frozenset({
+        'portfolio_rebalancing', 'manual_rebalance',
+        'prediction_reallocation', 'prediction_realloc',
+    })
+
     def _load_closed_positions(self, lookback_days: int) -> List[Any]:
-        """Load closed positions with indicator data from the last N days."""
+        """Load closed positions with indicator data from the last N days.
+        Excludes trades marked is_corrupted=True and rebalancing-origin trades
+        so the learning engine only trains on genuine SL/TP/trailing outcomes.
+        """
         try:
             from init_components import get_components
             pm = get_components().position_manager
@@ -155,6 +164,13 @@ class LearningEngine:
             cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
             filtered = []
             for p in positions:
+                # Skip trades explicitly flagged as corrupted in DB
+                if getattr(p, 'is_corrupted', False):
+                    continue
+                # Skip rebalancing-origin trades (old logic, now eliminated)
+                reason = getattr(p, 'close_reason', '') or ''
+                if reason in self._CORRUPTED_REASONS:
+                    continue
                 try:
                     et = p.exit_time
                     if isinstance(et, str):
@@ -201,13 +217,16 @@ class LearningEngine:
         # Correlate each indicator with wins
         correlations = self._correlate_indicators(with_indicators)
 
-        # Current defaults
-        defaults = {"rsi": 0.15, "macd": 0.10, "bb": 0.10, "ema": 0.10, "volume": 0.05}
+        # Current defaults (aligned with pnl_predictor._DEFAULT_WEIGHTS)
+        defaults = {
+            "rsi": 0.12, "macd": 0.10, "bb": 0.08, "ema": 0.08, "volume": 0.04,
+            "vol_spike": 0.15, "atr_pct": 0.08, "trend_4h": 0.15, "weekly_range": 0.08,
+        }
         new_weights = {}
         total_signal = sum(max(0, v) for v in correlations.values()) or 1.0
 
         for ind, corr in correlations.items():
-            base = defaults.get(ind, 0.10)
+            base = defaults.get(ind, 0.08)
             # Shift weight proportional to correlation, clamped
             delta = corr * 0.05  # max ±5% per cycle
             new_weights[ind] = max(_WEIGHT_MIN, min(_WEIGHT_MAX, base + delta))
@@ -227,6 +246,7 @@ class LearningEngine:
         """
         For each indicator, compute point-biserial correlation with trade outcome
         (1 = win, 0 = loss).  Returns dict indicator -> correlation [-1..1].
+        Includes 4 extended features: vol_spike, atr_pct, trend_4h, weekly_range.
         """
         outcomes = np.array([1.0 if float(getattr(p, "pnl", 0)) > 0 else 0.0
                              for p in positions])
@@ -242,7 +262,11 @@ class LearningEngine:
             return 0.0
 
         result = {}
-        for ind in ("rsi", "macd", "bb", "ema", "volume"):
+        _ALL_FEATURES = (
+            "rsi", "macd", "bb", "ema", "volume",
+            "vol_spike", "atr_pct", "trend_4h", "weekly_range",
+        )
+        for ind in _ALL_FEATURES:
             values = np.array([_extract(p, ind) for p in positions])
             if values.std() == 0 or outcomes.std() == 0:
                 result[ind] = 0.0
@@ -352,18 +376,33 @@ class LearningEngine:
             return
         w = adj.weights
         meta = {**adj.metadata, "accuracy": accuracy}
+        # Ensure extended weight columns exist (idempotent — safe to run every time)
+        for col in ("vol_spike_weight", "atr_pct_weight", "trend_4h_weight", "weekly_range_weight"):
+            try:
+                self.db.execute_update(
+                    f"ALTER TABLE indicator_weights ADD COLUMN IF NOT EXISTS {col} FLOAT DEFAULT 0.08",
+                    ()
+                )
+            except Exception:
+                pass
+
         sql = """
         INSERT INTO indicator_weights
             (symbol, rsi_weight, macd_weight, bb_weight, ema_weight, volume_weight,
+             vol_spike_weight, atr_pct_weight, trend_4h_weight, weekly_range_weight,
              bias_correction, trades_analyzed, win_rate, prediction_accuracy,
              avg_prediction_error, signal_quality_score, source, metadata)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'learning_engine', %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'learning_engine', %s)
         ON CONFLICT (symbol) DO UPDATE SET
             rsi_weight           = EXCLUDED.rsi_weight,
             macd_weight          = EXCLUDED.macd_weight,
             bb_weight            = EXCLUDED.bb_weight,
             ema_weight           = EXCLUDED.ema_weight,
             volume_weight        = EXCLUDED.volume_weight,
+            vol_spike_weight     = EXCLUDED.vol_spike_weight,
+            atr_pct_weight       = EXCLUDED.atr_pct_weight,
+            trend_4h_weight      = EXCLUDED.trend_4h_weight,
+            weekly_range_weight  = EXCLUDED.weekly_range_weight,
             bias_correction      = EXCLUDED.bias_correction,
             trades_analyzed      = EXCLUDED.trades_analyzed,
             win_rate             = EXCLUDED.win_rate,
@@ -376,8 +415,10 @@ class LearningEngine:
         """
         params = (
             adj.symbol,
-            w.get("rsi", 0.15), w.get("macd", 0.10),
-            w.get("bb", 0.10), w.get("ema", 0.10), w.get("volume", 0.05),
+            w.get("rsi", 0.12), w.get("macd", 0.10),
+            w.get("bb", 0.08), w.get("ema", 0.08), w.get("volume", 0.04),
+            w.get("vol_spike", 0.15), w.get("atr_pct", 0.08),
+            w.get("trend_4h", 0.15), w.get("weekly_range", 0.08),
             adj.bias_correction,
             adj.metadata.get("n", 0),
             adj.metadata.get("win_rate", 0.0),
@@ -389,13 +430,17 @@ class LearningEngine:
         self.db.execute_update(sql, params)
 
     def _load_weights_from_db(self, symbol: str) -> Dict[str, float]:
-        defaults = {"rsi": 0.15, "macd": 0.10, "bb": 0.10,
-                    "ema": 0.10, "volume": 0.05, "bias_correction": 1.0}
+        defaults = {
+            "rsi": 0.12, "macd": 0.10, "bb": 0.08, "ema": 0.08, "volume": 0.04,
+            "vol_spike": 0.15, "atr_pct": 0.08, "trend_4h": 0.15, "weekly_range": 0.08,
+            "bias_correction": 1.0,
+        }
         if self.db is None:
             return defaults
         try:
             sql = """
             SELECT rsi_weight, macd_weight, bb_weight, ema_weight, volume_weight,
+                   vol_spike_weight, atr_pct_weight, trend_4h_weight, weekly_range_weight,
                    bias_correction, updated_at
             FROM indicator_weights
             WHERE symbol = %s
@@ -417,9 +462,16 @@ class LearningEngine:
                     logger.info(f"Weights for {symbol} expired ({age}d old) — using defaults")
                     return defaults
             return {
-                "rsi": row["rsi_weight"], "macd": row["macd_weight"],
-                "bb": row["bb_weight"], "ema": row["ema_weight"],
-                "volume": row["volume_weight"], "bias_correction": row["bias_correction"],
+                "rsi":          row["rsi_weight"],
+                "macd":         row["macd_weight"],
+                "bb":           row["bb_weight"],
+                "ema":          row["ema_weight"],
+                "volume":       row["volume_weight"],
+                "vol_spike":    row.get("vol_spike_weight",    0.15),
+                "atr_pct":      row.get("atr_pct_weight",      0.08),
+                "trend_4h":     row.get("trend_4h_weight",     0.15),
+                "weekly_range": row.get("weekly_range_weight", 0.08),
+                "bias_correction": row["bias_correction"],
             }
         except Exception as e:
             logger.warning(f"Could not load weights for {symbol}: {e}")

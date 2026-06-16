@@ -29,36 +29,39 @@ from technical_indicators import TechnicalIndicators
 logger = logging.getLogger(__name__)
 
 MIN_STRENGTH = 0.35
-LOOKBACK_DAYS = 90
+LOOKBACK_DAYS = 365
 INTERVAL = "1h"
-WINDOW = 100       # candles fed to analyze_signal
-FORWARD_CANDLES = 5   # candles to simulate exit
+WINDOW = 100        # candles fed to analyze_signal
+FORWARD_CANDLES = 24    # candles to simulate exit (24h horizon — matches real trade duration)
 SL_ATR_MULT = 1.5
 TP_ATR_MULT = 2.5
 SL_PCT_FALLBACK = 0.015
 TP_PCT_FALLBACK = 0.025
 
-# ── Per-category lookback days ────────────────────────────────────────────────
-# Narrative/AI tokens: sparse activity bursts → need more history to sample enough breakouts
+# ── Per-category lookback days (extended jun-16-2026) ──────────────────────────
+# Binance public API provides up to ~1500 days of 1h klines per symbol
+# Extended to maximize synthetic trade samples without diminishing returns
 _NARRATIVE_TOKENS = {
     "FETUSDT", "TAOUSDT", "RENDERUSDT", "NEARUSDT", "WLDUSDT",
     "AGIXUSDT", "OCEANUSDT", "NMRUSDT", "RLCUSDT",
 }
-# Mid-cap alts: moderate activity → 180d gives 2x more signal samples
 _MIDCAP_ALTS = {
     "SOLUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "SUIUSDT",
     "ADAUSDT", "XRPUSDT", "WIFUSDT", "PEPEUSDT", "DOGEUSDT",
 }
-# Large caps: high daily activity → 90d is sufficient
 _LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
+_MEME_TOKENS = {"DOGEUSDT", "PEPEUSDT", "WIFUSDT"}
 
-_LOOKBACK_NARRATIVE = 365
-_LOOKBACK_MIDCAP    = 180
-_LOOKBACK_LARGECAP  =  90
+_LOOKBACK_NARRATIVE = 1000   # 3 years — captures multiple AI narrative cycles
+_LOOKBACK_MIDCAP    =  700   # ~2 years — 2 full market cycles
+_LOOKBACK_LARGECAP  = 1000   # 3 years — BTC/ETH/BNB have clean long history
+_LOOKBACK_MEME      =  500   # Meme coins: take what’s available
 
 
 def _lookback_for_symbol(symbol: str, default: int = LOOKBACK_DAYS) -> int:
     """Return appropriate lookback days based on token category."""
+    if symbol in _MEME_TOKENS:
+        return _LOOKBACK_MEME
     if symbol in _NARRATIVE_TOKENS:
         return _LOOKBACK_NARRATIVE
     if symbol in _MIDCAP_ALTS:
@@ -84,9 +87,10 @@ class _SyntheticPosition:
         self.entry_time = entry_time
         self.exit_time = exit_time
         self.close_reason = close_reason
-        self.indicators_at_entry = indicators
-        self.pnl_prediction = None          # no prior prediction to compare
+        self.indicators_at_entry = indicators   # includes vol_spike/atr_pct/trend_4h/weekly_range
+        self.pnl_prediction = None              # no prior prediction to compare
         self.prediction_accuracy = None
+        self.is_corrupted = False               # synthetic trades are never corrupted
 
 
 # ── Kline fetcher (pages through Binance in 1000-candle chunks) ───────────────
@@ -139,6 +143,9 @@ def _simulate_symbol(symbol: str, klines: List[Dict],
     results: List[_SyntheticPosition] = []
     step = 3   # analyse every 3rd window to avoid overfitting
 
+    # Pre-compute weekly ranges for weekly_range feature (sliding 7d = 168 candles)
+    _WEEKLY = 168
+
     for i in range(0, len(klines) - WINDOW - FORWARD_CANDLES, step):
         window = klines[i: i + WINDOW]
         future = klines[i + WINDOW: i + WINDOW + FORWARD_CANDLES]
@@ -163,10 +170,11 @@ def _simulate_symbol(symbol: str, klines: List[Dict],
             sl = entry_price - atr * SL_ATR_MULT
             tp = entry_price + atr * TP_ATR_MULT
         else:
+            atr = entry_price * SL_PCT_FALLBACK
             sl = entry_price * (1 - SL_PCT_FALLBACK)
             tp = entry_price * (1 + TP_PCT_FALLBACK)
 
-        # Simulate exit
+        # Simulate exit over 24h window
         exit_price = None
         close_reason = "timeout"
         for fc in future:
@@ -190,11 +198,49 @@ def _simulate_symbol(symbol: str, klines: List[Dict],
         pnl = (exit_price - entry_price) * qty
         pnl_pct = ((exit_price - entry_price) / entry_price) * 100
 
+        # ── Build extended indicator dict (4 new features) ─────────────────────────
+        base_indicators = sig.get("indicators", {}) or {}
+
+        # vol_spike: last volume vs avg of previous 20 candles
+        _vol_avg20 = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else sum(volumes[:-1]) / max(len(volumes) - 1, 1)
+        _vol_spike = volumes[-1] / _vol_avg20 if _vol_avg20 > 0 else 1.0
+
+        # atr_pct: ATR14 as percentage of price
+        _atr_pct = (atr / entry_price * 100) if entry_price > 0 else 2.0
+
+        # trend_4h: every 4 hourly candles = 1 four-hour candle; use EMA9 vs EMA21 on last 21 of those
+        _4h_closes = closes[::4][-22:]  # downsample 1h → 4h
+        _trend_4h = 0
+        if len(_4h_closes) >= 22:
+            _k9 = 2 / 10; _k21 = 2 / 22
+            _e9 = _4h_closes[0]; _e21 = _4h_closes[0]
+            for _c in _4h_closes[1:]:
+                _e9  = _c * _k9  + _e9  * (1 - _k9)
+                _e21 = _c * _k21 + _e21 * (1 - _k21)
+            _trend_4h = 1.0 if _e9 > _e21 else -1.0
+
+        # weekly_range: where is entry_price in the last 168h (7d) high-low range
+        _w_start = max(0, i - _WEEKLY)
+        _w_highs = [k["high"] for k in klines[_w_start: i + WINDOW]]
+        _w_lows  = [k["low"]  for k in klines[_w_start: i + WINDOW]]
+        _wk_high = max(_w_highs) if _w_highs else entry_price * 1.05
+        _wk_low  = min(_w_lows)  if _w_lows  else entry_price * 0.95
+        _wk_range = _wk_high - _wk_low
+        _weekly_range = (entry_price - _wk_low) / _wk_range if _wk_range > 0 else 0.5
+
+        extended_indicators = {
+            **base_indicators,
+            "vol_spike":    _vol_spike,
+            "atr_pct":      _atr_pct,
+            "trend_4h":     _trend_4h,
+            "weekly_range": _weekly_range,
+        }
+
         results.append(_SyntheticPosition(
             symbol=symbol,
             pnl=round(pnl, 6),
             pnl_pct=round(pnl_pct, 4),
-            indicators=sig.get("indicators", {}),
+            indicators=extended_indicators,
             entry_price=entry_price,
             exit_price=exit_price,
             entry_time=entry_time,

@@ -1430,11 +1430,26 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         tp_price = price * (1 + tp_pct)
                         print(f"Category SL/TP for {symbol} ({_cat_beh}): SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}%")
 
+                    # Ensure indicators_at_entry is always captured for LearningEngine.
+                    # If pnl_service.predict_for_symbol failed, fall back to
+                    # formatting the signal's raw indicators directly.
+                    if formatted_indicators is None:
+                        try:
+                            from trade_utils import format_indicators_for_predictor
+                            _raw_ind = sig.get('indicators') if isinstance(sig, dict) else {}
+                            if _raw_ind:
+                                formatted_indicators = format_indicators_for_predictor(_raw_ind, price)
+                        except Exception:
+                            formatted_indicators = {}
+                    _indicators_to_save = formatted_indicators or {}
+
                     # Prepare metadata with prediction
-                    metadata = {"order_id": order.get("orderId")}
+                    metadata = {
+                        "order_id": order.get("orderId"),
+                        "indicators_at_entry": _indicators_to_save,
+                    }
                     if prediction:
                         metadata['pnl_prediction'] = prediction
-                        metadata['indicators_at_entry'] = formatted_indicators
 
                     position = Position(
                         symbol=symbol,
@@ -1447,7 +1462,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         metadata=metadata,
                         entry_commission=entry_commission,
                         pnl_prediction=prediction,
-                        indicators_at_entry=formatted_indicators
+                        indicators_at_entry=_indicators_to_save
                     )
                     position_manager.add_position(position)
                     print(f"Position tracked with entry commission: {entry_commission:.4f} USDT")

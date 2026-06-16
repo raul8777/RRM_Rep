@@ -149,8 +149,8 @@ def startup_event():
 @app.post("/predictor/bootstrap")
 async def trigger_bootstrap(days: int = 90, _auth: None = Depends(_require_api_key)) -> Dict:
     """Manually trigger PnL predictor bootstrap with historical Binance data."""
-    if not 1 <= days <= 365:
-        raise HTTPException(status_code=400, detail="days must be between 1 and 365")
+    if not 1 <= days <= 1000:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 1000")
     try:
         from bootstrap_history import run_bootstrap
         comp = get_components()
@@ -162,6 +162,70 @@ async def trigger_bootstrap(days: int = 90, _auth: None = Depends(_require_api_k
             None, lambda: run_bootstrap(comp.binance_client, settings, lookback_days=days)
         )
         return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/predictor/reset-corrupted")
+async def reset_corrupted_trades(_auth: None = Depends(_require_api_key)) -> Dict:
+    """
+    Mark rebalancing-origin trades as corrupted so LearningEngine ignores them.
+    These trades were produced by the old _sell_holdings_not_in_top / decide_position_closures
+    fallback logic that has since been removed (commit 9b10e36, jun-16-2026).
+    Returns counts of trades marked and weights invalidated.
+    """
+    try:
+        comp = get_components()
+        if not comp.db_client:
+            raise HTTPException(status_code=503, detail="DB not initialized")
+        # Add is_corrupted column if it doesn't exist (idempotent)
+        try:
+            comp.db_client.execute_update(
+                "ALTER TABLE trades_closed ADD COLUMN IF NOT EXISTS is_corrupted BOOLEAN DEFAULT FALSE",
+                ()
+            )
+        except Exception:
+            pass
+        # Mark all rebalancing / manual-rebalance trades as corrupted
+        _CORRUPTED_REASONS = (
+            'portfolio_rebalancing', 'manual_rebalance',
+            'prediction_reallocation', 'prediction_realloc',
+        )
+        placeholders = ', '.join(['%s'] * len(_CORRUPTED_REASONS))
+        sql_mark = f"""
+            UPDATE trades_closed
+            SET is_corrupted = TRUE
+            WHERE close_reason IN ({placeholders})
+              AND (is_corrupted IS NULL OR is_corrupted = FALSE)
+        """
+        comp.db_client.execute_update(sql_mark, _CORRUPTED_REASONS)
+        # Count how many are now marked
+        rows = comp.db_client.execute_query(
+            "SELECT COUNT(*) AS n FROM trades_closed WHERE is_corrupted = TRUE", ()
+        )
+        marked = rows[0]['n'] if rows else 0
+        # Invalidate predictor weight cache
+        try:
+            from pnl_service import get_predictor
+            get_predictor().invalidate_cache()
+        except Exception:
+            pass
+        # Invalidate learning engine cache
+        try:
+            from learning_engine import get_learning_engine
+            get_learning_engine()._cache.clear()
+        except Exception:
+            pass
+        return {
+            "status": "ok",
+            "corrupted_trades_marked": marked,
+            "message": (
+                f"{marked} trades marked as corrupted (rebalancing-origin). "
+                "Run POST /predictor/bootstrap?days=1000 to re-train with clean data."
+            )
+        }
     except HTTPException:
         raise
     except Exception as e:
