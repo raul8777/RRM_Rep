@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 16 2026 07:34 UTC-6 | Smart TP: extend/scale-out/close dinámico por momentum + historial para predictor | commit 43c0c70
+> Última actualización: jun 16 2026 08:00 UTC-6 | F1-F4: trailing_peak 1m + SmartTP reversal guard + disable enable_closure + rebalance_excluded_symbols | commit db5912a
 
 ---
 
@@ -34,7 +34,7 @@
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 16 2026 07:34 UTC-6 |
+| Fecha última actualización | jun 16 2026 08:00 UTC-6 |
 | Capital total | ~$3,028 USDT |
 | Capital spot líquido | ~$717 USDT |
 | Capital invertido spot | ~$2,311 USDT (76.3%) — cap 75% (ligeramente sobre cap) |
@@ -46,7 +46,7 @@
 | BTC 30d | -17.7% (bear estructural — SPOT_BULL de rebote corto plazo) |
 | Screener dinámico | ✅ ACTIVO — 46 spot / 8 futures |
 | Hedge mode Binance | ✅ ACTIVADO (`dualSidePosition=true`) |
-| Docker | live, sin errores — commit 43c0c70 |
+| Docker | live, sin errores — commit db5912a |
 | dry_run | False |
 | allow_real_trading | True |
 | Posiciones abiertas spot (11+) | PAXGUSDT, INJUSDT(×2), WLDUSDT, TAOUSDT, RENDERUSDT, USD1USDT(×2), ASTERUSDT, XAUTUSDT, OPGUSDT + más |
@@ -289,6 +289,10 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 
 | Fecha | Bug | Fix |
 |-------|-----|-----|
+| jun 16 08:00 | `trailing_peak` congelado entre ciclos de 20min: el pico real del día se perdía si ocurría entre dos ciclos y el precio bajaba antes del siguiente. OPG: peak real=0.1783 no capturado → trail_SL=0.1652 en vez de 0.1747 → $11 USDT no capturados | `run_trades.py` bloque trailing (F1): antes de evaluar `peak_price`, reconstruye el high real de las últimas 30 velas 1m vía `get_klines`. Si el high 1m > peak_price guardado → actualiza. Commit db5912a |
+| jun 16 08:00 | Smart TP evalúa momentum cuando el precio YA retrocedió del pico (ej. OPG evaluó a 4.85% después de haber estado en +12.2%): score bajo lleva a CLOSE cuando realmente había habido un breakout fuerte | `run_trades.py` `_evaluate_tp_momentum()` (F2): detecta reversal con velas 15m. Si precio está >2% bajo el máximo de las últimas 8 velas 15m → `decision=close_reversal` inmediato (no evalúa score). Evita EXTEND en retroceso. Commit db5912a |
+| jun 16 08:00 | `enable_position_closure=True` hacía que `portfolio_manager` cerrara posiciones en DB antes de vender en Binance, saltando todos los gates de protección (min_hold=240, protect_profit). USD1(21min) e INJ(36min) cerrados sin pasar gate de 240min | `config.py`: `enable_position_closure=False` + `.env`: `ENABLE_POSITION_CLOSURE=false` (F3). El cierre real ya lo maneja `_close_prediction_based()` con gates completos. Commit db5912a |
+| jun 16 08:00 | Stablecoins (USD1USDT) entraban al pipeline de rebalanceo — comisiones en activos de volatilidad ~0% sin ninguna ganancia posible | `config.py`: nuevo param `rebalance_excluded_symbols=['USD1USDT','USDCUSDT','BUSDUSDT','TUSDUSDT','FDUSDUSDT']` (F4). `run_trades.py` Gate 3: skip si símbolo en excluded list. Commit db5912a |
 | jun 16 07:34 | Smart TP: sistema anterior cerraba/vendía 50% al TP fijo sin considerar momentum — se perdían ganancias potenciales cuando la posición tenía fuerza alcista | `run_trades.py`: nueva función `_evaluate_tp_momentum()` corre predictor + señales técnicas al momento del TP. Decisión: EXTEND(score 3-4/4)→sube TP+SL, SCALE_OUT(2/4)→vende 50%, CLOSE(0-1/4)→cierra todo. Historial completo en `metadata.tp_decisions[]`. `config.py`: 3 params nuevos + `tp_extension_pct` por categoría. `position_manager.py`: `update_position_tp()`. Commit 43c0c70 |
 | jun 16 07:23 | Scale-out no actualizaba `pos.quantity` en DB — tras vender 50% en TP el PM seguía con qty completa → siguiente ciclo SL/TP intentaba vender doble → error Binance `-2010` (OPGUSDT afectado) | `run_trades.py` scale-out: ahora llama `update_position_quantity(pos.position_id, remaining_qty)` + guarda `scale_out_qty_sold/avg_price` en metadata. `position_manager.py`: método `update_position_quantity()` nuevo; `update_position_metadata` y `update_position_sl` corregidos para usar `pos.db_id` (columna `id`) en vez de `position_id` (no existe en DB). Commit b3afd02 |
 | jun 16 07:23 | 3 saldos huérfanos: INJ(29.76), USD1(222), OPG(617 vendidos sin actualizar PM) — compras ejecutadas en Binance sin record en PM (excepción silenciosa post-buy o corte de ciclo) | Registrados manualmente como posiciones con SL/TP correctos: INJ(29.76@5.794, NARRATIVE SL3.5%/TP7%), USD1(222@1.00071, MIDCAP SL1.8%/TP3.5%). OPG qty corregida. Total recuperado: ~$504 USDT ahora monitoreados |
