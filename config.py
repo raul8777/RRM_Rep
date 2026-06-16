@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     min_pair_confidence_score: float = Field(default=50.0, env="MIN_PAIR_CONFIDENCE_SCORE")
     max_risk_per_pair_pct: float = Field(default=10.0, env="MAX_RISK_PER_PAIR_PCT")
     diversification_factor: float = Field(default=1.0, env="DIVERSIFICATION_FACTOR")
-    enable_position_closure: bool = Field(default=True, env="ENABLE_POSITION_CLOSURE")
+    enable_position_closure: bool = Field(default=False, env="ENABLE_POSITION_CLOSURE")  # F3: disabled — premature DB close without selling in Binance; _close_prediction_based() in run_trades.py handles closures with full gate protection
     
     # Autonomous signal generation configuration
     analysis_symbols: list = Field(default=[
@@ -125,6 +125,8 @@ class Settings(BaseSettings):
     # Rebalancing controls (v2)
     min_hold_minutes: int = Field(default=240, env="MIN_HOLD_MINUTES")         # min time before rebalancing out a position (v4: 120→240 = 4h mínimo)
     max_rebalance_per_cycle: int = Field(default=2, env="MAX_REBALANCE_PER_CYCLE")  # max sells per rebalance cycle
+    rebalance_excluded_symbols: list = Field(default=['USD1USDT', 'USDCUSDT', 'BUSDUSDT', 'TUSDUSDT', 'FDUSDUSDT'],  # F4: stablecoins never rebalanced
+                                             env="REBALANCE_EXCLUDED_SYMBOLS")
     max_total_exposure_pct: float = Field(default=0.65, env="MAX_TOTAL_EXPOSURE_PCT")  # max portfolio % in open spot positions
     # Smart exit: anti-wick SL confirmation
     sl_confirmation_candles: int = Field(default=1, env="SL_CONFIRMATION_CANDLES")  # 0=immediate, 1=require last 1m candle close below SL

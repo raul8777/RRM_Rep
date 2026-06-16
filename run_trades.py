@@ -614,6 +614,28 @@ def _evaluate_tp_momentum(client: BinanceClient, symbol: str, current_price: flo
             "success_prob": round(success_prob, 4),
         })
 
+        # ── F2: Reversal guard — if price already dropped >2% from recent peak,
+        # the move is in reversal and we should NOT extend, regardless of score.
+        _reversal_detected = False
+        try:
+            _k15 = client.client.get_klines(symbol=symbol, interval='15m', limit=8)
+            if _k15:
+                _recent_high_15m = max(float(k[2]) for k in _k15)
+                _pct_from_high = (current_price - _recent_high_15m) / _recent_high_15m
+                if _pct_from_high < -0.02:
+                    _reversal_detected = True
+                    print(f"[SmartTP] {symbol}: reversal detected — price {current_price:.4f} is "
+                          f"{_pct_from_high*100:.1f}% below recent 2h peak {_recent_high_15m:.4f} → forcing CLOSE")
+                result["recent_high_15m"] = round(_recent_high_15m, 8)
+                result["pct_from_high"] = round(_pct_from_high * 100, 2)
+        except Exception:
+            pass
+
+        if _reversal_detected:
+            result["decision"] = "close_reversal"
+            result["momentum_score"] = 0
+            return result
+
         # ── Score: 1 point per bullish condition ───────────────────────
         score = 0
         if vol_spike >= 1.5:
@@ -699,8 +721,19 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
                     # Peak is stored in position metadata; update if new high
                     metadata = getattr(pos, 'metadata', {}) or {}
                     peak_price = float(metadata.get('trailing_peak', entry_price))
+                    # F1: Reconstruct real peak from last 30 1m candles to capture
+                    # intrabar highs that occur between 20-min cycles.
+                    try:
+                        _klines_1m = client.client.get_klines(symbol=symbol, interval='1m', limit=30)
+                        if _klines_1m:
+                            _candle_peak = max(float(k[2]) for k in _klines_1m)
+                            if _candle_peak > peak_price:
+                                peak_price = _candle_peak
+                    except Exception:
+                        pass
                     if current_price > peak_price:
                         peak_price = current_price
+                    if peak_price > float(metadata.get('trailing_peak', entry_price)):
                         metadata['trailing_peak'] = peak_price
                         try:
                             position_manager.update_position_metadata(pos.position_id, metadata)
@@ -789,19 +822,20 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
                                             "pnl_pct": round(pnl_pct * 100, 4), "source": "smart_tp"})
                                 continue  # do NOT sell — let it run
 
-                            # ── CLOSE: weak momentum → sell everything immediately ───
-                            elif _decision == "close":
+                            # ── CLOSE / CLOSE_REVERSAL: sell everything immediately ──
+                            elif _decision in ("close", "close_reversal"):
                                 # Record the close decision in metadata before selling
                                 _tp_decisions = metadata.get('tp_decisions', [])
                                 _tp_decisions.append({
                                     "tp_level": _ext_count + 1,
                                     "pnl_pct_at_decision": round(pnl_pct * 100, 4),
-                                    "decision": "close",
+                                    "decision": _decision,
                                     "momentum_score": _tp_eval["momentum_score"],
                                     "vol_spike": _tp_eval["vol_spike"],
                                     "rsi": _tp_eval["rsi"],
                                     "trend_4h": _tp_eval["trend_4h"],
                                     "success_prob": _tp_eval["success_prob"],
+                                    "pct_from_high": _tp_eval.get("pct_from_high"),
                                     "timestamp": datetime.now(timezone.utc).isoformat(),
                                 })
                                 metadata['tp_decisions'] = _tp_decisions
@@ -809,7 +843,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
                                     position_manager.update_position_metadata(pos.position_id, metadata)
                                 except Exception:
                                     pass
-                                close_reason = f"smart_tp_close ({pnl_pct*100:.2f}%)"
+                                _cr_suffix = "reversal" if _decision == "close_reversal" else "close"
+                                close_reason = f"smart_tp_{_cr_suffix} ({pnl_pct*100:.2f}%)"
                                 # fall through to full-close below
 
                             # ── SCALE_OUT: neutral momentum → sell 50%, hold rest ───
@@ -1747,8 +1782,13 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
         _min_hold_min = getattr(settings, 'min_hold_minutes', 240)
         _protect = getattr(settings, 'protect_profitable_positions', True)
         _protect_pct = getattr(settings, 'protect_profit_min_pct', 0.3) / 100.0
+        _excluded_syms = set(getattr(settings, 'rebalance_excluded_symbols', []))  # F4: stablecoins etc.
         approved = []
         for sym in symbols_to_close:
+            # F4: skip symbols explicitly excluded from rebalancing (stablecoins)
+            if sym in _excluded_syms:
+                print(f"[SlotPressure] {sym}: in rebalance_excluded_symbols — skipping")
+                continue
             pos_list = all_positions.get(sym, [])
             if not pos_list:
                 continue
