@@ -661,13 +661,17 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
                             valid, reason = is_quantity_valid(sell_qty, current_price, filters)
                             if valid:
                                 order = client.create_market_order(symbol=symbol, side="SELL", quantity=sell_qty)
-                                print(f"SCALE-OUT {symbol}: sold {sell_qty} ({_scale_pct*100:.0f}%) @ {current_price:.4f}, SL→breakeven={entry_price:.4f}")
+                                remaining_qty = align_quantity_to_step(full_qty - sell_qty, filters["step"])
+                                print(f"SCALE-OUT {symbol}: sold {sell_qty} ({_scale_pct*100:.0f}%) @ {current_price:.4f}, remaining={remaining_qty}, SL→breakeven={entry_price:.4f}")
                                 metadata = getattr(pos, 'metadata', {}) or {}
                                 metadata['scale_out_done'] = True
+                                metadata['scale_out_qty_sold'] = sell_qty
+                                metadata['scale_out_avg_price'] = current_price
                                 metadata['trailing_peak'] = current_price
                                 try:
                                     position_manager.update_position_metadata(pos.position_id, metadata)
                                     position_manager.update_position_sl(pos.position_id, entry_price)
+                                    position_manager.update_position_quantity(pos.position_id, remaining_qty)
                                 except Exception:
                                     pass
                                 ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
@@ -679,6 +683,17 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
                                                "price": current_price, "order": order})
                                 continue
                         qty = align_quantity_to_step(full_qty, filters["step"])
+                        # ── Clamp qty to actual Binance balance to prevent -2010 ──────────
+                        try:
+                            _asset = symbol.replace('USDT', '')
+                            _bal = client.get_account_balance()
+                            _avail = float(_bal.get(_asset, 0))
+                            if _avail < qty:
+                                _clamped = align_quantity_to_step(_avail, filters["step"])
+                                print(f"[SL/TP] {symbol}: clamping qty {qty} → {_clamped} (Binance balance={_avail})")
+                                qty = _clamped
+                        except Exception as _be:
+                            print(f"[SL/TP] balance clamp failed for {symbol}: {_be}")
                         valid, reason = is_quantity_valid(qty, current_price, filters)
                         if not valid:
                             print(f"SL/TP: cannot sell {symbol}: {reason}")

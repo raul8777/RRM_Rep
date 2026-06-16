@@ -349,11 +349,11 @@ class PositionManager:
             for pos in pos_list:
                 if str(pos.position_id) == str(position_id):
                     pos.metadata = metadata
-                    if self.db_client:
+                    if self.db_client and pos.db_id:
                         try:
                             self.db_client.execute_update(
-                                "UPDATE trades_open SET metadata = %s WHERE position_id = %s",
-                                (json.dumps(metadata), str(position_id))
+                                "UPDATE trades_open SET metadata = %s WHERE id = %s",
+                                (json.dumps(metadata), pos.db_id)
                             )
                         except Exception as e:
                             logger.warning(f"Could not persist metadata update for {position_id}: {e}")
@@ -364,15 +364,31 @@ class PositionManager:
         for pos_list in self._open_positions.values():
             for pos in pos_list:
                 if str(pos.position_id) == str(position_id):
-                    pos.stop_loss_price = new_sl_price
-                    if self.db_client:
+                    pos.stop_loss = new_sl_price
+                    if self.db_client and pos.db_id:
                         try:
                             self.db_client.execute_update(
-                                "UPDATE trades_open SET stop_loss_price = %s WHERE position_id = %s",
-                                (new_sl_price, str(position_id))
+                                "UPDATE trades_open SET stop_loss = %s WHERE id = %s",
+                                (new_sl_price, pos.db_id)
                             )
                         except Exception as e:
                             logger.warning(f"Could not persist SL update for {position_id}: {e}")
+                    return
+
+    def update_position_quantity(self, position_id: str, new_qty: float) -> None:
+        """Update quantity of an open position after a partial sell (e.g. scale-out)."""
+        for pos_list in self._open_positions.values():
+            for pos in pos_list:
+                if str(pos.position_id) == str(position_id):
+                    pos.quantity = new_qty
+                    if self.db_client and pos.db_id:
+                        try:
+                            self.db_client.execute_update(
+                                "UPDATE trades_open SET quantity = %s WHERE id = %s",
+                                (new_qty, pos.db_id)
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not persist qty update for {position_id}: {e}")
                     return
 
     def _calc_close(self, position: Position, exit_price: float, commission_rate: float):
