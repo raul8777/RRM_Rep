@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 15 2026 21:05 UTC-6 | MC dashboard 3 escenarios A/B/C + profit_projection corregido (trades normales) | análisis oportunidades perdidas jun15 | commit 68b7124
+> Última actualización: jun 15 2026 23:20 UTC-6 | P1+P2+P3 hacia Escenario C: NARRATIVE SL 3.5%/TP 7%/trailing 5%-2%, 10 tokens nuevos en token_categories | commit 2a6219c
 
 ---
 
@@ -34,7 +34,7 @@
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 15 2026 21:05 UTC-6 |
+| Fecha última actualización | jun 15 2026 23:20 UTC-6 |
 | Capital total | ~$3,080 USDT |
 | Capital spot líquido | ~$1,316 USDT |
 | Capital invertido spot | ~$1,756 USDT (57.2%) — cap 75% |
@@ -46,7 +46,7 @@
 | BTC 30d | -17.7% (bear estructural — SPOT_BULL de rebote corto plazo) |
 | Screener dinámico | ✅ ACTIVO — 46 spot / 8 futures |
 | Hedge mode Binance | ✅ ACTIVADO (`dualSidePosition=true`) |
-| Docker | live, sin errores — commit 68b7124 |
+| Docker | live, sin errores — commit 2a6219c |
 | dry_run | False |
 | allow_real_trading | True |
 | Posiciones abiertas spot (12) | FETUSDT, LTCUSDT, ZECUSDT, MEGAUSDT, TRUMPUSDT, WLDUSDT, XLMUSDT, ZROUSDT, JTOUSDT, SOLUSDT, BNBUSDT, AVAXUSDT + más |
@@ -410,8 +410,9 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | N15 | Verificar win rate real con 83 trades en dashboard — actualmente 29.5% (bajo por rebalanceos). Monitorear si sube con nuevos filtros R1-R6 |
 | N16 | Monitorear rebalanceos próximas 24h: objetivo reducir de 60/día → 5-8/día. Log clave: `[Rebalance] Holding: no technical sell signal` |
 | N17 | Verificar que posiciones antiguas (>4h) con RSI>60 sí se rebalancean correctamente cuando aparece nueva señal de mayor EV |
-| N18 | WR trades normales (SL/TP) es 0% en 15 trades — investigar si SL está demasiado ajustado o entries en mal timing. Candidato: ATR-based SL para NARRATIVE |
-| N19 | Trailing stop poco agresivo para breakouts grandes: JTOUSDT +29% requería activación +5%/trail 2%. Revisar `trailing_activation_pct` NARRATIVE (actual +3%) |
+| N18 | WR trades normales: monitorear si mejora con SL 3.5% vs anterior 2.5% — objetivo ≥20% WR en próximos 20 trades normales |
+| N19 | ✅ RESUELTO: Trailing NARRATIVE ahora activation=5%, distance=2%, TP=7% — monitorear primera activación en breakout >5% |
+| N20 | Monitorear trailing NARRATIVE nuevos valores: verificar que no retiene posiciones en reversión fuerte. Log: `[Trail]` en run_trades.py |
 
 ---
 
@@ -490,6 +491,19 @@ Escenario C — Optimista (WR 45%):      P50=$3,246  return= +5.4%  WR=45%
 Diferencia A→B: +$311 en 90 días = +$38/día de ahorro por rebalanceo quirúrgico
 Para llegar a C: SL calibrado ATR + trailing agresivo (+5%/2%) + predictor con más datos
 ```
+
+### Category thresholds actuales — post P1+P3 (commit 2a6219c)
+| Categoría | SL% | TP% | Trail act% | Trail dist% | min_prob |
+|-----------|-----|-----|------------|-------------|----------|
+| LARGE_CAP | 1.8 | 3.5 | 2.5 | 1.2 | 55% |
+| MIDCAP_ALT | 1.8 | 3.5 | 2.5 | 1.2 | 50% |
+| **NARRATIVE** | **3.5** | **7.0** | **5.0** | **2.0** | 42% |
+| MEME | 2.0 | 4.5 | 2.5 | 1.5 | 52% |
+
+Cambios NARRATIVE: SL 2.5→**3.5%** (menos whipsaws), TP 5→**7%** (más recorrido), trailing act 3→**5%** (captura breakouts >8%), trail dist 1.5→**2%** (no cierra en corrección normal)
+
+### Tokens nuevos en token_categories (commit 2a6219c)
+UNIUSDT, AAVEUSDT (MIDCAP_ALT/DeFi) | BCHUSDT, ZECUSDT, LTCUSDT, XLMUSDT, ZROUSDT (MIDCAP_ALT/Infrastructure) | JTOUSDT (NARRATIVE/AI_DATA) | TRUMPUSDT, MEGAUSDT (MEME/Political)
 
 ### Matemáticas con capital actual ($3,080 total / $1,316 liquid)
 ```
