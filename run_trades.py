@@ -149,6 +149,26 @@ def _check_liquidity_and_slippage(symbol: str, vol_24h_usdt: float,
     return True, ""
 
 
+def _consecutive_sl_count(symbol: str, position_manager, n: int = 3) -> bool:
+    """WR Screener: returns True if the last N closed trades for symbol were ALL stop_loss.
+    Uses only clean closes (not rebalancing/manual) to detect genuine losing streaks.
+    """
+    try:
+        closed = position_manager.get_closed_positions(limit=200)
+        sym_trades = [
+            p for p in closed
+            if getattr(p, 'symbol', '') == symbol
+            and 'rebalancing' not in (getattr(p, 'close_reason', '') or '')
+            and 'manual' not in (getattr(p, 'close_reason', '') or '')
+        ]
+        if len(sym_trades) < n:
+            return False
+        recent_n = sym_trades[:n]
+        return all('stop_loss' in (getattr(t, 'close_reason', '') or '') for t in recent_n)
+    except Exception:
+        return False
+
+
 def _check_category_limit(symbol: str, position_manager, settings) -> tuple:
     """R4: Correlaciones — returns (ok: bool, reason: str).
     Enforces per-category position limits to avoid over-concentration in
@@ -653,9 +673,10 @@ def _evaluate_tp_momentum(client: BinanceClient, symbol: str, current_price: flo
 
         result["momentum_score"] = score
 
-        if score >= 3:
+        _extend_threshold = int(getattr(settings, 'smart_tp_extend_score_threshold', 2))
+        if score >= _extend_threshold:
             result["decision"] = "extend"
-        elif score >= 2:
+        elif score >= 1:
             result["decision"] = "scale_out"
         else:
             result["decision"] = "close"
@@ -1260,6 +1281,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             print(f"Skipping buy {symbol}: {_cat_reason}")
             update_signal_decision(symbol, "rejected", _cat_reason)
             continue
+
+        # ── WR Screener: bloquear pares con N SL consecutivos recientes ─────────
+        if position_manager and getattr(settings, 'wr_screener_enabled', True):
+            _wr_n = int(getattr(settings, 'wr_screener_consecutive_sl_block', 3))
+            if _wr_n > 0 and _consecutive_sl_count(symbol, position_manager, _wr_n):
+                print(f"[WRScreener] Skipping {symbol}: {_wr_n} consecutive SL — pair on losing streak")
+                update_signal_decision(symbol, "rejected", f"WR_BLOCK_{_wr_n}SL")
+                continue
 
         try:
             price = client.get_symbol_price(symbol)

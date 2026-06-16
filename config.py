@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     smart_tp_enabled: bool = Field(default=True, env="SMART_TP_ENABLED")
     smart_tp_max_extensions: int = Field(default=3, env="SMART_TP_MAX_EXTENSIONS")       # max extensions per position
     smart_tp_max_pnl_pct: float = Field(default=15.0, env="SMART_TP_MAX_PNL_PCT")        # never extend above this % gain
+    smart_tp_extend_score_threshold: int = Field(default=2, env="SMART_TP_EXTEND_SCORE_THRESHOLD")  # min score/4 to EXTEND (was 3, now 2 = more aggressive)
+    # WR Screener: block buys on pairs with N consecutive stop_loss closes
+    wr_screener_enabled: bool = Field(default=True, env="WR_SCREENER_ENABLED")
+    wr_screener_consecutive_sl_block: int = Field(default=3, env="WR_SCREENER_CONSECUTIVE_SL_BLOCK")  # block after N consecutive SL
     # BTC dominance filter
     btc_dominance_filter_enabled: bool = Field(default=True, env="BTC_DOMINANCE_FILTER_ENABLED")
     btc_dominance_altcoin_threshold: float = Field(default=56.0, env="BTC_DOMINANCE_ALTCOIN_THRESHOLD")  # if BTC.D > this, skip alts
