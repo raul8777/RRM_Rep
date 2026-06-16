@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 16 2026 07:08 UTC-6 | Aceleración predictor: bootstrap 1000d, 4 nuevas features, datos corruptos marcados, indicators_at_entry 100% | commit 8a0a750
+> Última actualización: jun 16 2026 07:23 UTC-6 | Fix scale-out qty desync + 3 saldos huérfanos recuperados + clamp -2010 defensivo | commit b3afd02
 
 ---
 
@@ -34,7 +34,7 @@
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 16 2026 07:08 UTC-6 |
+| Fecha última actualización | jun 16 2026 07:23 UTC-6 |
 | Capital total | ~$3,028 USDT |
 | Capital spot líquido | ~$717 USDT |
 | Capital invertido spot | ~$2,311 USDT (76.3%) — cap 75% (ligeramente sobre cap) |
@@ -46,10 +46,10 @@
 | BTC 30d | -17.7% (bear estructural — SPOT_BULL de rebote corto plazo) |
 | Screener dinámico | ✅ ACTIVO — 46 spot / 8 futures |
 | Hedge mode Binance | ✅ ACTIVADO (`dualSidePosition=true`) |
-| Docker | live, sin errores — commit 8a0a750 |
+| Docker | live, sin errores — commit b3afd02 |
 | dry_run | False |
 | allow_real_trading | True |
-| Posiciones abiertas spot (9+) | PAXGUSDT, INJUSDT, WLDUSDT, TAOUSDT, RENDERUSDT, USD1USDT, ASTERUSDT, XAUTUSDT, OPGUSDT + más |
+| Posiciones abiertas spot (11+) | PAXGUSDT, INJUSDT(×2), WLDUSDT, TAOUSDT, RENDERUSDT, USD1USDT(×2), ASTERUSDT, XAUTUSDT, OPGUSDT + más |
 | Ciclo activo | 20 min (SPOT_BULL dinámico) |
 | Win rate DB | ~28% (115 trades — 105 marcados is_corrupted) |
 | **Predictor** | **62,587 trades sintéticos + 10 reales limpios — 22 símbolos con pesos en DB** |
@@ -283,12 +283,15 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 
 ### Activos (no resueltos)
 
-**Sin bugs activos conocidos** — todos verificados y resueltos al jun 15 2026 20:40 UTC-6.
+**Sin bugs activos conocidos** — todos verificados y resueltos al jun 16 2026 07:23 UTC-6.
 
 ### Resueltos (historial)
 
 | Fecha | Bug | Fix |
 |-------|-----|-----|
+| jun 16 07:23 | Scale-out no actualizaba `pos.quantity` en DB — tras vender 50% en TP el PM seguía con qty completa → siguiente ciclo SL/TP intentaba vender doble → error Binance `-2010` (OPGUSDT afectado) | `run_trades.py` scale-out: ahora llama `update_position_quantity(pos.position_id, remaining_qty)` + guarda `scale_out_qty_sold/avg_price` en metadata. `position_manager.py`: método `update_position_quantity()` nuevo; `update_position_metadata` y `update_position_sl` corregidos para usar `pos.db_id` (columna `id`) en vez de `position_id` (no existe en DB). Commit b3afd02 |
+| jun 16 07:23 | 3 saldos huérfanos: INJ(29.76), USD1(222), OPG(617 vendidos sin actualizar PM) — compras ejecutadas en Binance sin record en PM (excepción silenciosa post-buy o corte de ciclo) | Registrados manualmente como posiciones con SL/TP correctos: INJ(29.76@5.794, NARRATIVE SL3.5%/TP7%), USD1(222@1.00071, MIDCAP SL1.8%/TP3.5%). OPG qty corregida. Total recuperado: ~$504 USDT ahora monitoreados |
+| jun 16 07:23 | Clamp defensivo: cualquier desincronización futura de qty causaría `-2010` en SL/TP | `run_trades.py` `_check_sl_tp_positions()`: antes de `create_market_order` obtiene balance Binance real y usa `min(qty_db, binance_balance)` → nunca vende más de lo disponible |
 | jun 15 20:40 | `_sell_holdings_not_in_top()` vendía TODO lo que no estaba en `top_symbols` del ciclo de 20min → win rate rebalanceo 18% (49/60 pérdidas = -$63.56 en un día). Root cause: criterio "no está en top" es ruido, no señal de salida | **Opción B**: rebalanceo solo si RSI1h>60 O EMA9 descendente + min_hold=240min. Nuevo param `rebalance_rsi_overbought=60`. `run_trades.py` + `config.py` commit ffc5a75 |
 | jun 15 20:40 | Timezone bug en `min_hold_minutes`: `entry_time` naive datetime vs `datetime.now(timezone.utc)` aware → comparación lanzaba excepción silenciosa (try/except pasaba), protección ignorada completamente → posiciones de 9-20min se rebalanceaban | Fix A: `_entry_ts.replace(tzinfo=timezone.utc)` si `tzinfo is None`. `run_trades.py:745` commit 4639c2c |
 | jun 15 20:40 | Posiciones en pérdida cerca del SL cerradas por rebalanceo antes de que SL checker actuara (competencia entre dos mecanismos) | Fix D SL-Delegated: si `abs(pnl_pct) >= SL × 0.75` → diferir al SL checker, no rebalancear. `run_trades.py:771` commit 4639c2c |
@@ -422,6 +425,8 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | N21 | Monitorear que slot-pressure solo actúa cuando posiciones >= MAX_POSITIONS_régimen (15 en SPOT_BULL) |
 | N22 | Monitorear win rate con predictor actualizado (9 features) en próximos 20 trades reales — baseline actual: 0%/15 trades normales |
 | N23 | Cuando acumule 50+ trades reales limpios: ejecutar POST /predictor/bootstrap?days=1000 para refinar pesos definitivamente |
+| N24 | Monitorear que no aparecen nuevos saldos huérfanos — causa raíz (excepción silenciosa post-buy) pendiente de investigar en `_buy_top_symbols` |
+| N25 | Verificar que scale-out de próximas posiciones actualiza `remaining_qty` en logs: `SCALE-OUT {sym}: sold X (50%) @ P, remaining=Y` |
 
 ---
 
