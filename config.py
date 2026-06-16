@@ -100,7 +100,7 @@ class Settings(BaseSettings):
         'FETUSDT', 'AVAXUSDT', 'ADAUSDT', 'XRPUSDT', 'DOTUSDT',
         'SUIUSDT', 'PEPEUSDT', 'WIFUSDT', 'BTCUSDT', 'ETHUSDT', 'LINKUSDT',
         'NEARUSDT', 'WLDUSDT', 'INJUSDT', 'AGIXUSDT',
-        'OPUSDT', 'LDOUSDT', 'ARBUSDT', 'ONDOUSDT', 'JUPUSDT', 'EIGENUSDT',  # M2: +6 NARRATIVE alta vol
+        'ONDOUSDT', 'JUPUSDT', 'OPUSDT',  # M2: +3 NARRATIVE alta vol (filtrados por WR 30d)
     ], env="ANALYSIS_SYMBOLS")
 
     # VolSpike override: bypass PnL predictor for narrative tokens with strong volume

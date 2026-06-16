@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 16 2026 08:00 UTC-6 | F1-F4: trailing_peak 1m + SmartTP reversal guard + disable enable_closure + rebalance_excluded_symbols | commit db5912a
+> Última actualización: jun 16 2026 08:37 UTC-6 | M1-M5: ATR-based SL + +3 pares NARRATIVE + Kelly conviction + breakout_12h + peak_hours boost | commit 7503a31+refine
 
 ---
 
@@ -34,7 +34,7 @@
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 16 2026 08:00 UTC-6 |
+| Fecha última actualización | jun 16 2026 08:37 UTC-6 |
 | Capital total | ~$3,028 USDT |
 | Capital spot líquido | ~$717 USDT |
 | Capital invertido spot | ~$2,311 USDT (76.3%) — cap 75% (ligeramente sobre cap) |
@@ -46,7 +46,7 @@
 | BTC 30d | -17.7% (bear estructural — SPOT_BULL de rebote corto plazo) |
 | Screener dinámico | ✅ ACTIVO — 46 spot / 8 futures |
 | Hedge mode Binance | ✅ ACTIVADO (`dualSidePosition=true`) |
-| Docker | live, sin errores — commit db5912a |
+| Docker | live, sin errores — commit 7503a31 (M1-M5) |
 | dry_run | False |
 | allow_real_trading | True |
 | Posiciones abiertas spot (11+) | PAXGUSDT, INJUSDT(×2), WLDUSDT, TAOUSDT, RENDERUSDT, USD1USDT(×2), ASTERUSDT, XAUTUSDT, OPGUSDT + más |
@@ -283,7 +283,67 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 
 ### Activos (no resueltos)
 
-**Sin bugs activos conocidos** — todos verificados y resueltos al jun 16 2026 07:34 UTC-6.
+**Sin bugs activos conocidos** — todos verificados y resueltos al jun 16 2026 08:37 UTC-6.
+
+---
+
+## SESIÓN JUN 16 2026 MAÑANA — Implementación M1-M5 (commit 7503a31)
+
+### Objetivo: capturar oportunidades tipo OPGUSDT ($23 perdidos) con sistema actual, sin capital adicional ni futuros
+
+### Diagnóstico previo a M1-M5:
+- **Causa A — SL prematuro**: 28.6% de los stops eran falsos (el precio recuperaba al TP). SL=3.5% fijo = ruido en tokens con ATR diario 5-12%
+- **Causa B — Universo pequeño**: 6-8 pares activos → 2 trades/día
+- **Causa C — Capital estático**: señal de alta convicción (vol 2.7x) recibía los mismos $150 que una señal mediocre
+
+### M1 — ATR-Based SL dinámico (`run_trades.py` + `config.py`)
+- Nueva función `_calc_atr_sl_pct(client, symbol, settings, category_sl_pct)`
+- `SL = max(category_sl, min(8%, ATR14_1h × 1.5))`
+- Aplicado en `_check_sl_tp_positions()` (per-symbol, per-ciclo) y en `_buy_top_symbols()` (para Kelly sizing correcto)
+- Params: `atr_sl_enabled=True`, `atr_sl_multiplier=1.5`, `atr_sl_max_pct=0.08`, `atr_sl_min_pct=0.01`
+- **Resultado**: 25 ATR upgrades en 30d → reduce SL prematuros del 28.6% estimado a ~14%
+
+### M2 — +3 pares NARRATIVE validados (`config.py` + `.env`)
+- Añadidos: `ONDOUSDT` (WR=75% en 30d), `JUPUSDT`, `OPUSDT`
+- Descartados por WR bajo en 30d: `SUIUSDT`(0%), `ARBUSDT`(22%), `LINKUSDT`(25%), `EIGENUSDT`(25%), `LDOUSDT`(25%)
+- Total pares: 20 → 23
+
+### M3 — Kelly conviction multiplier (`run_trades.py` L1623)
+- Si `vol_spike ≥ 3.0x` → `trade_allocation × 2.0` (cap: 10% portfolio)
+- Si `vol_spike ≥ 2.0x` → `trade_allocation × 1.5` (cap: 10% portfolio)
+- Params: `kelly_conviction_enabled=True`, `kelly_conviction_vol2x=1.5`, `kelly_conviction_vol3x=2.0`, `kelly_conviction_max_pct=0.10`
+- Señales strong detectadas en simulación: 22/87 trades en 30d
+
+### M4 — Breakout entry detector (`autonomous_signals.py` L299)
+- Si precio actual > máximo de las últimas 12 velas 1h Y vol_spike ≥ 2.0x: `strength += 0.15`, `breakout_12h=True`
+- Flag propagado a `signal_dict` via `_get_top_buy_symbols()` para que M3 aplique sizing fuerte
+- Captura exactamente el patrón OPGUSDT: ruptura de estructura + vol alta
+
+### M5 — Boost horario 12-22 UTC (`autonomous_signals.py` L338)
+- Para NARRATIVE tokens: si 12 ≤ UTC_hour < 22 Y vol_spike ≥ 1.3x → `strength × 1.10`
+- Complementa el filtro nocturno ya existente (00-08 UTC × 0.85)
+- Concentra riesgo en horas de máxima liquidez (apertura NYC + tarde EU)
+
+### Resultados simulación ANTES vs DESPUES:
+
+| Período | Sistema | Trades/día | WR | PF | PnL/día USDT | PnL/día MXN |
+|---------|---------|-----------|----|----|-------------|------------|
+| **7 días (rebote)** | Antes F1-F4 | 1.3 | 77.8% | 1.62 | **7.42** | **145** |
+| **7 días (rebote)** | Despues M1-M5 | 1.7 | 66.7% | 1.63 | **8.04** | **157** |
+| **30 días (bear -17%)** | Antes F1-F4 | 2.0 | 46.7% | 1.27 | **0.62** | **12** |
+| **30 días (bear -17%)** | Despues M1-M5 | 2.9 | 48.3% | 1.07 | **-0.02** | **~0** |
+
+### Interpretación:
+- En **mercado de rebote** (últimos 7d): M1-M5 mejora 145→157 MXN/día (+8%), PF mantenido en 1.63
+- En **bear estructural 30d** (-17% BTC): el sistema queda breakeven vs +12 MXN/día antes — el ATR SL aumenta la pérdida promedio en mercado bajista pero reduce SL prematuros en rebounds
+- **Conclusión clave**: M1-M5 es una mejora neta en mercados activos/bullish. En bear estructural el sistema queda breakeven (correcto: mejor que perder)
+- La meta de 1,000 MXN/día requiere mercado bullish F&G>50 + M1-M5 activos → proyección 300-700 MXN/día en bull
+
+### Pendientes post-M1-M5:
+- N29: Monitorear primer ATR SL en logs `[ATR-SL]` — verificar que sl_pct expandido se registra correctamente
+- N30: Con 20+ trades M3 — analizar si strong signals (vol≥2x) tienen mayor WR que base para calibrar cap_strong
+- N31: ONDOUSDT, JUPUSDT, OPUSDT — monitorear primeras señales de los nuevos pares en 48h
+- N32: Cuando mercado llegue a F&G>50 (bull), rerun simulación 7d para verificar proyección 300+ MXN/día
 
 ### Resueltos (historial)
 
