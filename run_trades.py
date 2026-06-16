@@ -742,6 +742,8 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
                     ]
                     _entry_ts = min(_ts_list) if _ts_list else None
                     if _entry_ts is not None:
+                        if hasattr(_entry_ts, 'tzinfo') and _entry_ts.tzinfo is None:
+                            _entry_ts = _entry_ts.replace(tzinfo=timezone.utc)
                         _age_min = (datetime.now(timezone.utc) - _entry_ts).total_seconds() / 60
                         if _age_min < _min_hold_min:
                             print(f"[Rebalance] Holding {symbol}: age={_age_min:.1f}min < min_hold={_min_hold_min}min")
@@ -766,6 +768,25 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
             except Exception:
                 pass
 
+        # Fix D — SL-Delegated: no rebalancear si pérdida ya >= 75% del SL threshold
+        # Lógica: si el precio ya cayó tanto, el SL checker debería cerrarlo — no el rebalanceo
+        if position_manager:
+            try:
+                pos_list = position_manager.get_all_positions().get(symbol, [])[:1]
+                if pos_list:
+                    _cur_price_d = client.get_symbol_price(symbol)
+                    _ep_d = float(pos_list[0].entry_price)
+                    _pnl_pct_d = (_cur_price_d - _ep_d) / _ep_d if _ep_d > 0 else 0.0
+                    if _pnl_pct_d < 0:
+                        _cat_beh_d = getattr(settings, 'token_categories', {}).get(symbol, {}).get('market_behavior', 'MIDCAP_ALT')
+                        _cat_th_d = getattr(settings, 'category_thresholds', {}).get(_cat_beh_d, {})
+                        _sl_d = _cat_th_d.get('stop_loss_pct', getattr(settings, 'stop_loss_pct', 1.8)) / 100.0
+                        if abs(_pnl_pct_d) >= _sl_d * 0.75:
+                            print(f"[Rebalance] Deferring {symbol}: pnl={_pnl_pct_d*100:.2f}% near SL ({_sl_d*100:.1f}%) — letting SL handle")
+                            continue
+            except Exception:
+                pass
+
         # Smart rebalance: skip if predictor sees positive upside on this position
         if getattr(settings, 'rebalance_skip_if_positive_prediction', True) and portfolio_manager:
             try:
@@ -781,6 +802,28 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
                     continue
             except Exception as _pred_err:
                 print(f"[Rebalance] prediction check skipped for {symbol}: {_pred_err}")
+
+        # Fix B — Re-análisis técnico: retener si RSI < 55 y precio sobre EMA9 (recuperable)
+        if getattr(settings, 'rebalance_skip_if_bullish_signal', True):
+            try:
+                _klines_b = client.client.get_klines(symbol=symbol, interval='1h', limit=20)
+                if _klines_b and len(_klines_b) >= 14:
+                    _closes_b = [float(k[4]) for k in _klines_b]
+                    _gains_b = [max(0.0, _closes_b[i] - _closes_b[i-1]) for i in range(1, len(_closes_b))]
+                    _losses_b = [max(0.0, _closes_b[i-1] - _closes_b[i]) for i in range(1, len(_closes_b))]
+                    _avg_gain_b = sum(_gains_b[-14:]) / 14
+                    _avg_loss_b = sum(_losses_b[-14:]) / 14
+                    _rsi_b = 100 - (100 / (1 + _avg_gain_b / _avg_loss_b)) if _avg_loss_b > 0 else 100.0
+                    _ema9_b = _closes_b[-1]
+                    _alpha_b = 2 / (9 + 1)
+                    for _c in _closes_b[-9:]:
+                        _ema9_b = _c * _alpha_b + _ema9_b * (1 - _alpha_b)
+                    _cur_c = _closes_b[-1]
+                    if _rsi_b < 55 and _cur_c >= _ema9_b * 0.998:
+                        print(f"[Rebalance] Holding {symbol}: RSI1h={_rsi_b:.1f}<55, price above EMA9 — bullish signal")
+                        continue
+            except Exception:
+                pass
 
         try:
             filters = get_symbol_filters(client, symbol)

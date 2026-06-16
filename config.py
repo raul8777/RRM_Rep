@@ -117,16 +117,17 @@ class Settings(BaseSettings):
     trailing_stop_activation_pct: float = Field(default=2.0, env="TRAILING_STOP_ACTIVATION_PCT")  # activate trailing after +2%
     trailing_stop_distance_pct: float = Field(default=1.0, env="TRAILING_STOP_DISTANCE_PCT")      # trail 1% below peak
     protect_profitable_positions: bool = Field(default=True, env="PROTECT_PROFITABLE_POSITIONS")  # skip rebalance if PnL>1%
-    protect_profit_min_pct: float = Field(default=0.8, env="PROTECT_PROFIT_MIN_PCT")              # minimum PnL% to protect (v2: 2.5→0.8)
+    protect_profit_min_pct: float = Field(default=0.3, env="PROTECT_PROFIT_MIN_PCT")              # minimum PnL% to protect (v3: 0.8→0.3 — protect desde micro-ganancia)
     # Rebalancing controls (v2)
-    min_hold_minutes: int = Field(default=60, env="MIN_HOLD_MINUTES")          # min time before rebalancing out a position
+    min_hold_minutes: int = Field(default=120, env="MIN_HOLD_MINUTES")         # min time before rebalancing out a position (v3: 60→120)
     max_rebalance_per_cycle: int = Field(default=2, env="MAX_REBALANCE_PER_CYCLE")  # max sells per rebalance cycle
     max_total_exposure_pct: float = Field(default=0.65, env="MAX_TOTAL_EXPOSURE_PCT")  # max portfolio % in open spot positions
     # Smart exit: anti-wick SL confirmation
     sl_confirmation_candles: int = Field(default=1, env="SL_CONFIRMATION_CANDLES")  # 0=immediate, 1=require last 1m candle close below SL
     # Smart exit: rebalance skips if predictor sees upside
     rebalance_skip_if_positive_prediction: bool = Field(default=True, env="REBALANCE_SKIP_IF_POSITIVE_PREDICTION")
-    rebalance_min_hold_prob: float = Field(default=0.55, env="REBALANCE_MIN_HOLD_PROB")  # skip rebalance if prob >= this AND epnl > 0
+    rebalance_min_hold_prob: float = Field(default=0.45, env="REBALANCE_MIN_HOLD_PROB")  # skip rebalance if prob >= this AND epnl > 0 (v3: 0.55→0.45)
+    rebalance_skip_if_bullish_signal: bool = Field(default=True, env="REBALANCE_SKIP_IF_BULLISH_SIGNAL")  # skip rebalance if RSI1h<55 AND price>EMA9
     # Dynamic max positions by regime (replaces single MAX_POSITIONS when regime is known)
     max_positions_spot_bull: int = Field(default=15, env="MAX_POSITIONS_SPOT_BULL")
     max_positions_range_scalp: int = Field(default=8, env="MAX_POSITIONS_RANGE_SCALP")
