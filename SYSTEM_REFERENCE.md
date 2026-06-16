@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 15 2026 13:47 UTC-6 | Fix posiciones cerradas vacías (datetime offset-naive) | R1-R6 roles | Dynamic max pos + overflow | Smart exit | Dashboard v18
+> Última actualización: jun 15 2026 20:40 UTC-6 | Rebalanceo quirúrgico Opción B (RSI>60 O EMA9↓) | Fix A-D cierres prematuros | min_hold=240min | commit ffc5a75
 
 ---
 
@@ -34,7 +34,7 @@
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 15 2026 13:47 UTC-6 |
+| Fecha última actualización | jun 15 2026 20:40 UTC-6 |
 | Capital total | ~$3,080 USDT |
 | Capital spot líquido | ~$1,316 USDT |
 | Capital invertido spot | ~$1,756 USDT (57.2%) — cap 75% |
@@ -46,12 +46,12 @@
 | BTC 30d | -17.7% (bear estructural — SPOT_BULL de rebote corto plazo) |
 | Screener dinámico | ✅ ACTIVO — 46 spot / 8 futures |
 | Hedge mode Binance | ✅ ACTIVADO (`dualSidePosition=true`) |
-| Docker | live, sin errores — commit 1de240e |
+| Docker | live, sin errores — commit ffc5a75 |
 | dry_run | False |
 | allow_real_trading | True |
 | Posiciones abiertas spot (12) | FETUSDT, LTCUSDT, ZECUSDT, MEGAUSDT, TRUMPUSDT, WLDUSDT, XLMUSDT, ZROUSDT, JTOUSDT, SOLUSDT, BNBUSDT, AVAXUSDT + más |
 | Ciclo activo | 20 min (SPOT_BULL dinámico) |
-| Win rate DB | 29.5% (83 trades totales — incluye rebalanceos forzados) |
+| Win rate DB | 29.5% (83 trades — degradado por 60 rebalanceos del día con WR 18%) |
 
 ---
 
@@ -277,12 +277,15 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 
 ### Activos (no resueltos)
 
-**Sin bugs activos conocidos** — todos verificados y resueltos al jun 15 2026 13:47 UTC-6.
+**Sin bugs activos conocidos** — todos verificados y resueltos al jun 15 2026 20:40 UTC-6.
 
 ### Resueltos (historial)
 
 | Fecha | Bug | Fix |
 |-------|-----|-----|
+| jun 15 20:40 | `_sell_holdings_not_in_top()` vendía TODO lo que no estaba en `top_symbols` del ciclo de 20min → win rate rebalanceo 18% (49/60 pérdidas = -$63.56 en un día). Root cause: criterio "no está en top" es ruido, no señal de salida | **Opción B**: rebalanceo solo si RSI1h>60 O EMA9 descendente + min_hold=240min. Nuevo param `rebalance_rsi_overbought=60`. `run_trades.py` + `config.py` commit ffc5a75 |
+| jun 15 20:40 | Timezone bug en `min_hold_minutes`: `entry_time` naive datetime vs `datetime.now(timezone.utc)` aware → comparación lanzaba excepción silenciosa (try/except pasaba), protección ignorada completamente → posiciones de 9-20min se rebalanceaban | Fix A: `_entry_ts.replace(tzinfo=timezone.utc)` si `tzinfo is None`. `run_trades.py:745` commit 4639c2c |
+| jun 15 20:40 | Posiciones en pérdida cerca del SL cerradas por rebalanceo antes de que SL checker actuara (competencia entre dos mecanismos) | Fix D SL-Delegated: si `abs(pnl_pct) >= SL × 0.75` → diferir al SL checker, no rebalancear. `run_trades.py:771` commit 4639c2c |
 | jun 15 13:47 | Dashboard mostraba 0 posiciones cerradas — `close_position()` guardaba `exit_time` como datetime naive (sin UTC) vs DB que retorna aware; comparación en `calculate_performance_metrics` y `get_closed_positions` lanzaba `TypeError: can't compare offset-naive and offset-aware datetimes`. `_get_monte_carlo_projection` pasaba objetos `ClosedPosition` a función que esperaba dicts `t["pnl"]` | Fix: `datetime.now(timezone.utc).isoformat()` en `position_manager.py:447` + conversión a dicts en `app.py:741`. `83 trades` ahora visibles. |
 | jun 15 11:41 | `_STALE_CYCLE_MINUTES=15` hardcoded → falso positivo con SPOT_BULL 15min; warning spameaba error_collector en cada poll | Fix: umbral dinámico `orchestrator.current_cycle_minutes × 1.5` + dedup por `last_cycle` timestamp. `app.py` línea ~1500 |
 | jun 15 11:41 | `portfolio_manager.get_position_predictions()` usaba `trade_cycle_minutes=5` fijo → predicción a 5min en vez del ciclo real 15min SPOT_BULL → sesgo contra posiciones abiertas en prediction-reallocation | Fix: usa `orchestrator.current_cycle_minutes` con fallback a config. `portfolio_manager.py` línea ~351 |
@@ -395,7 +398,7 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | N2 | Verificar BTCUSDT short qty>0 cuando régimen cambie a FUTURES_SHORT |
 | N4 | Monitorear WR durante próximas 48h con nuevos parámetros agresivos — objetivo ≥ 45% |
 | N5 | Predictor en bootstrap_mode para todos los pares nuevos del screener — acumulará datos con el tiempo |
-| N6 | Monitorear que Fix C (rebalanceo + predictor) no retiene posiciones en caída real — revisar si `rebalance_min_hold_prob=0.55` es apropiado o necesita ajuste |
+| N6 | Monitorear que nuevo rebalanceo quirúrgico (RSI>60 O EMA9↓) no retiene posiciones en caída real sostenida — revisar logs `[Rebalance] Technical sell confirmed` vs `Holding: no technical sell signal` |
 | N7 | Monitorear que Fix A (anti-wick candle 1m) no retrase SL en caídas reales > 2min |
 | N8 | Primera activación de reemplazo activo: verificar logs `[Replace]` con ratio correcto y que no vende posiciones en profit |
 | N9 | Primera activación overflow: verificar logs `[Overflow]` con strength/prob correctos; monitorear si las 3 posiciones extra son rentables |
@@ -405,6 +408,8 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | N13 | Filtro categorias R4: con 12 posiciones abiertas verificar distribución MEME≤2 / NARRATIVE≤4 |
 | N14 | Circuit breaker: verificar en logs que solo se activa por errores API, NO por pérdidas de mercado |
 | N15 | Verificar win rate real con 83 trades en dashboard — actualmente 29.5% (bajo por rebalanceos). Monitorear si sube con nuevos filtros R1-R6 |
+| N16 | Monitorear rebalanceos próximas 24h: objetivo reducir de 60/día → 5-8/día. Log clave: `[Rebalance] Holding: no technical sell signal` |
+| N17 | Verificar que posiciones antiguas (>4h) con RSI>60 sí se rebalancean correctamente cuando aparece nueva señal de mayor EV |
 
 ---
 
@@ -451,22 +456,23 @@ STABLECOIN_PREFIXES = ["USDC", "BUSD", "TUSD", "DAI", "FDUSD", "USDP"]
 ### Lo que destruye valor (CORREGIDO jun 15)
 | Problema | Impacto | Fix aplicado |
 |----------|---------|-------------|
-| `portfolio_rebalancing` prematuro (51/64 = 80% de todos los cierres) | Destruye posiciones ganadoras cobrando 0.2% comisión | `min_hold=90min` + `max_rebalance=1/ciclo` |
+| `portfolio_rebalancing` quirúrgico — Opción B (jun 15 20:40) | 60 rebalanceos/día, WR=18%, -$63.56 en un día. Criterio "no está en top_symbols" es ruido de 20min | **Rebalanceo solo si: RSI1h>60 O EMA9↓ + min_hold=240min (4h)**. 5-8 rebalanceos/día esperados. `run_trades.py` commit ffc5a75 |
+| `portfolio_rebalancing` prematuro (51/64 = 80% de todos los cierres) | Destruye posiciones ganadoras cobrando 0.2% comisión | `min_hold=90→120→240min` + `max_rebalance=1/ciclo` |
 | Triple penalización Kelly ($7.50/trade en bear) | Capital subutilizado en bear | Kelly unificado via `_regime.kelly_multiplier` |
 | `MAX_PER_TRADE_USDT=15` → predictor con $15 pero Kelly compraba $150 | PnL estimado 10× subestimado → señales rechazadas innecesariamente | `MAX_PER_TRADE_USDT=350` |
 | `kelly_dynamic_base_pct=8%` con cap $200 → $105 plano | Capital subutilizado | Base 12%, max $350 |
 | BTC.D filter 56% bloqueaba TODOS los alts | Cero señales con BTC.D ~63% | Subido a 64% |
 | 3 posiciones mismo símbolo (RENDER×3, TAO×3) | Concentración extrema | `MAX_POSITIONS_PER_SYMBOL=1` |
 
-### Estadísticas históricas (64 trades cerrados al jun 15)
+### Estadísticas históricas (83 trades cerrados al jun 15 20:40)
 ```
-Win rate: 34% (22W / 42L) — ADVERTENCIA: degradado por portfolio_rebalancing (51 cierres)
-Profit factor: 0.44 — objetivo ≥ 1.5 (esperamos mejora con min_hold=90min)
-Avg win: $0.59 | Avg loss: -$0.70
+Win rate: 29.5% — ADVERTENCIA: degradado por portfolio_rebalancing (60 cierres hoy, WR=18%)
+PnL del día: -$71.53 (portfolio_rebalancing -$63.56 + stop_loss -$7.97)
+Profit factor: ~0.4 — objetivo ≥ 1.5 (esperamos mejora con Opción B)
 
-Mejores símbolos: DOGEUSDT (75% WR, +$2.6 total) | RENDERUSDT (53% WR, +$2.6)
-Peores símbolos:  FETUSDT (0% WR, -$6.9 total)   | WLDUSDT (0% WR, -$6.7)
-                  TAOUSDT (25% WR, -$6.6 total)
+Peores símbolos por rebalanceo: RENDERUSDT (9 sells, -$9.25) | WLDUSDT (4 sells, -$9.19)
+                                  TAOUSDT (3 sells, -$6.57)   | JTOUSDT (3 sells, -$6.17)
+Patrón ciclo vicioso: FETCH/RENDER/NEAR vendidos y recomprados en <2h (comisión doble)
 ```
 
 ### Matemáticas con capital actual ($3,080 total / $1,316 liquid)
