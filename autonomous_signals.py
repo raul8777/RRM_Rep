@@ -296,6 +296,26 @@ class AutonomousSignalGenerator:
                 except Exception:
                     pass
 
+            # ── M4: Breakout entry detector (ruptura máximo 12h + vol>2x) ────
+            if analysis['signal'] == 'BUY' and len(klines) >= 13:
+                try:
+                    _recent_highs = [k['high'] for k in klines[-13:-1]]  # últimas 12 velas excluyendo la actual
+                    _max_12h = max(_recent_highs) if _recent_highs else 0
+                    _cur_close = closes[-1]
+                    _avg_vol_bo = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else None
+                    _last_vol_bo = volumes[-1] if volumes else 0
+                    _vs_bo = (_last_vol_bo / _avg_vol_bo) if _avg_vol_bo and _avg_vol_bo > 0 else 0
+                    if _cur_close > _max_12h and _vs_bo >= 2.0:
+                        analysis['strength'] = min(1.0, analysis['strength'] + 0.15)
+                        analysis['reason'] += f' [+breakout_12h max={_max_12h:.4f} vol={_vs_bo:.1f}x]'
+                        analysis['breakout_12h'] = True
+                        analysis['vol_spike'] = round(_vs_bo, 2)
+                        logger.info(f"Breakout 12h DETECTED {symbol}: close={_cur_close:.4f} > max12h={_max_12h:.4f}, vol={_vs_bo:.1f}x → +0.15 strength")
+                    else:
+                        analysis.setdefault('vol_spike', round(_vs_bo, 2))
+                except Exception:
+                    pass
+
             # ── Time-of-day filter for NARRATIVE tokens ───────────────────────
             if analysis['signal'] == 'BUY':
                 try:
@@ -315,6 +335,11 @@ class AutonomousSignalGenerator:
                             analysis['strength'] = max(0.0, analysis['strength'] * 0.85)
                             analysis['reason'] += f' [-low-vol night {_hour_utc:02d}h UTC ×0.85]'
                             logger.debug(f"Time-of-day penalty {symbol}: UTC hour={_hour_utc}, vol_spike={_vs:.2f}")
+                        # M5: boost during peak liquidity hours (12-22 UTC)
+                        elif 12 <= _hour_utc < 22 and _vs >= 1.3:
+                            analysis['strength'] = min(1.0, analysis['strength'] * 1.10)
+                            analysis['reason'] += f' [+peak_hours {_hour_utc:02d}h UTC ×1.10]'
+                            logger.debug(f"Peak-hours BOOST {symbol}: UTC hour={_hour_utc}, vol_spike={_vs:.2f}")
                 except Exception:
                     pass
 

@@ -100,6 +100,7 @@ class Settings(BaseSettings):
         'FETUSDT', 'AVAXUSDT', 'ADAUSDT', 'XRPUSDT', 'DOTUSDT',
         'SUIUSDT', 'PEPEUSDT', 'WIFUSDT', 'BTCUSDT', 'ETHUSDT', 'LINKUSDT',
         'NEARUSDT', 'WLDUSDT', 'INJUSDT', 'AGIXUSDT',
+        'OPUSDT', 'LDOUSDT', 'ARBUSDT', 'ONDOUSDT', 'JUPUSDT', 'EIGENUSDT',  # M2: +6 NARRATIVE alta vol
     ], env="ANALYSIS_SYMBOLS")
 
     # VolSpike override: bypass PnL predictor for narrative tokens with strong volume
@@ -128,6 +129,16 @@ class Settings(BaseSettings):
     rebalance_excluded_symbols: list = Field(default=['USD1USDT', 'USDCUSDT', 'BUSDUSDT', 'TUSDUSDT', 'FDUSDUSDT'],  # F4: stablecoins never rebalanced
                                              env="REBALANCE_EXCLUDED_SYMBOLS")
     max_total_exposure_pct: float = Field(default=0.65, env="MAX_TOTAL_EXPOSURE_PCT")  # max portfolio % in open spot positions
+    # M1: ATR-Based dynamic SL — replaces fixed SL% with 1.5×ATR for volatile tokens
+    atr_sl_enabled: bool = Field(default=True, env="ATR_SL_ENABLED")           # enable ATR-based SL calculation
+    atr_sl_multiplier: float = Field(default=1.5, env="ATR_SL_MULTIPLIER")     # SL = max(category_sl, atr_mult × ATR14)
+    atr_sl_max_pct: float = Field(default=0.08, env="ATR_SL_MAX_PCT")          # cap ATR SL at 8% to avoid monster stops
+    atr_sl_min_pct: float = Field(default=0.01, env="ATR_SL_MIN_PCT")          # floor ATR SL at 1% to always have a stop
+    # M3: Kelly conviction multiplier — scale position size by signal strength
+    kelly_conviction_enabled: bool = Field(default=True, env="KELLY_CONVICTION_ENABLED")
+    kelly_conviction_vol2x: float = Field(default=1.5, env="KELLY_CONVICTION_VOL2X")   # vol 2-3x → 1.5x sizing
+    kelly_conviction_vol3x: float = Field(default=2.0, env="KELLY_CONVICTION_VOL3X")   # vol >3x → 2.0x sizing
+    kelly_conviction_max_pct: float = Field(default=0.10, env="KELLY_CONVICTION_MAX_PCT")  # hard cap: never >10% portfolio in 1 trade
     # Smart exit: anti-wick SL confirmation
     sl_confirmation_candles: int = Field(default=1, env="SL_CONFIRMATION_CANDLES")  # 0=immediate, 1=require last 1m candle close below SL
     # Smart exit: rebalance skips if predictor sees upside

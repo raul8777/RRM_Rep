@@ -476,6 +476,10 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                     "strength": signal['strength'],
                     "volume_confirmed": signal.get('volume_confirmed', False),
                     "higher_tf_trend": signal.get('higher_tf_trend', 'FLAT'),
+                    # M3/M4: propagate vol_spike and breakout flag for conviction sizing
+                    "vol_spike": signal.get('vol_spike', signal.get('indicators', {}).get('vol_spike', 0.0)),
+                    "breakout_12h": signal.get('breakout_12h', False),
+                    "rsi": signal.get('indicators', {}).get('rsi', 50.0),
                 }
                 top_signals.append(signal_dict)
                 
@@ -662,6 +666,41 @@ def _evaluate_tp_momentum(client: BinanceClient, symbol: str, current_price: flo
     return result
 
 
+def _calc_atr_sl_pct(client: BinanceClient, symbol: str, settings, category_sl_pct: float) -> float:
+    """
+    M1: ATR-Based dynamic SL. Returns SL% = max(category_sl, atr_mult × ATR14_pct).
+    Capped at atr_sl_max_pct to prevent monster stops.
+    Falls back to category_sl if data unavailable.
+    """
+    if not getattr(settings, 'atr_sl_enabled', True):
+        return category_sl_pct
+    try:
+        _kl = client.client.get_klines(symbol=symbol, interval='1h', limit=16)
+        if not _kl or len(_kl) < 15:
+            return category_sl_pct
+        _highs = [float(k[2]) for k in _kl]
+        _lows  = [float(k[3]) for k in _kl]
+        _cls   = [float(k[4]) for k in _kl]
+        # ATR14 = average of True Range over last 14 periods
+        _trs = []
+        for _i in range(1, 15):
+            _tr = max(_highs[_i] - _lows[_i],
+                      abs(_highs[_i] - _cls[_i-1]),
+                      abs(_lows[_i]  - _cls[_i-1]))
+            _trs.append(_tr)
+        _atr = sum(_trs) / len(_trs)
+        _price = _cls[-1]
+        _atr_pct = _atr / _price if _price > 0 else 0.0
+        _mult  = getattr(settings, 'atr_sl_multiplier', 1.5)
+        _max   = getattr(settings, 'atr_sl_max_pct', 0.08)
+        _min   = getattr(settings, 'atr_sl_min_pct', 0.01)
+        _atr_sl = max(_min, min(_max, _atr_pct * _mult))
+        _final  = max(category_sl_pct, _atr_sl)
+        return _final
+    except Exception:
+        return category_sl_pct
+
+
 def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) -> List[Dict]:
     """
     Check all open positions against Stop-Loss, Take-Profit, and Trailing Stop rules.
@@ -697,6 +736,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
         tp_pct = _cat_th.get('take_profit_pct', _global_tp_pct) / 100.0
         trail_activate = _cat_th.get('trailing_activation_pct', _global_trail_act) / 100.0
         trail_dist = _cat_th.get('trailing_distance_pct', _global_trail_dist) / 100.0
+        # M1: override sl_pct with ATR-based dynamic SL (prevents premature stops on volatile tokens)
+        sl_pct = _calc_atr_sl_pct(client, symbol, settings, sl_pct)
 
         for pos in pos_list:
             try:
@@ -1557,6 +1598,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         _cat_th_e  = getattr(settings, 'category_thresholds', {}).get(_sym_cat_e, {})
         sl_pct = _cat_th_e.get('stop_loss_pct', getattr(settings, 'stop_loss_pct', 1.5)) / 100.0
         tp_pct = _cat_th_e.get('take_profit_pct', getattr(settings, 'take_profit_pct', 2.5)) / 100.0
+        # M1: ATR-Based SL — Kelly sizes trade against real volatility, not fixed %
+        sl_pct = _calc_atr_sl_pct(client, symbol, settings, sl_pct)
 
         # Apply regime-specific SL/TP overrides (régimen sobreescribe categoría)
         if _regime and _regime.confirmed:
@@ -1580,6 +1623,30 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             _rmult = _regime.kelly_multiplier
             trade_allocation *= _rmult
             print(f"[Regime] {_regime_mode}: Kelly ×{_rmult} → ${trade_allocation:.2f} for {symbol}")
+
+        # ── M3: Kelly conviction multiplier ─────────────────────────────────
+        # Scale position size when signal has high vol_spike conviction
+        if getattr(settings, 'kelly_conviction_enabled', True):
+            _meta_vs = float(signal_meta.get(symbol, {}).get('vol_spike', 0))
+            _conv3x = getattr(settings, 'kelly_conviction_vol3x', 2.0)
+            _conv2x = getattr(settings, 'kelly_conviction_vol2x', 1.5)
+            _conv_max_pct = getattr(settings, 'kelly_conviction_max_pct', 0.10)
+            if _meta_vs >= 3.0:
+                _conv_mult = _conv3x
+            elif _meta_vs >= 2.0:
+                _conv_mult = _conv2x
+            else:
+                _conv_mult = 1.0
+            if _conv_mult > 1.0:
+                _total_portfolio_val = float(client.get_account_balance().get("USDT", usdt_liquid_now)) + sum(
+                    float(p.quantity) * client.get_symbol_price(s)
+                    for s, pl in (position_manager.get_all_positions() if position_manager else {}).items()
+                    for p in pl if True
+                ) if position_manager else usdt_liquid_now * 4
+                _hard_cap = _total_portfolio_val * _conv_max_pct
+                _boosted = min(trade_allocation * _conv_mult, _hard_cap)
+                print(f"[M3] {symbol}: vol_spike={_meta_vs:.1f}x → conviction ×{_conv_mult} ${trade_allocation:.2f}→${_boosted:.2f} (cap=${_hard_cap:.2f})")
+                trade_allocation = _boosted
 
         # ── R1: Behavioral Finance — F&G Kelly boost ─────────────────────────
         trade_allocation = _apply_fng_kelly_boost(trade_allocation, _fng_value, settings)
