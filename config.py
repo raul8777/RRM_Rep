@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # Scale-out on take-profit
     scale_out_enabled: bool = Field(default=True, env="SCALE_OUT_ENABLED")
     scale_out_first_close_pct: float = Field(default=0.5, env="SCALE_OUT_FIRST_CLOSE_PCT")  # close 50% at TP
+    # Smart TP: analyse momentum at TP before selling — extend if bullish, scale-out if neutral, close if bearish
+    smart_tp_enabled: bool = Field(default=True, env="SMART_TP_ENABLED")
+    smart_tp_max_extensions: int = Field(default=3, env="SMART_TP_MAX_EXTENSIONS")       # max extensions per position
+    smart_tp_max_pnl_pct: float = Field(default=15.0, env="SMART_TP_MAX_PNL_PCT")        # never extend above this % gain
     # BTC dominance filter
     btc_dominance_filter_enabled: bool = Field(default=True, env="BTC_DOMINANCE_FILTER_ENABLED")
     btc_dominance_altcoin_threshold: float = Field(default=56.0, env="BTC_DOMINANCE_ALTCOIN_THRESHOLD")  # if BTC.D > this, skip alts
@@ -233,10 +237,10 @@ class Settings(BaseSettings):
     # min_pnl:  mínimo PnL esperado (USDT) — negativo permitido para NARRATIVE
     # min_volspike: VolSpike mínimo para confirmar señal (informativo, no enforcement aquí)
     category_thresholds: dict = Field(default={
-        "LARGE_CAP":  {"min_prob": 0.55, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.2},
-        "MIDCAP_ALT": {"min_prob": 0.50, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.2},
-        "NARRATIVE":  {"min_prob": 0.42, "min_pnl": -5.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 2.0},
-        "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.0, "take_profit_pct": 4.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.5},
+        "LARGE_CAP":  {"min_prob": 0.55, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.2, "tp_extension_pct": 1.5},
+        "MIDCAP_ALT": {"min_prob": 0.50, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.2, "tp_extension_pct": 2.0},
+        "NARRATIVE":  {"min_prob": 0.42, "min_pnl": -5.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 2.0, "tp_extension_pct": 3.0},
+        "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.0, "take_profit_pct": 4.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.5, "tp_extension_pct": 2.5},
     }, env="CATEGORY_THRESHOLDS")
     
     # ── Futures trading (USDM, fapi.binance.com) ─────────────────────────────

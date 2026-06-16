@@ -564,6 +564,82 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
     return top_signals
 
 
+def _evaluate_tp_momentum(client: BinanceClient, symbol: str, current_price: float,
+                           pnl_pct: float, settings) -> Dict:
+    """
+    Analyse current momentum at Take-Profit trigger to decide whether to extend,
+    scale-out, or close the position.
+
+    Returns a dict:
+        {
+          "decision": "extend" | "scale_out" | "close",
+          "momentum_score": int (0-4),
+          "vol_spike": float,
+          "rsi": float,
+          "trend_4h": float,
+          "success_prob": float,
+        }
+    Fallback on any error: {"decision": "scale_out", "momentum_score": -1, ...}
+    """
+    result = {
+        "decision": "scale_out",
+        "momentum_score": -1,
+        "vol_spike": 0.0,
+        "rsi": 50.0,
+        "trend_4h": 0.0,
+        "success_prob": 0.0,
+    }
+    try:
+        from autonomous_signals import AutonomousSignalGenerator
+        sig_gen = AutonomousSignalGenerator(client)
+        sig = sig_gen.analyze_symbol(symbol, interval='1h', use_multi_timeframe=True)
+        ind = sig.get("indicators", {})
+
+        vol_spike   = float(ind.get("vol_spike") or ind.get("volume_ratio") or 1.0)
+        rsi         = float(ind.get("rsi") or 50.0)
+        trend_4h    = float(ind.get("trend_4h") or 0.0)
+
+        # Run predictor with current indicators
+        position_size = float(getattr(settings, 'max_per_trade_usdt', 150.0))
+        prediction, _ = pnl_service.predict_for_symbol(
+            symbol=symbol, client=client, settings=settings,
+            position_size_usdt=position_size
+        )
+        success_prob = float((prediction or {}).get("success_probability", 0.0))
+
+        result.update({
+            "vol_spike": round(vol_spike, 3),
+            "rsi": round(rsi, 2),
+            "trend_4h": round(trend_4h, 2),
+            "success_prob": round(success_prob, 4),
+        })
+
+        # ── Score: 1 point per bullish condition ───────────────────────
+        score = 0
+        if vol_spike >= 1.5:
+            score += 1
+        if trend_4h >= 1.0:
+            score += 1
+        if 45.0 <= rsi <= 65.0:
+            score += 1
+        if success_prob >= 0.60:
+            score += 1
+
+        result["momentum_score"] = score
+
+        if score >= 3:
+            result["decision"] = "extend"
+        elif score >= 2:
+            result["decision"] = "scale_out"
+        else:
+            result["decision"] = "close"
+
+    except Exception as _e:
+        print(f"[SmartTP] momentum evaluation failed for {symbol}: {_e} — falling back to scale_out")
+
+    return result
+
+
 def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) -> List[Dict]:
     """
     Check all open positions against Stop-Loss, Take-Profit, and Trailing Stop rules.
@@ -654,34 +730,129 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
                         _scale_out = getattr(settings, 'scale_out_enabled', True)
                         _scale_pct = getattr(settings, 'scale_out_first_close_pct', 0.5)
                         _is_tp = close_reason.startswith("take_profit")
+                        _smart_tp = getattr(settings, 'smart_tp_enabled', True)
 
-                        if _scale_out and _is_tp and full_qty * _scale_pct >= filters.get("min_qty", 0):
-                            # ── Scale-out: sell 50% at TP, move SL to breakeven ──────────
-                            sell_qty = align_quantity_to_step(full_qty * _scale_pct, filters["step"])
-                            valid, reason = is_quantity_valid(sell_qty, current_price, filters)
-                            if valid:
-                                order = client.create_market_order(symbol=symbol, side="SELL", quantity=sell_qty)
-                                remaining_qty = align_quantity_to_step(full_qty - sell_qty, filters["step"])
-                                print(f"SCALE-OUT {symbol}: sold {sell_qty} ({_scale_pct*100:.0f}%) @ {current_price:.4f}, remaining={remaining_qty}, SL→breakeven={entry_price:.4f}")
-                                metadata = getattr(pos, 'metadata', {}) or {}
-                                metadata['scale_out_done'] = True
-                                metadata['scale_out_qty_sold'] = sell_qty
-                                metadata['scale_out_avg_price'] = current_price
+                        # ── Smart TP: evaluate momentum before acting on TP ───────────
+                        if _is_tp and _smart_tp:
+                            metadata = getattr(pos, 'metadata', {}) or {}
+                            _ext_count = int(metadata.get('tp_extensions_count', 0))
+                            _max_ext = int(getattr(settings, 'smart_tp_max_extensions', 3))
+                            _max_pnl = float(getattr(settings, 'smart_tp_max_pnl_pct', 15.0)) / 100.0
+                            _can_extend = (_ext_count < _max_ext) and (pnl_pct < _max_pnl)
+
+                            _tp_eval = _evaluate_tp_momentum(client, symbol, current_price, pnl_pct, settings)
+                            _decision = _tp_eval["decision"]
+                            print(f"[SmartTP] {symbol}: pnl={pnl_pct*100:.2f}% score={_tp_eval['momentum_score']}/4"
+                                  f" vol={_tp_eval['vol_spike']}x rsi={_tp_eval['rsi']} trend4h={_tp_eval['trend_4h']}"
+                                  f" prob={_tp_eval['success_prob']:.2f} → {_decision.upper()}"
+                                  f" (extensions={_ext_count}/{_max_ext})")
+
+                            # ── EXTEND: strong momentum → raise TP, SL → current TP ──
+                            if _decision == "extend" and _can_extend:
+                                _ext_pct = _cat_th.get('tp_extension_pct', 2.0) / 100.0
+                                _new_tp = round(current_price * (1.0 + _ext_pct), 8)
+                                # New SL = current TP price (locks in the gain reached)
+                                _new_sl = round(current_price * (1.0 - 0.005), 8)  # 0.5% below current price to avoid immediate trigger
+                                # But if we already have a profitable SL, keep the higher one
+                                _cur_sl = float(pos.stop_loss or entry_price)
+                                _new_sl = max(_new_sl, _cur_sl)
+
+                                # Record this decision in metadata for the LearningEngine
+                                _tp_decisions = metadata.get('tp_decisions', [])
+                                _tp_decisions.append({
+                                    "tp_level": _ext_count + 1,
+                                    "pnl_pct_at_decision": round(pnl_pct * 100, 4),
+                                    "decision": "extend",
+                                    "momentum_score": _tp_eval["momentum_score"],
+                                    "vol_spike": _tp_eval["vol_spike"],
+                                    "rsi": _tp_eval["rsi"],
+                                    "trend_4h": _tp_eval["trend_4h"],
+                                    "success_prob": _tp_eval["success_prob"],
+                                    "old_tp": round(current_price, 8),
+                                    "new_tp": _new_tp,
+                                    "new_sl": _new_sl,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                })
+                                metadata['tp_decisions'] = _tp_decisions
+                                metadata['tp_extensions_count'] = _ext_count + 1
                                 metadata['trailing_peak'] = current_price
                                 try:
+                                    position_manager.update_position_tp(pos.position_id, _new_tp)
+                                    position_manager.update_position_sl(pos.position_id, _new_sl)
                                     position_manager.update_position_metadata(pos.position_id, metadata)
-                                    position_manager.update_position_sl(pos.position_id, entry_price)
-                                    position_manager.update_position_quantity(pos.position_id, remaining_qty)
                                 except Exception:
                                     pass
                                 ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
-                                             f"Scale-out {symbol}: {sell_qty} @ {current_price:.4f}")
-                                add_signal({"symbol": symbol, "action": "SELL", "price": current_price,
-                                            "reason": f"scale_out_tp ({pnl_pct*100:.2f}%)",
-                                            "pnl_pct": round(pnl_pct * 100, 4), "source": "scale_out"})
-                                closed.append({"symbol": symbol, "reason": f"scale_out_tp",
-                                               "price": current_price, "order": order})
-                                continue
+                                             f"[SmartTP] EXTEND {symbol}: TP {current_price:.4f}→{_new_tp:.4f} SL→{_new_sl:.4f} (ext {_ext_count+1}/{_max_ext})")
+                                add_signal({"symbol": symbol, "action": "HOLD", "price": current_price,
+                                            "reason": f"smart_tp_extended_{_ext_count+1} score={_tp_eval['momentum_score']}/4",
+                                            "pnl_pct": round(pnl_pct * 100, 4), "source": "smart_tp"})
+                                continue  # do NOT sell — let it run
+
+                            # ── CLOSE: weak momentum → sell everything immediately ───
+                            elif _decision == "close":
+                                # Record the close decision in metadata before selling
+                                _tp_decisions = metadata.get('tp_decisions', [])
+                                _tp_decisions.append({
+                                    "tp_level": _ext_count + 1,
+                                    "pnl_pct_at_decision": round(pnl_pct * 100, 4),
+                                    "decision": "close",
+                                    "momentum_score": _tp_eval["momentum_score"],
+                                    "vol_spike": _tp_eval["vol_spike"],
+                                    "rsi": _tp_eval["rsi"],
+                                    "trend_4h": _tp_eval["trend_4h"],
+                                    "success_prob": _tp_eval["success_prob"],
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                })
+                                metadata['tp_decisions'] = _tp_decisions
+                                try:
+                                    position_manager.update_position_metadata(pos.position_id, metadata)
+                                except Exception:
+                                    pass
+                                close_reason = f"smart_tp_close ({pnl_pct*100:.2f}%)"
+                                # fall through to full-close below
+
+                            # ── SCALE_OUT: neutral momentum → sell 50%, hold rest ───
+                            else:
+                                _decision = "scale_out"  # normalise (covers !_can_extend path too)
+                                if _scale_out and full_qty * _scale_pct >= filters.get("min_qty", 0):
+                                    sell_qty = align_quantity_to_step(full_qty * _scale_pct, filters["step"])
+                                    valid, reason = is_quantity_valid(sell_qty, current_price, filters)
+                                    if valid:
+                                        order = client.create_market_order(symbol=symbol, side="SELL", quantity=sell_qty)
+                                        remaining_qty = align_quantity_to_step(full_qty - sell_qty, filters["step"])
+                                        print(f"SCALE-OUT {symbol}: sold {sell_qty} ({_scale_pct*100:.0f}%) @ {current_price:.4f}, remaining={remaining_qty}, SL→breakeven={entry_price:.4f}")
+                                        _tp_decisions = metadata.get('tp_decisions', [])
+                                        _tp_decisions.append({
+                                            "tp_level": _ext_count + 1,
+                                            "pnl_pct_at_decision": round(pnl_pct * 100, 4),
+                                            "decision": "scale_out",
+                                            "momentum_score": _tp_eval["momentum_score"],
+                                            "vol_spike": _tp_eval["vol_spike"],
+                                            "rsi": _tp_eval["rsi"],
+                                            "trend_4h": _tp_eval["trend_4h"],
+                                            "success_prob": _tp_eval["success_prob"],
+                                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                                        })
+                                        metadata['tp_decisions'] = _tp_decisions
+                                        metadata['scale_out_done'] = True
+                                        metadata['scale_out_qty_sold'] = sell_qty
+                                        metadata['scale_out_avg_price'] = current_price
+                                        metadata['trailing_peak'] = current_price
+                                        try:
+                                            position_manager.update_position_metadata(pos.position_id, metadata)
+                                            position_manager.update_position_sl(pos.position_id, entry_price)
+                                            position_manager.update_position_quantity(pos.position_id, remaining_qty)
+                                        except Exception:
+                                            pass
+                                        ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
+                                                     f"[SmartTP] SCALE-OUT {symbol}: {sell_qty} @ {current_price:.4f}")
+                                        add_signal({"symbol": symbol, "action": "SELL", "price": current_price,
+                                                    "reason": f"smart_tp_scale_out ({pnl_pct*100:.2f}%)",
+                                                    "pnl_pct": round(pnl_pct * 100, 4), "source": "smart_tp"})
+                                        closed.append({"symbol": symbol, "reason": "smart_tp_scale_out",
+                                                       "price": current_price, "order": order})
+                                        continue
                         qty = align_quantity_to_step(full_qty, filters["step"])
                         # ── Clamp qty to actual Binance balance to prevent -2010 ──────────
                         try:

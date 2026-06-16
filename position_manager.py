@@ -391,6 +391,22 @@ class PositionManager:
                             logger.warning(f"Could not persist qty update for {position_id}: {e}")
                     return
 
+    def update_position_tp(self, position_id: str, new_tp_price: float) -> None:
+        """Move take-profit price of an open position (e.g. Smart TP extension)."""
+        for pos_list in self._open_positions.values():
+            for pos in pos_list:
+                if str(pos.position_id) == str(position_id):
+                    pos.take_profit = new_tp_price
+                    if self.db_client and pos.db_id:
+                        try:
+                            self.db_client.execute_update(
+                                "UPDATE trades_open SET take_profit = %s WHERE id = %s",
+                                (new_tp_price, pos.db_id)
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not persist TP update for {position_id}: {e}")
+                    return
+
     def _calc_close(self, position: Position, exit_price: float, commission_rate: float):
         """Shared PnL calculation for closing a position. Returns (qty, entry_p, exit_price, pnl, pnl_pct, exit_comm, pred_accuracy)."""
         qty        = float(position.quantity)
