@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 15 2026 20:40 UTC-6 | Rebalanceo quirúrgico Opción B (RSI>60 O EMA9↓) | Fix A-D cierres prematuros | min_hold=240min | commit ffc5a75
+> Última actualización: jun 15 2026 21:05 UTC-6 | MC dashboard 3 escenarios A/B/C + profit_projection corregido (trades normales) | análisis oportunidades perdidas jun15 | commit 68b7124
 
 ---
 
@@ -34,7 +34,7 @@
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 15 2026 20:40 UTC-6 |
+| Fecha última actualización | jun 15 2026 21:05 UTC-6 |
 | Capital total | ~$3,080 USDT |
 | Capital spot líquido | ~$1,316 USDT |
 | Capital invertido spot | ~$1,756 USDT (57.2%) — cap 75% |
@@ -46,12 +46,12 @@
 | BTC 30d | -17.7% (bear estructural — SPOT_BULL de rebote corto plazo) |
 | Screener dinámico | ✅ ACTIVO — 46 spot / 8 futures |
 | Hedge mode Binance | ✅ ACTIVADO (`dualSidePosition=true`) |
-| Docker | live, sin errores — commit ffc5a75 |
+| Docker | live, sin errores — commit 68b7124 |
 | dry_run | False |
 | allow_real_trading | True |
 | Posiciones abiertas spot (12) | FETUSDT, LTCUSDT, ZECUSDT, MEGAUSDT, TRUMPUSDT, WLDUSDT, XLMUSDT, ZROUSDT, JTOUSDT, SOLUSDT, BNBUSDT, AVAXUSDT + más |
 | Ciclo activo | 20 min (SPOT_BULL dinámico) |
-| Win rate DB | 29.5% (83 trades — degradado por 60 rebalanceos del día con WR 18%) |
+| Win rate DB | 28% (107 trades — WR real normales: 0%/15 trades; rebalanceos post-fix: WR 53.6%/pool B) |
 
 ---
 
@@ -68,8 +68,8 @@ crypto-agent/
 ├── pnl_service.py         Predictor PnL: umbrales por categoría + F&G modifier + bootstrap
 ├── strategy.py            Pesos ranking por régimen (TV/News/Tech)
 ├── position_manager.py    Gestión posiciones abiertas, DB, trailing stop, cierre
-├── app.py                 FastAPI: /dashboard/summary, /futures/positions, /health/status
-├── dashboard.js           Frontend: cards, tablas, Monte Carlo, market ticker
+├── app.py                 FastAPI: /dashboard/summary, /futures/positions, /health/status, MC 3 escenarios A/B/C
+├── dashboard.js           Frontend: cards, tablas, Monte Carlo 3 escenarios, barras comparativas, badge ahorro
 ├── SYSTEM_REFERENCE.md    ← ESTE ARCHIVO
 └── .env                   Variables de entorno (gitignored)
 ```
@@ -410,6 +410,8 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | N15 | Verificar win rate real con 83 trades en dashboard — actualmente 29.5% (bajo por rebalanceos). Monitorear si sube con nuevos filtros R1-R6 |
 | N16 | Monitorear rebalanceos próximas 24h: objetivo reducir de 60/día → 5-8/día. Log clave: `[Rebalance] Holding: no technical sell signal` |
 | N17 | Verificar que posiciones antiguas (>4h) con RSI>60 sí se rebalancean correctamente cuando aparece nueva señal de mayor EV |
+| N18 | WR trades normales (SL/TP) es 0% en 15 trades — investigar si SL está demasiado ajustado o entries en mal timing. Candidato: ATR-based SL para NARRATIVE |
+| N19 | Trailing stop poco agresivo para breakouts grandes: JTOUSDT +29% requería activación +5%/trail 2%. Revisar `trailing_activation_pct` NARRATIVE (actual +3%) |
 
 ---
 
@@ -464,15 +466,29 @@ STABLECOIN_PREFIXES = ["USDC", "BUSD", "TUSD", "DAI", "FDUSD", "USDP"]
 | BTC.D filter 56% bloqueaba TODOS los alts | Cero señales con BTC.D ~63% | Subido a 64% |
 | 3 posiciones mismo símbolo (RENDER×3, TAO×3) | Concentración extrema | `MAX_POSITIONS_PER_SYMBOL=1` |
 
-### Estadísticas históricas (83 trades cerrados al jun 15 20:40)
+### Estadísticas históricas (107 trades cerrados al jun 15 21:05)
 ```
-Win rate: 29.5% — ADVERTENCIA: degradado por portfolio_rebalancing (60 cierres hoy, WR=18%)
-PnL del día: -$71.53 (portfolio_rebalancing -$63.56 + stop_loss -$7.97)
-Profit factor: ~0.4 — objetivo ≥ 1.5 (esperamos mejora con Opción B)
+Win rate global: 28% (30W/77L) — DEGRADADO por 92 rebalanceos (WR=32.6%)
+Win rate trades normales (SL/TP/predictor): 0% / 15 trades — requiere ajuste SL
+PnL del día: -$74.38 (portfolio_rebalancing -$59.17 + normales -$15.20)
+Profit factor global: 0.18 — objetivo ≥ 1.5
 
-Peores símbolos por rebalanceo: RENDERUSDT (9 sells, -$9.25) | WLDUSDT (4 sells, -$9.19)
-                                  TAOUSDT (3 sells, -$6.57)   | JTOUSDT (3 sells, -$6.17)
-Patrón ciclo vicioso: FETCH/RENDER/NEAR vendidos y recomprados en <2h (comisión doble)
+Impacto post-fix inmediato: 55 rebalanceos → 5 en primera hora tras apply
+Oportunidades perdidas por rebalanceo PRE-fix:
+  JTOUSDT vendido → +29.4% el día   | XLMUSDT vendido → +10.7%
+  ZROUSDT vendido → +10.7%           | WLDUSDT vendido 4x → +6.5%
+  INJUSDT vendido → +7.3%
+~70% de rebalanceos habrían sido bloqueados por Opción B
+```
+
+### Monte Carlo 90 días — 3 escenarios (1,000 sims, capital $3,080)
+```
+Escenario A — Sin fixes (histórico):   P50=$2,755  return=-10.5%  WR=28%
+Escenario B — Con Opción B (activo):   P50=$3,066  return= -0.4%  WR~54%
+Escenario C — Optimista (WR 45%):      P50=$3,246  return= +5.4%  WR=45%
+
+Diferencia A→B: +$311 en 90 días = +$38/día de ahorro por rebalanceo quirúrgico
+Para llegar a C: SL calibrado ATR + trailing agresivo (+5%/2%) + predictor con más datos
 ```
 
 ### Matemáticas con capital actual ($3,080 total / $1,316 liquid)
