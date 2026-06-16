@@ -803,7 +803,11 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
             except Exception as _pred_err:
                 print(f"[Rebalance] prediction check skipped for {symbol}: {_pred_err}")
 
-        # Fix B — Re-análisis técnico: retener si RSI < 55 y precio sobre EMA9 (recuperable)
+        # Opción B — Condición técnica negativa REQUERIDA para rebalancear
+        # El rebalanceo solo procede si el par muestra señal técnica genuinamente negativa:
+        #   RSI 1h > rebalance_rsi_overbought (default 60) → sobrecomprado / agotado
+        #   O EMA9 descendente (último cierre < EMA9) → tendencia bajista a 1h
+        # Si NO se cumple ninguna condición negativa → RETENER (no vender por ruido de ciclo)
         if getattr(settings, 'rebalance_skip_if_bullish_signal', True):
             try:
                 _klines_b = client.client.get_klines(symbol=symbol, interval='1h', limit=20)
@@ -813,17 +817,25 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
                     _losses_b = [max(0.0, _closes_b[i-1] - _closes_b[i]) for i in range(1, len(_closes_b))]
                     _avg_gain_b = sum(_gains_b[-14:]) / 14
                     _avg_loss_b = sum(_losses_b[-14:]) / 14
-                    _rsi_b = 100 - (100 / (1 + _avg_gain_b / _avg_loss_b)) if _avg_loss_b > 0 else 100.0
-                    _ema9_b = _closes_b[-1]
+                    _rsi_b = 100 - (100 / (1 + _avg_gain_b / _avg_loss_b)) if _avg_loss_b > 0 else 50.0
+                    _ema9_b = _closes_b[0]
                     _alpha_b = 2 / (9 + 1)
-                    for _c in _closes_b[-9:]:
+                    for _c in _closes_b:
                         _ema9_b = _c * _alpha_b + _ema9_b * (1 - _alpha_b)
                     _cur_c = _closes_b[-1]
-                    if _rsi_b < 55 and _cur_c >= _ema9_b * 0.998:
-                        print(f"[Rebalance] Holding {symbol}: RSI1h={_rsi_b:.1f}<55, price above EMA9 — bullish signal")
+                    _rsi_threshold = getattr(settings, 'rebalance_rsi_overbought', 60.0)
+                    _rsi_negative = _rsi_b > _rsi_threshold
+                    _ema9_negative = _cur_c < _ema9_b * 0.999
+                    if not (_rsi_negative or _ema9_negative):
+                        print(f"[Rebalance] Holding {symbol}: no technical sell signal (RSI1h={_rsi_b:.1f}<={_rsi_threshold}, price vs EMA9 OK) — keeping position")
                         continue
-            except Exception:
-                pass
+                    print(f"[Rebalance] Technical sell confirmed {symbol}: RSI={_rsi_b:.1f} rsi_neg={_rsi_negative}, ema9_neg={_ema9_negative} — proceeding with rebalance")
+                else:
+                    print(f"[Rebalance] Holding {symbol}: insufficient klines for technical check — keeping position")
+                    continue
+            except Exception as _te:
+                print(f"[Rebalance] Holding {symbol}: technical check failed ({_te}) — keeping position")
+                continue
 
         try:
             filters = get_symbol_filters(client, symbol)

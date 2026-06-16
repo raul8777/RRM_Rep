@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     protect_profitable_positions: bool = Field(default=True, env="PROTECT_PROFITABLE_POSITIONS")  # skip rebalance if PnL>1%
     protect_profit_min_pct: float = Field(default=0.3, env="PROTECT_PROFIT_MIN_PCT")              # minimum PnL% to protect (v3: 0.8→0.3 — protect desde micro-ganancia)
     # Rebalancing controls (v2)
-    min_hold_minutes: int = Field(default=120, env="MIN_HOLD_MINUTES")         # min time before rebalancing out a position (v3: 60→120)
+    min_hold_minutes: int = Field(default=240, env="MIN_HOLD_MINUTES")         # min time before rebalancing out a position (v4: 120→240 = 4h mínimo)
     max_rebalance_per_cycle: int = Field(default=2, env="MAX_REBALANCE_PER_CYCLE")  # max sells per rebalance cycle
     max_total_exposure_pct: float = Field(default=0.65, env="MAX_TOTAL_EXPOSURE_PCT")  # max portfolio % in open spot positions
     # Smart exit: anti-wick SL confirmation
@@ -127,7 +127,8 @@ class Settings(BaseSettings):
     # Smart exit: rebalance skips if predictor sees upside
     rebalance_skip_if_positive_prediction: bool = Field(default=True, env="REBALANCE_SKIP_IF_POSITIVE_PREDICTION")
     rebalance_min_hold_prob: float = Field(default=0.45, env="REBALANCE_MIN_HOLD_PROB")  # skip rebalance if prob >= this AND epnl > 0 (v3: 0.55→0.45)
-    rebalance_skip_if_bullish_signal: bool = Field(default=True, env="REBALANCE_SKIP_IF_BULLISH_SIGNAL")  # skip rebalance if RSI1h<55 AND price>EMA9
+    rebalance_skip_if_bullish_signal: bool = Field(default=True, env="REBALANCE_SKIP_IF_BULLISH_SIGNAL")  # require technical negative signal before rebalancing
+    rebalance_rsi_overbought: float = Field(default=60.0, env="REBALANCE_RSI_OVERBOUGHT")  # RSI1h threshold — rebalance only if RSI > this OR EMA9 descending
     # Dynamic max positions by regime (replaces single MAX_POSITIONS when regime is known)
     max_positions_spot_bull: int = Field(default=15, env="MAX_POSITIONS_SPOT_BULL")
     max_positions_range_scalp: int = Field(default=8, env="MAX_POSITIONS_RANGE_SCALP")
