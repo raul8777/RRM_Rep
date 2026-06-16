@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 16 2026 07:23 UTC-6 | Fix scale-out qty desync + 3 saldos huérfanos recuperados + clamp -2010 defensivo | commit b3afd02
+> Última actualización: jun 16 2026 07:34 UTC-6 | Smart TP: extend/scale-out/close dinámico por momentum + historial para predictor | commit 43c0c70
 
 ---
 
@@ -34,7 +34,7 @@
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 16 2026 07:23 UTC-6 |
+| Fecha última actualización | jun 16 2026 07:34 UTC-6 |
 | Capital total | ~$3,028 USDT |
 | Capital spot líquido | ~$717 USDT |
 | Capital invertido spot | ~$2,311 USDT (76.3%) — cap 75% (ligeramente sobre cap) |
@@ -46,7 +46,7 @@
 | BTC 30d | -17.7% (bear estructural — SPOT_BULL de rebote corto plazo) |
 | Screener dinámico | ✅ ACTIVO — 46 spot / 8 futures |
 | Hedge mode Binance | ✅ ACTIVADO (`dualSidePosition=true`) |
-| Docker | live, sin errores — commit b3afd02 |
+| Docker | live, sin errores — commit 43c0c70 |
 | dry_run | False |
 | allow_real_trading | True |
 | Posiciones abiertas spot (11+) | PAXGUSDT, INJUSDT(×2), WLDUSDT, TAOUSDT, RENDERUSDT, USD1USDT(×2), ASTERUSDT, XAUTUSDT, OPGUSDT + más |
@@ -283,12 +283,13 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 
 ### Activos (no resueltos)
 
-**Sin bugs activos conocidos** — todos verificados y resueltos al jun 16 2026 07:23 UTC-6.
+**Sin bugs activos conocidos** — todos verificados y resueltos al jun 16 2026 07:34 UTC-6.
 
 ### Resueltos (historial)
 
 | Fecha | Bug | Fix |
 |-------|-----|-----|
+| jun 16 07:34 | Smart TP: sistema anterior cerraba/vendía 50% al TP fijo sin considerar momentum — se perdían ganancias potenciales cuando la posición tenía fuerza alcista | `run_trades.py`: nueva función `_evaluate_tp_momentum()` corre predictor + señales técnicas al momento del TP. Decisión: EXTEND(score 3-4/4)→sube TP+SL, SCALE_OUT(2/4)→vende 50%, CLOSE(0-1/4)→cierra todo. Historial completo en `metadata.tp_decisions[]`. `config.py`: 3 params nuevos + `tp_extension_pct` por categoría. `position_manager.py`: `update_position_tp()`. Commit 43c0c70 |
 | jun 16 07:23 | Scale-out no actualizaba `pos.quantity` en DB — tras vender 50% en TP el PM seguía con qty completa → siguiente ciclo SL/TP intentaba vender doble → error Binance `-2010` (OPGUSDT afectado) | `run_trades.py` scale-out: ahora llama `update_position_quantity(pos.position_id, remaining_qty)` + guarda `scale_out_qty_sold/avg_price` en metadata. `position_manager.py`: método `update_position_quantity()` nuevo; `update_position_metadata` y `update_position_sl` corregidos para usar `pos.db_id` (columna `id`) en vez de `position_id` (no existe en DB). Commit b3afd02 |
 | jun 16 07:23 | 3 saldos huérfanos: INJ(29.76), USD1(222), OPG(617 vendidos sin actualizar PM) — compras ejecutadas en Binance sin record en PM (excepción silenciosa post-buy o corte de ciclo) | Registrados manualmente como posiciones con SL/TP correctos: INJ(29.76@5.794, NARRATIVE SL3.5%/TP7%), USD1(222@1.00071, MIDCAP SL1.8%/TP3.5%). OPG qty corregida. Total recuperado: ~$504 USDT ahora monitoreados |
 | jun 16 07:23 | Clamp defensivo: cualquier desincronización futura de qty causaría `-2010` en SL/TP | `run_trades.py` `_check_sl_tp_positions()`: antes de `create_market_order` obtiene balance Binance real y usa `min(qty_db, binance_balance)` → nunca vende más de lo disponible |
@@ -363,7 +364,7 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 
 ## 8. PENDIENTES PRIORIZADOS
 
-### ✅ TODO completado al jun 16 2026 07:08 UTC-6
+### ✅ TODO completado al jun 16 2026 07:34 UTC-6
 
 **Plan arquitectura v1** (P1–P14): todos completados.
 **Plan arquitectura v2** (Fases A–E): todos completados.
@@ -399,8 +400,11 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | R4 | Correlaciones: `_check_category_limit()` — LARGE_CAP:3, MIDCAP_ALT:5, NARRATIVE:4, MEME:2 | ✅ `run_trades.py` + `config.py` |
 | R5 | Circuit breaker técnico: 5 fallos API consecutivos → pausa 10min (no bloquea por pérdidas) | ✅ `run_trades.py` + `app.py` + `dashboard.js` |
 | R6 | On-chain funding rate: `_get_funding_rate()` cacheado 10min, skip si FR>0.08% en SPOT_BULL | ✅ `run_trades.py` + `config.py` |
+| S1 | Fix scale-out qty desync + `update_position_metadata/sl` columna DB correcta + clamp -2010 | ✅ `run_trades.py` + `position_manager.py` commit b3afd02 |
+| S2 | Recuperar 3 saldos huérfanos (~$504 USDT): INJ 29.76, USD1 222, OPG desync | ✅ DB directo commit b3afd02 |
+| S3 | **Smart TP**: `_evaluate_tp_momentum()` — EXTEND(score≥3/4), SCALE_OUT(2/4), CLOSE(≤1/4). Historial `metadata.tp_decisions[]` para LearningEngine | ✅ `run_trades.py` + `config.py` + `position_manager.py` commit 43c0c70 |
 
-### � En observación
+### En observación
 
 | # | Tarea |
 |---|-------|
@@ -427,6 +431,8 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | N23 | Cuando acumule 50+ trades reales limpios: ejecutar POST /predictor/bootstrap?days=1000 para refinar pesos definitivamente |
 | N24 | Monitorear que no aparecen nuevos saldos huérfanos — causa raíz (excepción silenciosa post-buy) pendiente de investigar en `_buy_top_symbols` |
 | N25 | Verificar que scale-out de próximas posiciones actualiza `remaining_qty` en logs: `SCALE-OUT {sym}: sold X (50%) @ P, remaining=Y` |
+| N26 | Smart TP: monitorear primeras activaciones en logs `[SmartTP]` — verificar que score/decision es correcto y que EXTEND guarda `tp_decisions[]` en metadata |
+| N27 | Smart TP: cuando acumulen 10+ trades con extensión — analizar si las extensiones fueron rentables (PnL final > PnL en primer TP) para calibrar umbrales de score |
 
 ---
 
