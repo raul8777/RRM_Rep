@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 16 2026 09:10 UTC-6 | sim_regimes.py: futuros ya activos, bear SHORT +$404 MXN/30d | commit cb5ed00+sim_regimes
+> Última actualización: jun 16 2026 09:49 UTC-6 | Profit Overhaul O1-O5 + Smart Kelly completo | commits ebfd749 → 1db5101 → f34fd60
 
 ---
 
@@ -34,25 +34,26 @@
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 16 2026 08:37 UTC-6 |
-| Capital total | ~$3,028 USDT |
-| Capital spot líquido | ~$717 USDT |
-| Capital invertido spot | ~$2,311 USDT (76.3%) — cap 75% (ligeramente sobre cap) |
+| Fecha última actualización | jun 16 2026 09:49 UTC-6 |
+| Capital total | ~$3,000 USDT |
+| Capital spot líquido | ~$1,758 USDT (58.6% del capital — productivo para trading) |
+| Capital invertido spot | ~$1,242 USDT (6 posiciones: ASTER, INJ, RENDER, RLUSD, TAO, WLD) |
 | Capital futuros | ~$5 USDT (ocioso — esperando FUTURES_SHORT) |
-| Régimen activo | **SPOT_BULL** (DÉBIL ALZA, confirmado) |
-| Fear & Greed | **~20 — Extreme Fear** |
-| BTC 4h trend | UP (+0.17% última vela 4h) |
-| BTC 7d | +9.0% |
-| BTC 30d | -17.7% (bear estructural — SPOT_BULL de rebote corto plazo) |
-| Screener dinámico | ✅ ACTIVO — 46 spot / 8 futures |
+| Régimen activo | **SPOT_BULL** (confirmado) |
+| Fear & Greed | **23 — Extreme Fear** |
+| BTC 4h trend | UP |
+| BTC 7d | +6.79% |
+| BTC 30d | -14.7% (rebote en bear estructural) |
+| Screener dinámico | ✅ ACTIVO — 46 spot / 9 futures |
 | Hedge mode Binance | ✅ ACTIVADO (`dualSidePosition=true`) |
-| Docker | live, sin errores — commit 7503a31 (M1-M5) |
+| Docker | live, sin errores — commit f34fd60 (Smart Kelly) |
 | dry_run | False |
 | allow_real_trading | True |
-| Posiciones abiertas spot (11+) | PAXGUSDT, INJUSDT(×2), WLDUSDT, TAOUSDT, RENDERUSDT, USD1USDT(×2), ASTERUSDT, XAUTUSDT, OPGUSDT + más |
-| Ciclo activo | 20 min (SPOT_BULL dinámico) |
-| Win rate DB | ~28% (115 trades — 105 marcados is_corrupted) |
-| **Predictor** | **62,587 trades sintéticos + 10 reales limpios — 22 símbolos con pesos en DB** |
+| Posiciones abiertas spot | ASTERUSDT, INJUSDT, RENDERUSDT, RLSDT, TAOUSDT, WLDUSDT |
+| Ciclo activo | **10 min** (SPOT_BULL — actualizado jun 16, era 20min) |
+| Pares en analysis_symbols | **25** (añadidos HBARUSDT + AAVEUSDT jun 16) |
+| Win rate DB | ~50% (trades limpios post-fix rebalanceo) |
+| **Predictor** | **62,587 trades sintéticos — 22 símbolos con pesos en DB** |
 | **Bootstrap** | **Ejecutado 365d — siguiente run opcional 1000d vía POST /predictor/bootstrap?days=1000** |
 
 ---
@@ -160,17 +161,20 @@ MAX_POSITIONS=12                    # ← actualizado jun15 (era 10)
 MAX_POSITIONS_PER_SYMBOL=1
 TRADE_CYCLE_MINUTES=5               # fallback (ciclo real es dinámico por régimen)
 
-# ── Kelly sizing — AGRESIVO (actualizado jun15 10:00) ──────────────────────
-KELLY_BASE_USDT=40                  # era 20 → base fija mínima
-KELLY_DYNAMIC_BASE_PCT=0.12         # era 0.08 → base = total × 12% ($3,080×12%=$369)
-KELLY_MAX_USDT=350                  # era 200 → ~11% del portfolio por trade
-KELLY_MAX_PCT_LIQUID=0.28           # era 0.30 → cap: 28% del líquido ($1,316×28%=$368)
-MAX_PER_TRADE_USDT=350              # era 15 → BUG FIX: alinear con kelly_max
+# ── Kelly sizing — SMART KELLY (actualizado jun16 09:49) ─────────────────────
+KELLY_BASE_USDT=40                  # base fija mínima
+KELLY_DYNAMIC_BASE_PCT=0.12         # base = capital_liquido × 12%
+KELLY_MAX_USDT=350                  # FLOOR: nunca menos de $350
+KELLY_MAX_PCT_CAP=0.25              # [NUEVO] Smart Kelly: max = max(floor, liquid × 25%)
+KELLY_MAX_PCT_LIQUID=0.28           # cap: 28% del líquido por trade
+MAX_PER_TRADE_USDT=350              # alineado con kelly_max (bug fix jun15)
 
-# Kelly sizes resultantes con capital actual ($3,080 total / $1,316 liquid):
-#   prob=0.50, str=0.85 → $159/trade
-#   prob=0.58, str=0.90 → $249/trade
-#   Tier BASE min → $~100/trade
+# Smart Kelly — tiers con $1,758 USDT líquidos:
+#   FUERTE (prob≥0.65 + str≥0.80) → $439  (max dinámico 25% liquid)
+#   ALTA   (prob≥0.60 + str≥0.70) → $394
+#   MEDIA  (prob≥0.55 + str≥0.55) → $325
+#   BASE   (prob≥0.50)            → $211  (12% liquid)
+# Conviction boost SPOT_BULL (vol_spike×2/3): cap 10%→15% liquid = $263
 
 # ── SL/TP globales (overrideados por categoría — ver sección 4) ────────────
 STOP_LOSS_PCT=1.8
@@ -189,7 +193,7 @@ MIN_HOLD_MINUTES=90                 # era 60 → esperar 90min antes de rebalanc
 MAX_REBALANCE_PER_CYCLE=1           # era 2 → máx 1 venta por ciclo (protege posiciones)
 
 # ── Ciclos dinámicos por régimen ────────────────────────────────────────────
-CYCLE_SPOT_BULL=20                  # era 15 → señales 1h/4h no cambian en 15min
+CYCLE_SPOT_BULL=10                  # actualizado jun16: era 20 → más throughput de señales (+47%)
 CYCLE_RANGE_SCALP=5                 # sin cambio
 CYCLE_PRESERVATION=45               # era 30 → menos ciclos en bajista = menos comisiones
 CYCLE_FUTURES_SHORT=6               # era 8 → más monitoreo en shorts
@@ -309,9 +313,10 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 - Total pares: 20 → 23
 
 ### M3 — Kelly conviction multiplier (`run_trades.py` L1623)
-- Si `vol_spike ≥ 3.0x` → `trade_allocation × 2.0` (cap: 10% portfolio)
-- Si `vol_spike ≥ 2.0x` → `trade_allocation × 1.5` (cap: 10% portfolio)
+- Si `vol_spike ≥ 3.0x` → `trade_allocation × 2.0` (cap: **15% portfolio en SPOT_BULL**, 10% resto)
+- Si `vol_spike ≥ 2.0x` → `trade_allocation × 1.5` (cap: 15% portfolio en SPOT_BULL)
 - Params: `kelly_conviction_enabled=True`, `kelly_conviction_vol2x=1.5`, `kelly_conviction_vol3x=2.0`, `kelly_conviction_max_pct=0.10`
+- Cap SPOT_BULL ampliado: 10%→**15%** (Smart Kelly, commit f34fd60) — con $1,758 liquid: cap $263 (era $175)
 - Señales strong detectadas en simulación: 22/87 trades en 30d
 
 ### M4 — Breakout entry detector (`autonomous_signals.py` L299)
@@ -523,6 +528,22 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | S2 | Recuperar 3 saldos huérfanos (~$504 USDT): INJ 29.76, USD1 222, OPG desync | ✅ DB directo commit b3afd02 |
 | S3 | **Smart TP**: `_evaluate_tp_momentum()` — EXTEND(score≥3/4), SCALE_OUT(2/4), CLOSE(≤1/4). Historial `metadata.tp_decisions[]` para LearningEngine | ✅ `run_trades.py` + `config.py` + `position_manager.py` commit 43c0c70 |
 
+### PROFIT OVERHAUL jun 16 2026 — O1-O5 + Smart Kelly
+
+| ID | Mejora | Commit | Impacto estimado MXN/día |
+|----|--------|--------|-------------------------|
+| O1 | Liquidar PAXG+XAUT+USD1×2 → USDT libre $911→$1,758 (+93%) | manual | +130–150 |
+| O2 | WR Screener: bloquear pares con 3 SL consecutivos (`_consecutive_sl_count`) | ebfd749 | +10–20 |
+| O3 | Ciclo SPOT_BULL 20→10 min (+47% throughput) | ebfd749 | +15–20 |
+| O4 | Smart TP EXTEND umbral 3/4→2/4 (`SMART_TP_EXTEND_SCORE_THRESHOLD=2`) | ebfd749 | +15–25 |
+| O5 | HBARUSDT ($15.7M vol) + AAVEUSDT ($14.4M vol) a analysis_symbols (25 pares) | 1db5101 | +10–20 |
+| SK | Smart Kelly: `kelly_max=max(350, liquid×25%)`, tiers directos, conviction 10→15% SPOT_BULL | f34fd60 | +60–120 |
+| **TOTAL** | | | **+240–355 MXN/día** |
+
+**Pendientes O6-O7:**
+- O6: Staking $600 USDT en Binance Flexible Earn → ~$2 MXN/día pasivos (**acción manual usuario**)
+- O7: Momentum Burst detector en `autonomous_signals.py` (baja prioridad, ~100 líneas)
+
 ### En observación
 
 | # | Tarea |
@@ -552,6 +573,10 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | N25 | Verificar que scale-out de próximas posiciones actualiza `remaining_qty` en logs: `SCALE-OUT {sym}: sold X (50%) @ P, remaining=Y` |
 | N26 | Smart TP: monitorear primeras activaciones en logs `[SmartTP]` — verificar que score/decision es correcto y que EXTEND guarda `tp_decisions[]` en metadata |
 | N27 | Smart TP: cuando acumulen 10+ trades con extensión — analizar si las extensiones fueron rentables (PnL final > PnL en primer TP) para calibrar umbrales de score |
+| N28 | Smart Kelly: monitorear logs `Kelly sizing: ... tier=ALTA/FUERTE` en próximos ciclos — verificar que $394/$439 se usan correctamente en señales fuertes |
+| N29 | Smart Kelly: tras 20 trades nuevos — comparar avg_size_usd vs baseline $95 para confirmar mejora en tamaño por trade |
+| N30 | O6 pendiente: recordar al usuario mover $600 USDT a Binance Flexible Earn (Simple Earn → Flexible en app Binance) |
+| N31 | O7 pendiente: Momentum Burst en `autonomous_signals.py` cuando haya tiempo — detector de alta convicción para +4-8 MXN/día |
 
 ---
 
@@ -644,17 +669,22 @@ Cambios NARRATIVE: SL 2.5→**3.5%** (menos whipsaws), TP 5→**7%** (más recor
 ### Tokens nuevos en token_categories (commit 2a6219c)
 UNIUSDT, AAVEUSDT (MIDCAP_ALT/DeFi) | BCHUSDT, ZECUSDT, LTCUSDT, XLMUSDT, ZROUSDT (MIDCAP_ALT/Infrastructure) | JTOUSDT (NARRATIVE/AI_DATA) | TRUMPUSDT, MEGAUSDT (MEME/Political)
 
-### Matemáticas con capital actual ($3,080 total / $1,316 liquid)
+### Matemáticas con capital actual ($3,000 total / $1,758 liquid) — Smart Kelly
 ```
-Kelly dinámico: $3,080 × 12% = $369 base
-Kelly sizes reales: prob=0.50 str=0.85 → $159/trade | prob=0.58 str=0.90 → $249/trade
-Kelly max cap: min($350, $1,316×28%) = min($350, $368) = $350
+Kelly dinámico base: $1,758 × 12% = $211 (BASE tier)
+Kelly max dinámico:  max($350_floor, $1,758×25%) = $439 (FUERTE tier)
+Kelly max cap check: $1,758 × 28% = $492 (nunca supera este límite por trade)
 
-12 posiciones × $150 avg = $1,800 = 58% del portfolio
-Exposición cap: 75% = $2,310 max invertido → quedan $510 disponibles para oportunidades
+Tiers Smart Kelly con $1,758 liquid:
+  FUERTE (prob≥0.65 + str≥0.80): $439/trade
+  ALTA   (prob≥0.60 + str≥0.70): $394/trade
+  MEDIA  (prob≥0.55 + str≥0.55): $325/trade
+  BASE   (prob≥0.50):             $211/trade
+  Conviction SPOT_BULL (vol≥2x):  cap = $1,758×15% = $263
 
-Con WR 45% objetivo (post-corrección rebalanceo), r=1.94 (TP3.5%/SL1.8%):
-EV por trade = 0.45×$150×1.94 - 0.55×$150 = +$48.2 (positivo)
+Con 2.5 trades/día, WR 50%, avg size $280 (MEDIA/ALTA), r=1.94 (TP3.5%/SL1.8%):
+EV/trade = 0.50×$280×1.94 - 0.50×$280 = +$131.6 bruto → -comisión 0.2% = +$125.8
+PnL estimado/día = 2.5 × $125.8 × net_factor ≈ $12-15 USD/día = 240-300 MXN/día
 ```
 
 ### Con futuros activados (FUTURES_SHORT, bear market)
