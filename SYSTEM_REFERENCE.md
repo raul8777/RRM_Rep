@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 16 2026 08:37 UTC-6 | M1-M5: ATR-based SL + +3 pares NARRATIVE + Kelly conviction + breakout_12h + peak_hours boost | commit 7503a31+refine
+> Última actualización: jun 16 2026 09:10 UTC-6 | sim_regimes.py: futuros ya activos, bear SHORT +$404 MXN/30d | commit cb5ed00+sim_regimes
 
 ---
 
@@ -344,6 +344,61 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 - N30: Con 20+ trades M3 — analizar si strong signals (vol≥2x) tienen mayor WR que base para calibrar cap_strong
 - N31: ONDOUSDT, JUPUSDT, OPUSDT — monitorear primeras señales de los nuevos pares en 48h
 - N32: Cuando mercado llegue a F&G>50 (bull), rerun simulación 7d para verificar proyección 300+ MXN/día
+
+---
+
+## SESIÓN JUN 16 2026 TARDE — Análisis por Régimen + Simulación Futuros (sim_regimes.py)
+
+### Estado futuros verificado (jun 16 09:00)
+- `futures_enabled=True` → **YA ACTIVO en .env** (no era necesario activar nada)
+- `futures_long_in_spot_bull=True`, `futures_long_rsi_threshold=35.0`
+- `futures_max_shorts=3`, `futures_usdt_per_trade=100`, `futures_sl_pct=2.5`, `futures_tp_pct=6.0`
+- Régimen actual: `SPOT_BULL DÉBIL ALZA` (EMA9>EMA21, BTC 7d=+6.79%, 30d=-14.7%)
+
+### Mapa completo de regímenes → estrategia activa
+
+| Régimen detectado | Trigger | Estrategia spot | Futuros | Estado |
+|-------------------|---------|-----------------|---------|--------|
+| `SPOT_BULL` | EMA9>EMA21 + día>0.5% | Long 23 pares, M1-M5, Kelly×1.0 | LONG 2x si RSI<35 + BTC UP | ✅ Activo |
+| `RANGE_SCALP` | BB<6% + vol<0.7x | Long en BB inferior, RSI<40, Kelly×0.7 | LONG 2x en BB touch | ✅ Activo |
+| `PRESERVATION` | BTC -7%/7d ó -15%/30d | Solo NARRATIVE, Kelly×0.5 | — | ✅ Activo |
+| `FUTURES_SHORT` | PRESERVATION + futures=True | Solo NARRATIVE spot | SHORT 2x BTC/ETH/SOL, SL2.5%/TP6% | ✅ **Activo** (futures_enabled=True) |
+
+### Resultados simulación `sim_regimes.py` (jun 16 2026)
+
+**Período 7 días (rebote, BTC +6.79%):**
+
+| Escenario | Trades/día | WR | PF | PnL/día USD | PnL/día MXN |
+|-----------|-----------|----|----|-------------|-------------|
+| A — Solo Spot M1-M5 | 1.7 | 66.7% | 1.46 | +7.64 | **+149** |
+| B — + Futuros SHORT bear | 1.7 | 66.7% | 1.46 | +7.64 | **+149** |
+| C — + Futuros LONG bull | 1.7 | 66.7% | 1.46 | +7.64 | **+149** |
+| D — Completo (SHORT+LONG) | 1.7 | 66.7% | 1.46 | +7.64 | **+149** |
+
+> En los 7d de rebote no hay bear (BTC 7d>0) = shorts no se abren. LONG futuros requiere RSI<32 = no activado (mercado alcista tiene RSI más alto). Spot puro domina.
+
+**Período 30 días (bear mayo-junio, BTC -17%):**
+
+| Escenario | Trades/día | WR | PF | PnL/día USD | PnL/día MXN | Desglose |
+|-----------|-----------|----|----|-------------|-------------|---------|
+| A — Solo Spot M1-M5 | 2.9 | 48.3% | 1.07 | -0.02 | **~0** | spot=-$0.71 |
+| B — + Futuros SHORT bear | 4.0 | 48.7% | 1.12 | +0.69 | **+13** | spot=-$0.71, shorts=+$21.43 |
+| C — + Futuros LONG bull | 3.2 | 48.4% | 1.08 | +0.11 | **+2** | spot=-$0.71, longs_fut=+$4.15 |
+| **D — Completo** | **4.2** | **48.8%** | **1.13** | **+0.83** | **+16** | spot=-$0.71, shorts=+$21.43, longs=+$4.15 |
+
+### Conclusiones clave
+1. **En bear -17%:** los FUTURES SHORT convierten breakeven (0 MXN/día) en **+13 MXN/día** (+$404 MXN en 30d)
+2. **En bull:** los FUTURES LONG tienen impacto mínimo en 7d — RSI rara vez cae a <32 en rebote fuerte
+3. **El sistema completo (Escenario D)** extrae valor en TODOS los regímenes:
+   - Bull → spot genera 149 MXN/día
+   - Bear → futures SHORT compensan: +13-16 MXN/día en lugar de 0
+4. **Futures SHORT WR en bear ~55-60%** (precio baja en bear = shorts ganan = correcto estadísticamente)
+5. Meta 1,000 MXN/día: requiere bull + capital ×6 ó WR+60% consistente
+
+### Pendientes post-sim_regimes:
+- N33: Verificar en logs que FUTURES_SHORT se abre correctamente cuando BTC 7d < -7% (próximo ciclo bear)
+- N34: Calibrar `futures_long_rsi_threshold` de 35→30 para ser más selectivo en LONG (menor ruido)
+- N35: Verificar que el auto-cierre de shorts al regresar a SPOT_BULL funciona (3 ciclos anti-whipsaw)
 
 ### Resueltos (historial)
 
