@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 15 2026 23:20 UTC-6 | P1+P2+P3 hacia Escenario C: NARRATIVE SL 3.5%/TP 7%/trailing 5%-2%, 10 tokens nuevos en token_categories | commit 2a6219c
+> Última actualización: jun 16 2026 07:08 UTC-6 | Aceleración predictor: bootstrap 1000d, 4 nuevas features, datos corruptos marcados, indicators_at_entry 100% | commit 8a0a750
 
 ---
 
@@ -34,24 +34,26 @@
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 15 2026 23:20 UTC-6 |
-| Capital total | ~$3,080 USDT |
-| Capital spot líquido | ~$1,316 USDT |
-| Capital invertido spot | ~$1,756 USDT (57.2%) — cap 75% |
+| Fecha última actualización | jun 16 2026 07:08 UTC-6 |
+| Capital total | ~$3,028 USDT |
+| Capital spot líquido | ~$717 USDT |
+| Capital invertido spot | ~$2,311 USDT (76.3%) — cap 75% (ligeramente sobre cap) |
 | Capital futuros | ~$5 USDT (ocioso — esperando FUTURES_SHORT) |
-| Régimen activo | **SPOT_BULL** (confirmado) |
-| Fear & Greed | **20 — Extreme Fear** |
-| BTC 4h trend | UP (+1.6% última vela 4h) |
+| Régimen activo | **SPOT_BULL** (DÉBIL ALZA, confirmado) |
+| Fear & Greed | **~20 — Extreme Fear** |
+| BTC 4h trend | UP (+0.17% última vela 4h) |
 | BTC 7d | +9.0% |
 | BTC 30d | -17.7% (bear estructural — SPOT_BULL de rebote corto plazo) |
 | Screener dinámico | ✅ ACTIVO — 46 spot / 8 futures |
 | Hedge mode Binance | ✅ ACTIVADO (`dualSidePosition=true`) |
-| Docker | live, sin errores — commit 2a6219c |
+| Docker | live, sin errores — commit 8a0a750 |
 | dry_run | False |
 | allow_real_trading | True |
-| Posiciones abiertas spot (12) | FETUSDT, LTCUSDT, ZECUSDT, MEGAUSDT, TRUMPUSDT, WLDUSDT, XLMUSDT, ZROUSDT, JTOUSDT, SOLUSDT, BNBUSDT, AVAXUSDT + más |
+| Posiciones abiertas spot (9+) | PAXGUSDT, INJUSDT, WLDUSDT, TAOUSDT, RENDERUSDT, USD1USDT, ASTERUSDT, XAUTUSDT, OPGUSDT + más |
 | Ciclo activo | 20 min (SPOT_BULL dinámico) |
-| Win rate DB | 28% (107 trades — WR real normales: 0%/15 trades; rebalanceos post-fix: WR 53.6%/pool B) |
+| Win rate DB | ~28% (115 trades — 105 marcados is_corrupted) |
+| **Predictor** | **62,587 trades sintéticos + 10 reales limpios — 22 símbolos con pesos en DB** |
+| **Bootstrap** | **Ejecutado 365d — siguiente run opcional 1000d vía POST /predictor/bootstrap?days=1000** |
 
 ---
 
@@ -64,11 +66,15 @@ crypto-agent/
 ├── config.py              Settings: todos los parámetros con defaults y env vars
 ├── market_regime.py       Detección: SPOT_BULL / RANGE_SCALP / PRESERVATION / FUTURES_SHORT
 ├── autonomous_signals.py  Señales técnicas: RSI, BB, EMA, vol_spike, divergencias (1h + 4h)
-├── pair_screener.py       [NUEVO jun15] Screener dinámico Binance 24h ticker, cache 15min
+├── pair_screener.py       [jun15] Screener dinámico Binance 24h ticker, cache 15min
 ├── pnl_service.py         Predictor PnL: umbrales por categoría + F&G modifier + bootstrap
+├── pnl_predictor.py       [ACTUALIZADO jun16] 9 features: +vol_spike, +atr_pct, +trend_4h, +weekly_range
+├── learning_engine.py     [ACTUALIZADO jun16] Filtra is_corrupted + rebalanceos; correlaciona 9 features; 4 cols nuevas DB
+├── bootstrap_history.py   [ACTUALIZADO jun16] Lookbacks 700-1000d, FORWARD=24h, 4 features extendidas inline
+├── trade_utils.py         [ACTUALIZADO jun16] format_indicators_for_predictor pasa 4 features nuevas
 ├── strategy.py            Pesos ranking por régimen (TV/News/Tech)
 ├── position_manager.py    Gestión posiciones abiertas, DB, trailing stop, cierre
-├── app.py                 FastAPI: /dashboard/summary, /futures/positions, /health/status, MC 3 escenarios A/B/C
+├── app.py                 FastAPI: /predictor/reset-corrupted (NUEVO), /predictor/bootstrap hasta 1000d
 ├── dashboard.js           Frontend: cards, tablas, Monte Carlo 3 escenarios, barras comparativas, badge ahorro
 ├── SYSTEM_REFERENCE.md    ← ESTE ARCHIVO
 └── .env                   Variables de entorno (gitignored)
@@ -354,7 +360,7 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 
 ## 8. PENDIENTES PRIORIZADOS
 
-### ✅ TODO completado al jun 15 2026 12:56 UTC-6
+### ✅ TODO completado al jun 16 2026 07:08 UTC-6
 
 **Plan arquitectura v1** (P1–P14): todos completados.
 **Plan arquitectura v2** (Fases A–E): todos completados.
@@ -413,6 +419,9 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | N18 | WR trades normales: monitorear si mejora con SL 3.5% vs anterior 2.5% — objetivo ≥20% WR en próximos 20 trades normales |
 | N19 | ✅ RESUELTO: Trailing NARRATIVE ahora activation=5%, distance=2%, TP=7% — monitorear primera activación en breakout >5% |
 | N20 | Monitorear trailing NARRATIVE nuevos valores: verificar que no retiene posiciones en reversión fuerte. Log: `[Trail]` en run_trades.py |
+| N21 | Monitorear que slot-pressure solo actúa cuando posiciones >= MAX_POSITIONS_régimen (15 en SPOT_BULL) |
+| N22 | Monitorear win rate con predictor actualizado (9 features) en próximos 20 trades reales — baseline actual: 0%/15 trades normales |
+| N23 | Cuando acumule 50+ trades reales limpios: ejecutar POST /predictor/bootstrap?days=1000 para refinar pesos definitivamente |
 
 ---
 
@@ -525,6 +534,71 @@ TP +6% = +$12 por trade | SL -2.5% = -$5 por trade → R:R = 2.4
 Con 3 shorts simultáneos = $300 margen total
 Win rate esperado shorts técnicos en bear: 45-55%
 ```
+
+---
+
+## 11. PREDICTOR PnL — ESTADO Y ARQUITECTURA (jun 16 2026)
+
+### Componentes del predictor
+| Archivo | Rol |
+|---------|-----|
+| `pnl_predictor.py` | Calcula `success_probability` y `expected_pnl` usando 9 features con pesos aprendidos |
+| `learning_engine.py` | Correlaciona indicadores con outcomes reales, ajusta pesos por símbolo y global |
+| `bootstrap_history.py` | Genera trades sintéticos desde klines históricas de Binance para pre-entrenar el predictor |
+| `pnl_service.py` | Facade: llama predictor + valida umbrales por categoría + F&G modifier |
+| `trade_utils.py` | `format_indicators_for_predictor()` normaliza el dict de indicadores para el predictor |
+
+### 9 features activas (post jun-16)
+| Feature | Peso default | Descripción | Validación |
+|---------|-------------|-------------|------------|
+| `vol_spike` | **0.15** | Vol actual / avg 20 velas anteriores | Validado jun-13: <0.5x = no entrar, >1.5x = señal fuerte |
+| `trend_4h` | **0.15** | +1.0 si EMA9>EMA21 en 4h, -1.0 si bajista | Validado jun-13: RSI 4h>65 + tendencia DOWN = no entrar |
+| `rsi` | 0.12 | RSI 14 en 1h | <30 alcista, >70 bajista |
+| `macd` | 0.10 | MACD vs signal + histograma | Cruce alcista = +prob |
+| `atr_pct` | 0.08 | ATR14/precio×100 | >3% = mov esperado amplio, <0.5% = comprimido |
+| `bb` | 0.08 | Posición en Bollinger Bands | <20% = soporte, >80% = resistencia |
+| `ema` | 0.08 | EMA vs SMA | EMA>SMA = alcista |
+| `weekly_range` | 0.08 | Posición precio en rango 7d (0=soporte, 1=resistencia) | Validado: >0.85 = no entrar |
+| `volume` | 0.04 | Volumen bruto | Peso bajo: ya capturado por vol_spike |
+
+### Estado del aprendizaje (jun 16 07:00)
+```
+Trades en DB:          115 total → 105 is_corrupted (rebalanceos) → 10 limpios
+Bootstrap más reciente: 365d → 62,587 trades sintéticos
+Símbolos con pesos:    22 símbolos + __global__
+Win rate bootstrapped: BTCUSDT=40.8%, ETHUSDT=39.4%, INJUSDT=40.4%, NEARUSDT=39.1%
+Bias correction global: 2.0 (predictor históricamente sobreestimaba)
+Accuracy real:         0% (solo 10 trades reales — necesita más datos)
+```
+
+### Endpoints de gestión del predictor
+```
+POST /predictor/reset-corrupted  → Marca 105 rebalanceos como is_corrupted + invalida cache
+POST /predictor/bootstrap?days=N → Genera N días de trades sintéticos (1 ≤ N ≤ 1000)
+POST /predictor/learn            → Corre LearningEngine con datos reales limpios
+```
+
+### Lookbacks por categoría en bootstrap
+| Categoría | Lookback | Símbolo ejemplo |
+|-----------|----------|-----------------|
+| LARGE_CAP | 1000d | BTCUSDT, ETHUSDT, BNBUSDT |
+| NARRATIVE | 1000d | FETUSDT, TAOUSDT, RENDERUSDT |
+| MIDCAP_ALT | 700d | SOLUSDT, AVAXUSDT, DOTUSDT |
+| MEME | 500d | DOGEUSDT, PEPEUSDT, WIFUSDT |
+| Default | 365d | Resto |
+
+### Nuevas columnas DB en `indicator_weights` (creadas automáticamente)
+```sql
+vol_spike_weight    FLOAT DEFAULT 0.08
+atr_pct_weight      FLOAT DEFAULT 0.08
+trend_4h_weight     FLOAT DEFAULT 0.08
+weekly_range_weight FLOAT DEFAULT 0.08
+-- Creadas con ALTER TABLE IF NOT EXISTS en cada _persist_weights()
+```
+
+### indicators_at_entry — fix jun-16
+Antes: solo se guardaba si `prediction != None` (~14% de operaciones)  
+Ahora: siempre se guarda con fallback a `sig['indicators']` si el predictor falla → **100% de operaciones** capturan features para el LearningEngine.
 
 ---
 
