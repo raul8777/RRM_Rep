@@ -216,6 +216,16 @@ class Settings(BaseSettings):
         "PEPEUSDT":   {"market_behavior": "MEME",        "origin": "MEME_POLITICAL"},
         "WIFUSDT":    {"market_behavior": "MEME",        "origin": "MEME_POLITICAL"},
         "INJUSDT":    {"market_behavior": "NARRATIVE",   "origin": "AI_DATA"},
+        "UNIUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "DEFI"},
+        "AAVEUSDT":   {"market_behavior": "MIDCAP_ALT",  "origin": "DEFI"},
+        "BCHUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},
+        "ZECUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},
+        "LTCUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},
+        "XLMUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},
+        "ZROUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},
+        "JTOUSDT":    {"market_behavior": "NARRATIVE",   "origin": "AI_DATA"},
+        "TRUMPUSDT":  {"market_behavior": "MEME",        "origin": "MEME_POLITICAL"},
+        "MEGAUSDT":   {"market_behavior": "MEME",        "origin": "MEME_POLITICAL"},
     }, env="TOKEN_CATEGORIES")
 
     # Win-rate thresholds per market_behavior category
@@ -225,7 +235,7 @@ class Settings(BaseSettings):
     category_thresholds: dict = Field(default={
         "LARGE_CAP":  {"min_prob": 0.55, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.2},
         "MIDCAP_ALT": {"min_prob": 0.50, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.2},
-        "NARRATIVE":  {"min_prob": 0.42, "min_pnl": -5.0, "min_volspike": 1.5, "stop_loss_pct": 2.5, "take_profit_pct": 5.0, "trailing_activation_pct": 3.0, "trailing_distance_pct": 1.5},
+        "NARRATIVE":  {"min_prob": 0.42, "min_pnl": -5.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 2.0},
         "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.0, "take_profit_pct": 4.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.5},
     }, env="CATEGORY_THRESHOLDS")
     
