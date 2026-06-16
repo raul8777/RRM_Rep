@@ -105,6 +105,7 @@ class Settings(BaseSettings):
         'SUIUSDT', 'PEPEUSDT', 'WIFUSDT', 'BTCUSDT', 'ETHUSDT', 'LINKUSDT',
         'NEARUSDT', 'WLDUSDT', 'INJUSDT', 'AGIXUSDT',
         'ONDOUSDT', 'JUPUSDT', 'OPUSDT',  # M2: +3 NARRATIVE alta vol (filtrados por WR 30d)
+        'HBARUSDT', 'AAVEUSDT',  # O5: nuevos pares narrativa validados vol24h>$10M (jun 16 2026)
     ], env="ANALYSIS_SYMBOLS")
 
     # VolSpike override: bypass PnL predictor for narrative tokens with strong volume
@@ -247,6 +248,7 @@ class Settings(BaseSettings):
         "JTOUSDT":    {"market_behavior": "NARRATIVE",   "origin": "AI_DATA"},
         "TRUMPUSDT":  {"market_behavior": "MEME",        "origin": "MEME_POLITICAL"},
         "MEGAUSDT":   {"market_behavior": "MEME",        "origin": "MEME_POLITICAL"},
+        "HBARUSDT":   {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},  # O5: Hedera, $15.7M vol/día
     }, env="TOKEN_CATEGORIES")
 
     # Win-rate thresholds per market_behavior category
