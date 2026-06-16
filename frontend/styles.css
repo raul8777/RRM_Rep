@@ -682,6 +682,16 @@ h1 {
 .row-pnl-pos { background: rgba(78,204,163,0.04); }
 .row-pnl-neg { background: rgba(231,76,60,0.04); }
 
+/* ── Close reason badges ─────────────────────────────────────────────────── */
+.close-reason {
+    font-size: 11px; font-weight: 600; padding: 2px 7px;
+    border-radius: 10px; white-space: nowrap; display: inline-block;
+}
+.reason-sl      { background: rgba(231,76,60,0.15);   color: #e74c3c; }
+.reason-tp      { background: rgba(78,204,163,0.15);  color: #4ecca3; }
+.reason-rebal   { background: rgba(241,196,15,0.15);  color: #f1c40f; }
+.reason-neutral { background: rgba(149,165,166,0.15); color: #95a5a6; }
+
 /* ── Trading Mode Badge (header) ─────────────────────────────────────────── */
 .trading-mode-badge {
     display: flex; align-items: center; gap: 6px;

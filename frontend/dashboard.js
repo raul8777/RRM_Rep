@@ -53,6 +53,29 @@ function fmtPrediction(pred) {
     </span>`;
 }
 
+// ── Close reason → human-readable label ──────────────────────────────────────
+const _CLOSE_REASON_MAP = {
+    'stop_loss':                   ['🔴 Stop Loss',             'reason-sl'],
+    'take_profit':                 ['🟢 Take Profit',           'reason-tp'],
+    'trailing_stop':               ['🟢 Trailing Stop',         'reason-tp'],
+    'scale_out':                   ['🟡 Scale-Out parcial',     'reason-neutral'],
+    'portfolio_rebalancing':       ['🔄 Rebalanceo técnico',    'reason-rebal'],
+    'prediction_reallocation':     ['🔄 Reemplazo por EV',      'reason-rebal'],
+    'reallocation_slot_pressure':  ['🔄 Presión de slots',      'reason-rebal'],
+    'reallocation_rsi_overbought': ['🔄 Reemplazo: RSI overbought + mejor EV', 'reason-rebal'],
+    'reallocation_ema9_bearish':   ['🔄 Reemplazo: tendencia bajista + mejor EV', 'reason-rebal'],
+    'orphan_asset_cleanup':        ['🧹 Activo sin registro',   'reason-neutral'],
+    'prediction_realloc':          ['🔄 Reemplazo por EV',      'reason-rebal'],
+    'regime_change':               ['⚡ Cambio de régimen',     'reason-neutral'],
+    'manual':                      ['✋ Manual',                 'reason-neutral'],
+};
+function fmtCloseReason(r) {
+    if (!r) return '—';
+    const entry = _CLOSE_REASON_MAP[r];
+    if (entry) return `<span class="close-reason ${entry[1]}">${entry[0]}</span>`;
+    return `<span class="close-reason reason-neutral">${r}</span>`;
+}
+
 // ── Category helpers (must be before any render function) ───────────────────
 const CAT_ICON  = { 'LARGE_CAP': '🏦', 'MIDCAP_ALT': '📊', 'NARRATIVE': '🤖', 'MEME': '🎭' };
 const CAT_LABEL = { 'LARGE_CAP': 'LARGE CAP', 'MIDCAP_ALT': 'MID ALT', 'NARRATIVE': 'NARRATIVE', 'MEME': 'MEME' };
@@ -605,7 +628,7 @@ function renderClosedPositions(d) {
                         <td class="${pnlClass(p.pnl_percentage)}">${fmt(p.pnl_percentage)}%</td>
                         <td>${fmtPrediction(p.pnl_prediction)}</td>
                         <td>${acc}</td>
-                        <td>${p.close_reason || '—'}</td>
+                        <td>${fmtCloseReason(p.close_reason)}</td>
                         <td>${p.exit_time ? new Date(p.exit_time).toLocaleString('es-MX') : '—'}</td>
                     </tr>`;
                 }).join('')}

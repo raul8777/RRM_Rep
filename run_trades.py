@@ -710,132 +710,36 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
 
 
 def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[str, float], top_symbols: List[str], portfolio_manager=None, position_manager=None) -> List[Dict]:
+    """Clean up orphan assets — assets held in Binance balance with NO open position record in
+    the PositionManager (leftovers from before the system existed or from external trades).
+    Registered positions are NEVER touched here — they are managed exclusively by SL/TP checker
+    and the slot-pressure reallocation (Step 3).
+    """
     orders = []
-    _rebalance_count = 0
-    _max_rebalance = getattr(settings, 'max_rebalance_per_cycle', 2)
-    _min_hold_min  = getattr(settings, 'min_hold_minutes', 60)
+    _cleanup_count = 0
+    _max_cleanup = getattr(settings, 'max_rebalance_per_cycle', 2)
+
     for asset, amount in balances.items():
         if asset.upper() == "USDT" or amount <= 0:
             continue
-
-        # Cap: no más de max_rebalance_per_cycle sells por ciclo
-        if _rebalance_count >= _max_rebalance:
-            print(f"[Rebalance] max_rebalance_per_cycle={_max_rebalance} reached — deferring remaining sells")
+        if _cleanup_count >= _max_cleanup:
+            print(f"[Cleanup] max_cleanup_per_cycle={_max_cleanup} reached — deferring remaining orphans")
             break
 
         symbol = f"{asset.upper()}USDT"
         if symbol in _INVALID_SYMBOLS:
             continue
-        if symbol in top_symbols:
-            print(f"Keeping asset {asset} because {symbol} is in top symbols")
-            continue
 
-        # min_hold_minutes: no rebalancear posición con menos de N minutos de vida
-        if position_manager and _min_hold_min > 0:
-            try:
-                pos_list = position_manager.get_all_positions().get(symbol, [])
-                if pos_list:
-                    _ts_list = [
-                        (getattr(p, 'entry_time', None) or getattr(p, 'created_at', None))
-                        for p in pos_list
-                        if (getattr(p, 'entry_time', None) or getattr(p, 'created_at', None)) is not None
-                    ]
-                    _entry_ts = min(_ts_list) if _ts_list else None
-                    if _entry_ts is not None:
-                        if hasattr(_entry_ts, 'tzinfo') and _entry_ts.tzinfo is None:
-                            _entry_ts = _entry_ts.replace(tzinfo=timezone.utc)
-                        _age_min = (datetime.now(timezone.utc) - _entry_ts).total_seconds() / 60
-                        if _age_min < _min_hold_min:
-                            print(f"[Rebalance] Holding {symbol}: age={_age_min:.1f}min < min_hold={_min_hold_min}min")
-                            continue
-            except Exception:
-                pass
-
-        # Protect profitable positions from forced rebalancing
-        if getattr(settings, 'protect_profitable_positions', True) and position_manager:
-            try:
-                pos_list = position_manager.get_all_positions().get(symbol, [])
-                if pos_list:
-                    current_price = client.get_symbol_price(symbol)
-                    min_pct = getattr(settings, 'protect_profit_min_pct', 1.0) / 100.0
-                    is_profitable = any(
-                        (current_price - float(p.entry_price)) / float(p.entry_price) >= min_pct
-                        for p in pos_list if float(p.entry_price) > 0
-                    )
-                    if is_profitable:
-                        print(f"Protecting profitable position {symbol} from rebalancing")
-                        continue
-            except Exception:
-                pass
-
-        # Fix D — SL-Delegated: no rebalancear si pérdida ya >= 75% del SL threshold
-        # Lógica: si el precio ya cayó tanto, el SL checker debería cerrarlo — no el rebalanceo
+        # GATE: if there is ANY registered position for this symbol → NEVER touch it here.
+        # SL/TP checker and Step 3 (slot-pressure) handle registered positions.
         if position_manager:
             try:
-                pos_list = position_manager.get_all_positions().get(symbol, [])[:1]
+                pos_list = position_manager.get_all_positions().get(symbol, [])
                 if pos_list:
-                    _cur_price_d = client.get_symbol_price(symbol)
-                    _ep_d = float(pos_list[0].entry_price)
-                    _pnl_pct_d = (_cur_price_d - _ep_d) / _ep_d if _ep_d > 0 else 0.0
-                    if _pnl_pct_d < 0:
-                        _cat_beh_d = getattr(settings, 'token_categories', {}).get(symbol, {}).get('market_behavior', 'MIDCAP_ALT')
-                        _cat_th_d = getattr(settings, 'category_thresholds', {}).get(_cat_beh_d, {})
-                        _sl_d = _cat_th_d.get('stop_loss_pct', getattr(settings, 'stop_loss_pct', 1.8)) / 100.0
-                        if abs(_pnl_pct_d) >= _sl_d * 0.75:
-                            print(f"[Rebalance] Deferring {symbol}: pnl={_pnl_pct_d*100:.2f}% near SL ({_sl_d*100:.1f}%) — letting SL handle")
-                            continue
+                    print(f"[Cleanup] Skipping {symbol}: has {len(pos_list)} registered position(s) — managed by SL/TP")
+                    continue
             except Exception:
                 pass
-
-        # Smart rebalance: skip if predictor sees positive upside on this position
-        if getattr(settings, 'rebalance_skip_if_positive_prediction', True) and portfolio_manager:
-            try:
-                _pm = getattr(portfolio_manager, 'position_manager', None)
-                _pos_data = {symbol: {'quantity': amount}}
-                _preds = portfolio_manager.get_position_predictions(_pos_data)
-                _pred = _preds.get(symbol, {})
-                _epnl = _pred.get('expected_pnl', 0)
-                _prob = _pred.get('success_probability', 0)
-                _min_prob = getattr(settings, 'rebalance_min_hold_prob', 0.55)
-                if _epnl > 0 and _prob >= _min_prob:
-                    print(f"[Rebalance] Holding {symbol}: predictor epnl={_epnl:.3f} USDT, prob={_prob:.2f} >= {_min_prob} — skip sell")
-                    continue
-            except Exception as _pred_err:
-                print(f"[Rebalance] prediction check skipped for {symbol}: {_pred_err}")
-
-        # Opción B — Condición técnica negativa REQUERIDA para rebalancear
-        # El rebalanceo solo procede si el par muestra señal técnica genuinamente negativa:
-        #   RSI 1h > rebalance_rsi_overbought (default 60) → sobrecomprado / agotado
-        #   O EMA9 descendente (último cierre < EMA9) → tendencia bajista a 1h
-        # Si NO se cumple ninguna condición negativa → RETENER (no vender por ruido de ciclo)
-        if getattr(settings, 'rebalance_skip_if_bullish_signal', True):
-            try:
-                _klines_b = client.client.get_klines(symbol=symbol, interval='1h', limit=20)
-                if _klines_b and len(_klines_b) >= 14:
-                    _closes_b = [float(k[4]) for k in _klines_b]
-                    _gains_b = [max(0.0, _closes_b[i] - _closes_b[i-1]) for i in range(1, len(_closes_b))]
-                    _losses_b = [max(0.0, _closes_b[i-1] - _closes_b[i]) for i in range(1, len(_closes_b))]
-                    _avg_gain_b = sum(_gains_b[-14:]) / 14
-                    _avg_loss_b = sum(_losses_b[-14:]) / 14
-                    _rsi_b = 100 - (100 / (1 + _avg_gain_b / _avg_loss_b)) if _avg_loss_b > 0 else 50.0
-                    _ema9_b = _closes_b[0]
-                    _alpha_b = 2 / (9 + 1)
-                    for _c in _closes_b:
-                        _ema9_b = _c * _alpha_b + _ema9_b * (1 - _alpha_b)
-                    _cur_c = _closes_b[-1]
-                    _rsi_threshold = getattr(settings, 'rebalance_rsi_overbought', 60.0)
-                    _rsi_negative = _rsi_b > _rsi_threshold
-                    _ema9_negative = _cur_c < _ema9_b * 0.999
-                    if not (_rsi_negative or _ema9_negative):
-                        print(f"[Rebalance] Holding {symbol}: no technical sell signal (RSI1h={_rsi_b:.1f}<={_rsi_threshold}, price vs EMA9 OK) — keeping position")
-                        continue
-                    print(f"[Rebalance] Technical sell confirmed {symbol}: RSI={_rsi_b:.1f} rsi_neg={_rsi_negative}, ema9_neg={_ema9_negative} — proceeding with rebalance")
-                else:
-                    print(f"[Rebalance] Holding {symbol}: insufficient klines for technical check — keeping position")
-                    continue
-            except Exception as _te:
-                print(f"[Rebalance] Holding {symbol}: technical check failed ({_te}) — keeping position")
-                continue
 
         try:
             filters = get_symbol_filters(client, symbol)
@@ -844,41 +748,30 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
             if "-1121" in str(exc):
                 _INVALID_SYMBOLS.add(symbol)
             else:
-                print(f"Skip sell {symbol}: {exc}")
+                print(f"[Cleanup] Skip {symbol}: {exc}")
             continue
 
         qty = align_quantity_to_step(amount, filters["step"])
         valid, reason = is_quantity_valid(qty, price, filters)
         if not valid:
-            print(f"Skipping sell {symbol}: {reason}")
+            print(f"[Cleanup] Skipping orphan {symbol}: {reason}")
             continue
 
         try:
+            print(f"[Cleanup] Selling orphan {symbol}: {qty} units @ {price:.6f} (no PM record)")
             order = client.create_market_order(symbol=symbol, side="SELL", quantity=qty)
             orders.append({"symbol": symbol, "side": "SELL", "quantity": qty, "order": order})
-            _overflow_positions.discard(symbol)  # free overflow slot if used
-            _rebalance_count += 1
-            print(f"Sold {qty} {symbol} [rebalance {_rebalance_count}/{_max_rebalance}]")
+            _overflow_positions.discard(symbol)
+            _cleanup_count += 1
             add_signal({
                 "symbol": symbol, "action": "SELL",
                 "price": price,
-                "reason": "portfolio_rebalancing",
-                "source": "rebalancing",
+                "reason": "orphan_asset_cleanup",
+                "source": "cleanup",
             })
-
-            # Close position in Position Manager if available
-            if position_manager:
-                try:
-                    commission_rate = getattr(settings, 'binance_commission_rate', 0.001)
-                    if getattr(settings, 'use_bnb_for_commission', False):
-                        commission_rate = 0.0005
-                    position_manager.close_all_positions_for_symbol(symbol, price, "portfolio_rebalancing", commission_rate)
-                except Exception as e:
-                    print(f"Failed to close position in Position Manager: {e}")
-                    ec.add_error(ec.SOURCE_POSITION_MANAGER, ec.LEVEL_WARNING, f"Failed to close position {symbol}: {e}")
         except Exception as exc:
-            print(f"Sell order failed for {symbol}: {exc}")
-            ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_ERROR, f"Sell order failed for {symbol}: {exc}")
+            print(f"[Cleanup] Sell failed for orphan {symbol}: {exc}")
+            ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_ERROR, f"Orphan cleanup sell failed {symbol}: {exc}")
     return orders
 
 
@@ -1598,13 +1491,26 @@ def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, 
 
 
 def _close_prediction_based(top_symbols: List[str], client: BinanceClient, settings,
-                            portfolio_manager, position_manager, predictions: Dict) -> None:
-    """Step 3: Close positions whose predictions suggest switching to better symbols."""
+                            portfolio_manager, position_manager, predictions: Dict,
+                            regime_mode: str = "SPOT_BULL") -> None:
+    """Step 3: Slot-pressure reallocation — close the weakest position ONLY when MAX_POSITIONS
+    is reached AND the new opportunity is genuinely better AND the position shows a technical
+    sell signal (same Opción B criteria as the SL/TP checker).
+    Never closes positions just because they are not in top_symbols.
+    """
     if not portfolio_manager or not position_manager or not predictions:
         return
     try:
+        # ── Gate 1: only act when position slots are FULL ─────────────────
+        _regime_max = _get_max_positions_for_regime(settings, regime_mode)
+        all_positions = position_manager.get_all_positions()
+        _open_count = sum(1 for pl in all_positions.values() if pl)
+        if _open_count < _regime_max:
+            print(f"[SlotPressure] {_open_count}/{_regime_max} positions open — no slot pressure, skipping reallocation")
+            return
+
         current_positions = {}
-        for sym, pos_list in position_manager.get_all_positions().items():
+        for sym, pos_list in all_positions.items():
             if pos_list:
                 pos = pos_list[0]
                 current_positions[sym] = {
@@ -1613,11 +1519,12 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
                 }
         if not current_positions:
             return
-        print(f"Current open positions: {list(current_positions.keys())}")
 
+        # ── Gate 2: find the weakest current position vs best new opportunity ─
+        # Use decide_position_closures (prediction-only path, fallback disabled)
         from portfolio_manager import CapitalAllocation
         usdt_liquid = float(portfolio_manager.get_total_balance().get("usdt_available", 0))
-        alloc_per = min(settings.max_per_trade_usdt, usdt_liquid / len(top_symbols))
+        alloc_per = min(settings.max_per_trade_usdt, usdt_liquid / max(len(top_symbols), 1))
         new_allocations = [
             CapitalAllocation(
                 symbol=sym,
@@ -1634,42 +1541,126 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
         )
         if not symbols_to_close:
             return
-        print(f"Closing positions based on predictions: {symbols_to_close}")
-        # ── Execute real sell orders for each symbol to close ─────────────
-        from trade_utils import get_symbol_filters, align_quantity_to_step, is_quantity_valid
+
+        # ── Gate 3: apply all protective filters for each candidate ───────
+        _min_hold_min = getattr(settings, 'min_hold_minutes', 240)
+        _protect = getattr(settings, 'protect_profitable_positions', True)
+        _protect_pct = getattr(settings, 'protect_profit_min_pct', 0.3) / 100.0
+        approved = []
         for sym in symbols_to_close:
+            pos_list = all_positions.get(sym, [])
+            if not pos_list:
+                continue
+            pos = pos_list[0]
+            try:
+                current_price = client.get_symbol_price(sym)
+            except Exception:
+                print(f"[SlotPressure] {sym}: price fetch failed — skipping")
+                continue
+
+            # min_hold check
+            _entry_ts = getattr(pos, 'entry_time', None) or getattr(pos, 'created_at', None)
+            if _entry_ts is not None:
+                if hasattr(_entry_ts, 'tzinfo') and _entry_ts.tzinfo is None:
+                    _entry_ts = _entry_ts.replace(tzinfo=timezone.utc)
+                _age_min = (datetime.now(timezone.utc) - _entry_ts).total_seconds() / 60
+                if _age_min < _min_hold_min:
+                    print(f"[SlotPressure] {sym}: age={_age_min:.1f}min < min_hold={_min_hold_min}min — skipping")
+                    continue
+
+            # protect_profit check
+            ep = float(pos.entry_price)
+            pnl_pct = (current_price - ep) / ep if ep > 0 else 0.0
+            if _protect and pnl_pct >= _protect_pct:
+                print(f"[SlotPressure] {sym}: profitable {pnl_pct*100:.2f}% >= protect {_protect_pct*100:.1f}% — skipping")
+                continue
+
+            # Fix D: defer to SL checker if near SL threshold
+            if pnl_pct < 0:
+                _cat_beh = getattr(settings, 'token_categories', {}).get(sym, {}).get('market_behavior', 'MIDCAP_ALT')
+                _sl_pct = getattr(settings, 'category_thresholds', {}).get(_cat_beh, {}).get('stop_loss_pct',
+                    getattr(settings, 'stop_loss_pct', 1.8)) / 100.0
+                if abs(pnl_pct) >= _sl_pct * 0.75:
+                    print(f"[SlotPressure] {sym}: near SL ({pnl_pct*100:.2f}%) — deferring to SL checker")
+                    continue
+
+            # Opción B: require a technical sell signal before displacing the position
+            _has_tech_signal = False
+            _close_reason = "reallocation_slot_pressure"
+            if getattr(settings, 'rebalance_skip_if_bullish_signal', True):
+                try:
+                    _klines_sp = client.client.get_klines(symbol=sym, interval='1h', limit=20)
+                    if _klines_sp and len(_klines_sp) >= 14:
+                        _cls = [float(k[4]) for k in _klines_sp]
+                        _gains = [max(0.0, _cls[i] - _cls[i-1]) for i in range(1, len(_cls))]
+                        _losses = [max(0.0, _cls[i-1] - _cls[i]) for i in range(1, len(_cls))]
+                        _ag = sum(_gains[-14:]) / 14
+                        _al = sum(_losses[-14:]) / 14
+                        _rsi = 100 - (100 / (1 + _ag / _al)) if _al > 0 else 50.0
+                        _ema9 = _cls[0]
+                        _a = 2 / (9 + 1)
+                        for _c in _cls:
+                            _ema9 = _c * _a + _ema9 * (1 - _a)
+                        _rsi_thr = getattr(settings, 'rebalance_rsi_overbought', 60.0)
+                        _rsi_neg = _rsi > _rsi_thr
+                        _ema9_neg = _cls[-1] < _ema9 * 0.999
+                        if _rsi_neg or _ema9_neg:
+                            _has_tech_signal = True
+                            _close_reason = "reallocation_rsi_overbought" if _rsi_neg else "reallocation_ema9_bearish"
+                            print(f"[SlotPressure] {sym}: tech signal confirmed RSI={_rsi:.1f} rsi_neg={_rsi_neg} ema9_neg={_ema9_neg} — approved for reallocation")
+                        else:
+                            print(f"[SlotPressure] {sym}: no technical sell signal (RSI={_rsi:.1f}<={_rsi_thr}, EMA9 OK) — skipping displacement")
+                            continue
+                    else:
+                        print(f"[SlotPressure] {sym}: insufficient klines — skipping displacement")
+                        continue
+                except Exception as _te:
+                    print(f"[SlotPressure] {sym}: technical check failed ({_te}) — skipping displacement")
+                    continue
+            else:
+                _has_tech_signal = True
+
+            approved.append((sym, _close_reason))
+
+        if not approved:
+            print(f"[SlotPressure] No positions approved for displacement after filters")
+            return
+
+        # ── Execute sells for approved positions ──────────────────────────
+        from trade_utils import get_symbol_filters, align_quantity_to_step, is_quantity_valid
+        for sym, _close_reason in approved[:1]:  # max 1 displacement per cycle
             try:
                 balances = client.get_account_balance()
                 asset = sym.replace("USDT", "")
                 qty_held = float(balances.get(asset, 0))
                 if qty_held <= 0:
-                    print(f"Prediction close {sym}: no balance held, skipping sell")
+                    print(f"[SlotPressure] {sym}: no balance held, skipping sell")
                     continue
                 filters = get_symbol_filters(client, sym)
                 qty = align_quantity_to_step(qty_held, filters["step"])
-                valid, reason = is_quantity_valid(qty, client.get_symbol_price(sym), filters)
+                exit_price_sp = client.get_symbol_price(sym)
+                valid, reason = is_quantity_valid(qty, exit_price_sp, filters)
                 if not valid:
-                    print(f"Prediction close {sym}: invalid qty {qty} — {reason}")
+                    print(f"[SlotPressure] {sym}: invalid qty {qty} — {reason}")
                     continue
-                order = client.place_order(symbol=sym, side="SELL", quantity=qty)
-                exit_price = float(order.get("fills", [{}])[0].get("price", 0) or
-                                   client.get_symbol_price(sym))
-                # Close position records in DB
+                order = client.create_market_order(symbol=sym, side="SELL", quantity=qty)
+                exit_price_sp = float((order.get("fills") or [{}])[0].get("price", 0) or exit_price_sp)
                 for pos in position_manager.get_all_positions().get(sym, []):
-                    pnl = (exit_price - float(pos.entry_price)) * float(pos.quantity)
+                    ep = float(pos.entry_price)
+                    pnl = (exit_price_sp - ep) * float(pos.quantity)
                     position_manager.close_position(
                         position_id=pos.position_id,
-                        exit_price=exit_price,
+                        exit_price=exit_price_sp,
                         pnl=pnl,
-                        close_reason="prediction_reallocation",
+                        close_reason=_close_reason,
                     )
-                _overflow_positions.discard(sym)  # free overflow slot if used
-                print(f"Prediction close {sym}: sold {qty} @ {exit_price:.4f}, pnl estimated")
+                _overflow_positions.discard(sym)
+                print(f"[SlotPressure] {sym}: displaced @ {exit_price_sp:.4f} reason={_close_reason}")
             except Exception as sell_err:
-                print(f"Prediction close {sym}: sell failed — {sell_err}")
+                print(f"[SlotPressure] {sym}: sell failed — {sell_err}")
         time.sleep(1)
     except Exception as e:
-        print(f"Error in prediction-based position closure: {e}")
+        print(f"Error in slot-pressure reallocation: {e}")
 
 
 def execute_once():
@@ -1810,8 +1801,8 @@ def execute_once():
     # ── Step 2: Generate predictions once (reused by step 3 and step 5) ───────
     predictions = _build_predictions(top_symbols, client, settings, portfolio_manager)
 
-    # ── Step 3: Prediction-based position closure ──────────────────────────────
-    _close_prediction_based(top_symbols, client, settings, portfolio_manager, position_manager, predictions)
+    # ── Step 3: Slot-pressure reallocation (only when MAX_POSITIONS reached) ──────
+    _close_prediction_based(top_symbols, client, settings, portfolio_manager, position_manager, predictions, regime_mode=_regime_mode)
 
     # ── Step 4: Sell holdings no longer in top ─────────────────────────────────
     balances = client.get_account_balance()
