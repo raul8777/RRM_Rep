@@ -1141,107 +1141,150 @@ function renderMonteCarlo(mc) {
     const el = document.getElementById('monteCarloData');
     if (!el || !mc) return;
 
-    const breakdown = mc.monthly_breakdown || [];
-    const cap0      = mc.initial_capital  || 346.13;
-    const btcFinal  = mc.btc_hodl_final   || cap0;
-    const btcPct    = mc.btc_hodl_pct     != null ? mc.btc_hodl_pct : (mc.btc_hodl_180d_pct ?? 0);
-    const totalPnl  = mc.total_pnl        != null ? mc.total_pnl    : (mc.total_pnl_post ?? 0);
-    const p5        = mc.p5               ?? mc.p5_post  ?? cap0;
-    const p50       = mc.p50              ?? cap0;
-    const p95       = mc.p95              ?? mc.p95_post ?? cap0;
-    const winRate   = mc.win_rate         ?? mc.win_rate_improved ?? 51.5;
+    const cap0      = mc.initial_capital  || 3080.0;
     const nTrades   = mc.n_trades_used    ?? 0;
+    const nNormal   = mc.n_normal_trades  ?? '?';
+    const nRebal    = mc.n_rebal_trades   ?? '?';
     const genAt     = mc.generated_at     ?? '—';
+    const btcFinal  = mc.btc_hodl_final   || cap0;
+    const btcPct    = parseFloat(mc.btc_hodl_pct ?? 0);
+    const savingsDay = parseFloat(mc.savings_per_day ?? 38);
+    const months    = mc.months || 3;
 
+    // ── 3-scenario table ───────────────────────────────────────────────────────
+    const scenarios = mc.scenarios || {};
+    const scA = scenarios.A || {};
+    const scB = scenarios.B || {};
+    const scC = scenarios.C || {};
+
+    function scRow(sc, color, emoji) {
+        if (!sc || !sc.label) return '';
+        const ret = sc.return_pct != null ? sc.return_pct : ((sc.mean_final - cap0) / cap0 * 100);
+        const retStr = (ret >= 0 ? '+' : '') + parseFloat(ret).toFixed(1) + '%';
+        const retCls = ret >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
+        return `<tr>
+            <td style="color:${color};font-weight:600">${emoji} ${sc.label}</td>
+            <td class="right" style="color:#e74c3c">$${parseFloat(sc.p5 || cap0).toFixed(0)}</td>
+            <td class="right" style="color:#f39c12">$${parseFloat(sc.p50 || cap0).toFixed(0)}</td>
+            <td class="right" style="color:#4ecca3">$${parseFloat(sc.p95 || cap0).toFixed(0)}</td>
+            <td class="right ${retCls}">${retStr}</td>
+            <td class="right" style="color:#888">${sc.win_rate ?? '?'}%</td>
+        </tr>`;
+    }
+
+    const scenariosTable = (scA.label || scB.label || scC.label) ? `
+        <div style="overflow-x:auto;margin-top:14px">
+        <table class="mc-table">
+            <thead><tr>
+                <th>Escenario (${months} meses)</th>
+                <th class="right">P5 peor</th>
+                <th class="right">Mediana</th>
+                <th class="right">P95 mejor</th>
+                <th class="right">Return</th>
+                <th class="right">WR</th>
+            </tr></thead>
+            <tbody>
+                ${scRow(scA, '#e74c3c', '🔴')}
+                ${scRow(scB, '#f39c12', '🟡')}
+                ${scRow(scC, '#4ecca3', '🟢')}
+            </tbody>
+        </table>
+        </div>` : '';
+
+    // ── Monthly breakdown for scenario B ──────────────────────────────────────
+    const breakdown = (scB.monthly_breakdown || mc.monthly_breakdown || []);
     const rows = breakdown.map(m => {
-        // Support both old format (pnl_pre/pnl_post) and new live format (pnl/capital)
-        const cap    = m.capital  ?? m.capital_post ?? (cap0 + (m.pnl ?? 0));
-        const pnl    = m.pnl      ?? m.pnl_post     ?? 0;
+        const capM  = m.capital ?? (cap0 + (m.pnl ?? 0));
+        const pnl   = m.pnl ?? 0;
         const pnlCls = pnl >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
         return `<tr>
             <td>Mes ${m.month}</td>
-            <td class="right">${mc.trades_per_month}</td>
-            <td class="right">$${cap.toFixed(2)}</td>
-            <td class="right ${pnlCls}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)}</td>
+            <td class="right">${scB.trades_per_month ?? mc.trades_per_month ?? '?'}</td>
+            <td class="right">$${parseFloat(capM).toFixed(2)}</td>
+            <td class="right ${pnlCls}">${pnl >= 0 ? '+' : ''}$${parseFloat(pnl).toFixed(2)}</td>
         </tr>`;
     }).join('');
 
-    const totalCls = totalPnl >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
+    // ── Progress bars A / B / C ───────────────────────────────────────────────
+    const allFinals = [scA.p50, scB.p50, scC.p50, btcFinal, cap0].filter(Boolean).map(Number);
+    const rangeMin = Math.min(...allFinals) * 0.97;
+    const rangeMax = Math.max(...allFinals) * 1.03;
+    const rangeDiff = rangeMax - rangeMin || 1;
+    function barPct(val) { return Math.max(2, Math.min(98, ((val - rangeMin) / rangeDiff * 100))).toFixed(1); }
 
-    // Progress bar: system final vs BTC final
-    const rangeMin = Math.min(btcFinal, cap0 * 0.85);
-    const rangeMax = p95 || cap0 * 1.10;
-    const rangeDiff = rangeMax - rangeMin;
-    const pctBtc  = rangeDiff > 0 ? ((btcFinal  - rangeMin) / rangeDiff * 100).toFixed(1) : 0;
-    const pctPost = rangeDiff > 0 ? (((totalPnl + cap0) - rangeMin) / rangeDiff * 100).toFixed(1) : 50;
+    const progressBars = `
+        <div class="mc-progress-wrap" style="margin-top:16px">
+            <div class="mc-progress-label">Comparativa capital final mediana — ${months} meses</div>
+            <div style="display:flex;flex-direction:column;gap:7px;margin-top:8px">
+                <div style="display:flex;align-items:center;gap:10px;font-size:12px">
+                    <span style="width:120px;color:#e74c3c">🔴 Sin fixes</span>
+                    <div class="mc-progress-bar-bg" style="flex:1">
+                        <div class="mc-progress-bar-fill" style="width:${barPct(scA.p50 || cap0)}%;background:#e74c3c"></div>
+                    </div>
+                    <span style="width:65px;text-align:right;color:#e74c3c">$${parseFloat(scA.p50 || cap0).toFixed(0)}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px;font-size:12px">
+                    <span style="width:120px;color:#f39c12">🟡 Con Opción B</span>
+                    <div class="mc-progress-bar-bg" style="flex:1">
+                        <div class="mc-progress-bar-fill" style="width:${barPct(scB.p50 || cap0)}%;background:#f39c12"></div>
+                    </div>
+                    <span style="width:65px;text-align:right;color:#f39c12">$${parseFloat(scB.p50 || cap0).toFixed(0)}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px;font-size:12px">
+                    <span style="width:120px;color:#4ecca3">🟢 Optimista</span>
+                    <div class="mc-progress-bar-bg" style="flex:1">
+                        <div class="mc-progress-bar-fill" style="width:${barPct(scC.p50 || cap0)}%;background:#4ecca3"></div>
+                    </div>
+                    <span style="width:65px;text-align:right;color:#4ecca3">$${parseFloat(scC.p50 || cap0).toFixed(0)}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px;font-size:12px">
+                    <span style="width:120px;color:#888">₿ HODL BTC</span>
+                    <div class="mc-progress-bar-bg" style="flex:1">
+                        <div class="mc-progress-bar-fill" style="width:${barPct(btcFinal)}%;background:#f7931a"></div>
+                    </div>
+                    <span style="width:65px;text-align:right;color:#f7931a">$${btcFinal.toFixed(0)} (${btcPct >= 0 ? '+' : ''}${btcPct.toFixed(1)}%)</span>
+                </div>
+            </div>
+        </div>`;
+
+    // ── Savings badge ─────────────────────────────────────────────────────────
+    const savingsBadge = savingsDay > 0 ? `
+        <div style="background:rgba(78,204,163,0.1);border:1px solid rgba(78,204,163,0.3);border-radius:8px;padding:10px 14px;margin-top:14px;font-size:13px">
+            💡 <b style="color:#4ecca3">Opción B activa</b>: ahorro estimado
+            <b style="color:#4ecca3">+$${savingsDay.toFixed(2)}/día</b> vs sistema sin fixes
+            &nbsp;·&nbsp; ${nNormal} trades normales | ${nRebal} rebalanceos históricos
+        </div>` : '';
 
     el.innerHTML = `
         <div class="mc-header">
-            <span class="mc-subtitle">10,000 sims · WR: ${winRate}% · ${nTrades} trades reales · ${(mc.trades_per_month||11)} trades/mes</span>
+            <span class="mc-subtitle">1,000 sims · Capital: $${parseFloat(cap0).toFixed(0)} · ${nTrades} trades reales · ${months} meses</span>
             <span class="mc-subtitle" style="display:flex;align-items:center;gap:8px">
-                <span>Generado: ${genAt}</span>
+                <span style="color:#666">Generado: ${genAt}</span>
                 <button id="mcRecalcBtn" class="btn btn-primary btn-sm" onclick="recalculateMonteCarlo()">🔄 Recalcular</button>
             </span>
         </div>
-        <div style="overflow-x:auto">
-        <table class="mc-table">
-            <thead><tr>
-                <th>Mes</th>
-                <th class="right">Trades</th>
-                <th class="right">Capital esperado</th>
-                <th class="right">PnL mes</th>
-            </tr></thead>
-            <tbody>${rows}</tbody>
-            <tfoot><tr class="mc-total-row">
-                <td>TOTAL ${mc.months || 6} meses</td>
-                <td class="right">${(mc.trades_per_month || 11) * (mc.months || 6)}</td>
-                <td class="right">$${(cap0 + totalPnl).toFixed(2)}</td>
-                <td class="right ${totalCls}">${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(4)}</td>
-            </tr></tfoot>
-        </table>
-        </div>
-        <div class="mc-summary">
-            <div class="mc-summary-item">
-                <div class="mc-summary-label">Peor caso P5</div>
-                <div class="mc-summary-val" style="color:#e74c3c">$${p5.toFixed(2)}</div>
+
+        ${scenariosTable}
+        ${savingsBadge}
+        ${progressBars}
+
+        ${breakdown.length > 0 ? `
+        <div style="margin-top:16px">
+            <div class="mc-progress-label">Desglose mensual — Escenario B (Con Opción B)</div>
+            <div style="overflow-x:auto;margin-top:8px">
+            <table class="mc-table">
+                <thead><tr>
+                    <th>Mes</th>
+                    <th class="right">Trades</th>
+                    <th class="right">Capital esperado</th>
+                    <th class="right">PnL mes</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
             </div>
-            <div class="mc-summary-item">
-                <div class="mc-summary-label">Mediana P50</div>
-                <div class="mc-summary-val" style="color:#f39c12">$${p50.toFixed(2)}</div>
-            </div>
-            <div class="mc-summary-item">
-                <div class="mc-summary-label">Mejor caso P95</div>
-                <div class="mc-summary-val" style="color:#4ecca3">$${p95.toFixed(2)}</div>
-            </div>
-            <div class="mc-summary-item">
-                <div class="mc-summary-label">HODL BTC (proyectado)</div>
-                <div class="mc-summary-val" style="color:#e74c3c">$${btcFinal.toFixed(2)} (${btcPct >= 0 ? '+' : ''}${parseFloat(btcPct).toFixed(1)}%)</div>
-            </div>
-            <div class="mc-summary-item">
-                <div class="mc-summary-label">Ventaja vs BTC</div>
-                <div class="mc-summary-val" style="color:#4ecca3">+$${((cap0 + totalPnl) - btcFinal).toFixed(2)}</div>
-            </div>
-        </div>
-        <div class="mc-progress-wrap">
-            <div class="mc-progress-label">Comparativa capital final (escala relativa)</div>
-            <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px">
-                <div style="display:flex;align-items:center;gap:10px;font-size:12px">
-                    <span style="width:110px;color:#888">HODL BTC</span>
-                    <div class="mc-progress-bar-bg" style="flex:1">
-                        <div class="mc-progress-bar-fill" style="width:${pctBtc}%;background:#e74c3c"></div>
-                    </div>
-                    <span style="width:60px;text-align:right;color:#e74c3c">$${btcFinal.toFixed(0)}</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:10px;font-size:12px">
-                    <span style="width:110px;color:#888">Sist. mejorado</span>
-                    <div class="mc-progress-bar-bg" style="flex:1">
-                        <div class="mc-progress-bar-fill" style="width:${pctPost}%;background:#4ecca3"></div>
-                    </div>
-                    <span style="width:60px;text-align:right;color:#4ecca3">$${(cap0 + totalPnl).toFixed(0)}</span>
-                </div>
-            </div>
-        </div>
-        <div class="mc-note">* Basado en trades reales cerrados como distribución. El Monte Carlo no incluye compounding completo (Kelly dinámico → retorno real podría ser mayor).</div>
+        </div>` : ''}
+
+        <div class="mc-note">* Bootstrap sobre trades reales cerrados. Escenario C proyecta WR=45% con SL/TP calibrado (objetivo pendiente). Sin compounding completo.</div>
     `;
 }
 

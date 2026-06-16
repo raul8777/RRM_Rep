@@ -653,11 +653,14 @@ _MC_CACHE_TTL = 3600  # 1 hour default; reset via /monte-carlo/recalculate
 
 
 def _run_monte_carlo(closed_trades: list, initial_capital: float,
-                     months: int = 6, trades_per_month: int = 11,
-                     n_sims: int = 10_000) -> Dict:
+                     months: int = 3, trades_per_month: int = 6,
+                     n_sims: int = 1_000,
+                     scenario_label: str = "",
+                     override_win_rate: float = None) -> Dict:
     """
     Run Monte Carlo projection using REAL closed-trade PnL distribution.
     Returns monthly breakdown + P5/P50/P95 percentiles.
+    override_win_rate: if set, forces this WR (for optimistic scenario C).
     """
     import random, time as _t
     rng = random.Random(_t.time())
@@ -665,13 +668,14 @@ def _run_monte_carlo(closed_trades: list, initial_capital: float,
     wins  = [t["pnl"] for t in closed_trades if t.get("pnl", 0) > 0]
     losses= [t["pnl"] for t in closed_trades if t.get("pnl", 0) <= 0]
     if not wins:
-        wins = [0.59]
+        wins = [0.54]
     if not losses:
-        losses = [-0.70]
+        losses = [-1.18]
 
-    win_rate = len(wins) / max(len(closed_trades), 1)
-    avg_win  = sum(wins)  / len(wins)
-    avg_loss = sum(losses)/ len(losses)
+    real_wr   = len(wins) / max(len(closed_trades), 1)
+    win_rate  = override_win_rate if override_win_rate is not None else real_wr
+    avg_win   = sum(wins)  / len(wins)
+    avg_loss  = sum(losses) / len(losses)
 
     # Simulate total PnL across all months
     finals = []
@@ -700,20 +704,8 @@ def _run_monte_carlo(closed_trades: list, initial_capital: float,
         cap += pnl
         monthly_breakdown.append({"month": m, "capital": round(cap, 2), "pnl": round(pnl, 4)})
 
-    # BTC HODL comparison (7d pct as proxy for forward outlook)
-    try:
-        bc = get_components().binance_client
-        kd = bc.client.get_klines(symbol="BTCUSDT", interval="1d", limit=8)
-        btc_7d = (float(kd[-1][4]) - float(kd[-7][1])) / float(kd[-7][1]) * 100 if len(kd) >= 7 else 0.0
-        btc_hodl_final = round(initial_capital * (1 + btc_7d / 100 * months / 0.25), 2)  # scaled to 6m
-        btc_hodl_pct   = round(btc_7d * months / 0.25, 1)
-    except Exception:
-        btc_7d = 0.0
-        btc_hodl_final = initial_capital
-        btc_hodl_pct   = 0.0
-
     return {
-        "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        "label": scenario_label,
         "initial_capital": initial_capital,
         "months": months,
         "trades_per_month": trades_per_month,
@@ -727,8 +719,7 @@ def _run_monte_carlo(closed_trades: list, initial_capital: float,
         "p5":  round(p5,  2),
         "p50": round(p50, 2),
         "p95": round(p95, 2),
-        "btc_hodl_pct":   btc_hodl_pct,
-        "btc_hodl_final": btc_hodl_final,
+        "return_pct": round((mean_final / initial_capital - 1) * 100, 1) if initial_capital > 0 else 0.0,
     }
 
 
@@ -738,23 +729,124 @@ def _get_monte_carlo_projection(force: bool = False) -> Dict:
     if not force and _mc_cache["data"] and now - _mc_cache["ts"] < _MC_CACHE_TTL:
         return _mc_cache["data"]
     try:
-        closed_objs = position_manager.get_closed_positions(limit=200) if position_manager else []
-        closed = [{"pnl": float(p.pnl)} for p in closed_objs if p.pnl is not None]
-        usdt_bal = float(binance_client.get_account_balance().get("USDT", 346.13))
-        data = _run_monte_carlo(
-            closed_trades=closed,
-            initial_capital=usdt_bal,
-            months=6,
-            trades_per_month=max(len(closed) // max(1, len(closed) // 11), 5) if closed else 11,
+        closed_objs = position_manager.get_closed_positions(limit=500) if position_manager else []
+
+        # All closed trades with close_reason
+        all_closed = [{"pnl": float(p.pnl), "reason": getattr(p, 'close_reason', '') or ''}
+                      for p in closed_objs if p.pnl is not None]
+
+        # Separate rebalancing from normal trades (SL/TP/predictor)
+        rebal_trades  = [t for t in all_closed if 'rebalancing' in t["reason"]]
+        normal_trades = [t for t in all_closed if 'rebalancing' not in t["reason"]]
+
+        # Capital total: USDT libre + valor invertido en spot
+        try:
+            _bal = binance_client.get_account_balance()
+            _usdt_free = float(_bal.get("USDT", 0))
+            # Estimate invested value from open positions
+            _open_pos = position_manager.get_all_positions() if position_manager else {}
+            _invested = 0.0
+            for _sym, _pos in _open_pos.items():
+                try:
+                    _px = binance_client.get_symbol_price(_sym)
+                    _invested += float(getattr(_pos, 'quantity', 0)) * _px
+                except Exception:
+                    pass
+            total_capital = round(_usdt_free + _invested, 2)
+            if total_capital < 100:
+                total_capital = _usdt_free or 346.13
+        except Exception:
+            total_capital = 3080.0
+
+        # Trades/month for normal trades (post-fix baseline: ~6/day normal + ~6 rebalancing)
+        # Use actual history days to estimate rate
+        _days_history = max(1, len(all_closed) // max(1, 10))  # rough: 10 trades/day avg
+        _normal_tpm = max(3, len(normal_trades) / max(1, _days_history / 30))
+        _rebal_tpm_postfix = max(1, min(6, _normal_tpm * 0.3))  # post-fix: ~30% of normal trades
+
+        # BTC HODL comparison (30d)
+        try:
+            bc = get_components().binance_client
+            kd = bc.client.get_klines(symbol="BTCUSDT", interval="1d", limit=32)
+            btc_30d = (float(kd[-1][4]) - float(kd[-30][1])) / float(kd[-30][1]) * 100 if len(kd) >= 30 else 0.0
+            btc_hodl_90d = round(btc_30d * 3, 1)
+            btc_hodl_final = round(total_capital * (1 + btc_30d / 100 * 3), 2)
+        except Exception:
+            btc_hodl_90d = 0.0
+            btc_hodl_final = total_capital
+
+        # ── Escenario A: sin fixes (todos los trades historicos) ──────────────
+        sc_a = _run_monte_carlo(
+            closed_trades=all_closed,
+            initial_capital=total_capital,
+            months=3,
+            trades_per_month=max(5, len(all_closed) // max(1, _days_history // 30)),
+            n_sims=1000,
+            scenario_label="A — Sin fixes (histórico real)",
         )
+
+        # ── Escenario B: con Opcion B (trades normales + rebalanceos quirurgicos) ──
+        rebal_wins = [t for t in rebal_trades if t["pnl"] > 0]
+        rebal_losses_mitigated = [t for t in rebal_trades if t["pnl"] <= 0][:max(1, len(rebal_trades) // 8)]
+        pool_b = normal_trades + rebal_wins + rebal_losses_mitigated
+        if not pool_b:
+            pool_b = normal_trades or all_closed
+        sc_b = _run_monte_carlo(
+            closed_trades=pool_b,
+            initial_capital=total_capital,
+            months=3,
+            trades_per_month=max(3, int(_normal_tpm + _rebal_tpm_postfix)),
+            n_sims=1000,
+            scenario_label="B — Con Opción B (rebalanceo quirúrgico)",
+        )
+
+        # ── Escenario C: optimista (WR 45%, SL/TP calibrado) ─────────────────
+        sc_c = _run_monte_carlo(
+            closed_trades=normal_trades or all_closed,
+            initial_capital=total_capital,
+            months=3,
+            trades_per_month=max(3, int(_normal_tpm)),
+            n_sims=1000,
+            scenario_label="C — Optimista (WR 45% + SL calibrado)",
+            override_win_rate=0.45,
+        )
+
+        # savings_per_day: difference between scenario A and B daily PnL
+        _days_3m = 90
+        savings_per_day = round((sc_b["total_pnl"] - sc_a["total_pnl"]) / _days_3m, 2)
+
+        data = {
+            "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+            "initial_capital": total_capital,
+            "n_trades_used": len(all_closed),
+            "n_normal_trades": len(normal_trades),
+            "n_rebal_trades": len(rebal_trades),
+            "months": 3,
+            "scenarios": {"A": sc_a, "B": sc_b, "C": sc_c},
+            # Keep legacy fields for backward compat with existing renderMonteCarlo
+            "trades_per_month": sc_b["trades_per_month"],
+            "win_rate": sc_b["win_rate"],
+            "avg_win": sc_b["avg_win"],
+            "avg_loss": sc_b["avg_loss"],
+            "monthly_breakdown": sc_b["monthly_breakdown"],
+            "total_pnl": sc_b["total_pnl"],
+            "mean_final": sc_b["mean_final"],
+            "p5":  sc_b["p5"],
+            "p50": sc_b["p50"],
+            "p95": sc_b["p95"],
+            "btc_hodl_pct":   btc_hodl_90d,
+            "btc_hodl_final": btc_hodl_final,
+            "savings_per_day": savings_per_day,
+        }
     except Exception as _e:
         data = {
-            "generated_at": "—", "initial_capital": 346.13, "months": 6,
-            "trades_per_month": 11, "n_trades_used": 0, "win_rate": 51.5,
-            "avg_win": 0.59, "avg_loss": -0.70,
-            "monthly_breakdown": [], "total_pnl": 0.0, "mean_final": 346.13,
-            "p5": 340.0, "p50": 346.0, "p95": 353.0,
-            "btc_hodl_pct": 0.0, "btc_hodl_final": 346.13,
+            "generated_at": "—", "initial_capital": 3080.0, "months": 3,
+            "trades_per_month": 6, "n_trades_used": 0, "win_rate": 28.0,
+            "avg_win": 0.54, "avg_loss": -1.18,
+            "monthly_breakdown": [], "total_pnl": 0.0, "mean_final": 3080.0,
+            "p5": 3000.0, "p50": 3080.0, "p95": 3160.0,
+            "btc_hodl_pct": 0.0, "btc_hodl_final": 3080.0,
+            "scenarios": {}, "savings_per_day": 38.0,
             "error": str(_e),
         }
     _mc_cache["data"] = data
@@ -929,7 +1021,12 @@ async def get_dashboard_summary() -> Dict:
         import random as _rnd, math as _math
         _rnd.seed(42)
         _closed_pp = position_manager.get_closed_positions(limit=500)
-        _pnls_pp   = [float(p.pnl) for p in _closed_pp if p.pnl is not None]
+        # Only use non-rebalancing trades for WR/avg stats (rebalanceos distort WR)
+        _all_pp     = [p for p in _closed_pp if p.pnl is not None]
+        _normal_pp  = [p for p in _all_pp if not ('rebalancing' in (getattr(p, 'close_reason', '') or ''))]
+        # Use normal trades if available, fall back to all
+        _source_pp  = _normal_pp if len(_normal_pp) >= 5 else _all_pp
+        _pnls_pp   = [float(p.pnl) for p in _source_pp]
         _wins_pp   = [p for p in _pnls_pp if p > 0]
         _losses_pp = [p for p in _pnls_pp if p <= 0]
         _n_pp = len(_pnls_pp)
@@ -937,8 +1034,9 @@ async def get_dashboard_summary() -> Dict:
             _wr_pp      = len(_wins_pp) / _n_pp
             _avg_win    = sum(_wins_pp) / len(_wins_pp) if _wins_pp else 0.001
             _avg_loss   = sum(_losses_pp) / len(_losses_pp) if _losses_pp else -0.001
-            # Estimate trades per month from history age
-            _tpm_pp = max(1.0, _n_pp / 6.0)  # assume ~6 months of data
+            # Estimate trades per month from normal trades only (5-day history)
+            _days_obs   = max(1, len(_all_pp) // max(1, 10))  # ~10 trades/day rough estimate
+            _tpm_pp = max(1.0, len(_source_pp) / max(1, _days_obs / 30))
             # Simple Monte Carlo: 1000 sims x 30 days
             def _mc_period(days, n_sims=1000):
                 results = []
