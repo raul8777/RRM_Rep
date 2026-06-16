@@ -1079,7 +1079,10 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
     fixed_base = getattr(settings, "kelly_base_usdt", 60.0)
     dyn_pct = getattr(settings, "kelly_dynamic_base_pct", 0.15)
     base = max(fixed_base, usdt_liquid * dyn_pct)
-    max_usdt = getattr(settings, "kelly_max_usdt", 150.0)
+    # Smart Kelly: max scales with liquid capital instead of fixed cap
+    max_usdt_floor = getattr(settings, "kelly_max_usdt", 350.0)
+    max_usdt_pct_cap = getattr(settings, "kelly_max_pct_cap", 0.25)
+    max_usdt = max(max_usdt_floor, usdt_liquid * max_usdt_pct_cap)
     cap_pct = getattr(settings, "kelly_max_pct_liquid", 0.40)
 
     prob = float((prediction or {}).get("success_probability", 0.50))
@@ -1088,20 +1091,22 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
     # Half-Kelly fraction
     kelly_f = max(0.0, (prob - (1 - prob) / r)) * 0.5
 
-    # Map to tier
+    # Map to tier — FUERTE/ALTA/MEDIA use tier amount directly (kelly_f already near max).
+    # BASE tier uses kelly_f scaling to soften weak signals.
     if prob >= 0.65 and strength >= 0.80:
         tier, amount = "FUERTE", max_usdt
+        sized = amount  # at max conviction, use full tier
     elif prob >= 0.60 and strength >= 0.70:
         tier, amount = "ALTA", base + (max_usdt - base) * 0.80
+        sized = amount  # high conviction, no kelly_f discount
     elif prob >= 0.55 and strength >= 0.55:
         tier, amount = "MEDIA", base + (max_usdt - base) * 0.50
+        sized = amount  # medium conviction, use full tier
     else:
         tier, amount = "BASE", base
-
-    # Scale further by half-kelly fraction (softens high-tier amounts when kelly_f is low)
-    scaled = amount * min(1.0, kelly_f * 10)
-    # Never go below base
-    sized = max(base, scaled)
+        # BASE tier: scale by kelly_f so weak signals get smaller sizes
+        scaled = amount * min(1.0, kelly_f * 10)
+        sized = max(base * 0.5, scaled)  # floor at 50% of base, not full base
 
     # Hard cap: fraction of liquid USDT
     liquid_cap = usdt_liquid * cap_pct
@@ -1660,6 +1665,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             _conv3x = getattr(settings, 'kelly_conviction_vol3x', 2.0)
             _conv2x = getattr(settings, 'kelly_conviction_vol2x', 1.5)
             _conv_max_pct = getattr(settings, 'kelly_conviction_max_pct', 0.10)
+            # Smart Kelly: in confirmed SPOT_BULL, raise conviction cap to 15% (was 10%)
+            if _regime_mode == "SPOT_BULL" and _regime and _regime.confirmed:
+                _conv_max_pct = min(0.15, _conv_max_pct * 1.5)
             if _meta_vs >= 3.0:
                 _conv_mult = _conv3x
             elif _meta_vs >= 2.0:

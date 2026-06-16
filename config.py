@@ -53,7 +53,8 @@ class Settings(BaseSettings):
     # Kelly dynamic position sizing
     kelly_enabled: bool = Field(default=True, env="KELLY_ENABLED")
     kelly_base_usdt: float = Field(default=60.0, env="KELLY_BASE_USDT")
-    kelly_max_usdt: float = Field(default=150.0, env="KELLY_MAX_USDT")
+    kelly_max_usdt: float = Field(default=350.0, env="KELLY_MAX_USDT")           # floor: never less than this
+    kelly_max_pct_cap: float = Field(default=0.25, env="KELLY_MAX_PCT_CAP")       # Smart Kelly: max = max(floor, liquid * this)
     kelly_max_pct_liquid: float = Field(default=0.40, env="KELLY_MAX_PCT_LIQUID")
     kelly_dynamic_base_pct: float = Field(default=0.15, env="KELLY_DYNAMIC_BASE_PCT")  # base = capital * this (if > fixed base)
     # Bear market mode
