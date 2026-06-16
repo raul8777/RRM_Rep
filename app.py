@@ -800,8 +800,11 @@ def _get_monte_carlo_projection(force: bool = False) -> Dict:
                       for p in closed_objs if p.pnl is not None]
 
         # Separate rebalancing from normal trades (SL/TP/predictor)
-        rebal_trades  = [t for t in all_closed if 'rebalancing' in t["reason"]]
-        normal_trades = [t for t in all_closed if 'rebalancing' not in t["reason"]]
+        _REBAL_REASONS_MC = ('rebalancing', 'manual_rebalance', 'manual', 'balance_sync')
+        rebal_trades  = [t for t in all_closed if any(r in t["reason"] for r in _REBAL_REASONS_MC)]
+        normal_trades = [t for t in all_closed
+                         if not any(r in t["reason"] for r in _REBAL_REASONS_MC)
+                         and abs(t["pnl"]) < 50.0]  # exclude wild outliers
 
         # Capital total: USDT libre + valor invertido en spot
         try:
@@ -839,45 +842,74 @@ def _get_monte_carlo_projection(force: bool = False) -> Dict:
             btc_hodl_90d = 0.0
             btc_hodl_final = total_capital
 
-        # ── Escenario A: sin fixes (todos los trades historicos) ──────────────
+        # ── Escenario A: Bear — mercado bajista (todos los trades históricos) ──
         sc_a = _run_monte_carlo(
             closed_trades=all_closed,
             initial_capital=total_capital,
             months=3,
             trades_per_month=max(5, len(all_closed) // max(1, _days_history // 30)),
             n_sims=1000,
-            scenario_label="A — Sin fixes (histórico real)",
+            scenario_label="Bear (mercado bajista)",
         )
 
-        # ── Escenario B: con Opcion B (trades normales + rebalanceos quirurgicos) ──
-        rebal_wins = [t for t in rebal_trades if t["pnl"] > 0]
-        rebal_losses_mitigated = [t for t in rebal_trades if t["pnl"] <= 0][:max(1, len(rebal_trades) // 8)]
-        pool_b = normal_trades + rebal_wins + rebal_losses_mitigated
-        if not pool_b:
-            pool_b = normal_trades or all_closed
+        # ── Escenario B: Base — sistema actual (solo trades SL/TP/predictor) ─
+        pool_b = normal_trades if normal_trades else all_closed
         sc_b = _run_monte_carlo(
             closed_trades=pool_b,
             initial_capital=total_capital,
             months=3,
-            trades_per_month=max(3, int(_normal_tpm + _rebal_tpm_postfix)),
+            trades_per_month=max(3, int(_normal_tpm)),
             n_sims=1000,
-            scenario_label="B — Con Opción B (rebalanceo quirúrgico)",
+            scenario_label="Base (sistema actual)",
         )
 
-        # ── Escenario C: optimista (WR 45%, SL/TP calibrado) ─────────────────
+        # ── Escenario C: Bull — mercado alcista (WR 55%, +M1-M5 activos) ────
+        _bull_tpm = max(3, int(_normal_tpm * 1.4))  # más señales en mercado bull
         sc_c = _run_monte_carlo(
             closed_trades=normal_trades or all_closed,
             initial_capital=total_capital,
             months=3,
-            trades_per_month=max(3, int(_normal_tpm)),
+            trades_per_month=_bull_tpm,
             n_sims=1000,
-            scenario_label="C — Optimista (WR 45% + SL calibrado)",
-            override_win_rate=0.45,
+            scenario_label="Bull (F&G>50 + M1-M5)",
+            override_win_rate=0.55,
         )
 
-        # savings_per_day: difference between scenario A and B daily PnL
-        _days_3m = 90
-        savings_per_day = round((sc_b["total_pnl"] - sc_a["total_pnl"]) / _days_3m, 2)
+        # ── Meta 1,000 MXN/día con capital actual ────────────────────────────
+        _usd_mxn_mc = 19.5
+        _target_daily_usd = 1000.0 / _usd_mxn_mc  # ~51.28 USDT/día
+        _wr_base  = sc_b["win_rate"] / 100.0
+        _avg_w_b  = sc_b["avg_win"]
+        _avg_l_b  = abs(sc_b["avg_loss"])
+        _ev_trade = _wr_base * _avg_w_b - (1 - _wr_base) * _avg_l_b
+        _tpm_base = sc_b["trades_per_month"]
+        _trades_day_current = round(_tpm_base / 30, 2)
+        _pnl_day_current_usd = round(_ev_trade * _trades_day_current, 4)
+        _pnl_day_current_mxn = round(_pnl_day_current_usd * _usd_mxn_mc, 2)
+        # trades/day needed to hit 1,000 MXN/day (EV per trade fixed)
+        if _ev_trade > 0:
+            _trades_needed_day = round(_target_daily_usd / _ev_trade, 1)
+            _pct_toward_goal   = round(min(_trades_day_current / _trades_needed_day * 100, 100), 1)
+            _bull_trades_day   = round(_bull_tpm / 30, 2)
+            _bull_pnl_day_mxn  = round(_ev_trade * _bull_trades_day * 1.4 * _usd_mxn_mc, 2)  # bull WR boost
+        else:
+            _trades_needed_day = 999
+            _pct_toward_goal   = 0.0
+            _bull_trades_day   = 0.0
+            _bull_pnl_day_mxn  = 0.0
+
+        _meta_1000 = {
+            "target_mxn_day": 1000,
+            "target_usd_day": round(_target_daily_usd, 2),
+            "ev_per_trade_usd": round(_ev_trade, 4),
+            "trades_day_current": _trades_day_current,
+            "pnl_day_current_usd": _pnl_day_current_usd,
+            "pnl_day_current_mxn": _pnl_day_current_mxn,
+            "trades_needed_day": _trades_needed_day,
+            "pct_toward_goal": _pct_toward_goal,
+            "bull_trades_day": _bull_trades_day,
+            "bull_pnl_day_mxn": _bull_pnl_day_mxn,
+        }
 
         data = {
             "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
@@ -887,7 +919,8 @@ def _get_monte_carlo_projection(force: bool = False) -> Dict:
             "n_rebal_trades": len(rebal_trades),
             "months": 3,
             "scenarios": {"A": sc_a, "B": sc_b, "C": sc_c},
-            # Keep legacy fields for backward compat with existing renderMonteCarlo
+            "meta_1000_mxn_day": _meta_1000,
+            # Legacy fields (backward compat) — Base scenario as primary
             "trades_per_month": sc_b["trades_per_month"],
             "win_rate": sc_b["win_rate"],
             "avg_win": sc_b["avg_win"],
@@ -900,7 +933,7 @@ def _get_monte_carlo_projection(force: bool = False) -> Dict:
             "p95": sc_b["p95"],
             "btc_hodl_pct":   btc_hodl_90d,
             "btc_hodl_final": btc_hodl_final,
-            "savings_per_day": savings_per_day,
+            "savings_per_day": 0,  # deprecated — kept for compat
         }
     except Exception as _e:
         data = {
@@ -910,7 +943,8 @@ def _get_monte_carlo_projection(force: bool = False) -> Dict:
             "monthly_breakdown": [], "total_pnl": 0.0, "mean_final": 3080.0,
             "p5": 3000.0, "p50": 3080.0, "p95": 3160.0,
             "btc_hodl_pct": 0.0, "btc_hodl_final": 3080.0,
-            "scenarios": {}, "savings_per_day": 38.0,
+            "scenarios": {}, "savings_per_day": 0,
+            "meta_1000_mxn_day": {},
             "error": str(_e),
         }
     _mc_cache["data"] = data
@@ -1085,11 +1119,17 @@ async def get_dashboard_summary() -> Dict:
         import random as _rnd, math as _math
         _rnd.seed(42)
         _closed_pp = position_manager.get_closed_positions(limit=500)
-        # Only use non-rebalancing trades for WR/avg stats (rebalanceos distort WR)
+        # Only use clean SL/TP/predictor trades (exclude rebalancing, corrupted, outliers)
         _all_pp     = [p for p in _closed_pp if p.pnl is not None]
-        _normal_pp  = [p for p in _all_pp if not ('rebalancing' in (getattr(p, 'close_reason', '') or ''))]
-        # Use normal trades if available, fall back to all
-        _source_pp  = _normal_pp if len(_normal_pp) >= 5 else _all_pp
+        _REBAL_REASONS = ('rebalancing', 'manual_rebalance', 'manual', 'balance_sync')
+        _normal_pp  = [p for p in _all_pp
+                       if not any(r in (getattr(p, 'close_reason', '') or '') for r in _REBAL_REASONS)
+                       and not getattr(p, 'is_corrupted', False)
+                       and abs(float(p.pnl)) < 50.0]  # exclude wild outliers
+        # Use clean normal trades if ≥5, else fall back to all non-corrupted
+        _source_pp  = _normal_pp if len(_normal_pp) >= 5 else [
+            p for p in _all_pp if not getattr(p, 'is_corrupted', False)
+        ]
         _pnls_pp   = [float(p.pnl) for p in _source_pp]
         _wins_pp   = [p for p in _pnls_pp if p > 0]
         _losses_pp = [p for p in _pnls_pp if p <= 0]
@@ -1122,15 +1162,23 @@ async def get_dashboard_summary() -> Dict:
             _proj_day   = _mc_period(1)
             _proj_week  = _mc_period(7)
             _proj_month = _mc_period(30)
-            # $100k MXN scenario
-            _cap_100k_mxn = 100000.0 / _usd_mxn  # USD
+            # Capital actual
             _cap_current  = result.get("balance", {}).get("total_usdt", 282.0)
-            _scale = _cap_100k_mxn / _cap_current if _cap_current > 0 else 1.0
-            _proj_100k_month = _mc_period(30)
             # Capital for $30k MXN/month
             _target_usd_month = 30000 / _usd_mxn
             _cap_for_target = (_target_usd_month / _proj_month["mean"] * _cap_current
                                if _proj_month["mean"] > 0.001 else 999999)
+            # Meta 1,000 MXN/día con capital actual
+            _ev_pp = _wr_pp * _avg_win + (1 - _wr_pp) * _avg_loss
+            _target_day_usd = 1000.0 / _usd_mxn
+            _trades_per_day_pp = _tpm_pp / 30.0
+            _pnl_day_mxn_pp = round(_ev_pp * _trades_per_day_pp * _usd_mxn, 2)
+            if _ev_pp > 0:
+                _trades_needed_pp = round(_target_day_usd / _ev_pp, 1)
+                _pct_goal_pp = round(min(_trades_per_day_pp / _trades_needed_pp * 100, 100), 1)
+            else:
+                _trades_needed_pp = 999
+                _pct_goal_pp = 0.0
             result["profit_projection"] = {
                 "day":   {k: round(v * 1, 4) for k, v in _proj_day.items()},
                 "week":  {k: round(v * 1, 4) for k, v in _proj_week.items()},
@@ -1145,14 +1193,15 @@ async def get_dashboard_summary() -> Dict:
                 "capital_usd": round(_cap_current, 2),
                 "capital_mxn": round(_cap_current * _usd_mxn, 2),
                 "usd_mxn_rate": _usd_mxn,
-                # $100k MXN scenario (scaled)
-                "scenario_100k_mxn": {
-                    "capital_usd":   round(_cap_100k_mxn, 2),
-                    "monthly_mean_usd":  round(_proj_month["mean"] * _scale, 2),
-                    "monthly_mean_mxn":  round(_proj_month["mean"] * _scale * _usd_mxn, 2),
-                    "monthly_p5_mxn":    round(_proj_month["p5"] * _scale * _usd_mxn, 2),
-                    "monthly_p95_mxn":   round(_proj_month["p95"] * _scale * _usd_mxn, 2),
-                    "annual_mean_mxn":   round(_proj_month["mean"] * _scale * 12 * _usd_mxn, 2),
+                # Capital actual scenario (replaces hypothetical $100k)
+                "scenario_capital_actual": {
+                    "capital_usd": round(_cap_current, 2),
+                    "capital_mxn": round(_cap_current * _usd_mxn, 2),
+                    "monthly_mean_usd":  round(_proj_month["mean"], 2),
+                    "monthly_mean_mxn":  round(_proj_month["mean"] * _usd_mxn, 2),
+                    "monthly_p5_mxn":    round(_proj_month["p5"] * _usd_mxn, 2),
+                    "monthly_p95_mxn":   round(_proj_month["p95"] * _usd_mxn, 2),
+                    "annual_mean_mxn":   round(_proj_month["mean"] * 12 * _usd_mxn, 2),
                 },
                 # Target: $30k MXN/month
                 "target_30k_mxn": {
@@ -1160,6 +1209,14 @@ async def get_dashboard_summary() -> Dict:
                     "capital_required_usd": round(min(_cap_for_target, 9_999_999), 2),
                     "capital_required_mxn": round(min(_cap_for_target * _usd_mxn, 999_999_999), 2),
                     "current_progress_pct": round(_cap_current / min(_cap_for_target, 9_999_999) * 100, 2),
+                },
+                # Meta 1,000 MXN/día con capital actual
+                "meta_1000_mxn_day": {
+                    "pnl_day_mxn": _pnl_day_mxn_pp,
+                    "trades_day_current": round(_trades_per_day_pp, 2),
+                    "trades_needed_day": _trades_needed_pp,
+                    "pct_toward_goal": _pct_goal_pp,
+                    "ev_per_trade_usd": round(_ev_pp, 4),
                 },
             }
         else:

@@ -445,20 +445,43 @@ function renderProfitProjection(pp) {
         el.innerHTML = `<p class="loading">${pp && pp.error === 'insufficient_trades' ? 'Insuficientes trades (' + (pp.n_trades||0) + '< 5)' : 'Sin datos'}</p>`;
         return;
     }
-    const rate = parseFloat(pp.usd_mxn_rate || 17.8);
+    const rate = parseFloat(pp.usd_mxn_rate || 19.5);
     const pRow = (label, obj, objMxn) => {
+        if (!obj || obj.mean == null) return '';
         const cls = parseFloat(obj.mean) >= 0 ? 'positive' : 'negative';
+        const p5Mxn  = objMxn && objMxn.p5  != null ? fmt(objMxn.p5)  : '—';
+        const p95Mxn = objMxn && objMxn.p95 != null ? fmt(objMxn.p95) : '—';
         return `<tr>
             <td>${label}</td>
-            <td class="${cls}">${fmt(obj.mean, 4)} USD</td>
-            <td class="${cls}">${fmt(objMxn.mean)} MXN</td>
-            <td style="color:#888;font-size:0.82em">${fmt(objMxn.p5)} / ${fmt(objMxn.p95)}</td>
+            <td class="${cls}">${fmt(obj.mean, 2)} USD</td>
+            <td class="${cls}"><b>${fmt(objMxn ? objMxn.mean : obj.mean * rate, 0)} MXN</b></td>
+            <td style="color:#888;font-size:0.82em">${p5Mxn} / ${p95Mxn} MXN</td>
         </tr>`;
     };
+
+    // Capital actual scenario
+    const sca = pp.scenario_capital_actual || {};
+    const scaCapMxn   = parseFloat(sca.capital_mxn || pp.capital_mxn || 0);
+    const scaMonthMxn = parseFloat(sca.monthly_mean_mxn || 0);
+    const scaP5Mxn    = parseFloat(sca.monthly_p5_mxn || 0);
+    const scaP95Mxn   = parseFloat(sca.monthly_p95_mxn || 0);
+    const scaYearMxn  = parseFloat(sca.annual_mean_mxn || 0);
+    const scaMonthCls = scaMonthMxn >= 0 ? 'positive' : 'negative';
+    const scaYearCls  = scaYearMxn  >= 0 ? 'positive' : 'negative';
+
     // Progress bar toward $30k MXN/month
-    const t30 = pp.target_30k_mxn || {};
+    const t30  = pp.target_30k_mxn || {};
     const prog = Math.min(parseFloat(t30.current_progress_pct || 0), 100);
-    const s100 = pp.scenario_100k_mxn || {};
+
+    // Meta 1,000 MXN/día
+    const m1k = pp.meta_1000_mxn_day || {};
+    const m1kPnlDay   = parseFloat(m1k.pnl_day_mxn ?? 0);
+    const m1kTdCur    = parseFloat(m1k.trades_day_current ?? 0);
+    const m1kTdNeed   = parseFloat(m1k.trades_needed_day ?? 999);
+    const m1kPct      = parseFloat(m1k.pct_toward_goal ?? 0);
+    const m1kEv       = parseFloat(m1k.ev_per_trade_usd ?? 0);
+    const m1kPnlCls   = m1kPnlDay >= 0 ? 'positive' : 'negative';
+
     el.innerHTML = `
         <div class="proj-stats">
             <span class="proj-stat">WR <b>${fmt(pp.win_rate, 1)}%</b></span>
@@ -467,33 +490,56 @@ function renderProfitProjection(pp) {
             <span class="proj-stat">Avg loss <b class="negative">$${fmt(pp.avg_loss_usd, 3)}</b></span>
         </div>
         <table class="proj-table">
-            <thead><tr><th>Período</th><th>Esperado</th><th>En MXN</th><th>Rango P5/P95 MXN</th></tr></thead>
+            <thead><tr><th>Período</th><th>Esperado USD</th><th>Esperado MXN</th><th>Rango P5/P95 MXN</th></tr></thead>
             <tbody>
                 ${pRow('📅 Hoy',    pp.day,   pp.day_mxn)}
                 ${pRow('📆 Semana', pp.week,  pp.week_mxn)}
                 ${pRow('🗓️ Mes',    pp.month, pp.month_mxn)}
             </tbody>
         </table>
+
         <div class="proj-scenario">
-            <div class="proj-scenario-title">💰 Con $100,000 MXN (~$${fmt(s100.capital_usd)} USD)</div>
+            <div class="proj-scenario-title">💰 Con capital actual ($${fmt(scaCapMxn, 0)} MXN · $${fmt(sca.capital_usd || pp.capital_usd, 0)} USD)</div>
             <div class="proj-scenario-row">
                 <span>Ganancia mensual esperada:</span>
-                <span class="${parseFloat(s100.monthly_mean_mxn||0)>=0?'positive':'negative'}"><b>$${fmt(s100.monthly_mean_mxn)} MXN</b></span>
+                <span class="${scaMonthCls}"><b>${scaMonthMxn >= 0 ? '+' : ''}$${fmt(scaMonthMxn, 0)} MXN</b></span>
             </div>
             <div class="proj-scenario-row">
                 <span>Rango P5–P95:</span>
-                <span style="color:#aaa">$${fmt(s100.monthly_p5_mxn)} – $${fmt(s100.monthly_p95_mxn)} MXN</span>
+                <span style="color:#aaa">$${fmt(scaP5Mxn, 0)} – $${fmt(scaP95Mxn, 0)} MXN</span>
             </div>
             <div class="proj-scenario-row">
-                <span>Ganancia anual esperada:</span>
-                <span class="${parseFloat(s100.annual_mean_mxn||0)>=0?'positive':'negative'}"><b>$${fmt(s100.annual_mean_mxn)} MXN</b></span>
+                <span>Ganancia anual proyectada:</span>
+                <span class="${scaYearCls}"><b>${scaYearMxn >= 0 ? '+' : ''}$${fmt(scaYearMxn, 0)} MXN</b></span>
             </div>
         </div>
-        <div class="proj-target">
-            <div class="proj-target-title">🎯 Objetivo: $30,000 MXN/mes</div>
+
+        ${m1kEv > 0 ? `
+        <div class="proj-target" style="border-color:rgba(78,204,163,0.3);background:rgba(78,204,163,0.05)">
+            <div class="proj-target-title" style="color:#4ecca3">🎯 Meta: 1,000 MXN/día con capital actual</div>
             <div class="proj-target-row">
-                <span>Capital requerido:</span>
-                <span><b>$${fmt(t30.capital_required_mxn)} MXN</b> (~$${fmt(t30.capital_required_usd)} USD)</span>
+                <span>PnL/día actual (sistema Base):</span>
+                <span class="${m1kPnlCls}"><b>${m1kPnlDay >= 0 ? '+' : ''}$${fmt(m1kPnlDay, 0)} MXN</b></span>
+            </div>
+            <div class="proj-target-row">
+                <span>EV por trade:</span>
+                <span><b>$${fmt(m1kEv, 3)} USDT</b></span>
+            </div>
+            <div class="proj-target-row">
+                <span>Trades/día actuales vs necesarios:</span>
+                <span><b>${fmt(m1kTdCur, 1)}</b> de <b style="color:#f39c12">${fmt(m1kTdNeed, 1)}</b> necesarios</span>
+            </div>
+            <div class="proj-progress-wrap" style="margin-top:8px">
+                <div class="proj-progress-bar" style="width:${Math.min(m1kPct,100)}%;background:linear-gradient(90deg,#f39c12,#4ecca3)"></div>
+            </div>
+            <div class="proj-progress-label">${fmt(m1kPct, 1)}% hacia la meta de 1,000 MXN/día</div>
+        </div>` : ''}
+
+        <div class="proj-target">
+            <div class="proj-target-title">📈 Objetivo: $30,000 MXN/mes</div>
+            <div class="proj-target-row">
+                <span>Capital requerido (con WR actual):</span>
+                <span><b>$${fmt(t30.capital_required_mxn, 0)} MXN</b></span>
             </div>
             <div class="proj-progress-wrap">
                 <div class="proj-progress-bar" style="width:${prog}%"></div>
@@ -1167,12 +1213,11 @@ function renderMonteCarlo(mc) {
     const cap0      = mc.initial_capital  || 3080.0;
     const nTrades   = mc.n_trades_used    ?? 0;
     const nNormal   = mc.n_normal_trades  ?? '?';
-    const nRebal    = mc.n_rebal_trades   ?? '?';
     const genAt     = mc.generated_at     ?? '—';
     const btcFinal  = mc.btc_hodl_final   || cap0;
     const btcPct    = parseFloat(mc.btc_hodl_pct ?? 0);
-    const savingsDay = parseFloat(mc.savings_per_day ?? 38);
     const months    = mc.months || 3;
+    const meta      = mc.meta_1000_mxn_day || {};
 
     // ── 3-scenario table ───────────────────────────────────────────────────────
     const scenarios = mc.scenarios || {};
@@ -1185,8 +1230,12 @@ function renderMonteCarlo(mc) {
         const ret = sc.return_pct != null ? sc.return_pct : ((sc.mean_final - cap0) / cap0 * 100);
         const retStr = (ret >= 0 ? '+' : '') + parseFloat(ret).toFixed(1) + '%';
         const retCls = ret >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
+        const pnlDayMxn = sc.total_pnl != null ? (sc.total_pnl / 90 * 19.5) : null;
+        const pnlDayStr = pnlDayMxn != null
+            ? `<span style="color:#aaa;font-size:0.85em"> (${pnlDayMxn >= 0 ? '+' : ''}$${pnlDayMxn.toFixed(0)} MXN/día)</span>`
+            : '';
         return `<tr>
-            <td style="color:${color};font-weight:600">${emoji} ${sc.label}</td>
+            <td style="color:${color};font-weight:600">${emoji} ${sc.label}${pnlDayStr}</td>
             <td class="right" style="color:#e74c3c">$${parseFloat(sc.p5 || cap0).toFixed(0)}</td>
             <td class="right" style="color:#f39c12">$${parseFloat(sc.p50 || cap0).toFixed(0)}</td>
             <td class="right" style="color:#4ecca3">$${parseFloat(sc.p95 || cap0).toFixed(0)}</td>
@@ -1214,21 +1263,23 @@ function renderMonteCarlo(mc) {
         </table>
         </div>` : '';
 
-    // ── Monthly breakdown for scenario B ──────────────────────────────────────
+    // ── Monthly breakdown for scenario Base ───────────────────────────────────
     const breakdown = (scB.monthly_breakdown || mc.monthly_breakdown || []);
     const rows = breakdown.map(m => {
         const capM  = m.capital ?? (cap0 + (m.pnl ?? 0));
         const pnl   = m.pnl ?? 0;
+        const pnlMxn = pnl * 19.5;
         const pnlCls = pnl >= 0 ? 'mc-pnl-pos' : 'mc-pnl-neg';
         return `<tr>
             <td>Mes ${m.month}</td>
             <td class="right">${scB.trades_per_month ?? mc.trades_per_month ?? '?'}</td>
-            <td class="right">$${parseFloat(capM).toFixed(2)}</td>
+            <td class="right">$${parseFloat(capM).toFixed(0)}</td>
             <td class="right ${pnlCls}">${pnl >= 0 ? '+' : ''}$${parseFloat(pnl).toFixed(2)}</td>
+            <td class="right ${pnlCls}" style="font-size:0.85em">${pnlMxn >= 0 ? '+' : ''}$${pnlMxn.toFixed(0)} MXN</td>
         </tr>`;
     }).join('');
 
-    // ── Progress bars A / B / C ───────────────────────────────────────────────
+    // ── Progress bars Bear / Base / Bull / BTC ────────────────────────────────
     const allFinals = [scA.p50, scB.p50, scC.p50, btcFinal, cap0].filter(Boolean).map(Number);
     const rangeMin = Math.min(...allFinals) * 0.97;
     const rangeMax = Math.max(...allFinals) * 1.03;
@@ -1237,45 +1288,67 @@ function renderMonteCarlo(mc) {
 
     const progressBars = `
         <div class="mc-progress-wrap" style="margin-top:16px">
-            <div class="mc-progress-label">Comparativa capital final mediana — ${months} meses</div>
+            <div class="mc-progress-label">Comparativa capital final mediana — ${months} meses · Capital inicial: $${parseFloat(cap0).toFixed(0)}</div>
             <div style="display:flex;flex-direction:column;gap:7px;margin-top:8px">
                 <div style="display:flex;align-items:center;gap:10px;font-size:12px">
-                    <span style="width:120px;color:#e74c3c">🔴 Sin fixes</span>
+                    <span style="width:120px;color:#e74c3c">🔴 Bear</span>
                     <div class="mc-progress-bar-bg" style="flex:1">
                         <div class="mc-progress-bar-fill" style="width:${barPct(scA.p50 || cap0)}%;background:#e74c3c"></div>
                     </div>
                     <span style="width:65px;text-align:right;color:#e74c3c">$${parseFloat(scA.p50 || cap0).toFixed(0)}</span>
                 </div>
                 <div style="display:flex;align-items:center;gap:10px;font-size:12px">
-                    <span style="width:120px;color:#f39c12">🟡 Con Opción B</span>
+                    <span style="width:120px;color:#f39c12">🟡 Base</span>
                     <div class="mc-progress-bar-bg" style="flex:1">
                         <div class="mc-progress-bar-fill" style="width:${barPct(scB.p50 || cap0)}%;background:#f39c12"></div>
                     </div>
                     <span style="width:65px;text-align:right;color:#f39c12">$${parseFloat(scB.p50 || cap0).toFixed(0)}</span>
                 </div>
                 <div style="display:flex;align-items:center;gap:10px;font-size:12px">
-                    <span style="width:120px;color:#4ecca3">🟢 Optimista</span>
+                    <span style="width:120px;color:#4ecca3">🟢 Bull</span>
                     <div class="mc-progress-bar-bg" style="flex:1">
                         <div class="mc-progress-bar-fill" style="width:${barPct(scC.p50 || cap0)}%;background:#4ecca3"></div>
                     </div>
                     <span style="width:65px;text-align:right;color:#4ecca3">$${parseFloat(scC.p50 || cap0).toFixed(0)}</span>
                 </div>
                 <div style="display:flex;align-items:center;gap:10px;font-size:12px">
-                    <span style="width:120px;color:#888">₿ HODL BTC</span>
+                    <span style="width:120px;color:#f7931a">₿ HODL BTC</span>
                     <div class="mc-progress-bar-bg" style="flex:1">
                         <div class="mc-progress-bar-fill" style="width:${barPct(btcFinal)}%;background:#f7931a"></div>
                     </div>
-                    <span style="width:65px;text-align:right;color:#f7931a">$${btcFinal.toFixed(0)} (${btcPct >= 0 ? '+' : ''}${btcPct.toFixed(1)}%)</span>
+                    <span style="width:65px;text-align:right;color:#f7931a">$${btcFinal.toFixed(0)}</span>
                 </div>
             </div>
         </div>`;
 
-    // ── Savings badge ─────────────────────────────────────────────────────────
-    const savingsBadge = savingsDay > 0 ? `
-        <div style="background:rgba(78,204,163,0.1);border:1px solid rgba(78,204,163,0.3);border-radius:8px;padding:10px 14px;margin-top:14px;font-size:13px">
-            💡 <b style="color:#4ecca3">Opción B activa</b>: ahorro estimado
-            <b style="color:#4ecca3">+$${savingsDay.toFixed(2)}/día</b> vs sistema sin fixes
-            &nbsp;·&nbsp; ${nNormal} trades normales | ${nRebal} rebalanceos históricos
+    // ── Meta 1,000 MXN/día ────────────────────────────────────────────────────
+    const evTrade    = parseFloat(meta.ev_per_trade_usd ?? 0);
+    const tdCurrent  = parseFloat(meta.trades_day_current ?? 0);
+    const tdNeeded   = parseFloat(meta.trades_needed_day ?? 999);
+    const pnlDayMxn  = parseFloat(meta.pnl_day_current_mxn ?? 0);
+    const pctGoal    = parseFloat(meta.pct_toward_goal ?? 0);
+    const bullDay    = parseFloat(meta.bull_trades_day ?? 0);
+    const bullPnlMxn = parseFloat(meta.bull_pnl_day_mxn ?? 0);
+    const pnlDayCls  = pnlDayMxn >= 0 ? '#4ecca3' : '#e74c3c';
+    const metaBadge = evTrade > 0 ? `
+        <div style="background:rgba(78,204,163,0.08);border:1px solid rgba(78,204,163,0.25);border-radius:10px;padding:12px 16px;margin-top:14px">
+            <div style="font-size:13px;font-weight:700;color:#4ecca3;margin-bottom:8px">🎯 Meta: 1,000 MXN/día con capital actual</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 20px;font-size:12px">
+                <div>EV por trade: <b style="color:#fff">$${evTrade.toFixed(3)} USDT</b></div>
+                <div>Trades/día actuales: <b style="color:#fff">${tdCurrent}</b></div>
+                <div>Trades/día necesarios: <b style="color:#f39c12">${tdNeeded}</b></div>
+                <div>PnL/día actual: <b style="color:${pnlDayCls}">${pnlDayMxn >= 0 ? '+' : ''}$${pnlDayMxn.toFixed(0)} MXN</b></div>
+            </div>
+            <div style="margin-top:10px">
+                <div style="display:flex;justify-content:space-between;font-size:11px;color:#888;margin-bottom:3px">
+                    <span>Progreso hacia 1,000 MXN/día</span>
+                    <span>${pctGoal.toFixed(1)}% (en mercado Base)</span>
+                </div>
+                <div style="background:#1a1a2e;border-radius:4px;height:8px;overflow:hidden">
+                    <div style="height:100%;width:${Math.min(pctGoal,100)}%;background:linear-gradient(90deg,#f39c12,#4ecca3);border-radius:4px;transition:width 0.5s"></div>
+                </div>
+            </div>
+            ${bullPnlMxn > 0 ? `<div style="margin-top:8px;font-size:11px;color:#aaa">🟢 En mercado Bull (F&G>50): ~<b style="color:#4ecca3">$${bullPnlMxn.toFixed(0)} MXN/día</b> con ${bullDay} trades/día estimados</div>` : ''}
         </div>` : '';
 
     el.innerHTML = `
@@ -1288,26 +1361,27 @@ function renderMonteCarlo(mc) {
         </div>
 
         ${scenariosTable}
-        ${savingsBadge}
+        ${metaBadge}
         ${progressBars}
 
         ${breakdown.length > 0 ? `
         <div style="margin-top:16px">
-            <div class="mc-progress-label">Desglose mensual — Escenario B (Con Opción B)</div>
+            <div class="mc-progress-label">Desglose mensual — Escenario Base (sistema actual)</div>
             <div style="overflow-x:auto;margin-top:8px">
             <table class="mc-table">
                 <thead><tr>
                     <th>Mes</th>
                     <th class="right">Trades</th>
                     <th class="right">Capital esperado</th>
-                    <th class="right">PnL mes</th>
+                    <th class="right">PnL mes (USD)</th>
+                    <th class="right">PnL mes (MXN)</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>
             </div>
         </div>` : ''}
 
-        <div class="mc-note">* Bootstrap sobre trades reales cerrados. Escenario C proyecta WR=45% con SL/TP calibrado (objetivo pendiente). Sin compounding completo.</div>
+        <div class="mc-note">* 1,000 simulaciones Monte Carlo sobre trades reales cerrados. Bear=WR histórico real, Base=solo trades SL/TP (sin rebalanceos), Bull=WR 55% + señales M1-M5 activas.</div>
     `;
 }
 
