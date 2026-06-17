@@ -229,6 +229,8 @@ class Settings(BaseSettings):
         'AGIXUSDT', 'OCEANUSDT', 'INJUSDT',
         # E1: Nuevos narratives AI/Data para rotación sectorial
         'GRTUSDT', 'AIOZUSDT',
+        # MEJO-J: Sincronizados con token_categories market_behavior=NARRATIVE
+        'JTOUSDT',
     ], env="NARRATIVE_TOKENS")
 
     # ── Token classification 2D ───────────────────────────────────────────────
@@ -281,10 +283,11 @@ class Settings(BaseSettings):
     # min_prob: mínima probabilidad de éxito requerida
     # min_pnl:  mínimo PnL esperado (USDT) — negativo permitido para NARRATIVE
     # min_volspike: VolSpike mínimo para confirmar señal (informativo, no enforcement aquí)
+    # MEJO-A: NARRATIVE trailing aumentado (8%/3%) para capturar breakouts +15-30% completos
     category_thresholds: dict = Field(default={
         "LARGE_CAP":  {"min_prob": 0.55, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.2, "tp_extension_pct": 1.5},
         "MIDCAP_ALT": {"min_prob": 0.50, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.2, "tp_extension_pct": 2.0},
-        "NARRATIVE":  {"min_prob": 0.42, "min_pnl": -5.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 2.0, "tp_extension_pct": 3.0},
+        "NARRATIVE":  {"min_prob": 0.42, "min_pnl": -5.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 8.0, "trailing_distance_pct": 3.0, "tp_extension_pct": 3.0},
         "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.0, "take_profit_pct": 4.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.5, "tp_extension_pct": 2.5},
     }, env="CATEGORY_THRESHOLDS")
     

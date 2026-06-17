@@ -171,12 +171,12 @@ def _detect_raw(binance_client) -> dict:
             regime = "DÉBIL BAJA"
             color  = "#e67e22"
             reason = f"Tendencia bajista: BTC 7d={btc_7d_pct:+.1f}%, EMA9 aún UP"
-        elif ema9_vs_ema21 == "UP" and btc_day_pct > _BULL_DAY_MIN:
+        elif ema9_vs_ema21 == "UP" and (btc_day_pct > _BULL_DAY_MIN or bb_bw > _BB_SIDEWAYS_MAX):
             mode   = "SPOT_BULL"
             regime = "ALCISTA"
             color  = "#4ecca3"
             reason = (f"Tendencia alcista: EMA9>EMA21, día={btc_day_pct:+.1f}%, "
-                      f"7d={btc_7d_pct:+.1f}%")
+                      f"7d={btc_7d_pct:+.1f}%, bb_bw={bb_bw:.3f}")
         elif ema9_vs_ema21 == "UP":
             mode   = "SPOT_BULL"
             regime = "DÉBIL ALZA"

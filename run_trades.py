@@ -157,15 +157,33 @@ def _check_liquidity_and_slippage(symbol: str, vol_24h_usdt: float,
 def _consecutive_sl_count(symbol: str, position_manager, n: int = 3) -> bool:
     """WR Screener: returns True if the last N closed trades for symbol were ALL stop_loss.
     Uses only clean closes (not rebalancing/manual) to detect genuine losing streaks.
+    MEJO-G: Only considers trades from the last 30 days to avoid blocking pairs indefinitely.
     """
     try:
+        from datetime import timedelta
+        _cutoff = datetime.now(timezone.utc) - timedelta(days=30)
         closed = position_manager.get_closed_positions(limit=200)
-        sym_trades = [
-            p for p in closed
-            if getattr(p, 'symbol', '') == symbol
-            and 'rebalancing' not in (getattr(p, 'close_reason', '') or '')
-            and 'manual' not in (getattr(p, 'close_reason', '') or '')
-        ]
+        sym_trades = []
+        for p in closed:
+            if getattr(p, 'symbol', '') != symbol:
+                continue
+            if 'rebalancing' in (getattr(p, 'close_reason', '') or ''):
+                continue
+            if 'manual' in (getattr(p, 'close_reason', '') or ''):
+                continue
+            # MEJO-G: skip trades older than 30 days
+            _exit = getattr(p, 'exit_time', None)
+            if _exit is not None:
+                try:
+                    if isinstance(_exit, str):
+                        _exit = datetime.fromisoformat(_exit.replace('Z', '+00:00'))
+                    if hasattr(_exit, 'tzinfo') and _exit.tzinfo is None:
+                        _exit = _exit.replace(tzinfo=timezone.utc)
+                    if _exit < _cutoff:
+                        continue
+                except Exception:
+                    pass
+            sym_trades.append(p)
         if len(sym_trades) < n:
             return False
         recent_n = sym_trades[:n]
@@ -229,16 +247,6 @@ def _record_order_failure(settings) -> None:
     threshold = getattr(settings, 'circuit_breaker_consecutive_failures', 5)
     if _consecutive_failures >= threshold:
         pause_min = getattr(settings, 'circuit_breaker_pause_minutes', 10)
-        _circuit_breaker_until = datetime.now(timezone.utc).replace(
-            second=0, microsecond=0
-        ).__class__(
-            datetime.now(timezone.utc).year,
-            datetime.now(timezone.utc).month,
-            datetime.now(timezone.utc).day,
-            datetime.now(timezone.utc).hour,
-            datetime.now(timezone.utc).minute + pause_min,
-            tzinfo=timezone.utc,
-        )
         from datetime import timedelta
         _circuit_breaker_until = datetime.now(timezone.utc) + timedelta(minutes=pause_min)
         ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_WARNING,
@@ -371,12 +379,16 @@ def _try_replace_weakest_position(
             _entry_ts = getattr(_wp, 'entry_time', None)
             if _entry_ts is not None:
                 try:
+                    if isinstance(_entry_ts, str):
+                        _entry_ts = datetime.fromisoformat(_entry_ts.replace('Z', '+00:00'))
+                    if hasattr(_entry_ts, 'tzinfo') and _entry_ts.tzinfo is None:
+                        _entry_ts = _entry_ts.replace(tzinfo=timezone.utc)
                     _age_min = (datetime.now(timezone.utc) - _entry_ts).total_seconds() / 60
                     if _age_min < _min_hold:
                         print(f"[Replace] {_worst_sym}: age={_age_min:.1f}min < min_hold={_min_hold}min — protected")
                         return False
-                except Exception:
-                    pass
+                except Exception as _ts_err:
+                    print(f"[Replace] {_worst_sym}: entry_ts parse error ({_ts_err}) — skipping min_hold check")
 
         # Check: replace_only_losing — skip if worst position is in profit
         if getattr(settings, 'replace_only_losing', True):
@@ -581,6 +593,13 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
             # Convert autonomous signals to expected format and add to signal store
             top_signals = []
             for signal in autonomous_signals:
+                # MEJO-F: Obtain vol_24h_usdt for liquidity filter — use quote_volume from 24h ticker
+                _vol_24h_usdt = 0.0
+                try:
+                    _ticker_24h = client.client.get_ticker(symbol=signal['symbol'])
+                    _vol_24h_usdt = float(_ticker_24h.get('quoteVolume', 0.0))
+                except Exception:
+                    pass
                 signal_dict = {
                     "symbol": signal['symbol'],
                     "score": signal['strength'] * 100,  # Convert to 0-100 scale
@@ -593,6 +612,8 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                     "vol_spike": signal.get('vol_spike', signal.get('indicators', {}).get('vol_spike', 0.0)),
                     "breakout_12h": signal.get('breakout_12h', False),
                     "rsi": signal.get('indicators', {}).get('rsi', 50.0),
+                    # MEJO-F: vol_24h_usdt needed by liquidity filter
+                    "volume_24h_usdt": _vol_24h_usdt,
                 }
                 top_signals.append(signal_dict)
                 
@@ -1598,11 +1619,20 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         pass
                 if symbol in _l_sym_list:
                     _fc_sb = _get_futures_client(settings)
-                    _l_usdt = getattr(settings, 'futures_usdt_per_trade', 20.0)
                     _l_sl   = getattr(settings, 'futures_long_sl_pct', 2.5)
                     _l_tp   = getattr(settings, 'futures_long_tp_pct', 5.0)
                     _l_lev  = getattr(settings, 'futures_leverage', 2)
-                    print(f"[Futures] SPOT_BULL oversold LONG {symbol}: RSI={_l_rsi_val:.1f}<{_l_rsi_thresh}, BTC={btc_trend}")
+                    # MEJO-D: Kelly sizing para LONG (igual que SHORT), cap futures_usdt_per_trade
+                    _l_pred_sb = {'success_probability': 0.55}  # oversold en uptrend = mayor prob
+                    _l_usdt = _kelly_position_size(
+                        settings, strength=float(signal_meta.get(symbol, {}).get('strength', 0.5)),
+                        prediction=_l_pred_sb, usdt_liquid=usdt_liquid,
+                        sl_pct=_l_sl * _l_lev / 100, tp_pct=_l_tp * _l_lev / 100)
+                    _l_usdt = min(_l_usdt, getattr(settings, 'futures_usdt_per_trade', 20.0))
+                    # Apply F&G boost (oversold + Fear = strong conviction entry)
+                    _l_usdt = _apply_fng_kelly_boost(_l_usdt, _fng_value, settings)
+                    _l_usdt = min(_l_usdt, getattr(settings, 'futures_usdt_per_trade', 20.0))
+                    print(f"[Futures] SPOT_BULL oversold LONG {symbol}: RSI={_l_rsi_val:.1f}<{_l_rsi_thresh}, BTC={btc_trend}, margin=${_l_usdt:.2f}")
                     _lpos_sb = _fc_sb.open_long(symbol, usdt_amount=_l_usdt,
                                                 sl_pct=_l_sl, tp_pct=_l_tp, leverage=_l_lev)
                     if _lpos_sb:
@@ -1729,6 +1759,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                 continue
                             
                             # Check 3: Límite diario
+                            from datetime import datetime as _dt  # BUG-1: import before first use
                             _daily_limit = getattr(settings, 'volspike_override_daily_limit', 3)
                             _today_str = _dt.now(timezone.utc).strftime('%Y-%m-%d')
                             _today_count = _OVERRIDE_DAILY_COUNT.get(_today_str, 0)
@@ -1738,7 +1769,6 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                             
                             # Check cooldown — no re-entry within 4h of last override
                             _last = _VOLSPIKE_COOLDOWN.get(symbol)
-                            from datetime import datetime as _dt
                             _now_utc = _dt.now(timezone.utc)
                             if _last:
                                 _hours_since = (_now_utc - _last).total_seconds() / 3600
@@ -1935,6 +1965,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "rsi_at_entry": float(signal_meta.get(symbol, {}).get('rsi', 50.0)),
                         "vol_spike_at_entry": float(signal_meta.get(symbol, {}).get('vol_spike', 0.0)),
                         "override_used": volspike_override,
+                        "strength": float(signal_meta.get(symbol, {}).get('strength', strength)),
                     }
                     if prediction:
                         metadata['pnl_prediction'] = prediction
@@ -2187,6 +2218,22 @@ def execute_once():
     portfolio_manager = comp.portfolio_manager
 
     print(f"DRY_RUN={settings.dry_run}  ALLOW_REAL_TRADING={settings.allow_real_trading}  MAX_PER_TRADE_USDT={settings.max_per_trade_usdt}")
+
+    # ── BUG-6: Cleanup expired cooldown entries (memory hygiene for 24/7 operation) ──
+    try:
+        from datetime import timedelta as _td
+        _cd_cutoff = datetime.now(timezone.utc) - _td(hours=_VOLSPIKE_COOLDOWN_HOURS + 1)
+        _expired_vs = [k for k, v in _VOLSPIKE_COOLDOWN.items() if v < _cd_cutoff]
+        for _k in _expired_vs:
+            _VOLSPIKE_COOLDOWN.pop(_k, None)
+        _nc_cutoff = datetime.now(timezone.utc) - _td(hours=_NARRATIVE_BUY_COOLDOWN_HOURS + 1)
+        _expired_nc = [k for k, v in _NARRATIVE_BUY_COOLDOWN.items() if v < _nc_cutoff]
+        for _k in _expired_nc:
+            _NARRATIVE_BUY_COOLDOWN.pop(_k, None)
+        if _expired_vs or _expired_nc:
+            print(f"[Cleanup] Removed {len(_expired_vs)} volspike + {len(_expired_nc)} narrative cooldown entries")
+    except Exception:
+        pass
 
     # ── Log Fear & Greed state ──────────────────────────────────────────────
     try:
