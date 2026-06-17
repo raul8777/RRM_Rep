@@ -1,0 +1,32 @@
+{
+  "phase": "top20",
+  "symbols_requested": [
+    "UNIUSDT",
+    "ASTERUSDT",
+    "WLDUSDT",
+    "XPLUSDT",
+    "ETHUSDT",
+    "BTCUSDT",
+    "NIGHTUSDT",
+    "IDUSDT",
+    "SPCXBUSDT",
+    "ENAUSDT",
+    "XAUTUSDT",
+    "ZECUSDT",
+    "BIOUSDT",
+    "PORTALUSDT",
+    "UTKUSDT",
+    "JTOUSDT",
+    "XLMUSDT",
+    "XRPUSDT",
+    "ADAUSDT",
+    "INJUSDT"
+  ],
+  "symbols_successful": [],
+  "total_requested": 20,
+  "successful": 0,
+  "failed": 20,
+  "days": 365,
+  "storage_gb": 0.0,
+  "date": "2026-06-17T14:30:29.216641"
+}

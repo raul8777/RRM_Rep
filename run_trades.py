@@ -22,6 +22,11 @@ _INVALID_SYMBOLS: set = {"EONUSDT", "ADDUSDT", "MEETONEUSDT", "ATDUSDT", "EOPUSD
 # Prevents re-entering the same narrative token breakout every 5min cycle
 _VOLSPIKE_COOLDOWN: Dict[str, datetime] = {}
 
+# V2: Tracking de métricas VolSpike Override (jun 16 2026)
+_VOLSPIKE_POSITIONS: set = set()           # Symbols con override activo
+_OVERRIDE_DAILY_COUNT: Dict[str, int] = {}  # date_str -> count
+_OVERRIDE_PERFORMANCE: list = []            # Lista de resultados para análisis
+
 # Futures client singleton (lazy-initialized)
 _futures_client: FuturesClient = None
 
@@ -323,14 +328,23 @@ def _try_replace_weakest_position(
         _worst_ev   = float(_worst_pred.get('expected_pnl', 0))
         _worst_prob = float(_worst_pred.get('success_probability', 0.5))
 
-        # Avg strength of open positions (use entry metadata if available)
-        _avg_strength = 0.5  # conservative default if no metadata
+        # Avg strength of open positions — compute from signal metadata stored at entry
+        _strengths = []
+        for _s, _plist in _all_pos.items():
+            if _plist:
+                _meta_s = float(getattr(_plist[0], 'metadata', {}).get('strength', 0) or 0)
+                if _meta_s > 0:
+                    _strengths.append(_meta_s)
+        _avg_strength = sum(_strengths) / len(_strengths) if _strengths else 0.45  # default: conservative
 
-        # Check: new EV vs worst open EV
-        _ev_ratio = getattr(settings, 'replace_ev_min_ratio', 1.3)
+        # Check: new EV vs worst open EV (BUG-C fix: also check when worst_ev < 0)
+        _ev_ratio = getattr(settings, 'replace_ev_min_ratio', 1.1)
         _new_ev = float((new_prediction or {}).get('expected_pnl', 0))
         _new_prob = float((new_prediction or {}).get('success_probability', 0))
 
+        if _new_ev <= _worst_ev:
+            print(f"[Replace] {new_symbol}: new_ev={_new_ev:.3f} <= worst_ev={_worst_ev:.3f} — not an improvement")
+            return False
         if _worst_ev >= 0 and _new_ev < _worst_ev * _ev_ratio:
             print(f"[Replace] {new_symbol}: new_ev={_new_ev:.3f} < worst_ev={_worst_ev:.3f}×{_ev_ratio} — skip")
             return False
@@ -338,14 +352,19 @@ def _try_replace_weakest_position(
             print(f"[Replace] {new_symbol}: new_prob={_new_prob:.2f} <= worst_prob={_worst_prob:.2f} — skip")
             return False
 
-        # Check: strength delta
-        _str_delta = getattr(settings, 'replace_strength_min_delta', 0.15)
+        # Check: strength delta vs real avg (BUG-B fix: use computed avg, not hardcoded 0.5)
+        _str_delta = getattr(settings, 'replace_strength_min_delta', 0.05)
         if new_strength < _avg_strength + _str_delta:
             print(f"[Replace] {new_symbol}: strength={new_strength:.2f} < avg+delta={_avg_strength+_str_delta:.2f} — skip")
             return False
 
-        # Check: worst position must have been held >= min_hold_minutes
-        _min_hold = getattr(settings, 'min_hold_minutes', 60)
+        # Check: worst position must have been held >= min_hold_minutes (dynamic by regime)
+        if regime_mode == 'RANGE_SCALP':
+            _min_hold = getattr(settings, 'min_hold_minutes_range_scalp', 30)
+        elif regime_mode == 'SPOT_BULL':
+            _min_hold = getattr(settings, 'min_hold_minutes_spot_bull', 120)
+        else:
+            _min_hold = getattr(settings, 'min_hold_minutes', 120)
         _worst_pos_list = _all_pos.get(_worst_sym, [])
         if _worst_pos_list:
             _wp = _worst_pos_list[0]
@@ -390,6 +409,8 @@ def _try_replace_weakest_position(
             _exit_price = client.get_symbol_price(_worst_sym)
             commission_rate = getattr(settings, 'binance_commission_rate', 0.001)
             position_manager.close_all_positions_for_symbol(_worst_sym, _exit_price, "active_replacement", commission_rate)
+            _overflow_positions.discard(_worst_sym)   # INEF-4: free overflow slot if used
+            _VOLSPIKE_POSITIONS.discard(_worst_sym)   # INEF-3: free volspike slot if used
             add_signal({"symbol": _worst_sym, "action": "SELL", "price": _exit_price,
                         "reason": f"active_replacement→{new_symbol}", "source": "replacement"})
             print(f"[Replace] Sold {_qty} {_worst_sym} @ {_exit_price:.4f} — slot freed for {new_symbol}")
@@ -415,6 +436,44 @@ def _get_news_scores(symbols: List[str], news_client: NewsClient, settings) -> D
             if symbol.upper() in text:
                 scores[symbol] = scores.get(symbol, 0.0) + 1.0
     return scores
+
+
+def _filter_by_quality(symbols: List[str], client, settings, target_count: int = 100) -> List[str]:
+    """
+    Apply quality filters to screener symbols for top 100 selection.
+    Filters by: volatility, price minimum.
+    """
+    filtered = []
+    max_volatility = getattr(settings, 'screener_quality_max_volatility', 0.50)
+    min_price = getattr(settings, 'screener_quality_min_price_usdt', 0.0001)
+    
+    for symbol in symbols:
+        try:
+            # Get 24h ticker for volatility check
+            ticker = client.get_client().get_ticker(symbol=symbol)
+            price_change_pct = abs(float(ticker.get('priceChangePercent', 0))) / 100
+            last_price = float(ticker.get('lastPrice', 0))
+            
+            # Filter by volatility
+            if price_change_pct > max_volatility:
+                continue
+            
+            # Filter by minimum price
+            if last_price < min_price:
+                continue
+            
+            filtered.append(symbol)
+            
+            if len(filtered) >= target_count:
+                break
+                
+        except Exception:
+            # If we can't get data, include the symbol (will be filtered later)
+            filtered.append(symbol)
+            if len(filtered) >= target_count:
+                break
+    
+    return filtered
 
 
 def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClient, portfolio_manager=None, regime: str = "SPOT_BULL") -> List[Dict]:
@@ -457,7 +516,41 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                 'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
                 'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT'
             ])
-            if getattr(settings, 'screener_enabled', True):
+            
+            # Check if top-n screener v2 is enabled (100 quality assets)
+            if getattr(settings, 'screener_top_n_enabled', False):
+                try:
+                    from pair_screener import get_screened_pairs
+                    _screened = get_screened_pairs(
+                        spot_min_vol=settings.screener_quality_min_vol_usdt,
+                        max_spot=settings.screener_top_n_count + 20,  # Request extra for filtering
+                        settings=settings
+                    )
+                    # Apply additional quality filters
+                    symbols = _filter_by_quality(
+                        _screened["spot"],
+                        client,
+                        settings,
+                        target_count=settings.screener_top_n_count
+                    )
+                    print(f"[Screener v2] Selected top {len(symbols)} quality assets (target: {settings.screener_top_n_count})")
+                    _new = [s for s in symbols if s not in _static_symbols]
+                    if _new:
+                        print(f"[Screener v2] New vs static: {_new[:15]}{'...' if len(_new) > 15 else ''}")
+                except Exception as _se:
+                    print(f"[Screener v2] Error, falling back to screener v1: {_se}")
+                    # Fallback to screener v1
+                    if getattr(settings, 'screener_enabled', True):
+                        from pair_screener import get_screened_pairs, merge_with_static
+                        _screened = get_screened_pairs(settings=settings)
+                        symbols = merge_with_static(
+                            _screened["spot"],
+                            _static_symbols,
+                            max_total=getattr(settings, 'screener_max_pairs', 50),
+                        )
+                    else:
+                        symbols = _static_symbols
+            elif getattr(settings, 'screener_enabled', True):
                 try:
                     from pair_screener import get_screened_pairs, merge_with_static
                     _screened = get_screened_pairs(settings=settings)
@@ -974,6 +1067,30 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
                             symbol, current_price, close_reason.split(" ")[0], commission_rate
                         )
                         _overflow_positions.discard(symbol)  # free overflow slot if used
+                        # V2: Tracking métricas VolSpike Override (jun 16 2026)
+                        if symbol in _VOLSPIKE_POSITIONS:
+                            _VOLSPIKE_POSITIONS.discard(symbol)
+                            # Calcular y registrar performance
+                            _pnl_actual = (current_price - entry_price) * float(pos.quantity)
+                            _pnl_expected = float(pos.pnl_prediction.get('expected_pnl', 0)) if pos.pnl_prediction else 0
+                            _accuracy = (_pnl_actual / _pnl_expected * 100) if _pnl_expected else 0
+                            _duration_hours = 0
+                            try:
+                                _entry_dt = datetime.fromisoformat(pos.entry_time.replace('Z', '+00:00'))
+                                _duration_hours = (datetime.now(timezone.utc) - _entry_dt).total_seconds() / 3600
+                            except:
+                                pass
+                            _OVERRIDE_PERFORMANCE.append({
+                                'symbol': symbol,
+                                'expected_pnl': _pnl_expected,
+                                'actual_pnl': _pnl_actual,
+                                'accuracy_pct': _accuracy,
+                                'close_reason': close_reason,
+                                'duration_hours': _duration_hours,
+                                'entry_time': pos.entry_time,
+                                'exit_time': datetime.now(timezone.utc).isoformat(),
+                            })
+                            print(f"[VolSpike Metrics] {symbol}: Actual={_pnl_actual:.2f}, Expected={_pnl_expected:.2f}, Accuracy={_accuracy:.1f}%, Duration={_duration_hours:.1f}h")
                         add_signal({
                             "symbol": symbol, "action": "SELL",
                             "price": current_price,
@@ -1168,6 +1285,18 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         _invested = _total_portfolio - usdt_liquid
         _exposure_pct = _invested / _total_portfolio if _total_portfolio > 0 else 0.0
         _max_exposure = getattr(settings, 'max_total_exposure_pct', 0.65)
+        # Aggressive mode: SPOT_BULL + F&G Fear → higher exposure cap to deploy more capital
+        _fng_early = 50
+        try:
+            if news_client:
+                _fng_early = int(news_client.get_fear_greed().get('value', 50))
+        except Exception:
+            pass
+        _fng_fear_thr = getattr(settings, 'max_total_exposure_spot_bull_fear_fng_threshold', 40)
+        _spot_bull_fear_cap = getattr(settings, 'max_total_exposure_spot_bull_fear', 0.80)
+        if _regime_mode == "SPOT_BULL" and _fng_early <= _fng_fear_thr:
+            _max_exposure = _spot_bull_fear_cap
+            print(f"[Exposure] SPOT_BULL + F&G={_fng_early} (Fear) → aggressive cap {_max_exposure:.0%}")
         print(f"USDT liquid: {usdt_liquid:.2f}, total: {_total_portfolio:.2f}, invested: {_invested:.2f} ({_exposure_pct:.1%}) — cap: {_max_exposure:.0%}")
         if _exposure_pct >= _max_exposure:
             print(f"[Exposure] Portfolio {_exposure_pct:.1%} >= cap {_max_exposure:.0%} — skipping new spot buys this cycle")
@@ -1359,8 +1488,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     # Fear & Greed boost: Extreme Fear (<25) → larger short margin (better entry)
                     try:
                         if news_client:
-                            _fng = news_client.get_fear_greed_index()
-                            _fng_val = _fng.get('value', 50) if isinstance(_fng, dict) else 50
+                            _fng = news_client.get_fear_greed()
+                            _fng_val = int(_fng.get('value', 50)) if isinstance(_fng, dict) else 50
                             if _fng_val < 25:
                                 _f_usdt = round(_f_usdt * 1.3, 2)
                                 print(f"[Futures] F&G Extreme Fear ({_fng_val}) → boosted margin ${_f_usdt}")
@@ -1580,8 +1709,33 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                     print(f"VolSpike OVERRIDE {symbol}: funding rate={_fr_val:.4%} ✓")
                         except Exception:
                             pass  # no futures pair or API error → allow entry
+                        _meta_rsi_override = float(signal_meta.get(symbol, {}).get('rsi', 50.0))
+                        if _meta_rsi_override >= _max_rsi and _spike >= _min_spike:
+                            print(f"VolSpike OVERRIDE {symbol}: RSI_1h={_meta_rsi_override:.1f} >= {_max_rsi} — bloqueado (sobrecomprado en 1h)")
                         if (_spike >= _min_spike and _rsi < _max_rsi
+                                and _meta_rsi_override < _max_rsi
                                 and (not _need_trend or _trend_up) and _funding_ok):
+                            # V2: Validaciones adicionales más selectivas (jun 16 2026)
+                            # Check 1: Strength mínimo requerido
+                            _min_strength = getattr(settings, 'volspike_override_min_strength', 0.65)
+                            if strength < _min_strength:
+                                print(f"VolSpike OVERRIDE {symbol}: rechazado - strength {strength:.2f} < {_min_strength} (señal débil)")
+                                continue  # Skip this symbol, don't mark as override
+                            
+                            # Check 2: Límite de posiciones override simultáneas
+                            _max_override_pos = getattr(settings, 'volspike_override_max_positions', 2)
+                            if len(_VOLSPIKE_POSITIONS) >= _max_override_pos:
+                                print(f"VolSpike OVERRIDE {symbol}: rechazado - límite de {_max_override_pos} posiciones override alcanzado ({len(_VOLSPIKE_POSITIONS)} activas)")
+                                continue
+                            
+                            # Check 3: Límite diario
+                            _daily_limit = getattr(settings, 'volspike_override_daily_limit', 3)
+                            _today_str = _dt.now(timezone.utc).strftime('%Y-%m-%d')
+                            _today_count = _OVERRIDE_DAILY_COUNT.get(_today_str, 0)
+                            if _today_count >= _daily_limit:
+                                print(f"VolSpike OVERRIDE {symbol}: rechazado - límite diario de {_daily_limit} alcanzado ({_today_count} hoy)")
+                                continue
+                            
                             # Check cooldown — no re-entry within 4h of last override
                             _last = _VOLSPIKE_COOLDOWN.get(symbol)
                             from datetime import datetime as _dt
@@ -1598,7 +1752,10 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                     else:
                                         volspike_override = True
                                         _VOLSPIKE_COOLDOWN[symbol] = _now_utc
-                                        print(f"VolSpike OVERRIDE {symbol}: spike={_spike:.2f}x, RSI4h={_rsi:.1f}, trend={'UP' if _trend_up else 'DOWN'} → bypassing PnL veto (pred={ep:.2f}, prob={sp:.2f})")
+                                        _VOLSPIKE_POSITIONS.add(symbol)
+                                        _OVERRIDE_DAILY_COUNT[_today_str] = _today_count + 1
+                                        print(f"VolSpike OVERRIDE {symbol}: ✅ APROBADO (strength={strength:.2f}, spike={_spike:.2f}x, RSI4h={_rsi:.1f}) → bypassing PnL veto (pred={ep:.2f}, prob={sp:.2f})")
+                                        print(f"VolSpike OVERRIDE {symbol}: Stats - posiciones override: {len(_VOLSPIKE_POSITIONS)}/{_max_override_pos}, hoy: {_today_count + 1}/{_daily_limit}")
                             else:
                                 # First time — check no open position exists
                                 _open_count = position_manager.get_positions_count(symbol) if position_manager else 0
@@ -1607,7 +1764,10 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                 else:
                                     volspike_override = True
                                     _VOLSPIKE_COOLDOWN[symbol] = _dt.now(timezone.utc)
-                                    print(f"VolSpike OVERRIDE {symbol}: spike={_spike:.2f}x, RSI4h={_rsi:.1f}, trend={'UP' if _trend_up else 'DOWN'} → bypassing PnL veto (pred={ep:.2f}, prob={sp:.2f})")
+                                    _VOLSPIKE_POSITIONS.add(symbol)
+                                    _OVERRIDE_DAILY_COUNT[_today_str] = _today_count + 1
+                                    print(f"VolSpike OVERRIDE {symbol}: ✅ APROBADO (strength={strength:.2f}, spike={_spike:.2f}x, RSI4h={_rsi:.1f}) → bypassing PnL veto (pred={ep:.2f}, prob={sp:.2f})")
+                                    print(f"VolSpike OVERRIDE {symbol}: Stats - posiciones override: {len(_VOLSPIKE_POSITIONS)}/{_max_override_pos}, hoy: {_today_count + 1}/{_daily_limit}")
                     except Exception as _ve:
                         print(f"VolSpike override check failed for {symbol}: {_ve}")
             if not volspike_override:
@@ -1772,6 +1932,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     metadata = {
                         "order_id": order.get("orderId"),
                         "indicators_at_entry": _indicators_to_save,
+                        "rsi_at_entry": float(signal_meta.get(symbol, {}).get('rsi', 50.0)),
+                        "vol_spike_at_entry": float(signal_meta.get(symbol, {}).get('vol_spike', 0.0)),
+                        "override_used": volspike_override,
                     }
                     if prediction:
                         metadata['pnl_prediction'] = prediction
@@ -1883,7 +2046,12 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
             return
 
         # ── Gate 3: apply all protective filters for each candidate ───────
-        _min_hold_min = getattr(settings, 'min_hold_minutes', 240)
+        if regime_mode == 'RANGE_SCALP':
+            _min_hold_min = getattr(settings, 'min_hold_minutes_range_scalp', 30)
+        elif regime_mode == 'SPOT_BULL':
+            _min_hold_min = getattr(settings, 'min_hold_minutes_spot_bull', 120)
+        else:
+            _min_hold_min = getattr(settings, 'min_hold_minutes', 120)
         _protect = getattr(settings, 'protect_profitable_positions', True)
         _protect_pct = getattr(settings, 'protect_profit_min_pct', 0.3) / 100.0
         _excluded_syms = set(getattr(settings, 'rebalance_excluded_symbols', []))  # F4: stablecoins etc.
@@ -1973,7 +2141,8 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
 
         # ── Execute sells for approved positions ──────────────────────────
         from trade_utils import get_symbol_filters, align_quantity_to_step, is_quantity_valid
-        for sym, _close_reason in approved[:1]:  # max 1 displacement per cycle
+        _max_displace = getattr(settings, 'max_rebalance_per_cycle', 2)
+        for sym, _close_reason in approved[:_max_displace]:  # INEF-1: use max_rebalance_per_cycle
             try:
                 balances = client.get_account_balance()
                 asset = sym.replace("USDT", "")
@@ -2084,17 +2253,31 @@ def execute_once():
                 _non_short_regime_cycles = 0  # reset — still in short-friendly mode
             if _open_short_keys and _regime_mode not in ("PRESERVATION", "FUTURES_SHORT"):
                 if _non_short_regime_cycles >= _min_cycles:
-                    print(f"[Futures] Regime is {_regime_mode} for {_non_short_regime_cycles} cycles (>={_min_cycles}) — closing ALL {len(_open_short_keys)} shorts")
+                    _protect_threshold = getattr(settings, 'futures_protect_profit_usdt', 1.0)
+                    _closed_count = 0
                     for _key in _open_short_keys:
                         _pos = _fc._open_positions.get(_key)
-                        _sym = _pos.symbol if _pos else _key.replace("_SHORT", "")
+                        if not _pos:
+                            continue
+                        _sym = _pos.symbol
                         try:
-                            _result = _fc.close_short(_sym, _pos.qty if _pos else None, reason="regime_change")
-                            futures_closes.append({"symbol": _sym, "reason": "regime_change", "result": _result})
-                            print(f"[Futures] Closed short {_sym} due to regime change → {_regime_mode}")
-                        except Exception as _ce:
-                            print(f"[Futures] Failed to close {_sym} on regime change: {_ce}")
-                    _non_short_regime_cycles = 0
+                            _cur_price = _fc.get_price(_sym)
+                            _unr_pnl = _pos.unrealized_pnl(_cur_price)
+                        except Exception:
+                            _unr_pnl = 0.0
+                        if _unr_pnl >= _protect_threshold:
+                            print(f"[Futures] SHORT {_sym}: PnL=${_unr_pnl:.2f} >= ${_protect_threshold} — PROTECTING (regime={_regime_mode}, letting SL/TP resolve)")
+                        else:
+                            try:
+                                _result = _fc.close_short(_sym, _pos.qty, reason="regime_change")
+                                futures_closes.append({"symbol": _sym, "reason": "regime_change", "result": _result})
+                                print(f"[Futures] Closed SHORT {_sym} (PnL=${_unr_pnl:.2f} < ${_protect_threshold}) due to regime → {_regime_mode}")
+                                _closed_count += 1
+                            except Exception as _ce:
+                                print(f"[Futures] Failed to close {_sym} on regime change: {_ce}")
+                    if _closed_count > 0:
+                        _non_short_regime_cycles = 0
+                    print(f"[Futures] Regime change {_regime_mode}: closed {_closed_count}/{len(_open_short_keys)} shorts (protected profitable ones)")
                 else:
                     print(f"[Futures] Regime is {_regime_mode} ({_non_short_regime_cycles}/{_min_cycles} cycles) — holding shorts (whipsaw guard)")
 

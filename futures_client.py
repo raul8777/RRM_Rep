@@ -49,6 +49,7 @@ class FuturesPosition:
     tp_order_id: Optional[str]
     opened_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     closed: bool = False
+    closed_at: Optional[datetime] = None
     exit_price: Optional[float] = None
     pnl: Optional[float] = None
 
@@ -798,7 +799,7 @@ class FuturesClient:
               f"current={current_price:.4f}, PnL~${pnl:.2f}, reason={reason}")
         if self.dry_run:
             if pos:
-                pos.closed = True; pos.exit_price = current_price; pos.pnl = pnl
+                pos.closed = True; pos.closed_at = datetime.now(timezone.utc); pos.exit_price = current_price; pos.pnl = pnl
             return {"simulated": True, "symbol": symbol, "pnl": pnl}
         if pos:
             for oid in [pos.sl_order_id, pos.tp_order_id]:
@@ -815,7 +816,7 @@ class FuturesClient:
                 "quantity": str(aligned_qty), "positionSide": "LONG", "reduceOnly": "true",
             })
             if pos:
-                pos.closed = True; pos.exit_price = current_price; pos.pnl = pnl
+                pos.closed = True; pos.closed_at = datetime.now(timezone.utc); pos.exit_price = current_price; pos.pnl = pnl
             print(f"[Futures] LONG {symbol} CLOSED: PnL~${pnl:.2f}")
             return result
         except Exception as e:
@@ -846,6 +847,7 @@ class FuturesClient:
         if self.dry_run:
             if pos:
                 pos.closed     = True
+                pos.closed_at  = datetime.now(timezone.utc)
                 pos.exit_price = current_price
                 pos.pnl        = pnl
             return {"simulated": True, "symbol": symbol, "pnl": pnl}
@@ -869,6 +871,7 @@ class FuturesClient:
             })
             if pos:
                 pos.closed     = True
+                pos.closed_at  = datetime.now(timezone.utc)
                 pos.exit_price = current_price
                 pos.pnl        = pnl
             print(f"[Futures] SHORT {symbol} CLOSED: PnL~${pnl:.2f}")

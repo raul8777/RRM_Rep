@@ -1315,14 +1315,16 @@ async def get_dashboard_summary() -> Dict:
                     "take_profit": float(position.take_profit) if position.take_profit else None,
                     "pnl_prediction": position.pnl_prediction,
                     "is_overflow": symbol in _ov_positions,
+                    "trade_type": "spot",
                 })
         result["open_positions"] = {"positions": open_list, "count": len(open_list)}
     except Exception as e:
         result["open_positions"] = {"positions": [], "count": 0, "error": str(e)}
 
-    # Closed Positions (with pnl_prediction & prediction_accuracy)
+    # Closed Positions (with pnl_prediction & prediction_accuracy) - Last 3 days only
     try:
-        closed_positions = position_manager.get_closed_positions(limit=20)
+        three_days_ago = datetime.utcnow() - timedelta(days=3)
+        closed_positions = position_manager.get_closed_positions_since(since=three_days_ago, limit=50)
         closed_list = []
         _cat_map_cl = getattr(settings, "token_categories", {})
         for pos in closed_positions:
@@ -1343,10 +1345,11 @@ async def get_dashboard_summary() -> Dict:
                 "exit_commission": float(pos.exit_commission) if pos.exit_commission else 0.0,
                 "pnl_prediction": pos.pnl_prediction,
                 "prediction_accuracy": float(pos.prediction_accuracy) if pos.prediction_accuracy else None,
+                "trade_type": "spot",
             })
-        result["closed_positions"] = {"positions": closed_list, "count": len(closed_list)}
+        result["closed_positions"] = {"positions": closed_list, "count": len(closed_list), "period_days": 3}
     except Exception as e:
-        result["closed_positions"] = {"positions": [], "count": 0, "error": str(e)}
+        result["closed_positions"] = {"positions": [], "count": 0, "error": str(e), "period_days": 3}
 
     # Next Cycle
     try:
@@ -1494,6 +1497,105 @@ async def get_daily_ticker() -> Dict:
     return {"ticker": data}
 
 
+@app.get("/metrics/override-performance")
+async def get_override_performance() -> Dict:
+    """Return VolSpike Override performance metrics for dashboard auditing."""
+    try:
+        # Importar las variables de tracking desde run_trades
+        from run_trades import _VOLSPIKE_POSITIONS, _OVERRIDE_DAILY_COUNT, _OVERRIDE_PERFORMANCE, _VOLSPIKE_COOLDOWN
+        
+        # Calcular métricas agregadas
+        total_overrides = len(_OVERRIDE_PERFORMANCE)
+        if total_overrides == 0:
+            return {
+                "summary": {
+                    "total_trades": 0,
+                    "win_rate": 0.0,
+                    "avg_accuracy": 0.0,
+                    "total_pnl": 0.0,
+                    "active_positions": len(_VOLSPIKE_POSITIONS),
+                    "todays_count": _OVERRIDE_DAILY_COUNT.get(datetime.utcnow().strftime('%Y-%m-%d'), 0),
+                },
+                "by_symbol": {},
+                "recent_trades": [],
+                "recommendations": ["No hay datos de override todavía"],
+            }
+        
+        # Calcular métricas por símbolo
+        by_symbol = {}
+        for trade in _OVERRIDE_PERFORMANCE:
+            sym = trade['symbol']
+            if sym not in by_symbol:
+                by_symbol[sym] = {'trades': 0, 'wins': 0, 'total_pnl': 0.0, 'total_accuracy': 0.0}
+            by_symbol[sym]['trades'] += 1
+            if trade['actual_pnl'] > 0:
+                by_symbol[sym]['wins'] += 1
+            by_symbol[sym]['total_pnl'] += trade['actual_pnl']
+            by_symbol[sym]['total_accuracy'] += trade.get('accuracy_pct', 0)
+        
+        # Calcular win rate y accuracy promedio por símbolo
+        for sym in by_symbol:
+            stats = by_symbol[sym]
+            stats['win_rate'] = (stats['wins'] / stats['trades'] * 100) if stats['trades'] > 0 else 0
+            stats['avg_accuracy'] = stats['total_accuracy'] / stats['trades'] if stats['trades'] > 0 else 0
+        
+        # Calcular métricas globales
+        total_pnl = sum(t['actual_pnl'] for t in _OVERRIDE_PERFORMANCE)
+        wins = sum(1 for t in _OVERRIDE_PERFORMANCE if t['actual_pnl'] > 0)
+        win_rate = (wins / total_overrides * 100) if total_overrides > 0 else 0
+        avg_accuracy = sum(t.get('accuracy_pct', 0) for t in _OVERRIDE_PERFORMANCE) / total_overrides if total_overrides > 0 else 0
+        
+        # Generar recomendaciones
+        recommendations = []
+        for sym, stats in by_symbol.items():
+            if stats['win_rate'] < 30 and stats['trades'] >= 3:
+                recommendations.append(f"⚠️ {sym}: Win rate bajo ({stats['win_rate']:.0f}%) - Considerar excluir de override")
+            elif stats['win_rate'] > 60 and stats['trades'] >= 3:
+                recommendations.append(f"✅ {sym}: Buen performance ({stats['win_rate']:.0f}% WR) - Mantener")
+        
+        if win_rate < 40 and total_overrides >= 5:
+            recommendations.append("🚨 Win rate global override <40% - Considerar desactivar temporalmente")
+        
+        # Preparar recent trades (últimos 10)
+        recent = sorted(_OVERRIDE_PERFORMANCE, key=lambda x: x.get('exit_time', ''), reverse=True)[:10]
+        
+        return {
+            "summary": {
+                "total_trades": total_overrides,
+                "win_rate": round(win_rate, 1),
+                "avg_accuracy": round(avg_accuracy, 1),
+                "total_pnl": round(total_pnl, 2),
+                "active_positions": len(_VOLSPIKE_POSITIONS),
+                "todays_count": _OVERRIDE_DAILY_COUNT.get(datetime.utcnow().strftime('%Y-%m-%d'), 0),
+                "daily_limit": getattr(settings, 'volspike_override_daily_limit', 3),
+                "positions_limit": getattr(settings, 'volspike_override_max_positions', 2),
+            },
+            "by_symbol": {
+                sym: {
+                    "trades": stats['trades'],
+                    "win_rate": round(stats['win_rate'], 1),
+                    "avg_accuracy": round(stats['avg_accuracy'], 1),
+                    "total_pnl": round(stats['total_pnl'], 2),
+                }
+                for sym, stats in by_symbol.items()
+            },
+            "recent_trades": [
+                {
+                    "symbol": t['symbol'],
+                    "expected": round(t['expected_pnl'], 2),
+                    "actual": round(t['actual_pnl'], 2),
+                    "accuracy": round(t.get('accuracy_pct', 0), 1),
+                    "reason": t.get('close_reason', 'unknown'),
+                    "duration": round(t.get('duration_hours', 0), 1),
+                }
+                for t in recent
+            ],
+            "recommendations": recommendations if recommendations else ["✅ Override funcionando dentro de parámetros"],
+        }
+    except Exception as e:
+        return {"error": str(e), "summary": {}, "by_symbol": {}, "recent_trades": [], "recommendations": ["Error cargando métricas"]}
+
+
 @app.get("/positions/open/detail")
 async def get_open_positions_detail() -> Dict:
     """Get open positions with full pnl_prediction detail."""
@@ -1573,6 +1675,53 @@ async def get_futures_positions() -> Dict:
             })
         return {"enabled": True, "positions": positions, "count": len(positions),
                 "timestamp": datetime.utcnow().isoformat()}
+    except Exception as e:
+        return {"enabled": False, "positions": [], "count": 0, "error": str(e)}
+
+
+@app.get("/futures/closed")
+async def get_futures_closed_positions(limit: int = 20, days: int = 3) -> Dict:
+    """Return closed futures positions from the FuturesClient memory (last N days)."""
+    try:
+        from run_trades import _get_futures_client
+        from config import get_settings as _get_s
+        _s = _get_s()
+        if not getattr(_s, 'futures_enabled', False):
+            return {"enabled": False, "positions": [], "count": 0}
+
+        _fc = _get_futures_client(_s)
+        closed = []
+        cutoff = datetime.utcnow() - timedelta(days=days)
+
+        for key, pos in _fc._open_positions.items():
+            if pos.closed:
+                # Only include positions closed within the specified days
+                closed_at = pos.closed_at if pos.closed_at else pos.opened_at
+                if closed_at and closed_at < cutoff:
+                    continue  # Skip positions closed before cutoff
+
+                closed.append({
+                    "symbol": pos.symbol,
+                    "side": pos.side,
+                    "qty": pos.qty,
+                    "entry_price": pos.entry_price,
+                    "exit_price": pos.exit_price,
+                    "pnl": pos.pnl,
+                    "opened_at": to_mexico_time_str(pos.opened_at.isoformat()) if pos.opened_at else None,
+                    "closed_at": to_mexico_time_str(pos.closed_at.isoformat()) if pos.closed_at else None,
+                    "trade_type": "futures",
+                })
+
+        # Sort by closed_at descending (most recent first)
+        closed.sort(key=lambda x: x.get('closed_at') or x.get('opened_at', ''), reverse=True)
+
+        return {
+            "enabled": True,
+            "positions": closed[:limit],
+            "count": len(closed[:limit]),
+            "period_days": days,
+            "timestamp": to_mexico_time(datetime.utcnow()).isoformat()
+        }
     except Exception as e:
         return {"enabled": False, "positions": [], "count": 0, "error": str(e)}
 

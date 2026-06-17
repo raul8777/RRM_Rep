@@ -689,7 +689,64 @@ class PositionManager:
             reverse=True
         )
         return sorted_positions[:limit]
-    
+
+    def get_closed_positions_since(self, since: datetime, limit: int = 50) -> List[ClosedPosition]:
+        """
+        Get closed positions since a specific datetime.
+
+        Args:
+            since: UTC datetime to filter positions (inclusive)
+            limit: Maximum number of closed positions to return
+
+        Returns:
+            List of ClosedPosition objects with exit_time >= since, most recent first
+        """
+        since_aware = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+
+        if self.db_client:
+            try:
+                query = """
+                    SELECT symbol, side, quantity, entry_price, exit_price,
+                           entry_time, exit_time, pnl, pnl_percentage, close_reason,
+                           strategy_id, metadata, entry_commission, exit_commission,
+                           pnl_prediction, indicators_at_entry, prediction_accuracy
+                    FROM trades_closed
+                    WHERE exit_time >= %s
+                    ORDER BY exit_time DESC
+                    LIMIT %s
+                """
+                results = self.db_client.execute_query(query, (since_aware.isoformat(), limit))
+                db_positions = []
+                for row in results:
+                    db_positions.append(ClosedPosition(
+                        symbol=row['symbol'], side=row['side'],
+                        quantity=row['quantity'], entry_price=row['entry_price'],
+                        exit_price=row['exit_price'], entry_time=row['entry_time'],
+                        exit_time=row['exit_time'], pnl=row['pnl'],
+                        pnl_percentage=row['pnl_percentage'], close_reason=row['close_reason'],
+                        strategy_id=row.get('strategy_id'), metadata=row.get('metadata'),
+                        entry_commission=row.get('entry_commission'),
+                        exit_commission=row.get('exit_commission'),
+                        pnl_prediction=row.get('pnl_prediction'),
+                        indicators_at_entry=row.get('indicators_at_entry'),
+                        prediction_accuracy=row.get('prediction_accuracy'),
+                    ))
+                return db_positions
+            except Exception as e:
+                logger.warning(f"DB query for closed positions since failed, using cache: {e}")
+
+        # Fallback: filter and sort in-memory
+        filtered_positions = [
+            pos for pos in self._closed_positions
+            if _parse_exit_time(pos.exit_time) >= since_aware
+        ]
+        sorted_positions = sorted(
+            filtered_positions,
+            key=lambda x: _parse_exit_time(x.exit_time),
+            reverse=True
+        )
+        return sorted_positions[:limit]
+
     def calculate_pnl_history(self, period: str = "day") -> Dict[str, Any]:
         """
         Calculate PnL for a specific period based on closed trades.

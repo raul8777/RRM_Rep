@@ -44,13 +44,91 @@ async function fetchDashboardData() {
 function fmt(n, dec = 2) { return parseFloat(n || 0).toFixed(dec); }
 function pnlClass(v) { return parseFloat(v || 0) >= 0 ? 'positive' : 'negative'; }
 
-function fmtPrediction(pred) {
+function fmtPrediction(pred, showDetails = false) {
     if (!pred) return '<span class="no-pred">Sin predicción</span>';
     const ep = parseFloat(pred.expected_pnl || 0);
     const sp = parseFloat(pred.success_probability || 0);
-    return `<span class="pred-badge ${ep >= 0 ? 'positive' : 'negative'}">
-        Pred: ${ep.toFixed(3)} USDT (${(sp * 100).toFixed(0)}% éxito)
-    </span>`;
+    const isBootstrap = pred.bootstrap_mode === true;
+    const badge = isBootstrap ? ' <span class="badge-bootstrap" title="Modelo en aprendizaje">📚</span>' : '';
+    
+    if (!showDetails) {
+        return `<span class="pred-badge ${ep >= 0 ? 'positive' : 'negative'}">${badge}
+            ${ep >= 0 ? '+' : ''}${ep.toFixed(2)} USDT <small>(${(sp * 100).toFixed(0)}%)</small>
+        </span>`;
+    }
+    
+    // Detailed view
+    const priceRange = pred.price_range || {};
+    const minPrice = priceRange.min ? `$${parseFloat(priceRange.min).toFixed(4)}` : '—';
+    const maxPrice = priceRange.max ? `$${parseFloat(priceRange.max).toFixed(4)}` : '—';
+    
+    return `<div class="pred-detail">
+        <div class="pred-main ${ep >= 0 ? 'positive' : 'negative'}">${badge} Esperado: ${ep >= 0 ? '+' : ''}${ep.toFixed(2)} USDT</div>
+        <div class="pred-sub">Probabilidad: ${(sp * 100).toFixed(1)}% | Rango: ${minPrice} — ${maxPrice}</div>
+    </div>`;
+}
+
+// ── Accuracy badge helper ────────────────────────────────────────────────────
+function fmtAccuracy(actual, expected) {
+    if (!expected || expected === 0) return '<span class="accuracy-none">—</span>';
+    const ratio = (actual / expected) * 100;
+    const absRatio = Math.abs(ratio);
+    let badgeClass = 'accuracy-missed';
+    let icon = '❌';
+    
+    if (absRatio >= 80) { badgeClass = 'accuracy-precise'; icon = '🎯'; }
+    else if (absRatio >= 50) { badgeClass = 'accuracy-good'; icon = '⚡'; }
+    
+    return `<span class="accuracy-badge ${badgeClass}">${icon} ${ratio.toFixed(0)}%</span>`;
+}
+
+function fmtAccuracyFromField(accuracyPct) {
+    if (accuracyPct == null) return '<span class="accuracy-none">—</span>';
+    const absVal = Math.abs(accuracyPct);
+    let badgeClass = 'accuracy-missed';
+    let icon = '❌';
+    
+    if (absVal >= 80) { badgeClass = 'accuracy-precise'; icon = '🎯'; }
+    else if (absVal >= 50) { badgeClass = 'accuracy-good'; icon = '⚡'; }
+    
+    return `<span class="accuracy-badge ${badgeClass}">${icon} ${accuracyPct.toFixed(0)}%</span>`;
+}
+
+// ── Progress bar toward targets ──────────────────────────────────────────────
+function fmtProgressBar(current, entry, target, isTp = true) {
+    if (!target || !entry) return '<span class="progress-none">—</span>';
+    
+    const totalDistance = Math.abs(target - entry);
+    const currentDistance = Math.abs(current - entry);
+    const percent = Math.min(100, Math.max(0, (currentDistance / totalDistance) * 100));
+    
+    const direction = isTp ? (target > entry ? 'up' : 'down') : (target < entry ? 'down' : 'up');
+    const progressClass = isTp ? 'progress-tp' : 'progress-sl';
+    const remainingPct = Math.abs((target - current) / entry * 100);
+    
+    return `<div class="progress-container" title="${remainingPct.toFixed(1)}% ${isTp ? 'para TP' : 'hasta SL'}">
+        <div class="progress-bar ${progressClass}" style="width: ${percent}%"></div>
+        <span class="progress-text">${remainingPct.toFixed(1)}%</span>
+    </div>`;
+}
+
+// ── Expected vs Actual comparison ───────────────────────────────────────────
+function fmtExpectedVsActual(actual, expected) {
+    if (expected == null || expected === undefined) return '<span class="no-pred">—</span>';
+    
+    const act = parseFloat(actual || 0);
+    const exp = parseFloat(expected || 0);
+    const diff = act - exp;
+    const diffPct = exp !== 0 ? (diff / Math.abs(exp)) * 100 : 0;
+    
+    const diffClass = diff >= 0 ? 'positive' : 'negative';
+    const arrow = diff >= 0 ? '↑' : '↓';
+    
+    return `<div class="expected-actual">
+        <div class="actual-line ${act >= 0 ? 'positive' : 'negative'}">Real: ${act >= 0 ? '+' : ''}${act.toFixed(2)}</div>
+        <div class="expected-line">Esper: ${exp >= 0 ? '+' : ''}${exp.toFixed(2)}</div>
+        <div class="diff-line ${diffClass}">${arrow} ${Math.abs(diff).toFixed(2)} (${diffPct >= 0 ? '+' : ''}${diffPct.toFixed(0)}%)</div>
+    </div>`;
 }
 
 // ── Close reason → human-readable label ──────────────────────────────────────
@@ -570,6 +648,12 @@ function renderOpenPositions(d) {
     const showMxn = document.getElementById('toggleMxn') && document.getElementById('toggleMxn').checked;
     const totalUnreal = d.positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
     const totalInvested = d.positions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
+    
+    // Calcular accuracy global del predictor en posiciones abiertas
+    const predPositions = d.positions.filter(p => p.pnl_prediction && p.pnl_prediction.expected_pnl);
+    const avgAccuracy = predPositions.length > 0 
+        ? predPositions.reduce((s, p) => s + (parseFloat(p.unrealized_pnl || 0) / parseFloat(p.pnl_prediction.expected_pnl || 1)), 0) / predPositions.length 
+        : 0;
 
     el.innerHTML = `
         <div class="table-scroll-10">
@@ -580,13 +664,11 @@ function renderOpenPositions(d) {
                     <th>Cat</th>
                     <th>Qty</th>
                     <th>Entrada</th>
-                    <th>Actual</th>
                     <th>Invertido</th>
+                    <th>Esperado al Entrar</th>
+                    <th>Progreso</th>
+                    <th>Actual vs Esperado</th>
                     <th>PnL No Real.</th>
-                    <th>PnL Pred.</th>
-                    <th>SL / TP</th>
-                    <th>%→SL</th>
-                    <th>%→TP</th>
                     <th>Edad</th>
                 </tr>
             </thead>
@@ -594,32 +676,35 @@ function renderOpenPositions(d) {
                 ${d.positions.map(p => {
                     const rowCls = parseFloat(p.unrealized_pnl||0) > 0 ? 'row-pnl-pos' : parseFloat(p.unrealized_pnl||0) < -0.01 ? 'row-pnl-neg' : '';
                     const curP = parseFloat(p.current_price || 0);
-                    const slDistPct = p.stop_loss && curP > 0 ? ((parseFloat(p.stop_loss) - curP) / curP * 100) : null;
-                    const tpDistPct = p.take_profit && curP > 0 ? ((parseFloat(p.take_profit) - curP) / curP * 100) : null;
-                    const slCls = slDistPct != null && Math.abs(slDistPct) < 1.0 ? 'negative' : '';
-                    const tpCls = tpDistPct != null && Math.abs(tpDistPct) < 1.0 ? 'positive' : '';
+                    const entryP = parseFloat(p.entry_price || 0);
                     const hrs = parseFloat(p.hours_held || 0);
                     const ageCls = hrs < 2 ? 'age-fresh' : hrs < 8 ? 'age-mid' : 'age-old';
                     const investedDisplay = showMxn
                         ? `$${fmt(p.invested_mxn ?? (p.invested_usdt * 17.5), 0)} MXN`
                         : `$${fmt(p.invested_usdt || 0)}`;
-                    const pnlDisplay = showMxn
-                        ? `${fmt(p.unrealized_pnl)} USDT<br><small>${fmt(p.unrealized_pnl_mxn ?? 0, 1)} MXN</small>`
-                        : `${fmt(p.unrealized_pnl)} USDT`;
                     const overflowBadge = p.is_overflow ? ' <span class="badge-overflow" title="Posición extra por señal excepcional">⚡OVF</span>' : '';
+                    const predBadge = p.pnl_prediction ? ' <span class="badge-pred" title="Tiene predicción">🎯</span>' : '';
+                    const typeBadge = p.trade_type === 'futures' ? '<span class="badge-futures">FUT</span>' : '<span class="badge-spot">SPOT</span>';
+
+                    // Calcular progreso hacia TP o SL
+                    const tp = parseFloat(p.take_profit || 0);
+                    const sl = parseFloat(p.stop_loss || 0);
+                    let progressHtml = '—';
+                    if (tp && entryP) {
+                        progressHtml = fmtProgressBar(curP, entryP, tp, true);
+                    }
+
                     return `
-                    <tr class="${rowCls}">
-                        <td><strong>${p.symbol}</strong>${overflowBadge}</td>
+                    <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id}', 'open')" style="cursor:pointer">
+                        <td>${typeBadge} <strong>${p.symbol}</strong>${overflowBadge}${predBadge}</td>
                         <td>${catIcon(p.category || 'MIDCAP_ALT')}</td>
                         <td>${fmt(p.quantity, 4)}</td>
-                        <td>$${fmt(p.entry_price)}</td>
-                        <td>$${fmt(p.current_price)}</td>
+                        <td>$${fmt(entryP)}<br><small class="entry-time">${p.entry_time ? p.entry_time.split(' ')[1]?.substring(0,5) : ''}</small></td>
                         <td>${investedDisplay}</td>
-                        <td class="${pnlClass(p.unrealized_pnl)}">${pnlDisplay}</td>
                         <td>${fmtPrediction(p.pnl_prediction)}</td>
-                        <td class="sl-tp">${p.stop_loss ? '$' + fmt(p.stop_loss) : '—'} / ${p.take_profit ? '$' + fmt(p.take_profit) : '—'}</td>
-                        <td class="${slCls}">${slDistPct != null ? (slDistPct >= 0 ? '+' : '') + slDistPct.toFixed(2) + '%' : '—'}</td>
-                        <td class="${tpCls}">${tpDistPct != null ? (tpDistPct >= 0 ? '+' : '') + tpDistPct.toFixed(2) + '%' : '—'}</td>
+                        <td>${progressHtml}</td>
+                        <td>${fmtExpectedVsActual(p.unrealized_pnl, p.pnl_prediction?.expected_pnl)}</td>
+                        <td class="${pnlClass(p.unrealized_pnl)}">${showMxn ? fmt(p.unrealized_pnl) + ' USDT<br><small>' + fmt(p.unrealized_pnl_mxn ?? 0, 1) + ' MXN</small>' : fmt(p.unrealized_pnl) + ' USDT'}</td>
                         <td class="${ageCls}">${hrs < 1 ? '<1h' : hrs.toFixed(0) + 'h'}</td>
                     </tr>`;
                 }).join('')}
@@ -634,6 +719,7 @@ function renderOpenPositions(d) {
             <span class="${pnlClass(totalUnreal)}">
                 <strong>${totalUnreal >= 0 ? '+' : ''}${fmt(totalUnreal)} USDT</strong>
             </span>
+            ${predPositions.length > 0 ? `&nbsp;|&nbsp;Precisión Pred. Promedio: <strong>${(avgAccuracy * 100).toFixed(0)}%</strong>` : ''}
         </div>
     `;
 }
@@ -641,47 +727,402 @@ function renderOpenPositions(d) {
 function renderClosedPositions(d) {
     if (!d) return;
     const el = document.getElementById('closedPositionsData');
+    const periodDays = d.period_days || 3;
     if (!d.positions || d.positions.length === 0) {
-        el.innerHTML = '<p class="loading">Sin posiciones cerradas</p>';
+        el.innerHTML = `<p class="loading">Sin posiciones cerradas recientes (últimos ${periodDays} días)</p>`;
         return;
     }
+
+    // Ordenar por exit_time descendente (más reciente primero)
+    const sortedPositions = [...d.positions].sort((a, b) => {
+        const dateA = new Date(b.exit_time || 0);
+        const dateB = new Date(a.exit_time || 0);
+        return dateA - dateB;
+    });
+
+    // Helper para formatear fechas en local (México)
+    const fmtDateLocal = (isoStr) => {
+        if (!isoStr) return '—';
+        try {
+            const d = new Date(isoStr);
+            return d.toLocaleString('es-MX', {
+                timeZone: 'America/Mexico_City',
+                day: '2-digit',
+                month: 'short',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false
+            });
+        } catch(e) { return isoStr; }
+    };
+
+    // Helper para badge de tipo de trading
+    const tradeTypeBadge = (type) => {
+        if (type === 'futures') return '<span class="badge-futures">FUT</span>';
+        return '<span class="badge-spot">SPOT</span>';
+    };
+
+    // Calcular métricas de accuracy
+    const withPred = sortedPositions.filter(p => p.prediction_accuracy != null);
+    const avgAccuracy = withPred.length > 0
+        ? withPred.reduce((s, p) => s + parseFloat(p.prediction_accuracy || 0), 0) / withPred.length
+        : 0;
+
     el.innerHTML = `
         <div class="table-scroll-10">
         <table class="positions-table">
             <thead>
                 <tr>
                     <th>Símbolo</th>
-                    <th>Lado</th>
-                    <th>PnL Real</th>
-                    <th>PnL %</th>
-                    <th>PnL Pred.</th>
-                    <th>Precisión</th>
+                    <th>Entrada → Salida</th>
+                    <th>Esperado</th>
+                    <th>Resultado</th>
+                    <th>Accuracy</th>
+                    <th>Desvío</th>
                     <th>Razón</th>
-                    <th>Cierre</th>
+                    <th>Cerrado</th>
                 </tr>
             </thead>
             <tbody>
-                ${d.positions.map(p => {
-                    const acc = p.prediction_accuracy != null
-                        ? `<span class="${parseFloat(p.prediction_accuracy) >= 0 ? 'positive' : 'negative'}">${fmt(p.prediction_accuracy)}%</span>`
-                        : '—';
-                    const rowCls = parseFloat(p.pnl||0) > 0 ? 'row-pnl-pos' : parseFloat(p.pnl||0) < -0.01 ? 'row-pnl-neg' : '';
+                ${sortedPositions.map(p => {
+                    const expectedPnl = p.pnl_prediction?.expected_pnl || null;
+                    const actualPnl = parseFloat(p.pnl || 0);
+                    const acc = fmtAccuracyFromField(p.prediction_accuracy);
+                    const rowCls = actualPnl > 0 ? 'row-pnl-pos' : actualPnl < -0.01 ? 'row-pnl-neg' : '';
+                    const typeBadge = tradeTypeBadge(p.trade_type);
+                    const exitTimeFmt = fmtDateLocal(p.exit_time);
+
+                    // Calcular desviación
+                    let desvHtml = '—';
+                    if (expectedPnl != null && expectedPnl !== 0) {
+                        const diff = actualPnl - parseFloat(expectedPnl);
+                        const diffPct = (diff / Math.abs(parseFloat(expectedPnl))) * 100;
+                        const desvClass = diff >= 0 ? 'positive' : 'negative';
+                        const arrow = diff >= 0 ? '↑' : '↓';
+                        desvHtml = `<span class="${desvClass}">${arrow} ${Math.abs(diff).toFixed(2)} (${diffPct >= 0 ? '+' : ''}${diffPct.toFixed(0)}%)</span>`;
+                    }
+
                     return `
-                    <tr class="${rowCls}">
-                        <td>${catIcon(p.category || 'MIDCAP_ALT')} ${p.symbol}</td>
-                        <td>${p.side}</td>
-                        <td class="${pnlClass(p.pnl)}">${fmt(p.pnl)} USDT</td>
-                        <td class="${pnlClass(p.pnl_percentage)}">${fmt(p.pnl_percentage)}%</td>
-                        <td>${fmtPrediction(p.pnl_prediction)}</td>
+                    <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'closed')" style="cursor:pointer">
+                        <td>${typeBadge} ${catIcon(p.category || 'MIDCAP_ALT')} <strong>${p.symbol}</strong></td>
+                        <td>$${fmt(p.entry_price)} → $${fmt(p.exit_price)}</td>
+                        <td>${expectedPnl != null ? (expectedPnl >= 0 ? '+' : '') + fmt(expectedPnl) + ' USDT' : '—'}</td>
+                        <td class="${pnlClass(actualPnl)}">${actualPnl >= 0 ? '+' : ''}${fmt(actualPnl)} USDT<br><small>${fmt(p.pnl_percentage)}%</small></td>
                         <td>${acc}</td>
+                        <td>${desvHtml}</td>
                         <td>${fmtCloseReason(p.close_reason)}</td>
-                        <td>${p.exit_time ? new Date(p.exit_time).toLocaleString('es-MX') : '—'}</td>
+                        <td>${exitTimeFmt}</td>
                     </tr>`;
                 }).join('')}
             </tbody>
         </table>
         </div>
+        <div class="positions-summary">
+            ${sortedPositions.length} trades cerrados (últimos ${periodDays} días) &nbsp;|&nbsp;
+            PnL Total: <strong class="${pnlClass(sortedPositions.reduce((s,p) => s + parseFloat(p.pnl||0), 0))}">${sortedPositions.reduce((s,p) => s + parseFloat(p.pnl||0), 0) >= 0 ? '+' : ''}${fmt(sortedPositions.reduce((s,p) => s + parseFloat(p.pnl||0), 0))} USDT</strong>
+            ${withPred.length > 0 ? `&nbsp;|&nbsp;Precisión Pred. Promedio: ${fmtAccuracyFromField(avgAccuracy)}` : ''}
+        </div>
     `;
+}
+
+// ── Card: Expectativa vs Realidad ────────────────────────────────────────────
+function renderExpectativaVsRealidad(data) {
+    const el = document.getElementById('expectativaVsRealidadData');
+    if (!el) return;
+    
+    const openPos = data?.open_positions?.positions || [];
+    const closedPos = data?.closed_positions?.positions || [];
+    
+    // Combinar últimas posiciones (abiertas + cerradas recientes)
+    const recentOpen = openPos.slice(0, 5).map(p => ({...p, status: 'open'}));
+    const recentClosed = closedPos.slice(0, 5).map(p => ({...p, status: 'closed'}));
+    const allPositions = [...recentOpen, ...recentClosed].slice(0, 6);
+    
+    if (allPositions.length === 0) {
+        el.innerHTML = '<p class="loading">Sin datos de trades recientes</p>';
+        return;
+    }
+    
+    // Calcular métricas consolidadas
+    const withPred = allPositions.filter(p => p.pnl_prediction);
+    const totalExpected = withPred.reduce((s, p) => s + parseFloat(p.pnl_prediction?.expected_pnl || 0), 0);
+    const totalActual = allPositions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || p.pnl || 0), 0);
+    const accuracy = withPred.length > 0 ? (totalActual / totalExpected) * 100 : 0;
+    
+    el.innerHTML = `
+        <div class="expectativa-stats">
+            <div class="stat-box">
+                <div class="stat-label">🎯 Predicciones</div>
+                <div class="stat-value">${withPred.length}</div>
+                <div class="stat-sub">${withPred.filter(p => (p.unrealized_pnl || p.pnl || 0) >= 0).length} ganando</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">💰 Esperado</div>
+                <div class="stat-value ${totalExpected >= 0 ? 'positive' : 'negative'}">${totalExpected >= 0 ? '+' : ''}${fmt(totalExpected)}</div>
+                <div class="stat-sub">USDT esperados</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">📈 Real</div>
+                <div class="stat-value ${totalActual >= 0 ? 'positive' : 'negative'}">${totalActual >= 0 ? '+' : ''}${fmt(totalActual)}</div>
+                <div class="stat-sub">USDT obtenidos</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">🎯 Accuracy</div>
+                <div class="stat-value">${Math.abs(accuracy).toFixed(0)}%</div>
+                <div class="stat-sub">${accuracy >= 80 ? 'Preciso 🎯' : accuracy >= 50 ? 'Bueno ⚡' : 'Aprendiendo 📚'}</div>
+            </div>
+        </div>
+        <div class="expectativa-table-wrap">
+            <table class="expectativa-table">
+                <thead>
+                    <tr>
+                        <th>Símbolo</th>
+                        <th>Esperado</th>
+                        <th>Progreso</th>
+                        <th>Real/Actual</th>
+                        <th>Diff</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${allPositions.map(p => {
+                        const expected = parseFloat(p.pnl_prediction?.expected_pnl || 0);
+                        const actual = parseFloat(p.unrealized_pnl || p.pnl || 0);
+                        const diff = expected !== 0 ? actual - expected : 0;
+                        const diffPct = expected !== 0 ? (diff / Math.abs(expected)) * 100 : 0;
+                        
+                        // Progreso visual
+                        let progressBar = '';
+                        if (p.status === 'open' && p.take_profit && p.entry_price) {
+                            const tp = parseFloat(p.take_profit);
+                            const entry = parseFloat(p.entry_price);
+                            const cur = parseFloat(p.current_price || entry);
+                            const pct = Math.min(100, Math.max(0, ((cur - entry) / (tp - entry)) * 100));
+                            progressBar = `<div class="mini-progress"><div class="mini-fill" style="width:${pct}%"></div></div>`;
+                        } else if (p.status === 'closed') {
+                            progressBar = '<span class="badge-closed">✓ Cerrado</span>';
+                        }
+                        
+                        return `<tr>
+                            <td><strong>${p.symbol}</strong> <small class="status-${p.status}">${p.status === 'open' ? '🟢' : '⚫'}</small></td>
+                            <td class="${expected >= 0 ? 'positive' : 'negative'}">${expected >= 0 ? '+' : ''}${fmt(expected)}</td>
+                            <td>${progressBar}</td>
+                            <td class="${actual >= 0 ? 'positive' : 'negative'}">${actual >= 0 ? '+' : ''}${fmt(actual)}</td>
+                            <td class="${diff >= 0 ? 'positive' : 'negative'}">${diff >= 0 ? '↑' : '↓'} ${Math.abs(diff).toFixed(2)}</td>
+                        </tr>`;
+                    }).join('')}
+                </tbody>
+            </table>
+        </div>
+        <div class="expectativa-explain">
+            <small>🧠 <strong>¿Qué es "PnL Pred."?</strong> Es lo que el modelo de IA esperaba ganar/perder al momento de comprar, basado en indicadores técnicos. Compara con el resultado real para medir precisión.</small>
+        </div>
+    `;
+}
+
+// ── Card: Auditoría VolSpike Override ─────────────────────────────────────────
+async function renderVolSpikeAudit() {
+    const el = document.getElementById('volSpikeAuditData');
+    if (!el) return;
+    
+    try {
+        const res = await fetch(`${API_BASE}/metrics/override-performance`);
+        if (!res.ok) throw new Error('Failed to fetch');
+        const d = await res.json();
+        
+        if (d.error || !d.summary) {
+            el.innerHTML = `<p class="loading">Sin datos de auditoría</p>`;
+            return;
+        }
+        
+        const s = d.summary;
+        const bySym = d.by_symbol || {};
+        const recent = d.recent_trades || [];
+        const recs = d.recommendations || [];
+        
+        // Determinar estado visual
+        const statusClass = s.win_rate >= 50 ? 'positive' : s.win_rate >= 35 ? 'neutral' : 'negative';
+        const statusIcon = s.win_rate >= 50 ? '✅' : s.win_rate >= 35 ? '⚡' : '🚨';
+        
+        el.innerHTML = `
+            <div class="volspike-header">
+                <div class="volspike-status ${statusClass}">
+                    <span class="vs-icon">${statusIcon}</span>
+                    <span class="vs-winrate">${s.win_rate}% WR</span>
+                    <span class="vs-sub">${s.total_trades} trades override</span>
+                </div>
+                <div class="volspike-limits">
+                    <span class="vs-limit ${s.active_positions >= s.positions_limit ? 'at-limit' : ''}">
+                        Pos: ${s.active_positions}/${s.positions_limit}
+                    </span>
+                    <span class="vs-limit ${s.todays_count >= s.daily_limit ? 'at-limit' : ''}">
+                        Hoy: ${s.todays_count}/${s.daily_limit}
+                    </span>
+                </div>
+            </div>
+            
+            ${Object.keys(bySym).length > 0 ? `
+            <div class="volspike-symbols">
+                <table class="volspike-table">
+                    <thead>
+                        <tr><th>Símbolo</th><th>Trades</th><th>WR</th><th>PnL</th><th>Status</th></tr>
+                    </thead>
+                    <tbody>
+                        ${Object.entries(bySym).map(([sym, stats]) => {
+                            const symStatus = stats.win_rate >= 50 ? '✅' : stats.win_rate >= 30 ? '⚡' : '⚠️';
+                            const symClass = stats.win_rate >= 50 ? 'positive' : stats.win_rate >= 30 ? 'neutral' : 'negative';
+                            return `<tr class="${symClass}">
+                                <td><strong>${sym}</strong></td>
+                                <td>${stats.trades}</td>
+                                <td>${stats.win_rate}%</td>
+                                <td class="${stats.total_pnl >= 0 ? 'positive' : 'negative'}">${stats.total_pnl >= 0 ? '+' : ''}${fmt(stats.total_pnl)}</td>
+                                <td>${symStatus}</td>
+                            </tr>`;
+                        }).join('')}
+                    </tbody>
+                </table>
+            </div>
+            ` : '<p class="loading">Sin trades override registrados todavía</p>'}
+            
+            ${recent.length > 0 ? `
+            <div class="volspike-recent">
+                <h4>Últimos Overrides</h4>
+                <div class="vs-recent-list">
+                    ${recent.slice(0, 5).map(t => `
+                        <div class="vs-recent-item ${t.actual >= 0 ? 'positive' : 'negative'}">
+                            <span class="vs-sym">${t.symbol}</span>
+                            <span class="vs-exp">Esp: ${t.expected >= 0 ? '+' : ''}${fmt(t.expected)}</span>
+                            <span class="vs-act">Real: ${t.actual >= 0 ? '+' : ''}${fmt(t.actual)}</span>
+                            <span class="vs-acc">${fmtAccuracyFromField(t.accuracy)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+            ` : ''}
+            
+            ${recs.length > 0 ? `
+            <div class="volspike-recs">
+                <h4>Recomendaciones</h4>
+                <ul>
+                    ${recs.map(r => `<li>${r}</li>`).join('')}
+                </ul>
+            </div>
+            ` : ''}
+        `;
+    } catch (e) {
+        el.innerHTML = `<p class="loading">Error cargando auditoría: ${e.message}</p>`;
+    }
+}
+
+// ── Modal: Detalle de Posición ────────────────────────────────────────────────
+function showPositionDetailModal(symbol, positionId, status) {
+    // Obtener datos del cache
+    const data = _cachedData;
+    if (!data) return;
+    
+    const positions = status === 'open' 
+        ? (data.open_positions?.positions || [])
+        : (data.closed_positions?.positions || []);
+    
+    const position = positions.find(p => p.symbol === symbol && (p.position_id === positionId || !positionId));
+    if (!position) return;
+    
+    const pred = position.pnl_prediction || {};
+    const indicators = pred.indicators_used || {};
+    
+    // Crear modal
+    const modalId = 'positionDetailModal';
+    let modal = document.getElementById(modalId);
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = modalId;
+        modal.className = 'modal-detail';
+        document.body.appendChild(modal);
+    }
+    
+    const expectedPnl = parseFloat(pred.expected_pnl || 0);
+    const actualPnl = parseFloat(position.unrealized_pnl || position.pnl || 0);
+    const diff = actualPnl - expectedPnl;
+    
+    modal.innerHTML = `
+        <div class="modal-overlay" onclick="closePositionDetailModal()">
+            <div class="modal-content" onclick="event.stopPropagation()">
+                <div class="modal-header">
+                    <h3>${symbol} — Detalle de ${status === 'open' ? 'Posición Abierta' : 'Trade Cerrado'}</h3>
+                    <button class="modal-close" onclick="closePositionDetailModal()">×</button>
+                </div>
+                <div class="modal-body">
+                    <div class="modal-section">
+                        <h4>📍 ENTRADA</h4>
+                        <div class="detail-grid">
+                            <div><label>Precio:</label><span>$${fmt(position.entry_price)}</span></div>
+                            <div><label>Cantidad:</label><span>${fmt(position.quantity, 4)}</span></div>
+                            <div><label>Invertido:</label><span>$${fmt(position.invested_usdt || (position.entry_price * position.quantity))} USDT</span></div>
+                            <div><label>Fecha:</label><span>${position.entry_time || '—'}</span></div>
+                        </div>
+                    </div>
+                    
+                    <div class="modal-section">
+                        <h4>🎯 PREDICCIÓN AL ENTRAR</h4>
+                        <div class="detail-grid">
+                            <div><label>PnL Esperado:</label><span class="${expectedPnl >= 0 ? 'positive' : 'negative'}">${expectedPnl >= 0 ? '+' : ''}${fmt(expectedPnl)} USDT</span></div>
+                            <div><label>Probabilidad:</label><span>${(parseFloat(pred.success_probability || 0) * 100).toFixed(0)}%</span></div>
+                            <div><label>Rango Precio:</label><span>$${fmt(pred.price_range?.min)} — $${fmt(pred.price_range?.max)}</span></div>
+                            <div><label>Modo:</label><span>${pred.bootstrap_mode ? '📚 Aprendizaje' : '🎯 Entrenado'}</span></div>
+                        </div>
+                    </div>
+                    
+                    <div class="modal-section">
+                        <h4>📊 INDICADORES AL ENTRAR</h4>
+                        <div class="detail-grid">
+                            <div><label>RSI 4h:</label><span>${fmt(indicators.rsi, 1)}</span></div>
+                            <div><label>EMA9 > EMA21:</label><span>${indicators.ema9 > indicators.ema21 ? '✓ Sí' : '✗ No'}</span></div>
+                            <div><label>Vol Spike:</label><span>${fmt(indicators.vol_spike, 1)}x</span></div>
+                            <div><label>BB Position:</label><span>${fmt(indicators.bb_position, 1)}%</span></div>
+                        </div>
+                    </div>
+                    
+                    <div class="modal-section">
+                        <h4>🛡️ TARGETS CALCULADOS</h4>
+                        <div class="detail-grid">
+                            <div><label>Stop Loss:</label><span class="negative">$${fmt(position.stop_loss)} (${((position.stop_loss - position.entry_price) / position.entry_price * 100).toFixed(1)}%)</span></div>
+                            <div><label>Take Profit:</label><span class="positive">$${fmt(position.take_profit)} (+${((position.take_profit - position.entry_price) / position.entry_price * 100).toFixed(1)}%)</span></div>
+                        </div>
+                    </div>
+                    
+                    <div class="modal-section">
+                        <h4>💰 ${status === 'open' ? 'RESULTADO ACTUAL' : 'RESULTADO FINAL'}</h4>
+                        <div class="detail-grid">
+                            <div><label>Precio ${status === 'open' ? 'Actual' : 'Salida'}:</label><span>$${fmt(status === 'open' ? position.current_price : position.exit_price)}</span></div>
+                            <div><label>PnL Real:</label><span class="${actualPnl >= 0 ? 'positive' : 'negative'}">${actualPnl >= 0 ? '+' : ''}${fmt(actualPnl)} USDT</span></div>
+                            <div><label>vs Esperado:</label><span class="${diff >= 0 ? 'positive' : 'negative'}">${diff >= 0 ? '↑' : '↓'} ${Math.abs(diff).toFixed(2)} USDT</span></div>
+                            <div><label>Accuracy:</label><span>${fmtAccuracy(actualPnl, expectedPnl)}</span></div>
+                        </div>
+                    </div>
+                    
+                    ${status === 'closed' ? `
+                    <div class="modal-section">
+                        <h4>🔚 CIERRE</h4>
+                        <div class="detail-grid">
+                            <div><label>Razón:</label><span>${position.close_reason || '—'}</span></div>
+                            <div><label>Fecha salida:</label><span>${position.exit_time || '—'}</span></div>
+                        </div>
+                    </div>
+                    ` : ''}
+                </div>
+            </div>
+        </div>
+    `;
+    
+    modal.style.display = 'block';
+    document.body.style.overflow = 'hidden';
+}
+
+function closePositionDetailModal() {
+    const modal = document.getElementById('positionDetailModal');
+    if (modal) {
+        modal.style.display = 'none';
+        document.body.style.overflow = '';
+    }
 }
 
 function renderNextCycle(d) {
@@ -1448,6 +1889,90 @@ async function renderFuturesPositions() {
     }
 }
 
+// ── Futures Closed Positions Card ───────────────────────────────────────────────
+async function renderFuturesClosed() {
+    const el = document.getElementById('futuresClosedData');
+    const card = document.getElementById('futuresClosedCard');
+    if (!el) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/futures/closed`, { headers: getAuthHeaders() });
+        if (!res.ok) {
+            el.innerHTML = '<p class="loading">No disponible</p>';
+            if (card) card.style.display = 'none';
+            return;
+        }
+        const d = await res.json();
+
+        if (!d.enabled) {
+            if (card) card.style.display = 'none';
+            return;
+        }
+
+        const periodDays = d.period_days || 3;
+
+        if (!d.positions || d.positions.length === 0) {
+            el.innerHTML = `<p class="loading" style="color:#9b59b6">Sin futuros cerrados recientes (últimos ${periodDays} días)</p>`;
+            if (card) card.style.display = '';
+            return;
+        }
+
+        if (card) card.style.display = '';
+
+        // Helper para formatear fechas en local (México)
+        const fmtDateLocal = (isoStr) => {
+            if (!isoStr) return '—';
+            try {
+                const date = new Date(isoStr);
+                return date.toLocaleString('es-MX', {
+                    timeZone: 'America/Mexico_City',
+                    day: '2-digit',
+                    month: 'short',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: false
+                });
+            } catch(e) { return isoStr; }
+        };
+
+        const totalPnl = d.positions.reduce((s, p) => s + (p.pnl || 0), 0);
+        const pnlCls = totalPnl >= 0 ? 'positive' : 'negative';
+
+        el.innerHTML = `
+        <div class="table-scroll-10">
+        <table class="positions-table">
+            <thead><tr>
+                <th>Símbolo</th>
+                <th>Lado</th>
+                <th>Entrada → Salida</th>
+                <th>PnL Realizado</th>
+                <th>Cerrado</th>
+            </tr></thead>
+            <tbody>
+            ${d.positions.map(p => {
+                const pnlCls = (p.pnl || 0) >= 0 ? 'positive' : 'negative';
+                const closedAt = fmtDateLocal(p.closed_at || p.opened_at);
+                return `<tr>
+                    <td><span class="badge-futures">FUT</span> <strong style="color:#9b59b6">${p.symbol}</strong></td>
+                    <td><span style="color:#9b59b6">${p.side === 'SHORT' ? '▼ SHORT' : '▲ LONG'}</span></td>
+                    <td>$${fmt(p.entry_price)} → $${fmt(p.exit_price)}</td>
+                    <td class="${pnlCls}">${p.pnl >= 0 ? '+' : ''}${fmt(p.pnl, 4)} USDT</td>
+                    <td>${closedAt}</td>
+                </tr>`;
+            }).join('')}
+            </tbody>
+        </table>
+        </div>
+        <div class="positions-summary">
+            ${d.positions.length} futuros cerrados (últimos ${periodDays} días) &nbsp;|&nbsp;
+            PnL Total: <span class="${pnlCls}"><strong>${totalPnl >= 0 ? '+' : ''}${fmt(totalPnl, 4)} USDT</strong></span>
+        </div>`;
+    } catch (e) {
+        el.innerHTML = '<p class="loading">Error cargando futuros cerrados</p>';
+        if (card) card.style.display = 'none';
+    }
+}
+
 // ── Market Regime Badge ─────────────────────────────────────────────────────────
 function renderMarketRegime(r) {
     const dot  = document.getElementById('marketRegimeDot');
@@ -1521,7 +2046,10 @@ async function updateDashboard() {
     renderBalance(data.balance);
     renderPnlHistory(data.pnl_history);
     renderOpenPositions(data.open_positions);
+    renderExpectativaVsRealidad(data);
+    renderVolSpikeAudit();  // Auditoría VolSpike Override
     renderFuturesPositions();  // C1: async, fetches /futures/positions independently
+    renderFuturesClosed();     // C2: async, fetches /futures/closed independently
     renderClosedPositions(data.closed_positions);
     renderNextCycle(data.next_cycle);
     renderAnalysisSummary(data.performance, data.closed_positions);

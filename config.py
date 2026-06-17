@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     spot_bull_btc_4h_up_required: bool = Field(default=True, env="SPOT_BULL_BTC_4H_UP_REQUIRED")      # only apply when BTC 4h=UP
     # Regime whipsaw protection — minimum consecutive PRESERVATION cycles before closing shorts
     min_cycles_before_close_shorts: int = Field(default=3, env="MIN_CYCLES_BEFORE_CLOSE_SHORTS")
+    # Protect profitable shorts on regime change — only close if unrealized PnL < this threshold (USD)
+    futures_protect_profit_usdt: float = Field(default=1.0, env="FUTURES_PROTECT_PROFIT_USDT")
+    # Aggressive exposure in SPOT_BULL + F&G Fear: use higher cap when conditions are optimal
+    max_total_exposure_spot_bull_fear: float = Field(default=0.80, env="MAX_TOTAL_EXPOSURE_SPOT_BULL_FEAR")
+    max_total_exposure_spot_bull_fear_fng_threshold: int = Field(default=40, env="MAX_TOTAL_EXPOSURE_SPOT_BULL_FEAR_FNG_THRESHOLD")
     # Futures: no short when BTC 4h candle just moved up strongly (avoid shorting into momentum)
     futures_no_short_btc_4h_threshold: float = Field(default=2.0, env="FUTURES_NO_SHORT_BTC_4H_THRESHOLD")  # %
     # Scale-out on take-profit
@@ -105,9 +110,13 @@ class Settings(BaseSettings):
         'FETUSDT', 'AVAXUSDT', 'ADAUSDT', 'XRPUSDT', 'DOTUSDT',
         'SUIUSDT', 'PEPEUSDT', 'WIFUSDT', 'BTCUSDT', 'ETHUSDT', 'LINKUSDT',
         'NEARUSDT', 'WLDUSDT', 'INJUSDT', 'AGIXUSDT',
-        'ONDOUSDT', 'JUPUSDT', 'OPUSDT',  # M2: +3 NARRATIVE alta vol (filtrados por WR 30d)
-        'HBARUSDT', 'AAVEUSDT',  # O5: nuevos pares narrativa validados vol24h>$10M (jun 16 2026)
-    ], env="ANALYSIS_SYMBOLS")
+        'ONDOUSDT', 'JUPUSDT', 'OPUSDT',  # M2: +3 NARRATIVE alta vol
+        'HBARUSDT', 'AAVEUSDT',  # O5: nuevos pares validados vol24h>$10M
+        # E1: Expansión Fase 1 (+7 tokens) - Optimización activos $3K capital
+        'ARBUSDT', 'MATICUSDT', 'ATOMUSDT',  # L2 + Infra
+        'GRTUSDT', 'AIOZUSDT',  # AI/Data Narrative
+        'SEIUSDT', 'SUSHIUSDT',  # Infra + DeFi
+    ])  # E1: Removido env=ANALYSIS_SYMBOLS para forzar lista de 32 tokens
 
     # VolSpike override: bypass PnL predictor for narrative tokens with strong volume
     volspike_override_enabled: bool = Field(default=True, env="VOLSPIKE_OVERRIDE_ENABLED")
@@ -115,6 +124,10 @@ class Settings(BaseSettings):
     volspike_override_max_rsi: float = Field(default=65.0, env="VOLSPIKE_OVERRIDE_MAX_RSI")      # RSI must be below this
     volspike_override_trend_required: bool = Field(default=True, env="VOLSPIKE_OVERRIDE_TREND_REQUIRED")  # must be 4h UP
     volspike_override_narrative_only: bool = Field(default=True, env="VOLSPIKE_OVERRIDE_NARRATIVE_ONLY")  # only for narrative tokens
+    # V2: Controles adicionales para hacer override más selectivo (jun 16 2026)
+    volspike_override_min_strength: float = Field(default=0.65, env="VOLSPIKE_OVERRIDE_MIN_STRENGTH")  # Requerir alta convicción técnica
+    volspike_override_max_positions: int = Field(default=2, env="VOLSPIKE_OVERRIDE_MAX_POSITIONS")  # Máx 2 posiciones override simultáneas
+    volspike_override_daily_limit: int = Field(default=3, env="VOLSPIKE_OVERRIDE_DAILY_LIMIT")      # Máx 3 overrides por día
     
     # Prediction-based position closure configuration
     min_pnl_improvement_threshold: float = Field(default=0.5, env="MIN_PNL_IMPROVEMENT_THRESHOLD")  # 50% improvement
@@ -130,7 +143,9 @@ class Settings(BaseSettings):
     protect_profitable_positions: bool = Field(default=True, env="PROTECT_PROFITABLE_POSITIONS")  # skip rebalance if PnL>1%
     protect_profit_min_pct: float = Field(default=0.3, env="PROTECT_PROFIT_MIN_PCT")              # minimum PnL% to protect (v3: 0.8→0.3 — protect desde micro-ganancia)
     # Rebalancing controls (v2)
-    min_hold_minutes: int = Field(default=240, env="MIN_HOLD_MINUTES")         # min time before rebalancing out a position (v4: 120→240 = 4h mínimo)
+    min_hold_minutes: int = Field(default=120, env="MIN_HOLD_MINUTES")         # min time before rebalancing out a position (v5: 240→120 — balance between hold and flexibility)
+    min_hold_minutes_range_scalp: int = Field(default=30, env="MIN_HOLD_MINUTES_RANGE_SCALP")  # RANGE_SCALP: shorter hold (5min cycles × 6 = 30min)
+    min_hold_minutes_spot_bull: int = Field(default=120, env="MIN_HOLD_MINUTES_SPOT_BULL")     # SPOT_BULL: 2h hold before replacement
     max_rebalance_per_cycle: int = Field(default=2, env="MAX_REBALANCE_PER_CYCLE")  # max sells per rebalance cycle
     rebalance_excluded_symbols: list = Field(default=['USD1USDT', 'USDCUSDT', 'BUSDUSDT', 'TUSDUSDT', 'FDUSDUSDT'],  # F4: stablecoins never rebalanced
                                              env="REBALANCE_EXCLUDED_SYMBOLS")
@@ -159,8 +174,8 @@ class Settings(BaseSettings):
     max_positions_futures_short: int = Field(default=4, env="MAX_POSITIONS_FUTURES_SHORT")
     # Active replacement: swap weakest open position for a better new signal
     replace_only_losing: bool = Field(default=True, env="REPLACE_ONLY_LOSING")  # only replace positions in loss/flat
-    replace_ev_min_ratio: float = Field(default=1.3, env="REPLACE_EV_MIN_RATIO")  # new EV must be >= worst_open_EV * this
-    replace_strength_min_delta: float = Field(default=0.15, env="REPLACE_STRENGTH_MIN_DELTA")  # new strength must exceed avg open strength by this
+    replace_ev_min_ratio: float = Field(default=1.1, env="REPLACE_EV_MIN_RATIO")  # MEJO-1: 1.3→1.1 — more permissive given small EV values
+    replace_strength_min_delta: float = Field(default=0.05, env="REPLACE_STRENGTH_MIN_DELTA")  # MEJO-2: 0.15→0.05 — BUG-B fix: avg is now real, not hardcoded 0.5
     # Overflow slots: allow extra positions beyond regime max when signal quality is exceptional
     overflow_min_strength: float = Field(default=0.80, env="OVERFLOW_MIN_STRENGTH")  # Kelly FUERTE tier threshold
     overflow_min_prob: float = Field(default=0.65, env="OVERFLOW_MIN_PROB")          # Kelly FUERTE tier threshold
@@ -184,8 +199,8 @@ class Settings(BaseSettings):
     category_max_positions_enabled: bool = Field(default=True, env="CATEGORY_MAX_POSITIONS_ENABLED")
     category_max_positions: dict = Field(default={
         "LARGE_CAP":  3,   # BTC/ETH/BNB — max 3
-        "MIDCAP_ALT": 5,   # SOL/AVAX/DOT — max 5
-        "NARRATIVE":  4,   # FET/TAO/RENDER — max 4 (concentración temática)
+        "MIDCAP_ALT": 8,   # E2: 7→8 slots (12 midcap disponibles en screener)
+        "NARRATIVE":  6,   # E2: 5→6 slots (10 AI/data narratives disponibles)
         "MEME":       2,   # DOGE/PEPE/WIF — max 2 (alta correlación)
     }, env="CATEGORY_MAX_POSITIONS")
 
@@ -212,6 +227,8 @@ class Settings(BaseSettings):
     narrative_tokens: list = Field(default=[
         'FETUSDT', 'TAOUSDT', 'RENDERUSDT', 'NEARUSDT', 'WLDUSDT',
         'AGIXUSDT', 'OCEANUSDT', 'INJUSDT',
+        # E1: Nuevos narratives AI/Data para rotación sectorial
+        'GRTUSDT', 'AIOZUSDT',
     ], env="NARRATIVE_TOKENS")
 
     # ── Token classification 2D ───────────────────────────────────────────────
@@ -250,6 +267,14 @@ class Settings(BaseSettings):
         "TRUMPUSDT":  {"market_behavior": "MEME",        "origin": "MEME_POLITICAL"},
         "MEGAUSDT":   {"market_behavior": "MEME",        "origin": "MEME_POLITICAL"},
         "HBARUSDT":   {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"},  # O5: Hedera, $15.7M vol/día
+        # E1: Nuevos tokens Fase 1 (expansión activos)
+        "ARBUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "L2"},            # Arbitrum L2
+        "MATICUSDT":  {"market_behavior": "MIDCAP_ALT",  "origin": "L2"},            # Polygon L2
+        "ATOMUSDT":   {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"}, # Cosmos infra
+        "GRTUSDT":    {"market_behavior": "NARRATIVE",   "origin": "AI_DATA"},        # The Graph indexing
+        "AIOZUSDT":   {"market_behavior": "NARRATIVE",   "origin": "AI_DATA"},        # DePIN + AI streaming
+        "SEIUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"}, # Sei trading-optimized L1
+        "SUSHIUSDT":  {"market_behavior": "MIDCAP_ALT",  "origin": "DEFI"},           # SushiSwap DEX
     }, env="TOKEN_CATEGORIES")
 
     # Win-rate thresholds per market_behavior category
@@ -282,6 +307,14 @@ class Settings(BaseSettings):
     screener_max_pairs: int = Field(default=50, env="SCREENER_MAX_PAIRS")           # max dynamic pairs for spot
     screener_cache_minutes: int = Field(default=15, env="SCREENER_CACHE_MINUTES")   # TTL for screener cache
     screener_merge_with_static: bool = Field(default=True, env="SCREENER_MERGE_WITH_STATIC")
+
+    # ── Screener v2: Top 100 Quality Assets ───────────────────────────────────
+    screener_top_n_enabled: bool = Field(default=True, env="SCREENER_TOP_N_ENABLED")
+    screener_top_n_count: int = Field(default=100, env="SCREENER_TOP_N_COUNT")  # Target: 100 quality assets
+    screener_quality_min_vol_usdt: float = Field(default=10_000_000)  # $10M minimum volume
+    screener_quality_max_volatility: float = Field(default=0.50)     # Max 50% 24h volatility
+    screener_quality_min_price_usdt: float = Field(default=0.0001)   # Minimum price filter
+    screener_quality_min_age_days: int = Field(default=90)             # Minimum token age
 
     # ── Futures LONG / hedge bidireccional ────────────────────────────────────
     futures_hedge_mode_enabled: bool = Field(default=True, env="FUTURES_HEDGE_MODE_ENABLED")

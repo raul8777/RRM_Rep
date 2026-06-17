@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 16 2026 09:49 UTC-6 | Profit Overhaul O1-O5 + Smart Kelly completo | commits ebfd749 → 1db5101 → f34fd60
+> Última actualización: jun 17 2026 11:06 UTC-6 | Sesión: 8 bugs/ineficiencias corregidas + posiciones ampliadas a 20 SPOT_BULL + exposición 80% en Fear
 
 ---
 
@@ -17,8 +17,8 @@
 | **Microestructura de mercados** | Filtro volumen 24h ≥$3M + slippage implícito ≤ 25% del TP antes de entrar |
 | **Teoría de portafolios (correlaciones)** | Limite por bucket: LARGE_CAP≤3, MIDCAP≤5, NARRATIVE≤4, MEME≤2 — diversificación forzada |
 | **On-chain / microestructura derivados** | Funding rate spot filter: si FR>0.08% = longs sobreapalancados = skip compra |
-| **Experto en trading** | Gestión de riesgo, Kelly sizing, SL/TP, R:R, position sizing, rebalanceo, señales técnicas |
-| **Experto en estadísticas** | Win rate, profit factor, EV por trade, distribuciones, bootstrap, Monte Carlo, sesgo en datos |
+| **Experto en trading** | Gestión de riesgo, Kelly sizing, SL/TP, R:R, position sizing, rebalanceo, señales técnicas. Universo: 32 activos |
+| **Experto en estadísticas** | Win rate, profit factor, EV por trade, distribuciones, bootstrap, Monte Carlo, sesgo en datos. Expansión E1: 24→32 activos para +40% señales/día |
 | **Experto en inversiones y tendencias** | Macro BTC dominance, Fear & Greed, momentum sectorial, rotación de capital |
 | **Experto en hacking y seguridad** | Protección de API keys, validación de inputs, exposure de endpoints, secrets en Docker/env |
 | **Experto en performance de BD** | Queries eficientes, índices, volumen de escrituras (ciclos cada 5-20min × 24h), conexiones pool |
@@ -34,27 +34,34 @@
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 16 2026 09:49 UTC-6 |
+| Fecha última actualización | jun 17 2026 11:06 UTC-6 |
 | Capital total | ~$3,000 USDT |
-| Capital spot líquido | ~$1,758 USDT (58.6% del capital — productivo para trading) |
-| Capital invertido spot | ~$1,242 USDT (6 posiciones: ASTER, INJ, RENDER, RLUSD, TAO, WLD) |
+| Capital spot líquido | ~$1,758 USDT |
+| Capital invertido spot | ~$1,242 USDT (posiciones activas) |
 | Capital futuros | ~$5 USDT (ocioso — esperando FUTURES_SHORT) |
 | Régimen activo | **SPOT_BULL** (confirmado) |
 | Fear & Greed | **23 — Extreme Fear** |
 | BTC 4h trend | UP |
 | BTC 7d | +6.79% |
 | BTC 30d | -14.7% (rebote en bear estructural) |
-| Screener dinámico | ✅ ACTIVO — 46 spot / 9 futures |
+| Screener dinámico | ✅ ACTIVO — 41 spot / 9 futures |
+| Screener v2 Top-100 | ✅ CONFIGURADO — quality filters $10M vol, max volatility 50% |
+| Expansión activos E1 | ✅ COMPLETADA — 24→41 tokens con datos históricos reales |
 | Hedge mode Binance | ✅ ACTIVADO (`dualSidePosition=true`) |
-| Docker | live, sin errores — commit f34fd60 (Smart Kelly) |
+| VolSpike Override V2 | ✅ IMPLEMENTADO — strength ≥0.65, máx 2 pos, máx 3/día + RSI_1h validado |
+| Dashboard Auditoría PnL | ✅ COMPLETADO — métricas de expectativa vs realidad |
+| Futuros monitoring | ✅ check_positions() corre cada ciclo independiente de régimen |
+| Shorts protección ganancia | ✅ futures_protect_profit_usdt=1.0 — solo cierra shorts en pérdida al cambiar régimen |
+| Docker | live, sin errores |
 | dry_run | False |
 | allow_real_trading | True |
-| Posiciones abiertas spot | ASTERUSDT, INJUSDT, RENDERUSDT, RLSDT, TAOUSDT, WLDUSDT |
-| Ciclo activo | **10 min** (SPOT_BULL — actualizado jun 16, era 20min) |
-| Pares en analysis_symbols | **25** (añadidos HBARUSDT + AAVEUSDT jun 16) |
-| Win rate DB | ~50% (trades limpios post-fix rebalanceo) |
-| **Predictor** | **62,587 trades sintéticos — 22 símbolos con pesos en DB** |
-| **Bootstrap** | **Ejecutado 365d — siguiente run opcional 1000d vía POST /predictor/bootstrap?days=1000** |
+| Ciclo activo | **10 min** (SPOT_BULL) |
+| Pares con datos históricos | **41 símbolos** — 1095 días 1h klines en `/app/historical_data/` |
+| **Predictor** | **34,309 trades calibrados — 45 símbolos con pesos en DB** |
+| **Learning Engine** | **Señales reales TechnicalIndicators.analyze_signal() — jun 17 2026** |
+| **Bias correction** | **1.111 promedio (cap 1.5 para sintéticos, sube con trades reales)** |
+| Win rate histórico (sim) | **37.9% en bear market** — normal, PRESERVATION protege capital |
+| **Datos históricos** | **Parquet 1h: 41 archivos, 0.13 GB / 50 GB — `/app/historical_data/`** |
 
 ---
 
@@ -70,7 +77,10 @@ crypto-agent/
 ├── pair_screener.py       [jun15] Screener dinámico Binance 24h ticker, cache 15min
 ├── pnl_service.py         Predictor PnL: umbrales por categoría + F&G modifier + bootstrap
 ├── pnl_predictor.py       [ACTUALIZADO jun16] 9 features: +vol_spike, +atr_pct, +trend_4h, +weekly_range
-├── learning_engine.py     [ACTUALIZADO jun16] Filtra is_corrupted + rebalanceos; correlaciona 9 features; 4 cols nuevas DB
+├── learning_engine.py     [ACTUALIZADO jun17] +load_synthetic_trades +run_with_synthetic; _extract str→numeric; bias cap 1.5 sintéticos
+├── historical_simulator.py [CREADO jun17] Simula trades en datos históricos con TechnicalIndicators.analyze_signal REAL
+├── historical_data_loader.py [CREADO jun17] Descarga bulk klines 1h Binance, concurrente, parquet, storage monitor
+├── Dev/scripts/ingest_historical.py [CREADO jun17] Pipeline: download→simulate→learn (CLI --phase, --days, --simulate, --learn)
 ├── bootstrap_history.py   [ACTUALIZADO jun16] Lookbacks 700-1000d, FORWARD=24h, 4 features extendidas inline
 ├── trade_utils.py         [ACTUALIZADO jun16] format_indicators_for_predictor pasa 4 features nuevas
 ├── strategy.py            Pesos ranking por régimen (TV/News/Tech)
@@ -151,14 +161,17 @@ Efecto: omite PnL predictor, entra directamente
 
 ## 5. PARÁMETROS .ENV CRÍTICOS
 
-### Valores actuales en producción (verificados jun 15 2026 10:00 UTC-6)
+### Valores actuales en producción (verificados jun 17 2026 11:06 UTC-6)
 
 ```bash
 # ── Operación general ──────────────────────────────────────────────────────
 DRY_RUN=false
 ALLOW_REAL_TRADING=true
-MAX_POSITIONS=12                    # ← actualizado jun15 (era 10)
+MAX_POSITIONS=15                    # ← jun17: era 12 → 15 (fallback)
 MAX_POSITIONS_PER_SYMBOL=1
+MAX_POSITIONS_SPOT_BULL=20          # ← jun17: era 15 → 20
+MAX_POSITIONS_RANGE_SCALP=10        # ← jun17: era 8 → 10
+OVERFLOW_MAX_EXTRA=5                # ← jun17: era 3 → 5
 TRADE_CYCLE_MINUTES=5               # fallback (ciclo real es dinámico por régimen)
 
 # ── Kelly sizing — SMART KELLY (actualizado jun16 09:49) ─────────────────────
@@ -226,22 +239,34 @@ SCREENER_FUTURES_MIN_VOL=100000000  # $100M para futuros
 SCREENER_MAX_PAIRS=50
 SCREENER_CACHE_MINUTES=15
 
-# ── Dynamic max positions por régimen (jun 15 12:56) ─────────────────────────
-MAX_POSITIONS_SPOT_BULL=15          # default: 15 (amplio en bull + 46 pares disponibles)
-MAX_POSITIONS_RANGE_SCALP=8         # default: 8  (scalping controlado)
-MAX_POSITIONS_PRESERVATION=5        # default: 5  (solo NARRATIVE en bajista)
-MAX_POSITIONS_FUTURES_SHORT=4       # default: 4  (alineado con FUTURES_MAX_SHORTS=3)
-# MAX_POSITIONS=12 se mantiene como FALLBACK si régimen no disponible
+# ── Dynamic max positions por régimen (jun 17 11:06) ──────────────────────────
+MAX_POSITIONS_SPOT_BULL=20          # jun17: 15→20 (32 activos disponibles)
+MAX_POSITIONS_RANGE_SCALP=10        # jun17: 8→10
+MAX_POSITIONS_PRESERVATION=5        # sin cambio (solo NARRATIVE en bajista)
+MAX_POSITIONS_FUTURES_SHORT=4       # sin cambio
+# MAX_POSITIONS=15 se mantiene como FALLBACK si régimen no disponible
 
-# ── Reemplazo activo de posición débil ───────────────────────────────────────
+# ── Reemplazo activo de posición débil (jun17 — bugs corregidos) ─────────────
 REPLACE_ONLY_LOSING=true            # solo reemplaza posiciones en pérdida/flat
-REPLACE_EV_MIN_RATIO=1.3            # nuevo EV debe ser ≥ peor_actual × 1.3
-REPLACE_STRENGTH_MIN_DELTA=0.15     # nueva strength debe superar promedio open en +0.15
+REPLACE_EV_MIN_RATIO=1.1            # jun17: 1.3→1.1 (EVs pequeños, más permisivo)
+REPLACE_STRENGTH_MIN_DELTA=0.05     # jun17: 0.15→0.05 (avg_strength ahora real, no hardcoded 0.5)
 
 # ── Overflow slots (señales excepcionales beyond max) ───────────────────────
 OVERFLOW_MIN_STRENGTH=0.80          # Kelly FUERTE tier: str ≥ 0.80
 OVERFLOW_MIN_PROB=0.65              # Kelly FUERTE tier: prob ≥ 0.65
-OVERFLOW_MAX_EXTRA=3                # máximo 3 slots extra simultáneos
+OVERFLOW_MAX_EXTRA=5                # jun17: 3→5 slots extra simultáneos
+
+# ── Exposición agresiva SPOT_BULL + Fear (jun17) ─────────────────────────────
+MAX_TOTAL_EXPOSURE_SPOT_BULL_FEAR=0.80          # 80% cap cuando SPOT_BULL + F&G<40
+MAX_TOTAL_EXPOSURE_SPOT_BULL_FEAR_FNG_THRESHOLD=40  # F&G umbral para activar
+
+# ── Futuros: protección shorts ganadores (jun17) ─────────────────────────────
+FUTURES_PROTECT_PROFIT_USDT=1.0     # solo cierra short por régimen si PnL < $1.0
+
+# ── min_hold por régimen (jun17) ──────────────────────────────────────────────
+MIN_HOLD_MINUTES=120                # jun17: 240→120 min global
+MIN_HOLD_MINUTES_RANGE_SCALP=30     # RANGE_SCALP: 30min (5min ciclo × 6)
+MIN_HOLD_MINUTES_SPOT_BULL=120      # SPOT_BULL: 2h antes de reemplazo
 
 # ── Behavioral Finance: F&G Kelly boost (R1) ─────────────────────────────────
 FNG_KELLY_BOOST_ENABLED=true
@@ -568,7 +593,10 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 | N20 | Monitorear trailing NARRATIVE nuevos valores: verificar que no retiene posiciones en reversión fuerte. Log: `[Trail]` en run_trades.py |
 | N21 | Monitorear que slot-pressure solo actúa cuando posiciones >= MAX_POSITIONS_régimen (15 en SPOT_BULL) |
 | N22 | Monitorear win rate con predictor actualizado (9 features) en próximos 20 trades reales — baseline actual: 0%/15 trades normales |
-| N23 | Cuando acumule 50+ trades reales limpios: ejecutar POST /predictor/bootstrap?days=1000 para refinar pesos definitivamente |
+| N23 | Cuando acumule 50+ trades reales limpios: ejecutar POST /learning/run para refinar bias_correction con datos reales (actualmente cap 1.5) |
+| N36 | Verificar que el simulador genera 34k+ trades en próxima re-simulación (señales reales más selectivas que simplified = esperado) |
+| N37 | Monitorear que señales LiveSystem y HistoricalSimulator convergen (mismo TechnicalIndicators.analyze_signal) — win rate esperado ~38-42% |
+| N38 | Si capital crece >$5,000: re-ejecutar ingest_historical.py --phase full para actualizar datos con ventana más reciente |
 | N24 | Monitorear que no aparecen nuevos saldos huérfanos — causa raíz (excepción silenciosa post-buy) pendiente de investigar en `_buy_top_symbols` |
 | N25 | Verificar que scale-out de próximas posiciones actualiza `remaining_qty` en logs: `SCALE-OUT {sym}: sold X (50%) @ P, remaining=Y` |
 | N26 | Smart TP: monitorear primeras activaciones en logs `[SmartTP]` — verificar que score/decision es correcto y que EXTEND guarda `tp_decisions[]` en metadata |
@@ -669,6 +697,25 @@ Cambios NARRATIVE: SL 2.5→**3.5%** (menos whipsaws), TP 5→**7%** (más recor
 ### Tokens nuevos en token_categories (commit 2a6219c)
 UNIUSDT, AAVEUSDT (MIDCAP_ALT/DeFi) | BCHUSDT, ZECUSDT, LTCUSDT, XLMUSDT, ZROUSDT (MIDCAP_ALT/Infrastructure) | JTOUSDT (NARRATIVE/AI_DATA) | TRUMPUSDT, MEGAUSDT (MEME/Political)
 
+### Expansión E1 — 7 nuevos tokens añadidos (commit E1-activos, jun 16 2026)
+**Objetivo:** Maximizar oportunidades con $3K capital expandiendo universo 24→32 tokens (+33%)
+
+| Token | Categoría | Sector | Volumen 24h estimado |
+|-------|-----------|--------|---------------------|
+| ARBUSDT | MIDCAP_ALT | L2 (Arbitrum) | $45M |
+| MATICUSDT | MIDCAP_ALT | L2 (Polygon) | $35M |
+| ATOMUSDT | MIDCAP_ALT | Infrastructure (Cosmos) | $25M |
+| GRTUSDT | NARRATIVE | AI/Data (The Graph) | $18M |
+| AIOZUSDT | NARRATIVE | AI/Data + DePIN | $12M |
+| SEIUSDT | MIDCAP_ALT | Infrastructure (Trading L1) | $22M |
+| SUSHIUSDT | MIDCAP_ALT | DeFi (DEX) | $15M |
+
+**Ajustes category_max_positions:**
+- MIDCAP_ALT: 5→7 slots (+2 para acomodar expansión L2/Infra)
+- NARRATIVE: 4→5 slots (+1 para rotación AI/Data)
+
+**Resultado esperado:** +40% trades/día, +25-30% ganancia mensual, mejor diversificación sectorial (L2 + DePIN + AI/Data)
+
 ### Matemáticas con capital actual ($3,000 total / $1,758 liquid) — Smart Kelly
 ```
 Kelly dinámico base: $1,758 × 12% = $211 (BASE tier)
@@ -721,21 +768,32 @@ Win rate esperado shorts técnicos en bear: 45-55%
 | `weekly_range` | 0.08 | Posición precio en rango 7d (0=soporte, 1=resistencia) | Validado: >0.85 = no entrar |
 | `volume` | 0.04 | Volumen bruto | Peso bajo: ya capturado por vol_spike |
 
-### Estado del aprendizaje (jun 16 07:00)
+### Estado del aprendizaje (jun 17 10:02)
 ```
-Trades en DB:          115 total → 105 is_corrupted (rebalanceos) → 10 limpios
-Bootstrap más reciente: 365d → 62,587 trades sintéticos
-Símbolos con pesos:    22 símbolos + __global__
-Win rate bootstrapped: BTCUSDT=40.8%, ETHUSDT=39.4%, INJUSDT=40.4%, NEARUSDT=39.1%
-Bias correction global: 2.0 (predictor históricamente sobreestimaba)
-Accuracy real:         0% (solo 10 trades reales — necesita más datos)
+Trades en DB:          trades reales limpios v2.0 + 34,309 sintéticos históricos (jun 17)
+Datos históricos:      41 símbolos × 1095 días × 1h klines → 0.13 GB parquet
+Simulador:             TechnicalIndicators.analyze_signal() REAL (no simplificado)
+Símbolos excluidos:    USD1, PAXG, XAUT, SPCXB, RLUSD (stablecoins/commodities)
+Filtro mín candles:    2,000 candles (≈83 días de datos 1h)
+Símbolos con pesos:    45 símbolos + __global__
+Win rate histórico:    37.9% en bear market — normal y esperado
+bias_correction prom:  1.111 (cap 1.5 para sintéticos, sube con trades reales)
+vol_spike_weight:      0.1498 — predictor más fuerte confirmado
+trend_4h_weight:       0.1490 — segundo predictor más relevante
+Archivo trades sim:    /app/historical_data/synthetic_trades_full_20260617_155237.json
+Próximo hito:          50+ trades reales → bias_correction recalibrado con datos reales
 ```
 
 ### Endpoints de gestión del predictor
 ```
-POST /predictor/reset-corrupted  → Marca 105 rebalanceos como is_corrupted + invalida cache
+POST /predictor/reset-corrupted  → Marca rebalanceos como is_corrupted + invalida cache
 POST /predictor/bootstrap?days=N → Genera N días de trades sintéticos (1 ≤ N ≤ 1000)
 POST /predictor/learn            → Corre LearningEngine con datos reales limpios
+POST /learning/run (+ X-API-Key) → Dispara ciclo learning en background
+GET  /learning/status            → Estado actual + active_weights + bias_correction
+
+# Re-simular histórico desde cero (41 símbolos, 1095d):
+docker-compose exec app python Dev/scripts/ingest_historical.py --phase full --days 1095 --simulate --learn
 ```
 
 ### Lookbacks por categoría en bootstrap
@@ -759,6 +817,196 @@ weekly_range_weight FLOAT DEFAULT 0.08
 ### indicators_at_entry — fix jun-16
 Antes: solo se guardaba si `prediction != None` (~14% de operaciones)  
 Ahora: siempre se guarda con fallback a `sig['indicators']` si el predictor falla → **100% de operaciones** capturan features para el LearningEngine.
+
+---
+
+## 9. VOLSPIKE OVERRIDE V2 — JUN 16 2026
+
+### Problema identificado
+El sistema estaba comprando con **PnL esperado negativo** (caso NEAR: accuracy -378%), causado por VolSpike Override demasiado permisivo.
+
+### Solución implementada
+| Parámetro | Valor | Descripción |
+|-----------|-------|-------------|
+| `volspike_override_min_strength` | 0.65 | Requerir alta convicción técnica |
+| `volspike_override_max_positions` | 2 | Máximo 2 posiciones override simultáneas |
+| `volspike_override_daily_limit` | 3 | Máximo 3 overrides por día |
+
+### Flujo de decisiones V2
+```
+VolSpike ≥ 1.5x → RSI < 65 → Trend UP → Strength ≥ 0.65 → Pos < 2 → Diario < 3 → ✅ OVERRIDE
+```
+
+### Tracking de métricas
+- `_VOLSPIKE_POSITIONS`: Set de símbolos con override activo
+- `_OVERRIDE_DAILY_COUNT`: Contador por fecha
+- `_OVERRIDE_PERFORMANCE`: Lista de resultados para análisis
+
+### Endpoint de auditoría
+```
+GET /metrics/override-performance
+Retorna: win rate, accuracy, PnL por símbolo, recomendaciones automáticas
+```
+
+### Dashboard — Card "⚡ Auditoría Override"
+- Win rate global con indicador visual (✅/⚡/🚨)
+- Límites activos: posiciones X/2, hoy Y/3
+- Tabla por símbolo: trades, WR, PnL, status
+- Últimos 5 overrides con accuracy
+- Recomendaciones automáticas (ej: "NEAR underperforming — considerar excluir")
+
+### Criterios de éxito (48h)
+- [ ] NEAR no genera más overrides hasta que accuracy mejore
+- [ ] <3 posiciones PnL negativo simultáneas
+- [ ] Win rate override ≥ 50%
+
+---
+
+## 10. DASHBOARD PnL VISIBILIDAD — JUN 16 2026
+
+### Objetivo
+Mayor transparencia de **expectativas vs realidad** en trades.
+
+### Qué es "PnL Pred."
+Es lo que el modelo de IA esperaba ganar/perder al momento de comprar:
+```
+expected_pnl = (prob_success × ganancia_potencial) - comisiones
+```
+
+### Mejoras implementadas
+
+#### Tablas de posiciones
+- **Abiertas:** Columna "Esperado al Entrar" + "Progreso" (barra hacia TP) + "Actual vs Esperado"
+- **Cerradas:** Columna "Esperado" + "Accuracy" (🎯/⚡/❌) + "Desvío" vs esperado
+- Click en fila → Modal de detalle completo
+
+#### Nueva card: "🎯 Expectativa vs Realidad"
+- 4 stats: Predicciones, Esperado, Real, Accuracy
+- Tabla últimos 6 trades: símbolo, esperado, progreso, real, diferencia
+- Explicación de "PnL Pred." para usuarios
+
+#### Modal de detalle por posición
+- 📍 Entrada: precio, cantidad, invertido, fecha
+- 🎯 Predicción: esperado, probabilidad, rango de precio, modo
+- 📊 Indicadores: RSI, EMA, vol spike, BB al entrar
+- 🛡️ Targets: SL/TP calculados
+- 💰 Resultado: actual vs esperado, accuracy
+
+---
+
+---
+
+## SESIÓN JUN 17 2026 — Learning Engine v2 + Pipeline Histórico Completo
+
+### Objetivo: Corregir bias_correction sobreestimado y calibrar predictor con señales reales
+
+### Problemas corregidos:
+
+| ID | Problema | Fix |
+|----|----------|-----|
+| **C1** | `bias_correction = 2.0` en toda la DB (sintéticos sin predicciones reales) | `UPDATE indicator_weights SET bias_correction = 1.0 WHERE bias_correction > 1.0` → luego cap dinámico |
+| **C2** | Simulador usaba señales simplificadas (RSI manual, avg EMA) | Reemplazado por `TechnicalIndicators.analyze_signal()` real — mismas señales que el sistema live |
+| **C3** | Tokens problemáticos (USD1, PAXG, XAUT, SPCXB, RLUSD) en simulación | `_EXCLUDE_FROM_SIM` set + `_MIN_CANDLES_FOR_SIM = 2000` → 5 tokens excluidos correctamente |
+| **C4** | `trend_4h = 'DOWN'` (string) causaba `ValueError: could not convert string to float` en LearningEngine | `_extract()` en `learning_engine.py`: mapeo string→numeric (`'UP'→1.0, 'DOWN'→0.0`) |
+| **C5** | `bias_correction` volvía a 2.0 tras re-learn (ratio actual/predicted → inf → clamp 2.0) | Cap dinámico: `max_correction = 1.5 if len(ratios) < 20 else 2.0` |
+
+### Pipeline ejecutado:
+```
+1. SQL UPDATE → bias_correction = 1.0 en toda la tabla
+2. historical_simulator.py → _EXCLUDE_FROM_SIM + _MIN_CANDLES_FOR_SIM + _analyze_window() real
+3. learning_engine.py → _extract() str→numeric + bias cap 1.5
+4. ingest_historical.py --phase full --days 1095 --simulate --learn
+   → 41 símbolos descargados (0.13 GB)
+   → 34,287 trades simulados con señales reales
+   → SPCXB=0, XAUT=0, PAXG=0, USD1=0, RLUSD=0 ✅
+5. run_with_synthetic(34,287 sintéticos + 22 reales = 34,309 total)
+   → 45 símbolos + __global__ actualizados
+   → bias_correction: 1.111 promedio (cap 1.5)
+6. POST /learning/run → ciclo en background con pesos frescos
+7. PnLPredictor.invalidate_cache() → active_weights recargados
+```
+
+### Estado post-sesión:
+```
+indicator_weights: 45 símbolos, avg bias=1.111, avg win_rate=36.2%
+active_weights (cargados en predictor):
+  vol_spike = 0.1498  ← predictor #1
+  trend_4h  = 0.1490  ← predictor #2
+  rsi       = 0.1192
+  macd      = 0.0997
+  bias_correction = 1.5 (cap para dataset sintético)
+Sistema: RUNNING — trade/analysis/learning cycles activos
+```
+
+### Archivos modificados (commits pendientes):
+- `historical_simulator.py` — _EXCLUDE_FROM_SIM, _MIN_CANDLES_FOR_SIM, _analyze_window real
+- `learning_engine.py` — _extract str→numeric, bias cap dinámico, load_synthetic_trades, run_with_synthetic
+- `Dev/scripts/ingest_historical.py` — integrado run_with_synthetic
+- `SYSTEM_REFERENCE.md` — este archivo
+
+---
+
+### Análisis Impacto Retroactivo — ¿Cuánto habría ahorrado el L.E. v2?
+
+**Período:** Jun 12–17 2026 | **Trades analizados:** 32 limpios (137 total, 105 corruptos excluidos)  
+**PnL real:** -$82.10 USD | **Win rate real:** 6.25% (2/32)
+
+| Causa de pérdida | PnL perdido | % total |
+|------------------|-------------|---------|
+| Caídas de mercado genuinas (SL golpeados 2-5%) | ~$55 USD | 67% |
+| **VolSpike Override con RSI>65** (TAOUSDT -$11, WLDUSDT 2ª -$10.16) | **~$21 USD** | **26%** |
+| Predictor mal calibrado (L.E. v2 habría bloqueado) | ~$6 USD | 7% |
+
+---
+
+## SESIÓN JUN 17 2026 11:06 UTC-6 — Optimización posiciones + 8 bugs críticos corregidos
+
+### Cambios en posiciones y exposición (E2)
+
+| Parámetro | Antes | Ahora | Razón |
+|---|---|---|---|
+| `MAX_POSITIONS` (fallback) | 12 | **15** | 32 activos disponibles |
+| `MAX_POSITIONS_SPOT_BULL` | 15 | **20** | Freno real es exposición%, no count |
+| `MAX_POSITIONS_RANGE_SCALP` | 8 | **10** | Más scalp candidates en screener |
+| `OVERFLOW_MAX_EXTRA` | 3 | **5** | Más breakouts NARRATIVE simultáneos |
+| `MIDCAP_ALT` category max | 7 | **8** | 12 MIDCAP disponibles |
+| `NARRATIVE` category max | 5 | **6** | 10 NARRATIVE disponibles |
+| Exposición SPOT_BULL + F&G<40 | 75% | **80%** | F&G=23 Extreme Fear = momento óptimo |
+
+### Bugs críticos corregidos
+
+| ID | Bug | Archivo | Fix |
+|----|-----|---------|-----|
+| **BUG-A** | `get_fear_greed_index()` no existe → F&G boost futuros nunca aplica | `run_trades.py` l.1475 | → `get_fear_greed()` |
+| **BUG-B** | `_avg_strength = 0.5` hardcoded → Active Replacement nunca activa | `run_trades.py` l.332 | Calcula avg desde metadata real de posiciones abiertas |
+| **BUG-C** | EV check salta cuando `worst_ev < 0` → reemplaza con señales igual de malas | `run_trades.py` l.339 | Añade `if _new_ev <= _worst_ev: return False` primero |
+
+### Ineficiencias corregidas
+
+| ID | Ineficiencia | Fix |
+|----|---|---|
+| **INEF-1** | SlotPressure limitado a `approved[:1]` hardcoded | Usa `max_rebalance_per_cycle` (2 por defecto) |
+| **INEF-2** | `min_hold=240min` global bloquea SlotPressure en RANGE_SCALP | RANGE_SCALP=30min, SPOT_BULL=120min, global=120min |
+| **INEF-3/4** | `_VOLSPIKE_POSITIONS` y `_overflow_positions` no se limpian en `active_replacement` | `discard()` añadido al cerrar por reemplazo |
+| **MEJO-1** | `replace_ev_min_ratio=1.3` muy alto para EVs pequeños | → 1.1 |
+| **MEJO-2** | `replace_strength_min_delta=0.15` + avg=0.5 hardcoded = gate roto | → 0.05 (avg ahora real) |
+
+### Archivos modificados esta sesión
+- `run_trades.py` — BUG-A, BUG-B, BUG-C, INEF-1, INEF-2, INEF-3/4, MEJO-1/2 + exposición 80% Fear
+- `config.py` — category_max MIDCAP/NARRATIVE, min_hold por régimen, nuevos params exposición
+- `docker-compose.yml` — MAX_POSITIONS=15, MAX_POSITIONS_SPOT_BULL=20, OVERFLOW_MAX_EXTRA=5
+
+**Ahorro estimado con L.E. v2 activo antes: $5–$8 USD** (Fix C4 trend_4h: INJUSDT RSI=73 habría sido bloqueado)
+
+**Por qué el bias_correction 2.0→1.111 no habría cambiado mucho:**  
+El bias multiplica `expected_pnl`, no `success_probability`. Todos los `expected_pnl` ya eran negativos antes del bias (entre -$0.04 y -$0.10). El bias solo los hacía "menos negativos" pero no cruzaban el umbral `min_pnl`. Ninguno de los 32 trades cae en el rango crítico donde `base × 2.0 > min_pnl` pero `base × 1.111 < min_pnl`.
+
+**Los trades grandes perdedores entraron por Override, NO por el predictor:**
+- TAOUSDT -$11.09: pred_pnl=-$2.92 (ya negativo) → entró por VolSpike Override
+- WLDUSDT 2ª -$10.16: pred_pnl=-$1.09 (negativo) → Override
+- WLDUSDT GANADOR +$8.05: pred_pnl=-$3.45 (negativo) → Override (éxito del Override)
+
+**⚠️ PRÓXIMO FIX PRIORITARIO:** Verificar que `volspike_override_max_rsi` (ya en config) bloquee correctamente cuando RSI_entry > 65 **en el momento de ejecutar la orden** — no solo al evaluar la señal inicial. Esto habría salvado ~$21 USD (26% del total de pérdidas).
 
 ---
 
