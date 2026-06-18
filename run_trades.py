@@ -70,6 +70,86 @@ _circuit_breaker_until: datetime = None  # UTC — None = not paused
 # ── Funding rate cache: {symbol: (rate_float, fetched_at_monotonic)} ─────────
 _funding_rate_cache: Dict[str, tuple] = {}
 
+# ── DB client reference for cooldown persistence (set in execute_once) ───────
+_db_client_ref = None
+
+# ── Audit startup flag: run excluded-asset cleanup only once per process ─────
+_AUDIT_STARTUP_DONE: bool = False
+
+
+def _set_cooldown(symbol: str, cooldown_type: str, hours: float, metadata: dict = None) -> None:
+    """Persist a cooldown to DB + update RAM dict. Type: 'volspike'|'narrative'|'override_daily'."""
+    from datetime import timedelta as _td
+    _now = datetime.now(timezone.utc)
+    _expires = _now + _td(hours=hours)
+    if cooldown_type == 'volspike':
+        _VOLSPIKE_COOLDOWN[symbol] = _now
+    elif cooldown_type == 'narrative':
+        _NARRATIVE_BUY_COOLDOWN[symbol] = _now
+    if _db_client_ref and getattr(_db_client_ref, 'execute_update', None):
+        try:
+            import json as _json
+            _db_client_ref.execute_update(
+                """INSERT INTO trading_cooldowns (symbol, cooldown_type, activated_at, expires_at, metadata)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (symbol, cooldown_type) DO UPDATE
+                   SET activated_at=EXCLUDED.activated_at, expires_at=EXCLUDED.expires_at, metadata=EXCLUDED.metadata""",
+                (symbol, cooldown_type, _now.isoformat(), _expires.isoformat(),
+                 _json.dumps(metadata) if metadata else None)
+            )
+        except Exception as _cd_err:
+            pass  # fail-open: RAM dict is still set
+
+
+def _check_cooldown_db(symbol: str, cooldown_type: str) -> bool:
+    """Check DB for an active cooldown (fallback when RAM is empty, e.g. after restart)."""
+    if not _db_client_ref:
+        return False
+    try:
+        rows = _db_client_ref.execute_query(
+            "SELECT expires_at FROM trading_cooldowns WHERE symbol=%s AND cooldown_type=%s",
+            (symbol, cooldown_type)
+        )
+        if rows:
+            from datetime import datetime as _dt_db
+            _exp = rows[0]['expires_at']
+            if isinstance(_exp, str):
+                _exp = _dt_db.fromisoformat(_exp.replace('Z', '+00:00'))
+            if _exp.tzinfo is None:
+                _exp = _exp.replace(tzinfo=timezone.utc)
+            return _exp > datetime.now(timezone.utc)
+    except Exception:
+        pass
+    return False
+
+
+def _load_cooldowns_from_db() -> None:
+    """Repopulate RAM cooldown dicts from DB at startup (survives Docker restart)."""
+    if not _db_client_ref:
+        return
+    try:
+        rows = _db_client_ref.execute_query(
+            "SELECT symbol, cooldown_type, activated_at FROM trading_cooldowns WHERE expires_at > NOW()"
+        )
+        loaded = 0
+        for row in rows:
+            _sym = row['symbol']
+            _type = row['cooldown_type']
+            _act = row['activated_at']
+            if isinstance(_act, str):
+                _act = datetime.fromisoformat(_act.replace('Z', '+00:00'))
+            if _act.tzinfo is None:
+                _act = _act.replace(tzinfo=timezone.utc)
+            if _type == 'volspike':
+                _VOLSPIKE_COOLDOWN[_sym] = _act
+            elif _type == 'narrative':
+                _NARRATIVE_BUY_COOLDOWN[_sym] = _act
+            loaded += 1
+        if loaded:
+            print(f"[Cooldowns] Loaded {loaded} active cooldowns from DB")
+    except Exception as _le:
+        print(f"[Cooldowns] Could not load from DB: {_le}")
+
 
 def _get_max_positions_for_regime(settings, regime: str) -> int:
     """Return the optimal max-open-positions for the current market regime.
@@ -836,9 +916,10 @@ def _calc_atr_sl_pct(client: BinanceClient, symbol: str, settings, category_sl_p
         return category_sl_pct
 
 
-def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) -> List[Dict]:
+def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, news_client=None) -> List[Dict]:
     """
     Check all open positions against Stop-Loss, Take-Profit, and Trailing Stop rules.
+    Also performs prediction-based exit when EV deteriorates (C1).
     Sells any position that has breached its exit threshold.
     Returns list of closed position dicts.
     """
@@ -884,16 +965,69 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager) ->
                 pnl_pct = (current_price - entry_price) / entry_price
                 close_reason = None
 
+                # ── C1: Re-evaluación predictiva — predicción tiene prioridad absoluta ──
+                if getattr(settings, 'prediction_exit_enabled', True) and pnl_pct < 0:
+                    try:
+                        _min_hold_pred = int(getattr(settings, 'min_hold_for_prediction_exit', 90))
+                        _entry_ts = getattr(pos, 'entry_time', None)
+                        _age_ok = False
+                        if _entry_ts:
+                            if hasattr(_entry_ts, 'tzinfo') and _entry_ts.tzinfo is None:
+                                _entry_ts = _entry_ts.replace(tzinfo=timezone.utc)
+                            _age_min = (datetime.now(timezone.utc) - _entry_ts).total_seconds() / 60
+                            _age_ok = _age_min >= _min_hold_pred
+                        if _age_ok:
+                            _pos_size = float(pos.quantity) * current_price
+                            _pred_exit, _ind_exit = pnl_service.predict_for_symbol(
+                                symbol, client, settings, _pos_size
+                            )
+                            if _pred_exit:
+                                _ev = float(_pred_exit.get('expected_pnl', 0))
+                                _prob = float(_pred_exit.get('success_probability', 1.0))
+                                _cat_beh_p = _token_categories.get(symbol, {}).get('market_behavior', 'MIDCAP_ALT')
+                                _min_pnl_cat = _cat_thresholds.get(_cat_beh_p, {}).get('min_pnl', 0.0)
+                                _min_prob_cat = _cat_thresholds.get(_cat_beh_p, {}).get('min_prob', 0.5)
+                                _trend_exit = 'FLAT'
+                                if _ind_exit:
+                                    _trend_exit = str(_ind_exit.get('trend_4h', 'FLAT'))
+                                # R2: FLAT allowed when EV is extreme (3x threshold) — catches stagnant bear positions
+                                # e.g. NARRATIVE min_pnl=-1.0 → FLAT triggers only if EV < -3.0
+                                _flat_extreme = (_trend_exit == 'FLAT'
+                                                 and _min_pnl_cat < 0
+                                                 and _ev < _min_pnl_cat * 3.0)
+                                _is_deteriorated = (_ev < _min_pnl_cat and _prob < _min_prob_cat
+                                                    and (_trend_exit == 'DOWN' or _flat_extreme))
+                                _meta_upd = getattr(pos, 'metadata', {}) or {}
+                                _meta_upd['last_pred_pnl'] = round(_ev, 4)
+                                _meta_upd['last_pred_prob'] = round(_prob, 4)
+                                _meta_upd['last_pred_time'] = datetime.now(timezone.utc).isoformat()
+                                _meta_upd['reevaluation_count'] = int(_meta_upd.get('reevaluation_count', 0)) + 1
+                                if _is_deteriorated:
+                                    _meta_upd['prediction_exit_triggered'] = True
+                                try:
+                                    position_manager.update_position_metadata(pos.position_id, _meta_upd)
+                                except Exception:
+                                    pass
+                                if _is_deteriorated:
+                                    print(f"[PredExit] {symbol}: EV={_ev:.2f} < min={_min_pnl_cat:.2f}, prob={_prob:.2f} < {_min_prob_cat:.2f}, trend={_trend_exit}, pnl={pnl_pct*100:.2f}% → CLOSING")
+                                    ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
+                                                 f"[PredExit] {symbol} prediction deteriorated: EV={_ev:.2f} trend={_trend_exit} pnl={pnl_pct*100:.2f}%")
+                                    close_reason = f"prediction_exit_deteriorated (EV={_ev:.2f}, prob={_prob:.2f}, trend={_trend_exit})"
+                                else:
+                                    print(f"[PredEval] {symbol}: EV={_ev:.2f} prob={_prob:.2f} trend={_trend_exit} pnl={pnl_pct*100:.2f}% → holding")
+                    except Exception as _pe:
+                        print(f"[PredEval] {symbol}: prediction check failed: {_pe}")
+
                 # ── Stop-Loss ──────────────────────────────────────────────
-                if pnl_pct <= -sl_pct:
+                if close_reason is None and pnl_pct <= -sl_pct:
                     close_reason = f"stop_loss ({pnl_pct*100:.2f}%)"
 
                 # ── Take-Profit ────────────────────────────────────────────
-                elif pnl_pct >= tp_pct:
+                if close_reason is None and pnl_pct >= tp_pct:
                     close_reason = f"take_profit ({pnl_pct*100:.2f}%)"
 
                 # ── Trailing Stop ──────────────────────────────────────────
-                elif trailing_enabled and pnl_pct >= trail_activate:
+                if close_reason is None and trailing_enabled and pnl_pct >= trail_activate:
                     # Peak is stored in position metadata; update if new high
                     metadata = getattr(pos, 'metadata', {}) or {}
                     peak_price = float(metadata.get('trailing_peak', entry_price))
@@ -1387,6 +1521,72 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
 
     _regime_max = _get_max_positions_for_regime(settings, _regime_mode)
     for symbol in top_symbols:
+        # ── FUTURES_SHORT mode — evaluated BEFORE spot position limits ────────
+        # Futures positions are in a separate wallet — they must NOT be blocked
+        # by the spot max_positions counter (which fills up with open spot trades).
+        if _regime and _regime.confirmed and _regime_mode == "FUTURES_SHORT":
+            if getattr(settings, 'futures_enabled', False):
+                _futures_symbols = list(getattr(settings, 'futures_symbols', ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']))
+                if getattr(settings, 'screener_enabled', True):
+                    try:
+                        from pair_screener import get_screened_pairs
+                        _sf = get_screened_pairs(settings=settings)["futures"]
+                        _futures_symbols = list(dict.fromkeys(_futures_symbols + _sf))
+                    except Exception:
+                        pass
+                if symbol not in _futures_symbols:
+                    print(f"[Futures] {symbol} not in futures_symbols — skipping short, no spot entry in FUTURES_SHORT mode")
+                    update_signal_decision(symbol, "rejected", "NOT_FUTURES_SYM")
+                    continue
+                # Enforce futures-specific max shorts (separate from spot limit)
+                _fc = _get_futures_client(settings)
+                _max_shorts = getattr(settings, 'futures_max_shorts', 2)
+                _open_shorts = len([p for p in _fc._open_positions.values() if not p.closed and p.side == "SHORT"])
+                if _open_shorts >= _max_shorts:
+                    print(f"[Futures] SHORT {symbol} SKIPPED: {_open_shorts}/{_max_shorts} shorts already open")
+                    update_signal_decision(symbol, "rejected", "MAX_SHORTS")
+                    continue
+                _f_sl    = getattr(settings, 'futures_sl_pct', 3.0)
+                _f_tp    = getattr(settings, 'futures_tp_pct', 5.0)
+                _f_lev   = getattr(settings, 'futures_leverage', 2)
+                _f_pred  = {'success_probability': 0.45}
+                _f_usdt  = _kelly_position_size(
+                    settings, strength=float(signal_meta.get(symbol, {}).get('strength', 0.5)),
+                    prediction=_f_pred, usdt_liquid=usdt_liquid,
+                    sl_pct=_f_sl * _f_lev / 100, tp_pct=_f_tp * _f_lev / 100)
+                _f_usdt = min(_f_usdt, getattr(settings, 'futures_usdt_per_trade', 50.0))
+                try:
+                    if news_client:
+                        _fng = news_client.get_fear_greed()
+                        _fng_val = int(_fng.get('value', 50)) if isinstance(_fng, dict) else 50
+                        if _fng_val < 25:
+                            _f_usdt = round(_f_usdt * 1.3, 2)
+                            print(f"[Futures] F&G Extreme Fear ({_fng_val}) → boosted margin ${_f_usdt}")
+                        elif _fng_val > 75:
+                            _f_usdt = round(_f_usdt * 0.8, 2)
+                            print(f"[Futures] F&G Extreme Greed ({_fng_val}) → reduced short margin ${_f_usdt}")
+                except Exception:
+                    pass
+                _no_short_threshold = getattr(settings, 'futures_no_short_btc_4h_threshold', 2.0)
+                if btc_4h_chg_pct >= _no_short_threshold:
+                    print(f"[Futures] SHORT {symbol} SKIPPED: BTC 4h candle={btc_4h_chg_pct:+.2f}% >= {_no_short_threshold}% — no shorting into BTC momentum")
+                    update_signal_decision(symbol, "rejected", "BTC_MOMENTUM")
+                    continue
+                print(f"[Futures] FUTURES_SHORT mode: opening short {symbol} margin=${_f_usdt}")
+                _pos = _fc.open_short(symbol, usdt_amount=_f_usdt,
+                                      sl_pct=_f_sl, tp_pct=_f_tp, leverage=_f_lev)
+                if _pos:
+                    orders.append({"symbol": symbol, "side": "SHORT_FUTURES",
+                                    "qty": _pos.qty, "entry_price": _pos.entry_price,
+                                    "sl": _pos.sl_price, "tp": _pos.tp_price})
+                    update_signal_decision(symbol, "executed", "FUTURES_SHORT")
+                else:
+                    update_signal_decision(symbol, "rejected", "FUTURES_BLOCKED")
+                continue  # skip spot buy logic
+            else:
+                # futures_enabled=False but mode is FUTURES_SHORT → treat as PRESERVATION
+                pass  # fall through to spot logic below (PRESERVATION path)
+
         # Enforce global MAX_POSITIONS limit (dynamic by regime)
         if position_manager:
             total_open = sum(len(v) for v in position_manager.get_all_positions().values())
@@ -1422,6 +1622,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         update_signal_decision(symbol, "rejected", "MAX_POSIC")
                         continue
         # Enforce per-symbol MAX_POSITIONS_PER_SYMBOL limit
+        # C2: Allow prediction-based add if new EV is significantly better
         if position_manager:
             count = position_manager.get_positions_count(symbol)
             max_per = getattr(settings, 'max_positions_per_symbol', 3)
@@ -1429,6 +1630,45 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 print(f"Skipping buy {symbol}: per-symbol limit ({count}/{max_per}) reached")
                 update_signal_decision(symbol, "rejected", "LÍM_SÍMBOLO")
                 continue
+            if count >= 1 and count < 2:
+                _allow_add = getattr(settings, 'allow_prediction_based_add', True)
+                if _allow_add:
+                    _meta_c2 = signal_meta.get(symbol, {})
+                    _str_c2 = float(_meta_c2.get('strength', 0.0))
+                    _min_str_add = getattr(settings, 'prediction_add_min_strength', 0.70)
+                    if _str_c2 < _min_str_add:
+                        print(f"Skipping buy {symbol}: {count} open position(s), strength={_str_c2:.2f} < {_min_str_add:.2f} for prediction_add")
+                        update_signal_decision(symbol, "rejected", "ADD_STR_LOW")
+                        continue
+                    _existing_positions = position_manager.get_all_positions().get(symbol, [])
+                    _existing_pred_pnl = None
+                    if _existing_positions:
+                        _ep_meta = getattr(_existing_positions[0], 'metadata', {}) or {}
+                        _existing_pred_pnl = _ep_meta.get('entry_pred_pnl')
+                    if _existing_pred_pnl is not None:
+                        if precomputed_predictions and symbol in precomputed_predictions:
+                            _new_pred_c2 = precomputed_predictions[symbol]
+                        else:
+                            _new_pred_c2, _ = pnl_service.predict_for_symbol(symbol, client, settings, allocation)
+                        _new_ev = float((_new_pred_c2 or {}).get('expected_pnl', 0))
+                        _ratio_req = getattr(settings, 'prediction_add_min_ev_ratio', 1.5)
+                        if _existing_pred_pnl <= 0:
+                            _ev_qualifies = _new_ev > 0
+                        else:
+                            _ev_qualifies = (_new_ev / _existing_pred_pnl) >= _ratio_req
+                        if not _ev_qualifies:
+                            print(f"Skipping buy {symbol}: {count} open position(s), new EV={_new_ev:.2f} not {_ratio_req}x better than existing EV={_existing_pred_pnl:.2f}")
+                            update_signal_decision(symbol, "rejected", "ADD_EV_LOW")
+                            continue
+                        print(f"[PredAdd] {symbol}: {count} existing position(s), new EV={_new_ev:.2f} vs existing={_existing_pred_pnl:.2f} — allowing prediction_add (Kelly×{getattr(settings,'prediction_add_kelly_factor',0.6)})")
+                    else:
+                        print(f"Skipping buy {symbol}: {count} open position(s), no entry_pred_pnl to compare — blocked")
+                        update_signal_decision(symbol, "rejected", "ADD_NO_BASELINE")
+                        continue
+                else:
+                    print(f"Skipping buy {symbol}: {count} open position(s), prediction_add disabled")
+                    update_signal_decision(symbol, "rejected", "LÍM_SÍMBOLO")
+                    continue
 
         # ── R4: Correlaciones — límite por categoría ─────────────────────────
         _cat_ok, _cat_reason = _check_category_limit(symbol, position_manager, settings)
@@ -1481,68 +1721,6 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 print(f"Skipping buy {symbol}: PRESERVATION mode, not NARRATIVE, vol_spike={_meta_spike:.2f} < {_bear_min_spike}")
                 update_signal_decision(symbol, "rejected", "PRESERVATION")
                 continue
-
-        # ── FUTURES_SHORT mode — open short via futures instead of spot buy ─
-        if _regime and _regime.confirmed and _regime_mode == "FUTURES_SHORT":
-            if getattr(settings, 'futures_enabled', False):
-                _futures_symbols = list(getattr(settings, 'futures_symbols', ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']))
-                if getattr(settings, 'screener_enabled', True):
-                    try:
-                        from pair_screener import get_screened_pairs
-                        _sf = get_screened_pairs(settings=settings)["futures"]
-                        _futures_symbols = list(dict.fromkeys(_futures_symbols + _sf))
-                    except Exception:
-                        pass
-                if symbol in _futures_symbols:
-                    _fc = _get_futures_client(settings)
-                    _f_sl    = getattr(settings, 'futures_sl_pct', 3.0)
-                    _f_tp    = getattr(settings, 'futures_tp_pct', 5.0)
-                    _f_lev   = getattr(settings, 'futures_leverage', 2)
-                    # Fase C: Kelly calcula sizing sobre riesgo real (sl*lev%) del margin
-                    _f_pred  = {'success_probability': 0.45}  # conservador para shorts
-                    _f_usdt  = _kelly_position_size(
-                        settings, strength=float(signal_meta.get(symbol, {}).get('strength', 0.5)),
-                        prediction=_f_pred, usdt_liquid=usdt_liquid,
-                        sl_pct=_f_sl * _f_lev / 100, tp_pct=_f_tp * _f_lev / 100)
-                    # Cap: futuros max $75 para limitar exposición apalancada
-                    _f_usdt = min(_f_usdt, getattr(settings, 'futures_usdt_per_trade', 50.0))
-                    # Fear & Greed boost: Extreme Fear (<25) → larger short margin (better entry)
-                    try:
-                        if news_client:
-                            _fng = news_client.get_fear_greed()
-                            _fng_val = int(_fng.get('value', 50)) if isinstance(_fng, dict) else 50
-                            if _fng_val < 25:
-                                _f_usdt = round(_f_usdt * 1.3, 2)
-                                print(f"[Futures] F&G Extreme Fear ({_fng_val}) → boosted margin ${_f_usdt}")
-                            elif _fng_val > 75:
-                                _f_usdt = round(_f_usdt * 0.8, 2)
-                                print(f"[Futures] F&G Extreme Greed ({_fng_val}) → reduced short margin ${_f_usdt}")
-                    except Exception:
-                        pass
-                    # Fix #2: avoid opening shorts into strong BTC 4h upward momentum
-                    _no_short_threshold = getattr(settings, 'futures_no_short_btc_4h_threshold', 2.0)
-                    if btc_4h_chg_pct >= _no_short_threshold:
-                        print(f"[Futures] SHORT {symbol} SKIPPED: BTC 4h candle={btc_4h_chg_pct:+.2f}% >= {_no_short_threshold}% — no shorting into BTC momentum")
-                        update_signal_decision(symbol, "rejected", "BTC_MOMENTUM")
-                        continue
-                    print(f"[Futures] FUTURES_SHORT mode: opening short {symbol} margin=${_f_usdt}")
-                    _pos = _fc.open_short(symbol, usdt_amount=_f_usdt,
-                                          sl_pct=_f_sl, tp_pct=_f_tp, leverage=_f_lev)
-                    if _pos:
-                        orders.append({"symbol": symbol, "side": "SHORT_FUTURES",
-                                        "qty": _pos.qty, "entry_price": _pos.entry_price,
-                                        "sl": _pos.sl_price, "tp": _pos.tp_price})
-                        update_signal_decision(symbol, "executed", "FUTURES_SHORT")
-                    else:
-                        update_signal_decision(symbol, "rejected", "FUTURES_BLOCKED")
-                    continue  # skip spot buy for this symbol
-                else:
-                    print(f"[Futures] {symbol} not in futures_symbols — skipping short, no spot entry in FUTURES_SHORT mode")
-                    update_signal_decision(symbol, "rejected", "NOT_FUTURES_SYM")
-                    continue
-            else:
-                # futures_enabled=False but mode is FUTURES_SHORT → treat as PRESERVATION
-                _regime_mode = "PRESERVATION"
 
         # ── Market Regime gate — mode-specific entry filters ─────────────
         if _regime and _regime.confirmed:
@@ -1641,6 +1819,13 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                        "sl": _lpos_sb.sl_price, "tp": _lpos_sb.tp_price})
                         update_signal_decision(symbol, "executed", "FUTURES_LONG_BULL")
 
+        # ── Exclusion list — gold tokens, stablecoins, artificially-volatile ─
+        _excluded_syms = set(getattr(settings, 'trading_excluded_symbols', []))
+        if symbol in _excluded_syms:
+            print(f"Skipping buy {symbol}: in trading_excluded_symbols list")
+            update_signal_decision(symbol, "rejected", "EXCLUIDO")
+            continue
+
         # ── BTC dominance filter — restrict non-NARRATIVE when BTC.D high ─
         if _btc_dom_high and symbol not in narrative_set:
             print(f"Skipping buy {symbol}: BTC.D high — only NARRATIVE allowed")
@@ -1651,12 +1836,18 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         if symbol in narrative_set:
             from datetime import datetime as _dt2
             _last_buy = _NARRATIVE_BUY_COOLDOWN.get(symbol)
+            if not _last_buy:
+                _last_buy = _check_cooldown_db(symbol, 'narrative') and _NARRATIVE_BUY_COOLDOWN.get(symbol)
             if _last_buy:
                 _h_since = (_dt2.now(timezone.utc) - _last_buy).total_seconds() / 3600
                 if _h_since < _NARRATIVE_BUY_COOLDOWN_HOURS:
                     print(f"Skipping buy {symbol}: NARRATIVE cooldown active ({_h_since:.1f}h < {_NARRATIVE_BUY_COOLDOWN_HOURS}h)")
                     update_signal_decision(symbol, "rejected", "NARRATIVE_CD")
                     continue
+            elif _check_cooldown_db(symbol, 'narrative'):
+                print(f"Skipping buy {symbol}: NARRATIVE cooldown active (from DB — post-restart)")
+                update_signal_decision(symbol, "rejected", "NARRATIVE_CD")
+                continue
 
         # ── Signal metadata ───────────────────────────────────────────────
         meta = signal_meta.get(symbol, {})
@@ -1770,6 +1961,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                             # Check cooldown — no re-entry within 4h of last override
                             _last = _VOLSPIKE_COOLDOWN.get(symbol)
                             _now_utc = _dt.now(timezone.utc)
+                            if not _last and _check_cooldown_db(symbol, 'volspike'):
+                                print(f"VolSpike OVERRIDE {symbol}: cooldown active (from DB — post-restart) — skip")
+                                continue
                             if _last:
                                 _hours_since = (_now_utc - _last).total_seconds() / 3600
                                 if _hours_since < _VOLSPIKE_COOLDOWN_HOURS:
@@ -1781,9 +1975,10 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                         print(f"VolSpike OVERRIDE {symbol}: already {_open_count} open position(s) — skip")
                                     else:
                                         volspike_override = True
-                                        _VOLSPIKE_COOLDOWN[symbol] = _now_utc
+                                        _set_cooldown(symbol, 'volspike', _VOLSPIKE_COOLDOWN_HOURS, {'spike': _spike, 'rsi': _rsi})
                                         _VOLSPIKE_POSITIONS.add(symbol)
                                         _OVERRIDE_DAILY_COUNT[_today_str] = _today_count + 1
+                                        _set_cooldown(f'__daily__{_today_str}', 'override_daily', 24.0, {'count': _today_count + 1})
                                         print(f"VolSpike OVERRIDE {symbol}: ✅ APROBADO (strength={strength:.2f}, spike={_spike:.2f}x, RSI4h={_rsi:.1f}) → bypassing PnL veto (pred={ep:.2f}, prob={sp:.2f})")
                                         print(f"VolSpike OVERRIDE {symbol}: Stats - posiciones override: {len(_VOLSPIKE_POSITIONS)}/{_max_override_pos}, hoy: {_today_count + 1}/{_daily_limit}")
                             else:
@@ -1793,9 +1988,10 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                     print(f"VolSpike OVERRIDE {symbol}: already {_open_count} open position(s) — skip")
                                 else:
                                     volspike_override = True
-                                    _VOLSPIKE_COOLDOWN[symbol] = _dt.now(timezone.utc)
+                                    _set_cooldown(symbol, 'volspike', _VOLSPIKE_COOLDOWN_HOURS, {'spike': _spike, 'rsi': _rsi})
                                     _VOLSPIKE_POSITIONS.add(symbol)
                                     _OVERRIDE_DAILY_COUNT[_today_str] = _today_count + 1
+                                    _set_cooldown(f'__daily__{_today_str}', 'override_daily', 24.0, {'count': _today_count + 1})
                                     print(f"VolSpike OVERRIDE {symbol}: ✅ APROBADO (strength={strength:.2f}, spike={_spike:.2f}x, RSI4h={_rsi:.1f}) → bypassing PnL veto (pred={ep:.2f}, prob={sp:.2f})")
                                     print(f"VolSpike OVERRIDE {symbol}: Stats - posiciones override: {len(_VOLSPIKE_POSITIONS)}/{_max_override_pos}, hoy: {_today_count + 1}/{_daily_limit}")
                     except Exception as _ve:
@@ -1842,6 +2038,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         trade_allocation = _kelly_position_size(
             settings, strength, prediction, usdt_liquid_now, sl_pct, tp_pct
         )
+        # C2: Kelly reducido para prediction_add (segunda entrada en mismo par)
+        if position_manager and position_manager.get_positions_count(symbol) >= 1:
+            _pred_add_factor = getattr(settings, 'prediction_add_kelly_factor', 0.6)
+            trade_allocation *= _pred_add_factor
+            print(f"[PredAdd] {symbol}: Kelly×{_pred_add_factor} for prediction_add → ${trade_allocation:.2f}")
         # Regime Kelly multiplier — single application, no double-counting
         if _regime and _regime.confirmed and _regime_mode != "SPOT_BULL":
             _rmult = _regime.kelly_multiplier
@@ -1897,8 +2098,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         try:
             # Register NARRATIVE cooldown BEFORE placing order to prevent race condition
             if symbol in narrative_set:
-                from datetime import datetime as _dt3
-                _NARRATIVE_BUY_COOLDOWN[symbol] = _dt3.now(timezone.utc)
+                _set_cooldown(symbol, 'narrative', _NARRATIVE_BUY_COOLDOWN_HOURS)
 
             order = client.create_market_order(symbol=symbol, side="BUY", quantity=qty)
             _record_order_success()  # R5: reset circuit breaker on success
@@ -1959,6 +2159,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     _indicators_to_save = formatted_indicators or {}
 
                     # Prepare metadata with prediction
+                    # C5: Enriquecer con entry_regime + entry_pred_pnl para re-evaluación y prediction_add
+                    _is_pred_add = (position_manager.get_positions_count(symbol) >= 1) if position_manager else False
                     metadata = {
                         "order_id": order.get("orderId"),
                         "indicators_at_entry": _indicators_to_save,
@@ -1966,6 +2168,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "vol_spike_at_entry": float(signal_meta.get(symbol, {}).get('vol_spike', 0.0)),
                         "override_used": volspike_override,
                         "strength": float(signal_meta.get(symbol, {}).get('strength', strength)),
+                        "entry_regime": _regime_mode,
+                        "entry_pred_pnl": float(prediction.get('expected_pnl', 0)) if prediction else None,
+                        "entry_pred_prob": float(prediction.get('success_probability', 0)) if prediction else None,
+                        "entry_type": "prediction_add" if _is_pred_add else "normal",
+                        "reevaluation_count": 0,
                     }
                     if prediction:
                         metadata['pnl_prediction'] = prediction
@@ -2209,6 +2416,7 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
 
 
 def execute_once():
+    global _db_client_ref
     from init_components import get_components
     comp = get_components()
     settings = comp.settings
@@ -2216,6 +2424,11 @@ def execute_once():
     news_client = comp.news_client
     position_manager = comp.position_manager
     portfolio_manager = comp.portfolio_manager
+
+    # ── C3: Inicializar referencia DB para cooldowns persistentes ───────────────
+    if _db_client_ref is None and hasattr(comp, 'db_client') and comp.db_client:
+        _db_client_ref = comp.db_client
+        _load_cooldowns_from_db()
 
     print(f"DRY_RUN={settings.dry_run}  ALLOW_REAL_TRADING={settings.allow_real_trading}  MAX_PER_TRADE_USDT={settings.max_per_trade_usdt}")
 
@@ -2262,11 +2475,56 @@ def execute_once():
             _regime_exe = get_regime(client, settings=settings)
             _regime_mode = _regime_exe.mode
             print(f"[Regime] execute_once: {_regime_mode} | confirmed={_regime_exe.confirmed}")
+            # F4 fix: on fresh start, anti-whipsaw needs 2 detections to confirm.
+            # If the raw signal is unambiguous (severe structural bear: 30d < -15%), prime
+            # the cache and immediately re-detect so the first cycle runs with confirmed=True
+            # and SHORTs / FUTURES_SHORT mode can activate without waiting an extra 45min.
+            if not _regime_exe.confirmed and _regime_exe.btc_30d_pct <= -15.0:
+                from market_regime import prime_cache as _prime_regime_cache
+                _prime_regime_cache(_regime_exe.mode)
+                _regime_exe = get_regime(client, settings=settings)
+                _regime_mode = _regime_exe.mode
+                print(f"[Regime] execute_once warm-up (severe bear): {_regime_mode} | confirmed={_regime_exe.confirmed}")
         except Exception as _re_exe:
             print(f"[Regime] execute_once detection failed: {_re_exe}")
 
+    # ── Step -1: Audit on startup — cierra activos de trading_excluded_symbols ──
+    global _AUDIT_STARTUP_DONE
+    if not _AUDIT_STARTUP_DONE and getattr(settings, 'auto_close_excluded_on_startup', True):
+        try:
+            from trade_utils import get_symbol_filters, align_quantity_to_step, is_quantity_valid
+            _excl = set(getattr(settings, 'trading_excluded_symbols', []))
+            if _excl:
+                _bal_audit = client.get_account_balance()
+                for _excl_sym in _excl:
+                    _asset = _excl_sym.replace('USDT', '')
+                    _qty_held = float(_bal_audit.get(_asset, 0))
+                    if _qty_held <= 0:
+                        continue
+                    try:
+                        _price_excl = client.get_symbol_price(_excl_sym)
+                        if _qty_held * _price_excl < 5.0:
+                            continue
+                        _filt_excl = get_symbol_filters(client, _excl_sym)
+                        _qty_sell = align_quantity_to_step(_qty_held, _filt_excl['step'])
+                        _valid_excl, _ = is_quantity_valid(_qty_sell, _price_excl, _filt_excl)
+                        if not _valid_excl:
+                            continue
+                        _ord_excl = client.create_market_order(symbol=_excl_sym, side='SELL', quantity=_qty_sell)
+                        _exit_p = float((_ord_excl.get('fills') or [{}])[0].get('price', 0) or _price_excl)
+                        if position_manager:
+                            position_manager.close_all_positions_for_symbol(_excl_sym, _exit_p, 'excluded_symbol_cleanup')
+                        ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
+                                     f"[AuditStartup] Sold excluded {_excl_sym}: {_qty_sell} @ {_exit_p:.4f}")
+                        print(f"[AuditStartup] Sold excluded {_excl_sym}: {_qty_sell} @ {_exit_p:.4f}")
+                    except Exception as _ae:
+                        print(f"[AuditStartup] Could not sell {_excl_sym}: {_ae}")
+        except Exception as _audit_err:
+            print(f"[AuditStartup] Error: {_audit_err}")
+        _AUDIT_STARTUP_DONE = True
+
     # ── Step 0: SL/TP monitor — runs every cycle before any new trades ─────────
-    sl_tp_closes = _check_sl_tp_positions(client, settings, position_manager)
+    sl_tp_closes = _check_sl_tp_positions(client, settings, position_manager, news_client=news_client)
     if sl_tp_closes:
         print(f"SL/TP closed {len(sl_tp_closes)} position(s): {[c['symbol'] for c in sl_tp_closes]}")
 
@@ -2298,6 +2556,27 @@ def execute_once():
                 _non_short_regime_cycles += 1
             else:
                 _non_short_regime_cycles = 0  # reset — still in short-friendly mode
+
+            # R1: Auto-close LONG futures when regime is FUTURES_SHORT — they are directionally wrong
+            # No whipsaw guard needed: LONGs in a confirmed bear regime are immediately incorrect.
+            if _regime_mode == "FUTURES_SHORT" and _regime_exe and _regime_exe.confirmed:
+                _open_long_keys = [k for k, p in _fc._open_positions.items()
+                                   if not p.closed and p.side == "LONG"]
+                for _lkey in _open_long_keys:
+                    _lpos = _fc._open_positions.get(_lkey)
+                    if not _lpos:
+                        continue
+                    _lsym = _lpos.symbol
+                    try:
+                        _lcur = _fc.get_price(_lsym)
+                        _lunr = _lpos.unrealized_pnl(_lcur)
+                        _result = _fc.close_long(_lsym, _lpos.qty, reason="regime_futures_short")
+                        if _result:
+                            futures_closes.append({"symbol": _lsym, "reason": "regime_futures_short", "pnl": _lunr})
+                            print(f"[Futures] R1: Closed LONG {_lsym} (PnL~${_lunr:.2f}) — FUTURES_SHORT regime, directionally wrong")
+                    except Exception as _le:
+                        print(f"[Futures] R1: Failed to close LONG {_lsym}: {_le}")
+
             if _open_short_keys and _regime_mode not in ("PRESERVATION", "FUTURES_SHORT"):
                 if _non_short_regime_cycles >= _min_cycles:
                     _protect_threshold = getattr(settings, 'futures_protect_profit_usdt', 1.0)
@@ -2349,23 +2628,30 @@ def execute_once():
 
     # ── Step 1: Determine top symbols ─────────────────────────────────────────
     top_signals = _select_symbols(settings, news_client, client, portfolio_manager, regime=_regime_mode)
+
+    # FUTURES_SHORT mode: always ensure futures_symbols are in the pool.
+    # The long-signal generator only produces spot candidates — futures symbols
+    # (BTC/ETH/SOL/BNB etc.) must be explicitly injected so open_short() can run.
+    if (_regime_mode == "FUTURES_SHORT" and _regime_exe is not None
+            and _regime_exe.confirmed and getattr(settings, 'futures_enabled', False)):
+        _f_syms = list(getattr(settings, 'futures_symbols', ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']))
+        if getattr(settings, 'screener_enabled', True):
+            try:
+                from pair_screener import get_screened_pairs
+                _f_syms = list(dict.fromkeys(_f_syms + get_screened_pairs(settings=settings)["futures"]))
+            except Exception:
+                pass
+        # Build set of symbols already in top_signals to avoid duplicates
+        _existing_syms = {s['symbol'] if isinstance(s, dict) else s for s in top_signals}
+        _new_futures = [{"symbol": s, "score": 50, "strength": 0.5, "reason": "FUTURES_SHORT_AUTO"}
+                        for s in _f_syms if s not in _existing_syms]
+        if _new_futures:
+            print(f"[Futures] FUTURES_SHORT: injecting {[s['symbol'] for s in _new_futures]} into signal pool")
+            top_signals = _new_futures + list(top_signals)  # futures first
+
     if not top_signals:
-        # FUTURES_SHORT mode: inject futures_symbols directly so shorts are opened
-        # even when the long-signal generator finds nothing (expected in bear markets)
-        if (_regime_mode == "FUTURES_SHORT" and _regime_exe is not None
-                and _regime_exe.confirmed and getattr(settings, 'futures_enabled', False)):
-            _f_syms = list(getattr(settings, 'futures_symbols', ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']))
-            if getattr(settings, 'screener_enabled', True):
-                try:
-                    from pair_screener import get_screened_pairs
-                    _f_syms = list(dict.fromkeys(_f_syms + get_screened_pairs(settings=settings)["futures"]))
-                except Exception:
-                    pass
-            print(f"[Futures] No long signals but FUTURES_SHORT confirmed — injecting {_f_syms} for short entry")
-            top_signals = [{"symbol": s, "score": 50, "strength": 0.5, "reason": "FUTURES_SHORT_AUTO"} for s in _f_syms]
-        else:
-            print("No buy signals available; skipping new buys this cycle.")
-            return {"top_symbols": [], "sell_orders": [], "buy_orders": [], "sl_tp_closes": sl_tp_closes}
+        print("No buy signals available; skipping new buys this cycle.")
+        return {"top_symbols": [], "sell_orders": [], "buy_orders": [], "sl_tp_closes": sl_tp_closes}
 
     # Normalize: _select_symbols may return dicts or strings
     if top_signals and isinstance(top_signals[0], dict):

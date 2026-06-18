@@ -341,3 +341,18 @@ def reset_cache() -> None:
     """Force next call to re-detect from scratch. Useful for testing."""
     global _cache
     _cache = {"regime": None, "ts": 0.0, "pending_mode": None, "pending_count": 0}
+
+
+def prime_cache(mode: str) -> None:
+    """Pre-load the pending counter so the *next* get_regime() call confirms *mode*.
+    Used by execute_once() to bypass the 2-cycle anti-whipsaw when market conditions
+    are unambiguously severe (e.g. structural bear with BTC 30d < -15%).
+    Only primes if the cache currently holds a different mode or is empty."""
+    global _cache
+    current = _cache.get("regime")
+    already_confirmed = current is not None and current.mode == mode and current.confirmed
+    if not already_confirmed:
+        _cache["pending_mode"]  = mode
+        _cache["pending_count"] = _CONFIRM_CYCLES  # will trigger confirmation on next call
+        _cache["ts"] = -9999.0  # force cache expiry regardless of process uptime
+        print(f"[MarketRegime] prime_cache: pre-loading {mode} confirmation (severe bear fast-path)")

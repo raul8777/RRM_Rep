@@ -1643,7 +1643,9 @@ async def recalculate_monte_carlo(_auth: None = Depends(_require_api_key)) -> Di
 
 @app.get("/futures/positions")
 async def get_futures_positions() -> Dict:
-    """Return open futures SHORT positions from the FuturesClient singleton."""
+    """Return open futures positions queried live from Binance (source of truth).
+    Also syncs the FuturesClient in-memory tracking to avoid stale state.
+    """
     try:
         from run_trades import _get_futures_client
         from config import get_settings as _get_s
@@ -1651,28 +1653,78 @@ async def get_futures_positions() -> Dict:
         if not getattr(_s, 'futures_enabled', False):
             return {"enabled": False, "positions": [], "count": 0}
         _fc = _get_futures_client(_s)
+
+        # Query Binance directly — single source of truth
+        live_positions = _fc.get_positions()  # non-zero positionAmt only
+
+        # Sync in-memory tracking: mark closed anything not in live_positions
+        live_keys = set()
+        for lp in live_positions:
+            sym = lp.get("symbol", "")
+            ps  = lp.get("positionSide", "BOTH")
+            amt = float(lp.get("positionAmt", 0))
+            if ps == "BOTH":
+                side = "SHORT" if amt < 0 else "LONG"
+            else:
+                side = ps
+            live_keys.add(_fc._pos_key(sym, side))
+
+        for _key, _pos in list(_fc._open_positions.items()):
+            if not _pos.closed and _key not in live_keys:
+                _pos.closed = True  # mark stale entry as closed
+
         positions = []
-        for sym, pos in list(_fc._open_positions.items()):
+        for lp in live_positions:
+            sym   = lp.get("symbol", "")
+            ps    = lp.get("positionSide", "BOTH")
+            amt   = float(lp.get("positionAmt", 0))
+            entry = float(lp.get("entryPrice", 0))
+            if entry <= 0:
+                continue
+            side = ("SHORT" if amt < 0 else "LONG") if ps == "BOTH" else ps
+            qty  = abs(amt)
+
             try:
-                cur_price = _fc._get_price(sym)
+                cur_price = _fc.get_price(sym)
             except Exception:
-                cur_price = pos.entry_price
-            upnl = pos.unrealized_pnl(cur_price)
-            sl_dist_pct = ((pos.sl_price - cur_price) / cur_price * 100) if cur_price > 0 else 0
-            tp_dist_pct = ((cur_price - pos.tp_price) / cur_price * 100) if cur_price > 0 else 0
+                cur_price = entry
+
+            # Retrieve SL/TP from tracking if available, otherwise estimate
+            _tkey = _fc._pos_key(sym, side)
+            _tpos = _fc._open_positions.get(_tkey)
+            if _tpos and not _tpos.closed:
+                sl_price = _tpos.sl_price
+                tp_price = _tpos.tp_price
+                opened_at = _tpos.opened_at.isoformat() if _tpos.opened_at else None
+            else:
+                tick = _fc._get_tick_size(sym)
+                sl_price = _fc._align_price(entry * (0.97 if side == "LONG" else 1.03), tick)
+                tp_price = _fc._align_price(entry * (1.06 if side == "LONG" else 0.94), tick)
+                opened_at = None
+
+            if side == "LONG":
+                upnl      = (cur_price - entry) * qty
+                sl_dist   = ((cur_price - sl_price) / cur_price * 100) if cur_price > 0 else 0
+                tp_dist   = ((tp_price - cur_price) / cur_price * 100) if cur_price > 0 else 0
+            else:
+                upnl      = (entry - cur_price) * qty
+                sl_dist   = ((sl_price - cur_price) / cur_price * 100) if cur_price > 0 else 0
+                tp_dist   = ((cur_price - tp_price) / cur_price * 100) if cur_price > 0 else 0
+
             positions.append({
-                "symbol":       sym,
-                "side":         pos.side,
-                "qty":          pos.qty,
-                "entry_price":  pos.entry_price,
+                "symbol":        sym,
+                "side":          side,
+                "qty":           qty,
+                "entry_price":   entry,
                 "current_price": cur_price,
-                "sl_price":     pos.sl_price,
-                "tp_price":     pos.tp_price,
-                "sl_dist_pct":  round(sl_dist_pct, 2),
-                "tp_dist_pct":  round(tp_dist_pct, 2),
+                "sl_price":      sl_price,
+                "tp_price":      tp_price,
+                "sl_dist_pct":   round(sl_dist, 2),
+                "tp_dist_pct":   round(tp_dist, 2),
                 "unrealized_pnl": round(upnl, 4),
-                "opened_at":    pos.opened_at.isoformat() if pos.opened_at else None,
+                "opened_at":     opened_at,
             })
+
         return {"enabled": True, "positions": positions, "count": len(positions),
                 "timestamp": datetime.utcnow().isoformat()}
     except Exception as e:
@@ -1681,7 +1733,9 @@ async def get_futures_positions() -> Dict:
 
 @app.get("/futures/closed")
 async def get_futures_closed_positions(limit: int = 20, days: int = 3) -> Dict:
-    """Return closed futures positions from the FuturesClient memory (last N days)."""
+    """Return closed futures positions queried live from Binance userTrades (last N days).
+    Survives container restarts — does not depend on in-memory tracking.
+    """
     try:
         from run_trades import _get_futures_client
         from config import get_settings as _get_s
@@ -1690,30 +1744,31 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 3) -> Dict:
             return {"enabled": False, "positions": [], "count": 0}
 
         _fc = _get_futures_client(_s)
+
+        # Build symbol list from config to query even after restart (empty tracking)
+        _extra = list(getattr(_s, 'futures_symbols', []))
+        try:
+            from pair_screener import get_screened_pairs
+            _extra = list(dict.fromkeys(_extra + get_screened_pairs(settings=_s).get("futures", [])))
+        except Exception:
+            pass
+
+        raw = _fc.get_recent_trades(days=days, limit=limit, extra_symbols=_extra)
+
         closed = []
-        cutoff = datetime.utcnow() - timedelta(days=days)
-
-        for key, pos in _fc._open_positions.items():
-            if pos.closed:
-                # Only include positions closed within the specified days
-                closed_at = pos.closed_at if pos.closed_at else pos.opened_at
-                if closed_at and closed_at < cutoff:
-                    continue  # Skip positions closed before cutoff
-
-                closed.append({
-                    "symbol": pos.symbol,
-                    "side": pos.side,
-                    "qty": pos.qty,
-                    "entry_price": pos.entry_price,
-                    "exit_price": pos.exit_price,
-                    "pnl": pos.pnl,
-                    "opened_at": to_mexico_time_str(pos.opened_at.isoformat()) if pos.opened_at else None,
-                    "closed_at": to_mexico_time_str(pos.closed_at.isoformat()) if pos.closed_at else None,
-                    "trade_type": "futures",
-                })
-
-        # Sort by closed_at descending (most recent first)
-        closed.sort(key=lambda x: x.get('closed_at') or x.get('opened_at', ''), reverse=True)
+        for t in raw:
+            closed_at_raw = t.get("closed_at")
+            closed.append({
+                "symbol":      t["symbol"],
+                "side":        t["side"],
+                "qty":         t["qty"],
+                "entry_price": t.get("entry_price"),
+                "exit_price":  t.get("exit_price"),
+                "pnl":         t.get("pnl"),
+                "opened_at":   None,
+                "closed_at":   to_mexico_time_str(closed_at_raw) if closed_at_raw else None,
+                "trade_type":  "futures",
+            })
 
         return {
             "enabled": True,
@@ -1938,14 +1993,21 @@ async def get_health_status() -> Dict:
         balances = binance_client.get_account_balance()
         # Only check symbols the system is actively tracking (e.g. BNBUSDT -> BNB)
         tracked_symbols = set(all_pos.keys())
+
+        def _sym_to_asset(sym: str) -> str:
+            for quote in ("USDT", "BUSD", "BTC", "ETH"):
+                if sym.endswith(quote) and len(sym) > len(quote):
+                    return sym[:-len(quote)]
+            return sym
+
         binance_holding_count = sum(
             1 for sym in tracked_symbols
-            if float(balances.get(sym.replace("USDT", "").replace("BTC", ""), 0)) > 0
+            if float(balances.get(_sym_to_asset(sym), 0)) > 0
         )
         # mismatch: DB has entries for symbols with no Binance balance
         symbols_missing_in_binance = [
             sym for sym in tracked_symbols
-            if float(balances.get(sym.replace("USDT", "").replace("BTC", ""), 0)) == 0
+            if float(balances.get(_sym_to_asset(sym), 0)) == 0
         ]
         mismatch = len(symbols_missing_in_binance)
         sync_status = "ok" if mismatch == 0 else "warning"

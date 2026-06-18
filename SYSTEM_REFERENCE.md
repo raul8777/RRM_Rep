@@ -1,7 +1,25 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 17 2026 11:06 UTC-6 | Sesión: 8 bugs/ineficiencias corregidas + posiciones ampliadas a 20 SPOT_BULL + exposición 80% en Fear
+> Última actualización: jun 17 2026 13:35 UTC-6 | Sesión: Prediction-Driven Lifecycle C1-C5 + _AUDIT_STARTUP_DONE flag
+
+---
+
+## ⚡ OBJETIVO PRIMARIO DEL SISTEMA
+
+> **MAXIMIZAR GANANCIAS EN EL MENOR TIEMPO POSIBLE.**
+
+Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras, cambios y decisiones de trading:
+
+1. **Velocidad de capitalización**: cada ciclo debe capturar la mayor ganancia posible dado el régimen de mercado actual.
+2. **Capital siempre trabajando**: exposición máxima permitida por el régimen. Capital ocioso = pérdida de oportunidad.
+3. **Compounding agresivo**: Kelly sizing dinámico que crece con el portfolio. A mayor capital → trades más grandes → crecimiento compuesto.
+4. **Corte rápido de perdedores**: predicción tiene prioridad absoluta sobre time-in-trade. Cerrar rápido lo que deteriora, mantener lo que gana.
+5. **Sin conservadurismo innecesario**: thresholds y filtros existen para evitar pérdidas reales, NO para reducir el número de trades. Si una señal es estadísticamente sólida, ENTRA.
+6. **Cada mejora se evalúa por impacto en MXN/día**, no por elegancia técnica.
+
+> Ante cualquier propuesta de cambio, la primera pregunta es: **¿Esto aumenta las ganancias o la velocidad de capitalización?**  
+> Si la respuesta es NO → la mejora no es prioritaria.
 
 ---
 
@@ -34,7 +52,7 @@
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 17 2026 11:06 UTC-6 |
+| Fecha última actualización | jun 17 2026 13:35 UTC-6 |
 | Capital total | ~$3,000 USDT |
 | Capital spot líquido | ~$1,758 USDT |
 | Capital invertido spot | ~$1,242 USDT (posiciones activas) |
@@ -312,7 +330,7 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 
 ### Activos (no resueltos)
 
-**Sin bugs activos conocidos** — todos verificados y resueltos al jun 16 2026 08:37 UTC-6.
+**Sin bugs activos conocidos** — todos verificados y resueltos al jun 17 2026 13:35 UTC-6.
 
 ---
 
@@ -1007,6 +1025,50 @@ El bias multiplica `expected_pnl`, no `success_probability`. Todos los `expected
 - WLDUSDT GANADOR +$8.05: pred_pnl=-$3.45 (negativo) → Override (éxito del Override)
 
 **⚠️ PRÓXIMO FIX PRIORITARIO:** Verificar que `volspike_override_max_rsi` (ya en config) bloquee correctamente cuando RSI_entry > 65 **en el momento de ejecutar la orden** — no solo al evaluar la señal inicial. Esto habría salvado ~$21 USD (26% del total de pérdidas).
+
+---
+
+---
+
+## SESIÓN JUN 17 2026 13:35 UTC-6 — Prediction-Driven Lifecycle (C1-C5) + Optimizaciones
+
+### Cambios implementados y verificados en producción
+
+| ID | Cambio | Archivo | Estado |
+|----|--------|---------|--------|
+| **C1** | Re-evaluación predictiva en `_check_sl_tp_positions` — cierra si EV<min AND prob<min AND trend=DOWN | `run_trades.py` | ✅ Activo en producción |
+| **C2** | Segunda entrada por predicción — require strength≥0.70 + nueva EV ≥1.5× la entrada original | `run_trades.py` | ✅ Activo |
+| **C3** | Cooldowns VolSpike + Narrative persistidos en tabla `trading_cooldowns` (DB) | `run_trades.py`, `migrations/009` | ✅ Activo |
+| **C4** | Audit on startup — vende activos en `trading_excluded_symbols` automáticamente al arrancar | `run_trades.py` | ✅ Vendió RLUSD+USD1 |
+| **C5** | Metadata enriquecida al abrir posición: `entry_regime`, `entry_pred_pnl`, `entry_pred_prob`, `entry_type`, `reevaluation_count` | `run_trades.py` | ✅ Activo |
+| **OPT** | `_AUDIT_STARTUP_DONE` flag — C4 corre solo una vez por proceso, no en cada ciclo | `run_trades.py:76` | ✅ Verificado |
+
+### Nuevos parámetros en config.py (líneas 306-318)
+```python
+prediction_exit_enabled = True
+min_hold_for_prediction_exit = 90      # minutos mínimos antes de C1
+allow_prediction_based_add = True
+prediction_add_min_ev_ratio = 1.5      # nueva EV debe ser 1.5× la de entrada
+prediction_add_min_strength = 0.70
+prediction_add_kelly_factor = 0.6      # Kelly reducido para 2ª entrada
+persist_cooldowns_enabled = True
+auto_close_excluded_on_startup = True
+```
+
+### Migración aplicada
+- `migrations/009_trading_cooldowns.sql` — tabla `trading_cooldowns(symbol, cooldown_type, activated_at, expires_at, metadata)` + trigger purge automático
+
+### Estado del portafolio post-sesión (13:35 UTC-6)
+- **USDT líquido**: ~$469 (tras vender RLUSDUSDT 109 + USD1USDT 280 excluidos)
+- **Régimen**: PRESERVATION (no confirmado — BTC 30d=-16.2%)
+- **Posiciones activas**: BTCUSDT(-1.97%), NEARUSDT(-1.95%), ONDOUSDT(-2.76%), TONUSDT(-0.49%), WLDUSDT(-1.66%)
+- **PredEval**: evaluando 5 posiciones cada ciclo — todas holding (trend=FLAT, no deterioradas)
+- **Alerta**: WLDUSDT EV=-2.86, prob=0.43 — cierre automático si trend cambia a DOWN
+
+### Pendientes post-sesión
+- N39: Monitorear primer cierre por C1 en logs `prediction_exit_deteriorated` — verificar que EV/prob/trend se logean correctamente
+- N40: Con 50+ trades reales → POST /learning/run para recalibrar bias_correction con datos reales (actualmente cap 1.5 sintéticos)
+- N41: Cuando PRESERVATION confirme (BTC 30d < -15% en 2 ciclos) → verificar que solo NARRATIVE recibe nuevas entradas
 
 ---
 

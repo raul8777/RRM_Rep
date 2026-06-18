@@ -230,6 +230,56 @@ class FuturesClient:
         account = self.get_account_info()
         return [p for p in account.get("positions", []) if float(p.get("positionAmt", 0)) != 0]
 
+    def get_recent_trades(self, days: int = 3, limit: int = 50,
+                          extra_symbols: List[str] = None) -> List[dict]:
+        """
+        Return recent closing trades from Binance userTrades (realizedPnl != 0).
+        Queries tracked symbols + extra_symbols (e.g. futures_symbols from config).
+        Used to populate the closed positions card in the dashboard.
+        """
+        if self.dry_run:
+            return []
+        cutoff_ms = int((datetime.now(timezone.utc).timestamp() - days * 86400) * 1000)
+        symbols_to_check = set(extra_symbols or [])
+        for pos in self._open_positions.values():
+            symbols_to_check.add(pos.symbol)
+
+        results = []
+        for sym in symbols_to_check:
+            try:
+                trades = self._get("/fapi/v1/userTrades", {
+                    "symbol": sym, "startTime": str(cutoff_ms), "limit": str(limit)
+                }, signed=True)
+                # Group consecutive trades into open/close pairs by positionSide
+                for t in trades:
+                    side_raw = t.get("positionSide", "BOTH")
+                    is_buyer = t.get("buyer", False)
+                    qty      = float(t.get("qty", 0))
+                    price    = float(t.get("price", 0))
+                    pnl      = float(t.get("realizedPnl", 0))
+                    ts_ms    = int(t.get("time", 0))
+                    # Only include trades that closed a position (realizedPnl != 0)
+                    if pnl == 0.0:
+                        continue
+                    side = side_raw if side_raw in ("LONG", "SHORT") else ("LONG" if is_buyer else "SHORT")
+                    closed_at = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+                    results.append({
+                        "symbol":      sym,
+                        "side":        side,
+                        "qty":         qty,
+                        "entry_price": None,   # not available per-trade from userTrades
+                        "exit_price":  price,
+                        "pnl":         round(pnl, 4),
+                        "opened_at":   None,
+                        "closed_at":   closed_at,
+                        "trade_type":  "futures",
+                    })
+            except Exception:
+                pass
+
+        results.sort(key=lambda x: x.get("closed_at", ""), reverse=True)
+        return results[:limit]
+
     def enable_hedge_mode(self) -> bool:
         """
         Activate Binance hedge mode (dualSidePosition=true).
@@ -600,10 +650,10 @@ class FuturesClient:
 
         # ── Live order execution ──────────────────────────────────────────────
         try:
-            # 1. Market SHORT order
+            # 1. Market SHORT order (hedge mode requires positionSide=SHORT)
             entry_order = self._post("/fapi/v1/order", {
                 "symbol": symbol, "side": "SELL", "type": "MARKET",
-                "quantity": str(qty), "reduceOnly": "false",
+                "quantity": str(qty), "positionSide": "SHORT",
             })
             order_id    = str(entry_order.get("orderId", "?"))
             filled_price = float(entry_order.get("avgPrice", price)) or price
@@ -618,16 +668,17 @@ class FuturesClient:
             sl_order_id = None
             for _sl_attempt in range(2):
                 try:
-                    _sl_trigger = round(self.get_price(symbol) * (1 + sl_pct / 100), 6) if _sl_attempt > 0 else sl_price
+                    _raw_trigger = self.get_price(symbol) * (1 + sl_pct / 100) if _sl_attempt > 0 else filled_price * (1 + sl_pct / 100)
+                    _sl_trigger = self._align_price(_raw_trigger, tick)
                     sl_order = self._post("/fapi/v1/algoOrder", {
                         "symbol": symbol, "side": "BUY",
                         "algoType": "CONDITIONAL", "type": "STOP_MARKET",
                         "quantity": str(qty), "triggerPrice": str(_sl_trigger),
-                        "reduceOnly": "true", "timeInForce": "GTC",
+                        "positionSide": "SHORT", "timeInForce": "GTC",
                     })
                     sl_order_id = str(sl_order.get("algoId", sl_order.get("orderId", "")))
                     sl_price = _sl_trigger
-                    print(f"[Futures] SL algo order placed: triggerPrice={sl_price:.4f} (algoId={sl_order_id})")
+                    print(f"[Futures] SL algo order placed: triggerPrice={sl_price} (algoId={sl_order_id})")
                     break
                 except Exception as se:
                     if _sl_attempt == 0:
@@ -637,7 +688,7 @@ class FuturesClient:
                         print(f"[Futures] SL order failed for {symbol}: {se} — position open WITHOUT SL, closing immediately")
                         self._post("/fapi/v1/order", {
                             "symbol": symbol, "side": "BUY", "type": "MARKET",
-                            "quantity": str(qty), "reduceOnly": "true",
+                            "quantity": str(qty), "positionSide": "SHORT",
                         })
                         return None
 
@@ -649,8 +700,8 @@ class FuturesClient:
                 tp_order = self._post("/fapi/v1/algoOrder", {
                     "symbol": symbol, "side": "BUY",
                     "algoType": "CONDITIONAL", "type": "TAKE_PROFIT_MARKET",
-                    "quantity": str(qty), "triggerPrice": str(tp_price),
-                    "reduceOnly": "true", "timeInForce": "GTC",
+                    "quantity": str(qty), "triggerPrice": str(self._align_price(tp_price, tick)),
+                    "positionSide": "SHORT", "timeInForce": "GTC",
                 })
                 tp_order_id = str(tp_order.get("algoId", tp_order.get("orderId", "")))
                 print(f"[Futures] TP algo order placed: triggerPrice={tp_price:.4f} (algoId={tp_order_id})")
@@ -746,7 +797,7 @@ class FuturesClient:
                     "symbol": symbol, "side": "SELL",
                     "algoType": "CONDITIONAL", "type": "STOP_MARKET",
                     "quantity": str(qty), "triggerPrice": str(sl_price),
-                    "positionSide": "LONG", "reduceOnly": "true", "timeInForce": "GTC",
+                    "positionSide": "LONG", "timeInForce": "GTC",
                 })
                 sl_order_id = str(sl_order.get("algoId", sl_order.get("orderId", "")))
                 print(f"[Futures] LONG SL placed: triggerPrice={sl_price:.4f} (algoId={sl_order_id})")
@@ -754,7 +805,7 @@ class FuturesClient:
                 print(f"[Futures] LONG SL order failed {symbol}: {se} — closing immediately")
                 self._post("/fapi/v1/order", {
                     "symbol": symbol, "side": "SELL", "type": "MARKET",
-                    "quantity": str(qty), "positionSide": "LONG", "reduceOnly": "true",
+                    "quantity": str(qty), "positionSide": "LONG",
                 })
                 return None
 
@@ -765,7 +816,7 @@ class FuturesClient:
                     "symbol": symbol, "side": "SELL",
                     "algoType": "CONDITIONAL", "type": "TAKE_PROFIT_MARKET",
                     "quantity": str(qty), "triggerPrice": str(tp_price),
-                    "positionSide": "LONG", "reduceOnly": "true", "timeInForce": "GTC",
+                    "positionSide": "LONG", "timeInForce": "GTC",
                 })
                 tp_order_id = str(tp_order.get("algoId", tp_order.get("orderId", "")))
                 print(f"[Futures] LONG TP placed: triggerPrice={tp_price:.4f} (algoId={tp_order_id})")
@@ -813,7 +864,7 @@ class FuturesClient:
             aligned_qty = self._align_qty(close_qty, step)
             result = self._post("/fapi/v1/order", {
                 "symbol": symbol, "side": "SELL", "type": "MARKET",
-                "quantity": str(aligned_qty), "positionSide": "LONG", "reduceOnly": "true",
+                "quantity": str(aligned_qty), "positionSide": "LONG",
             })
             if pos:
                 pos.closed = True; pos.closed_at = datetime.now(timezone.utc); pos.exit_price = current_price; pos.pnl = pnl
@@ -867,7 +918,7 @@ class FuturesClient:
             aligned_qty = self._align_qty(close_qty, step)
             result = self._post("/fapi/v1/order", {
                 "symbol": symbol, "side": "BUY", "type": "MARKET",
-                "quantity": str(aligned_qty), "reduceOnly": "true",
+                "quantity": str(aligned_qty), "positionSide": "SHORT",
             })
             if pos:
                 pos.closed     = True

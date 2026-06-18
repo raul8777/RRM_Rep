@@ -1595,14 +1595,26 @@ function renderTradingModeCard(r) {
         ? `<div class="mode-warn" style="color:#9b59b6;border-left-color:#9b59b6">⚠️ FUTURES SHORT activo — Posiciones con apalancamiento 2× abiertas. SL: ${r.regime_sl_pct ?? 3.0}% | TP: ${r.regime_tp_pct ?? 5.0}% | Kelly: ${r.regime_kelly ?? 0.3}×</div>`
         : '';
 
+    const sl   = r.regime_sl_pct    != null ? r.regime_sl_pct    : '—';
+    const tp   = r.regime_tp_pct    != null ? r.regime_tp_pct    : '—';
+    const kel  = r.regime_kelly     != null ? r.regime_kelly     : '—';
+
+    const modeReason = r.mode_reason || '';
+
     el.innerHTML = `
         <div class="mode-banner" style="background:${cfg.color}15; border-color:${cfg.color}40">
             <div class="mode-banner-icon">${cfg.icon}</div>
-            <div>
+            <div style="flex:1;min-width:0">
                 <div class="mode-banner-title" style="color:${cfg.color}">${cfg.label}</div>
-                <div class="mode-banner-reason">${r.mode_reason || ''}</div>
+                <div class="mode-banner-conf" style="font-size:11px;margin-top:2px;color:${confirmed ? '#4ecca3' : '#f39c12'}">${confirmed ? '✅ Confirmado' : '⏳ Pendiente confirmación'}</div>
+            </div>
+            <div style="display:flex;gap:20px;flex-shrink:0;text-align:center;padding-left:12px;border-left:1px solid rgba(255,255,255,0.1)">
+                <div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px">SL</div><div style="font-size:20px;font-weight:700;color:#e74c3c">${sl}%</div></div>
+                <div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px">TP</div><div style="font-size:20px;font-weight:700;color:#4ecca3">${tp}%</div></div>
+                <div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px">Kelly</div><div style="font-size:20px;font-weight:700;color:${cfg.color}">${kel}×</div></div>
             </div>
         </div>
+        ${modeReason ? `<div class="mode-reason-row" title="${modeReason}">📋 ${modeReason}</div>` : ''}
         <div class="mode-indicators">
             <div class="mode-ind-item">
                 <div class="mode-ind-label">BTC 7 días</div>
@@ -1624,10 +1636,6 @@ function renderTradingModeCard(r) {
                 <div class="mode-ind-label">BB Bandwidth${bbAlert}</div>
                 <div class="mode-ind-val ${bbCls}" title="${bb < 0.04 ? 'COMPRESIÓN — breakout inminente' : bb < 0.07 ? 'Moderado' : 'Expandido'}">${(bb * 100).toFixed(2)}%</div>
             </div>` : ''}
-            <div class="mode-ind-item">
-                <div class="mode-ind-label">Confirmado</div>
-                <div class="mode-ind-val ${confirmed ? 'up' : 'flat'}">${confirmed ? '✅ Sí' : '⏳ Pendiente'}</div>
-            </div>
         </div>
         <div class="mode-strategy-box" style="border-left-color:${cfg.color}">
             <strong>Estrategia activa:</strong> ${desc}
@@ -1862,9 +1870,13 @@ async function renderFuturesPositions() {
                 const slCls = Math.abs(p.sl_dist_pct) < 1.0 ? 'negative' : '';
                 const tpCls = Math.abs(p.tp_dist_pct) < 1.0 ? 'positive' : '';
                 const age = p.opened_at ? relativeTime(p.opened_at) : '—';
+                const isLong = p.side === 'LONG';
+                const sideLabel = isLong
+                    ? `<span style="color:#27ae60">▲ LONG</span>`
+                    : `<span style="color:#9b59b6">▼ SHORT</span>`;
                 return `<tr>
                     <td style="color:#9b59b6;font-weight:600">${p.symbol}</td>
-                    <td><span style="color:#9b59b6">▼ SHORT</span></td>
+                    <td>${sideLabel}</td>
                     <td>${parseFloat(p.qty || 0).toFixed(4)}</td>
                     <td>$${fmt(p.entry_price)}</td>
                     <td>$${fmt(p.current_price)}</td>
@@ -1896,7 +1908,7 @@ async function renderFuturesClosed() {
     if (!el) return;
 
     try {
-        const res = await fetch(`${API_BASE}/futures/closed`, { headers: getAuthHeaders() });
+        const res = await fetch(`${API_BASE}/futures/closed`, { headers: _authHeaders() });
         if (!res.ok) {
             el.innerHTML = '<p class="loading">No disponible</p>';
             if (card) card.style.display = 'none';

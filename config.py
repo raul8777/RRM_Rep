@@ -277,7 +277,19 @@ class Settings(BaseSettings):
         "AIOZUSDT":   {"market_behavior": "NARRATIVE",   "origin": "AI_DATA"},        # DePIN + AI streaming
         "SEIUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"}, # Sei trading-optimized L1
         "SUSHIUSDT":  {"market_behavior": "MIDCAP_ALT",  "origin": "DEFI"},           # SushiSwap DEX
+        "ONDOUSDT":   {"market_behavior": "NARRATIVE",   "origin": "DEFI"},            # Ondo Finance RWA
+        "TRXUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"}, # TRON
     }, env="TOKEN_CATEGORIES")
+
+    # Símbolos explícitamente excluidos del trading (oro tokenizado, stablecoins, delisted)
+    # Estos son bloqueados antes de cualquier análisis en _buy_top_symbols
+    trading_excluded_symbols: list = Field(default=[
+        "XAUTUSDT",   # XAU Tether — oro tokenizado, SL/TP% no aplica
+        "PAXGUSDT",   # PAX Gold — oro tokenizado
+        "RLUSDUSDT",  # RLUSD — stablecoin sin upside
+        "USD1USDT",   # USD1 — stablecoin sin upside
+        "SPCXBUSDT",  # SPCXB — volumen artificial
+    ], env="TRADING_EXCLUDED_SYMBOLS")
 
     # Win-rate thresholds per market_behavior category
     # min_prob: mínima probabilidad de éxito requerida
@@ -287,10 +299,24 @@ class Settings(BaseSettings):
     category_thresholds: dict = Field(default={
         "LARGE_CAP":  {"min_prob": 0.55, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.2, "tp_extension_pct": 1.5},
         "MIDCAP_ALT": {"min_prob": 0.50, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.2, "tp_extension_pct": 2.0},
-        "NARRATIVE":  {"min_prob": 0.42, "min_pnl": -5.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 8.0, "trailing_distance_pct": 3.0, "tp_extension_pct": 3.0},
+        "NARRATIVE":  {"min_prob": 0.45, "min_pnl": -1.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 8.0, "trailing_distance_pct": 3.0, "tp_extension_pct": 3.0},  # V3: min_pnl -5.0→-1.0, min_prob 0.42→0.45 (evitar entradas sin catalizador)
         "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.0, "take_profit_pct": 4.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.5, "tp_extension_pct": 2.5},
     }, env="CATEGORY_THRESHOLDS")
     
+    # ── Predicción con prioridad absoluta (jun 17 2026) ──────────────────────
+    # C1: Re-evaluación predictiva en cada ciclo — cierra posiciones cuando EV deteriora
+    prediction_exit_enabled: bool = Field(default=True, env="PREDICTION_EXIT_ENABLED")
+    min_hold_for_prediction_exit: int = Field(default=90, env="MIN_HOLD_FOR_PREDICTION_EXIT")  # minutos antes de evaluar cierre
+    # C2: Segunda entrada permitida si predicción nueva es fuertemente mejor
+    allow_prediction_based_add: bool = Field(default=True, env="ALLOW_PREDICTION_ADD")
+    prediction_add_min_ev_ratio: float = Field(default=1.5, env="PREDICTION_ADD_MIN_EV_RATIO")  # nueva pred >= 1.5x la existente
+    prediction_add_min_strength: float = Field(default=0.70, env="PREDICTION_ADD_MIN_STRENGTH")
+    prediction_add_kelly_factor: float = Field(default=0.6, env="PREDICTION_ADD_KELLY_FACTOR")  # Kelly reducido para 2ª entrada
+    # C3: Cooldowns en DB — previene doble entrada post-restart
+    persist_cooldowns_enabled: bool = Field(default=True, env="PERSIST_COOLDOWNS_ENABLED")
+    # C4: Cierre automático de activos prohibidos al arrancar
+    auto_close_excluded_on_startup: bool = Field(default=True, env="AUTO_CLOSE_EXCLUDED_ON_STARTUP")
+
     # ── Futures trading (USDM, fapi.binance.com) ─────────────────────────────
     futures_enabled: bool = Field(default=False, env="FUTURES_ENABLED")  # must opt-in explicitly
     futures_leverage: int = Field(default=2, env="FUTURES_LEVERAGE")           # hard max 2x
