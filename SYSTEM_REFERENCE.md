@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 17 2026 13:35 UTC-6 | Sesión: Prediction-Driven Lifecycle C1-C5 + _AUDIT_STARTUP_DONE flag
+> Última actualización: jun 17 2026 18:41 UTC-6 | Sesión: FUTURES_SHORT pipeline completo — 3 SHORTs BTC/ETH/SOL abiertos con SL/TP
 
 ---
 
@@ -52,16 +52,16 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 17 2026 13:35 UTC-6 |
+| Fecha última actualización | jun 17 2026 18:41 UTC-6 |
 | Capital total | ~$3,000 USDT |
-| Capital spot líquido | ~$1,758 USDT |
-| Capital invertido spot | ~$1,242 USDT (posiciones activas) |
-| Capital futuros | ~$5 USDT (ocioso — esperando FUTURES_SHORT) |
-| Régimen activo | **SPOT_BULL** (confirmado) |
-| Fear & Greed | **23 — Extreme Fear** |
-| BTC 4h trend | UP |
-| BTC 7d | +6.79% |
-| BTC 30d | -14.7% (rebote en bear estructural) |
+| Capital spot líquido | ~$469 USDT |
+| Capital invertido spot | ~$581 USDT (TRX/TON/U/INJ) |
+| Capital futuros | ~$810 USDT ($300 margin usado en 3 SHORTs) |
+| Régimen activo | **FUTURES_SHORT** (confirmado — BTC 30d=-16.7%) |
+| Fear & Greed | **15 — Capitulación** |
+| BTC 4h trend | DOWN (EMA9 < EMA21) |
+| BTC 7d | +1.6% |
+| BTC 30d | -16.7% (bear estructural activo) |
 | Screener dinámico | ✅ ACTIVO — 41 spot / 9 futures |
 | Screener v2 Top-100 | ✅ CONFIGURADO — quality filters $10M vol, max volatility 50% |
 | Expansión activos E1 | ✅ COMPLETADA — 24→41 tokens con datos históricos reales |
@@ -70,10 +70,11 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 | Dashboard Auditoría PnL | ✅ COMPLETADO — métricas de expectativa vs realidad |
 | Futuros monitoring | ✅ check_positions() corre cada ciclo independiente de régimen |
 | Shorts protección ganancia | ✅ futures_protect_profit_usdt=1.0 — solo cierra shorts en pérdida al cambiar régimen |
+| Futuros SHORTs activos | **3** — BTC(entry=64,546), ETH(entry=1,753), SOL(entry=72.26) — SL/TP activos |
 | Docker | live, sin errores |
 | dry_run | False |
 | allow_real_trading | True |
-| Ciclo activo | **10 min** (SPOT_BULL) |
+| Ciclo activo | **6 min** (FUTURES_SHORT) |
 | Pares con datos históricos | **41 símbolos** — 1095 días 1h klines en `/app/historical_data/` |
 | **Predictor** | **34,309 trades calibrados — 45 símbolos con pesos en DB** |
 | **Learning Engine** | **Señales reales TechnicalIndicators.analyze_signal() — jun 17 2026** |
@@ -330,7 +331,84 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 
 ### Activos (no resueltos)
 
-**Sin bugs activos conocidos** — todos verificados y resueltos al jun 17 2026 13:35 UTC-6.
+**Sin bugs activos conocidos** — todos verificados y resueltos al jun 17 2026 18:41 UTC-6.
+
+---
+
+## SESIÓN JUN 17 2026 TARDE — Pipeline FUTURES_SHORT completo (18:41 UTC-6)
+
+### Objetivo: que el sistema abra SHORTs reales cuando el régimen es FUTURES_SHORT
+
+### Root causes identificados (cadena de 5 bugs):
+
+| # | Bug | Síntoma en logs | Archivo |
+|---|-----|-----------------|---------|
+| B1 | Bloque FUTURES_SHORT **después** del `total_open >= _regime_max` | Spots llenaban el límite → SHORTs nunca se evaluaban | `run_trades.py` |
+| B2 | Inject de `futures_symbols` solo cuando `top_signals` vacío | En bear siempre hay señales spot → inject nunca activaba | `run_trades.py` |
+| B3 | Orden market SELL sin `positionSide=SHORT` | `-4061: Order's position side does not match` | `futures_client.py` |
+| B4 | SL/TP algo orders sin `positionSide=SHORT` (tenían `reduceOnly` incompatible con hedge) | `-4061` en algo orders | `futures_client.py` |
+| B5 | trigger price con 6 decimales fijos sin alinear al tick size | `-1111: Precision over maximum` | `futures_client.py` |
+
+### Fixes implementados:
+
+**B1** — `run_trades.py` L1522: bloque FUTURES_SHORT movido **antes** del `if total_open >= _regime_max`
+
+**B2** — `run_trades.py` L2632: inject de `futures_symbols` al pool **siempre** (no solo si vacío):
+```python
+# Antes (condicional):
+if not top_signals:
+    if FUTURES_SHORT: top_signals = [futures symbols]
+
+# Después (siempre):
+top_signals = _select_symbols(...)
+if FUTURES_SHORT and confirmed:
+    _new_futures = [s not already in pool]
+    top_signals = _new_futures + top_signals  # futures al frente
+```
+
+**B3** — `futures_client.py` L654: orden market SHORT:
+```python
+# Antes:  {"side": "SELL", "type": "MARKET", "reduceOnly": "false"}
+# Después: {"side": "SELL", "type": "MARKET", "positionSide": "SHORT"}
+```
+
+**B4** — `futures_client.py` L677 (SL) y L704 (TP): algo orders:
+```python
+# Antes:  {"reduceOnly": "true", ...}
+# Después: {"positionSide": "SHORT", ...}  # reduceOnly eliminado
+```
+
+**B5** — `futures_client.py` L672/703: trigger price ahora usa `_align_price(_raw, tick)` en vez de `round(x, 6)`
+
+**B6 (extra)** — SL/TP spot casi-nulos en DB: TRX(0.18%), TON(0.71%), U(0.02%) → corregidos a categoría:
+- TRXUSDT: SL=0.3165 (1.8%), TP=0.3336 (3.5%)
+- TONUSDT: SL=1.6351 (2.5%), TP=1.7609 (5.0%)
+- UUSDT: SL=0.9825 (1.8%), TP=1.0355 (3.5%)
+
+### Resultado final:
+```
+[Futures] FUTURES_SHORT: injecting ['BTCUSDT','ETHUSDT','SOLUSDT',...] into signal pool
+[Futures] FUTURES_SHORT mode: opening short BTCUSDT margin=$130.0
+[Futures] Opening SHORT BTCUSDT: qty=0.004, entry~64546, SL=66138 (+2.5%), TP=60653 (-6.0%)
+[Futures] SL algo order placed: algoId=2000001143113156
+[Futures] TP algo order placed: algoId=2000001143113165
+[Futures] SHORT BTCUSDT OPEN ✅
+```
+
+### 3 SHORTs activos con SL/TP (colocados manualmente post-deploy):
+| Par | qty | Entry | SL | TP | algoId SL | algoId TP |
+|-----|-----|-------|----|----|-----------|-----------|
+| BTCUSDT | 0.004 | 64,546 | 66,138 | 60,653 | 2000001143113156 | 2000001143113165 |
+| ETHUSDT | 0.148 | 1,753.79 | 1,799.04 | 1,649.85 | 2000001143113030 | 2000001143113040 |
+| SOLUSDT | 3.59 | 72.26 | 74.15 | 68.0 | 2000001143113216 | 2000001143113228 |
+
+- Margin por trade: $130 (F&G=15 capitulación → boost 1.3×)
+- R:R = 2.4 | EV esperado ~+2.18%/trade | WR esperado ~55% en bear
+
+### Pendientes N33-N35:
+- N33: Verificar que `check_positions()` detecta SL/TP triggers de los algo orders correctamente
+- N34: Ajustar `FUTURES_SL_PCT=3.0` y `FUTURES_TP_PCT=7.0` en `.env` para más runway en bear (próxima sesión)
+- N35: Añadir análisis técnico real (`analyze_symbol()`) a los `futures_symbols` inyectados para priorizar el par con mejor setup bajista
 
 ---
 
