@@ -63,6 +63,9 @@ _NARRATIVE_BUY_COOLDOWN_HOURS = 4.0
 # Cleared on Docker restart — slots replenish organically on the next cycle.
 _overflow_positions: set = set()
 
+# Futures overflow: SHORTs opened beyond futures_max_shorts when signal is exceptional.
+_futures_overflow_positions: set = set()
+
 # ── Circuit breaker: consecutive order failures (technical errors only) ──────
 _consecutive_failures: int = 0
 _circuit_breaker_until: datetime = None  # UTC — None = not paused
@@ -365,6 +368,42 @@ def _is_overflow_eligible(symbol: str, strength: float, prediction: dict, settin
     if _epnl <= 0:
         print(f"[Overflow] {symbol}: expected_pnl={_epnl:.3f} <= 0 — not eligible")
         return False
+    return True
+
+
+def _is_futures_overflow_eligible(
+    symbol: str, strength: float, vol_spike: float,
+    chg24: float, btc_4h_chg: float, settings, fc
+) -> bool:
+    """Return True if a futures SHORT qualifies for an extra slot beyond futures_max_shorts.
+    Requires: high-strength signal + vol spike + confirmed drop + BTC in downtrend.
+    Max simultaneous overflow slots controlled by futures_overflow_max_extra (default 3).
+    NOTE: review after 1 week of live data to tune thresholds up/down."""
+    _min_str   = getattr(settings, 'futures_overflow_min_strength', 0.82)
+    _min_vol   = getattr(settings, 'futures_overflow_min_vol_spike', 2.5)
+    _min_drop  = getattr(settings, 'futures_overflow_min_drop_24h', -5.0)
+    _max_extra = getattr(settings, 'futures_overflow_max_extra', 3)
+    _cur_ovfl  = len(_futures_overflow_positions)
+    if _cur_ovfl >= _max_extra:
+        print(f"[Futures/Overflow] {symbol}: all {_max_extra} overflow slots occupied ({_cur_ovfl}/{_max_extra})")
+        return False
+    if strength < _min_str:
+        print(f"[Futures/Overflow] {symbol}: strength={strength:.2f} < min={_min_str} — not eligible")
+        return False
+    if vol_spike < _min_vol:
+        print(f"[Futures/Overflow] {symbol}: vol_spike={vol_spike:.2f}x < min={_min_vol}x — not eligible")
+        return False
+    if chg24 > _min_drop:
+        print(f"[Futures/Overflow] {symbol}: chg24={chg24:.2f}% > {_min_drop}% drop threshold — not eligible")
+        return False
+    if btc_4h_chg >= 0:
+        print(f"[Futures/Overflow] {symbol}: BTC 4h={btc_4h_chg:+.2f}% — no overflow on BTC rebound")
+        return False
+    # Already have this symbol in overflow
+    if symbol in _futures_overflow_positions:
+        print(f"[Futures/Overflow] {symbol}: already in overflow set")
+        return False
+    print(f"[Futures/Overflow] {symbol}: ELIGIBLE — str={strength:.2f}, vol={vol_spike:.1f}x, chg24={chg24:.1f}%, btc4h={btc_4h_chg:+.2f}%")
     return True
 
 
@@ -1543,18 +1582,53 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 _max_shorts = getattr(settings, 'futures_max_shorts', 2)
                 _open_shorts = len([p for p in _fc._open_positions.values() if not p.closed and p.side == "SHORT"])
                 if _open_shorts >= _max_shorts:
-                    print(f"[Futures] SHORT {symbol} SKIPPED: {_open_shorts}/{_max_shorts} shorts already open")
-                    update_signal_decision(symbol, "rejected", "MAX_SHORTS")
-                    continue
+                    # Try overflow: open extra slot only if signal is exceptional
+                    _ovfl_meta     = signal_meta.get(symbol, {})
+                    _ovfl_strength = float(_ovfl_meta.get('strength', 0.0))
+                    _ovfl_volspike = float(_ovfl_meta.get('vol_spike', 0.0))
+                    _ovfl_chg24    = float(_ovfl_meta.get('change_24h_pct', 0.0))
+                    if _is_futures_overflow_eligible(
+                        symbol, _ovfl_strength, _ovfl_volspike, _ovfl_chg24, btc_4h_chg_pct, settings, _fc
+                    ):
+                        _futures_overflow_positions.add(symbol)
+                        print(f"[Futures/Overflow] Opening extra SHORT slot for {symbol} "
+                              f"({_open_shorts}/{_max_shorts} + overflow={len(_futures_overflow_positions)}/"
+                              f"{getattr(settings,'futures_overflow_max_extra',3)})")
+                        # fall through to open the position
+                    else:
+                        print(f"[Futures] SHORT {symbol} SKIPPED: {_open_shorts}/{_max_shorts} shorts already open")
+                        update_signal_decision(symbol, "rejected", "MAX_SHORTS")
+                        continue
+
+                # F5: Close residual LONG on same symbol before opening SHORT (regime change artifact)
+                _residual_long_key = _fc._pos_key(symbol, "LONG")
+                if _residual_long_key in _fc._open_positions and not _fc._open_positions[_residual_long_key].closed:
+                    print(f"[Futures] Closing residual LONG on {symbol} before opening SHORT (regime change)")
+                    try:
+                        _fc.close_position(symbol, side="LONG", reason="regime_change_to_short")
+                    except Exception as _cl_err:
+                        print(f"[Futures] Could not close residual LONG {symbol}: {_cl_err}")
+
                 _f_sl    = getattr(settings, 'futures_sl_pct', 3.0)
                 _f_tp    = getattr(settings, 'futures_tp_pct', 5.0)
                 _f_lev   = getattr(settings, 'futures_leverage', 2)
-                _f_pred  = {'success_probability': 0.45}
+                # F4: Use real signal probability instead of hardcoded 0.45
+                _f_sig_meta = signal_meta.get(symbol, {})
+                _f_real_prob = float(_f_sig_meta.get('success_probability', float(_f_sig_meta.get('strength', 0.45))))
+                _f_real_prob = max(0.45, min(0.75, _f_real_prob))
+                _f_pred  = {'success_probability': _f_real_prob, 'expected_pnl': 1.0}
                 _f_usdt  = _kelly_position_size(
-                    settings, strength=float(signal_meta.get(symbol, {}).get('strength', 0.5)),
+                    settings, strength=float(_f_sig_meta.get('strength', 0.5)),
                     prediction=_f_pred, usdt_liquid=usdt_liquid,
                     sl_pct=_f_sl * _f_lev / 100, tp_pct=_f_tp * _f_lev / 100)
-                _f_usdt = min(_f_usdt, getattr(settings, 'futures_usdt_per_trade', 50.0))
+                # F4: Dynamic cap — max(per_trade_floor, futures_margin × kelly_cap_pct)
+                _futures_kelly_cap = getattr(settings, 'futures_kelly_cap_pct', 0.15)
+                _futures_margin_avail = _fc.get_available_usdt() if not _fc.dry_run else usdt_liquid * 0.3
+                _f_usdt_cap = max(
+                    getattr(settings, 'futures_usdt_per_trade', 100.0),
+                    _futures_margin_avail * _futures_kelly_cap
+                )
+                _f_usdt = min(_f_usdt, _f_usdt_cap)
                 try:
                     if news_client:
                         _fng = news_client.get_fear_greed()
@@ -2597,6 +2671,7 @@ def execute_once():
                             try:
                                 _result = _fc.close_short(_sym, _pos.qty, reason="regime_change")
                                 futures_closes.append({"symbol": _sym, "reason": "regime_change", "result": _result})
+                                _futures_overflow_positions.discard(_sym)
                                 print(f"[Futures] Closed SHORT {_sym} (PnL=${_unr_pnl:.2f} < ${_protect_threshold}) due to regime → {_regime_mode}")
                                 _closed_count += 1
                             except Exception as _ce:
@@ -2623,6 +2698,10 @@ def execute_once():
             if _cycle_closes:
                 futures_closes.extend(_cycle_closes)
                 print(f"[Futures] Closed {len(_cycle_closes)} position(s) via SL/TP: {_cycle_closes}")
+                for _cc in _cycle_closes:
+                    _cc_sym = _cc.get('symbol') if isinstance(_cc, dict) else getattr(_cc, 'symbol', None)
+                    if _cc_sym:
+                        _futures_overflow_positions.discard(_cc_sym)
         except Exception as _fce:
             print(f"[Futures] check_positions error: {_fce}")
 
@@ -2643,8 +2722,25 @@ def execute_once():
                 pass
         # Build set of symbols already in top_signals to avoid duplicates
         _existing_syms = {s['symbol'] if isinstance(s, dict) else s for s in top_signals}
-        _new_futures = [{"symbol": s, "score": 50, "strength": 0.5, "reason": "FUTURES_SHORT_AUTO"}
-                        for s in _f_syms if s not in _existing_syms]
+        _new_futures = []
+        for _fsym in _f_syms:
+            if _fsym in _existing_syms:
+                continue
+            # Enrich with real technical data so overflow eligibility check has real values
+            _fsig = {"symbol": _fsym, "score": 50, "strength": 0.5, "reason": "FUTURES_SHORT_AUTO"}
+            try:
+                from technical_indicators import TechnicalIndicators
+                _ti = TechnicalIndicators(client)
+                _ta = _ti.analyze_signal(_fsym)
+                if _ta and isinstance(_ta, dict):
+                    _fsig["strength"]      = float(_ta.get("strength", 0.5))
+                    _fsig["vol_spike"]     = float(_ta.get("vol_spike", 0.0))
+                    _fsig["rsi"]           = float(_ta.get("rsi", 50.0))
+                    _fsig["change_24h_pct"] = float(_ta.get("change_24h_pct", 0.0))
+                    _fsig["score"]         = int(float(_ta.get("strength", 0.5)) * 100)
+            except Exception as _te:
+                pass  # keep defaults on any error
+            _new_futures.append(_fsig)
         if _new_futures:
             print(f"[Futures] FUTURES_SHORT: injecting {[s['symbol'] for s in _new_futures]} into signal pool")
             top_signals = _new_futures + list(top_signals)  # futures first

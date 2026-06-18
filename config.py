@@ -328,6 +328,14 @@ class Settings(BaseSettings):
     futures_symbols: list = Field(default=[
         'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT',
     ], env="FUTURES_SYMBOLS")   # symbols eligible for shorting
+    futures_no_short_btc_4h_threshold: float = Field(default=2.0, env="FUTURES_NO_SHORT_BTC_4H_THRESHOLD")
+    # Futures overflow: allow extra SHORTs beyond futures_max_shorts when signal is exceptional
+    futures_overflow_max_extra: int   = Field(default=3,    env="FUTURES_OVERFLOW_MAX_EXTRA")    # max extra simultaneous overflow SHORTs (3+3=6 total) — review after 1 week
+    futures_overflow_min_strength: float = Field(default=0.82, env="FUTURES_OVERFLOW_MIN_STRENGTH")  # Kelly FUERTE+
+    futures_overflow_min_vol_spike: float = Field(default=2.5,  env="FUTURES_OVERFLOW_MIN_VOL_SPIKE") # vol spike multiplier
+    futures_overflow_min_drop_24h: float  = Field(default=-5.0, env="FUTURES_OVERFLOW_MIN_DROP_24H")  # min 24h drop %
+    # Futures Kelly dynamic cap
+    futures_kelly_cap_pct: float = Field(default=0.15, env="FUTURES_KELLY_CAP_PCT")  # 15% of available futures margin
 
     # ── Dynamic pair screener ─────────────────────────────────────────────────
     screener_enabled: bool = Field(default=True, env="SCREENER_ENABLED")
