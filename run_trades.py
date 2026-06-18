@@ -2608,18 +2608,36 @@ def execute_once():
         try:
             _fc = _get_futures_client(settings)
 
-            # Auto-fund: when regime is FUTURES_SHORT, ensure futures wallet has enough margin
-            if _regime_mode == "FUTURES_SHORT" and _regime_exe and _regime_exe.confirmed:
-                _f_usdt_per_trade = getattr(settings, 'futures_usdt_per_trade', 20.0)
-                _f_max_shorts     = getattr(settings, 'futures_max_shorts', 2)
-                _f_required       = _f_usdt_per_trade * _f_max_shorts
-                _funded = _fc.check_and_fund(
-                    required_usdt  = _f_required,
-                    spot_api_key   = settings.binance_api_key,
-                    spot_api_secret= settings.binance_api_secret,
-                )
-                if not _funded:
-                    print(f"[Futures] WARNING: could not fund futures wallet (need ${_f_required:.2f}) — shorts will be skipped")
+            # CapBridge: bidirectional autonomous spot↔futures capital rebalancing
+            if getattr(settings, 'futures_capital_bridge_enabled', True):
+                try:
+                    _cb_spot_usdt   = float(client.get_account_balance().get('USDT', 0.0))
+                    _cb_open_shorts = sum(1 for p in _fc._open_positions.values() if not p.closed and p.side == 'SHORT')
+                    _cb_max_shorts  = getattr(settings, 'futures_max_shorts', 5)
+                    _cb_open_spots  = len(position_manager.get_all_positions()) if position_manager else 0
+                    _cb_kelly_margin = max(
+                        getattr(settings, 'futures_usdt_per_trade', 100.0),
+                        _fc.get_available_usdt() * getattr(settings, 'futures_kelly_cap_pct', 0.15)
+                    )
+                    _cb_kelly_spot  = getattr(settings, 'kelly_base_usdt', 60.0)
+                    _cb_min_tx      = getattr(settings, 'futures_capital_bridge_min_transfer', 10.0)
+                    _cb_result = _fc.smart_rebalance_capital(
+                        spot_usdt        = _cb_spot_usdt,
+                        open_shorts      = _cb_open_shorts,
+                        max_shorts       = _cb_max_shorts,
+                        kelly_margin     = _cb_kelly_margin,
+                        open_spot_count  = _cb_open_spots,
+                        kelly_spot_amount= _cb_kelly_spot,
+                        regime           = _regime_mode,
+                        spot_api_key     = settings.binance_api_key,
+                        spot_api_secret  = settings.binance_api_secret,
+                        min_transfer     = _cb_min_tx,
+                    )
+                    if _cb_result.get('error'):
+                        print(f"[CapBridge] ERROR logged for analysis: dir={_cb_result['direction']} "
+                              f"amount=${_cb_result['amount']:.2f} error={_cb_result['error']}")
+                except Exception as _cb_err:
+                    print(f"[CapBridge] ERROR: exception in capital bridge setup: {_cb_err}")
 
             # A3: Auto-close ALL shorts if regime switched OUT of bear modes
             # Whipsaw guard: only close after N consecutive non-short cycles
@@ -2731,16 +2749,7 @@ def execute_once():
                 else:
                     print(f"[Futures] Regime is {_regime_mode} ({_non_short_regime_cycles}/{_min_cycles} cycles) — holding shorts (whipsaw guard)")
 
-            # Bidirectional: return idle futures funds to spot — only after shorts are closed
-            if _regime_mode not in ("PRESERVATION", "FUTURES_SHORT") and _non_short_regime_cycles >= _min_cycles:
-                try:
-                    _fc.return_idle_funds_to_spot(
-                        reserve_usdt    = 5.0,
-                        spot_api_key    = settings.binance_api_key,
-                        spot_api_secret = settings.binance_api_secret,
-                    )
-                except Exception as _rfe:
-                    print(f"[Futures] return_idle_funds_to_spot error: {_rfe}")
+            # CapBridge handles idle-funds return via smart_rebalance_capital (Case 3 above)
 
             # Normal SL/TP cycle check
             _cycle_closes = _fc.check_positions()

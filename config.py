@@ -336,6 +336,9 @@ class Settings(BaseSettings):
     futures_overflow_min_drop_24h: float  = Field(default=-3.0, env="FUTURES_OVERFLOW_MIN_DROP_24H")  # min 24h drop %
     # Futures Kelly dynamic cap
     futures_kelly_cap_pct: float = Field(default=0.15, env="FUTURES_KELLY_CAP_PCT")  # 15% of available futures margin
+    # Capital Bridge: bidirectional autonomous spot↔futures transfer
+    futures_capital_bridge_enabled: bool = Field(default=True, env="FUTURES_CAPITAL_BRIDGE_ENABLED")
+    futures_capital_bridge_min_transfer: float = Field(default=10.0, env="FUTURES_CAPITAL_BRIDGE_MIN_TRANSFER")  # min USDT to trigger transfer
 
     # ── Dynamic pair screener ─────────────────────────────────────────────────
     screener_enabled: bool = Field(default=True, env="SCREENER_ENABLED")

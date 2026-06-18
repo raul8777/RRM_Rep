@@ -522,6 +522,141 @@ class FuturesClient:
             return new_balance >= required_usdt
         return False
 
+    def smart_rebalance_capital(
+        self,
+        spot_usdt: float,
+        open_shorts: int,
+        max_shorts: int,
+        kelly_margin: float,
+        open_spot_count: int,
+        kelly_spot_amount: float,
+        regime: str,
+        spot_api_key: str = None,
+        spot_api_secret: str = None,
+        min_transfer: float = 10.0,
+    ) -> dict:
+        """
+        Bidirectional autonomous capital bridge: spot ↔ futures.
+        Evaluates both wallets every cycle and transfers exactly what is needed
+        to avoid missing any trading opportunity in either direction.
+
+        Returns dict with keys: direction ('spot->futures'|'futures->spot'|'none'),
+        amount, reason, success (bool), error (str|None).
+        """
+        result = {"direction": "none", "amount": 0.0, "reason": "", "success": True, "error": None}
+        try:
+            futures_usdt = self.get_available_usdt()
+
+            # ── Compute committed margin (margin locked in open shorts) ──────────
+            committed_margin = 0.0
+            for pos in self._open_positions.values():
+                if not pos.closed and pos.side == "SHORT":
+                    try:
+                        committed_margin += float(pos.margin or (pos.qty * pos.entry_price / 2.0))
+                    except Exception:
+                        pass
+            futures_min_reserve = max(committed_margin * 1.1, 5.0)
+
+            # ── Compute spot minimum reserve (protect existing spot positions) ──
+            spot_min_reserve = max(100.0, open_spot_count * kelly_spot_amount * 0.5)
+
+            # ── Case 1: Futures needs capital (FUTURES_SHORT, open slots exist) ─
+            if regime == "FUTURES_SHORT":
+                open_slots = max(0, max_shorts - open_shorts)
+                if open_slots > 0:
+                    needed_futures = open_slots * kelly_margin
+                    shortfall = needed_futures - futures_usdt
+                    if shortfall >= min_transfer:
+                        transferable_from_spot = max(0.0, spot_usdt - spot_min_reserve)
+                        transfer_amount = round(min(shortfall, transferable_from_spot), 2)
+                        if transfer_amount >= min_transfer:
+                            reason = (f"FUTURES_SHORT: {open_slots} open slot(s) × ${kelly_margin:.0f}/slot "
+                                      f"= need ${needed_futures:.0f}, have ${futures_usdt:.0f} "
+                                      f"→ transfer ${transfer_amount:.2f} spot→futures")
+                            print(f"[CapBridge] {reason}")
+                            ok = self.transfer_to_futures(transfer_amount, spot_api_key, spot_api_secret)
+                            result["direction"] = "spot->futures"
+                            result["amount"] = transfer_amount
+                            result["reason"] = reason
+                            result["success"] = ok
+                            if ok:
+                                time.sleep(1.0)
+                                new_bal = self.get_available_usdt()
+                                print(f"[CapBridge] Post-transfer futures balance: ${new_bal:.2f} USDT")
+                            else:
+                                err_msg = "transfer_to_futures returned False"
+                                result["error"] = err_msg
+                                print(f"[CapBridge] ERROR: spot→futures transfer failed — {err_msg}")
+                            return result
+                        else:
+                            print(f"[CapBridge] spot→futures: need ${shortfall:.2f} but only ${transferable_from_spot:.2f} "
+                                  f"transferable (spot_min_reserve=${spot_min_reserve:.0f}) — skipping")
+                    else:
+                        if shortfall > 0:
+                            print(f"[CapBridge] futures shortfall ${shortfall:.2f} < min_transfer ${min_transfer:.0f} — skipping")
+
+            # ── Case 2: Spot needs capital (non-bear regime, spot has open slots) ─
+            elif regime in ("SPOT_BULL", "RANGE_SCALP"):
+                from config import get_settings as _gs
+                try:
+                    _s = _gs()
+                    _max_spot = getattr(_s, 'max_positions', 10)
+                except Exception:
+                    _max_spot = 10
+                spot_open_slots = max(0, _max_spot - open_spot_count)
+                if spot_open_slots > 0:
+                    needed_spot = spot_open_slots * kelly_spot_amount
+                    spot_shortfall = needed_spot - spot_usdt
+                    if spot_shortfall >= min_transfer:
+                        futures_excess = max(0.0, futures_usdt - futures_min_reserve)
+                        transfer_amount = round(min(spot_shortfall, futures_excess), 2)
+                        if transfer_amount >= min_transfer:
+                            reason = (f"{regime}: {spot_open_slots} spot slot(s) × ${kelly_spot_amount:.0f}/slot "
+                                      f"= need ${needed_spot:.0f}, have ${spot_usdt:.0f} "
+                                      f"→ transfer ${transfer_amount:.2f} futures→spot")
+                            print(f"[CapBridge] {reason}")
+                            ok = self.transfer_to_spot(transfer_amount, spot_api_key, spot_api_secret)
+                            result["direction"] = "futures->spot"
+                            result["amount"] = transfer_amount
+                            result["reason"] = reason
+                            result["success"] = ok
+                            if ok:
+                                time.sleep(1.0)
+                                print(f"[CapBridge] Post-transfer: spot USDT ~${spot_usdt + transfer_amount:.2f}")
+                            else:
+                                err_msg = "transfer_to_spot returned False"
+                                result["error"] = err_msg
+                                print(f"[CapBridge] ERROR: futures→spot transfer failed — {err_msg}")
+                            return result
+
+            # ── Case 3: Idle futures capital — no open shorts, return excess ────
+            if open_shorts == 0 and regime not in ("FUTURES_SHORT", "PRESERVATION"):
+                excess = futures_usdt - futures_min_reserve
+                if excess >= min_transfer:
+                    reason = f"Idle futures capital ${excess:.2f} (no open shorts, regime={regime}) → returning to spot"
+                    print(f"[CapBridge] {reason}")
+                    ok = self.transfer_to_spot(round(excess, 2), spot_api_key, spot_api_secret)
+                    result["direction"] = "futures->spot"
+                    result["amount"] = round(excess, 2)
+                    result["reason"] = reason
+                    result["success"] = ok
+                    if not ok:
+                        err_msg = "transfer_to_spot returned False (idle return)"
+                        result["error"] = err_msg
+                        print(f"[CapBridge] ERROR: idle futures return failed — {err_msg}")
+                    return result
+
+            if result["direction"] == "none":
+                print(f"[CapBridge] No transfer needed — futures=${futures_usdt:.2f}, spot=${spot_usdt:.2f}, "
+                      f"regime={regime}, open_shorts={open_shorts}/{max_shorts}")
+
+        except Exception as e:
+            result["success"] = False
+            result["error"] = str(e)
+            print(f"[CapBridge] ERROR: unexpected exception in smart_rebalance_capital: {e}")
+
+        return result
+
     # ── Leverage management ───────────────────────────────────────────────────
 
     def set_leverage(self, symbol: str, leverage: int = LEVERAGE_MAX) -> bool:
