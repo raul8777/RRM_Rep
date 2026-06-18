@@ -320,7 +320,7 @@ class Settings(BaseSettings):
     # ── Futures trading (USDM, fapi.binance.com) ─────────────────────────────
     futures_enabled: bool = Field(default=False, env="FUTURES_ENABLED")  # must opt-in explicitly
     futures_leverage: int = Field(default=2, env="FUTURES_LEVERAGE")           # hard max 2x
-    futures_max_shorts: int = Field(default=2, env="FUTURES_MAX_SHORTS")       # max simultaneous shorts
+    futures_max_shorts: int = Field(default=5, env="FUTURES_MAX_SHORTS")       # max simultaneous shorts
     futures_usdt_per_trade: float = Field(default=20.0, env="FUTURES_USDT_PER_TRADE")  # margin per short
     futures_sl_pct: float = Field(default=3.0, env="FUTURES_SL_PCT")           # SL % above entry
     futures_tp_pct: float = Field(default=5.0, env="FUTURES_TP_PCT")           # TP % below entry
@@ -331,9 +331,9 @@ class Settings(BaseSettings):
     futures_no_short_btc_4h_threshold: float = Field(default=2.0, env="FUTURES_NO_SHORT_BTC_4H_THRESHOLD")
     # Futures overflow: allow extra SHORTs beyond futures_max_shorts when signal is exceptional
     futures_overflow_max_extra: int   = Field(default=3,    env="FUTURES_OVERFLOW_MAX_EXTRA")    # max extra simultaneous overflow SHORTs (3+3=6 total) — review after 1 week
-    futures_overflow_min_strength: float = Field(default=0.82, env="FUTURES_OVERFLOW_MIN_STRENGTH")  # Kelly FUERTE+
+    futures_overflow_min_strength: float = Field(default=0.75, env="FUTURES_OVERFLOW_MIN_STRENGTH")  # Kelly FUERTE+
     futures_overflow_min_vol_spike: float = Field(default=2.5,  env="FUTURES_OVERFLOW_MIN_VOL_SPIKE") # vol spike multiplier
-    futures_overflow_min_drop_24h: float  = Field(default=-5.0, env="FUTURES_OVERFLOW_MIN_DROP_24H")  # min 24h drop %
+    futures_overflow_min_drop_24h: float  = Field(default=-3.0, env="FUTURES_OVERFLOW_MIN_DROP_24H")  # min 24h drop %
     # Futures Kelly dynamic cap
     futures_kelly_cap_pct: float = Field(default=0.15, env="FUTURES_KELLY_CAP_PCT")  # 15% of available futures margin
 

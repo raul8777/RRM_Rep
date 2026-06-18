@@ -2651,6 +2651,55 @@ def execute_once():
                     except Exception as _le:
                         print(f"[Futures] R1: Failed to close LONG {_lsym}: {_le}")
 
+            # B2: Auto-close residual spot LONGs in FUTURES_SHORT regime — directionally wrong in bear
+            # Only close positions with positive PnL (protect from crystallising losses on healthy spots)
+            # Exception: UUSDT/stablecoins skip (near-zero volatility, not hurting)
+            if _regime_mode == "FUTURES_SHORT" and _regime_exe and _regime_exe.confirmed:
+                try:
+                    _spot_positions = position_manager.get_all_positions() if position_manager else {}
+                    _commission_rate_b2 = getattr(settings, 'binance_commission_rate', 0.001)
+                    for _b2_sym, _b2_pos_list in _spot_positions.items():
+                        if not _b2_pos_list:
+                            continue
+                        # Skip stablecoins (ends with USDT but price ~1.0)
+                        _b2_price = None
+                        try:
+                            _b2_price = client.get_symbol_price(_b2_sym)
+                        except Exception:
+                            continue
+                        if _b2_price and 0.98 <= _b2_price <= 1.02:
+                            continue  # stablecoin — skip
+                        for _b2_pos in _b2_pos_list:
+                            if getattr(_b2_pos, 'closed', False):
+                                continue
+                            _b2_entry = float(getattr(_b2_pos, 'entry_price', 0) or 0)
+                            if _b2_entry <= 0 or _b2_price is None:
+                                continue
+                            _b2_pnl_pct = (_b2_price - _b2_entry) / _b2_entry * 100
+                            # Only close if in profit (>+0.3%) to avoid locking in spot losses
+                            if _b2_pnl_pct >= 0.3:
+                                try:
+                                    _b2_asset = _b2_sym.replace("USDT", "")
+                                    _b2_bal = client.get_account_balance()
+                                    _b2_qty_held = float(_b2_bal.get(_b2_asset, 0))
+                                    if _b2_qty_held <= 0:
+                                        continue
+                                    _b2_filters = get_symbol_filters(client, _b2_sym)
+                                    _b2_qty = align_quantity_to_step(_b2_qty_held, _b2_filters["step"])
+                                    _b2_valid, _b2_reason = is_quantity_valid(_b2_qty, _b2_price, _b2_filters)
+                                    if not _b2_valid:
+                                        print(f"[B2] {_b2_sym}: invalid qty {_b2_qty} — {_b2_reason}")
+                                        continue
+                                    _b2_order = client.create_market_order(symbol=_b2_sym, side="SELL", quantity=_b2_qty)
+                                    _b2_exit = float(((_b2_order.get("fills") or [{}])[0]).get("price", 0) or _b2_price)
+                                    position_manager.close_all_positions_for_symbol(_b2_sym, _b2_exit, "regime_futures_short_spot_cleanup", _commission_rate_b2)
+                                    _overflow_positions.discard(_b2_sym)
+                                    print(f"[B2] Closed spot LONG {_b2_sym} @ {_b2_exit:.4f} pnl_pct={_b2_pnl_pct:+.2f}% — FUTURES_SHORT regime, in profit")
+                                except Exception as _b2_err:
+                                    print(f"[B2] Failed to close spot {_b2_sym}: {_b2_err}")
+                except Exception as _b2_outer:
+                    print(f"[B2] Spot residual close error: {_b2_outer}")
+
             if _open_short_keys and _regime_mode not in ("PRESERVATION", "FUTURES_SHORT"):
                 if _non_short_regime_cycles >= _min_cycles:
                     _protect_threshold = getattr(settings, 'futures_protect_profit_usdt', 1.0)

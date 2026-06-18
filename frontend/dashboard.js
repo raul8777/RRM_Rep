@@ -171,6 +171,16 @@ const MODE_CFG = {
     'FUTURES_SHORT':{ icon: '📉',  label: 'SHORT 2×',   color: '#9b59b6' },
 };
 
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function switchTab(tabId) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === tabId);
+    });
+    const target = document.getElementById(tabId);
+    if (target) target.classList.add('active');
+}
+
 // ── Collapsible sections ─────────────────────────────────────────────────────
 function toggleSection(bodyId, chevronId) {
     const body = document.getElementById(bodyId);
@@ -301,7 +311,26 @@ function renderExecutiveSummary(data) {
     `;
 }
 
-// ── KPI Row ───────────────────────────────────────────────────────────────────
+// ── Apply adaptive mode theming ───────────────────────────────────────────────
+function applyModeTheme(mode) {
+    const cfg = MODE_CFG[mode] || MODE_CFG['SPOT_BULL'];
+    const root = document.documentElement;
+    root.style.setProperty('--mode-color', cfg.color);
+    // RGB breakdown for rgba() usage
+    const hex = cfg.color.replace('#','');
+    const r = parseInt(hex.substring(0,2),16);
+    const g = parseInt(hex.substring(2,4),16);
+    const b = parseInt(hex.substring(4,6),16);
+    root.style.setProperty('--mode-color-rgb', `${r},${g},${b}`);
+    root.style.setProperty('--mode-bg', `rgba(${r},${g},${b},0.08)`);
+    // Update mode pill
+    const pill = document.getElementById('modePillText');
+    const dot  = document.getElementById('modePillDot');
+    if (pill) pill.textContent = cfg.icon + ' ' + cfg.label;
+    if (dot)  { dot.style.background = cfg.color; dot.style.boxShadow = `0 0 6px ${cfg.color}`; }
+}
+
+// ── KPI Row — updates header chips + status bar ───────────────────────────────
 function renderKPIRow(data) {
     if (!data) return;
     const balance  = data.balance       || {};
@@ -324,28 +353,83 @@ function renderKPIRow(data) {
     const pf         = parseFloat(m.profit_factor || 0);
     const cycleMins  = cycle.interval_minutes || '—';
     const secsLeft   = cycle.seconds_until_next;
-    const mode       = regime.trading_mode || '—';
+    const mode       = regime.trading_mode || 'SPOT_BULL';
     const maxPos     = 12;
+    const ctx        = data.market_context || {};
+    const fng        = ctx.fear_greed_value ?? 50;
+    const fngLabel   = ctx.fear_greed_label || 'Neutral';
 
-    const expColor   = expPct >= maxExpPct ? '#f44336' : expPct >= maxExpPct * 0.85 ? '#ff9800' : '#4ecca3';
     const unrealCls  = unrealPnl >= 0 ? 'positive' : 'negative';
     const pnlHCls    = pnlToday  >= 0 ? 'positive' : 'negative';
     const wrCls      = wr >= 50  ? 'positive' : wr >= 40 ? '' : 'negative';
     const pfCls      = pf >= 1.5 ? 'positive' : pf >= 1.0 ? '' : 'negative';
+    const expColor   = expPct >= maxExpPct ? 'var(--red)' : expPct >= maxExpPct*0.85 ? '#f39c12' : 'var(--green)';
 
     const countdownStr = secsLeft != null
         ? `${Math.floor(secsLeft/60)}:${String(secsLeft%60).padStart(2,'0')}`
         : '—:——';
 
-    // Update header elements
+    // ── Apply adaptive theme ──────────────────────────────────────────────────
+    applyModeTheme(mode);
+
+    // ── Header chips ──────────────────────────────────────────────────────────
     const hLiquid = document.getElementById('headerLiquid');
     const hTotal  = document.getElementById('headerTotal');
     const hCd     = document.getElementById('headerCountdownValue');
+    const hFng    = document.getElementById('headerFng');
+    const hState  = document.getElementById('headerState');
     if (hLiquid) hLiquid.textContent = `$${fmt(liquidUsdt)}`;
     if (hTotal)  hTotal.textContent  = `$${fmt(totalUsdt)}`;
     if (hCd)     hCd.textContent     = countdownStr;
+    if (hFng)    hFng.textContent    = `${fng} ${fngLabel}`;
 
-    // KPI tiles
+    // ── Status bar ────────────────────────────────────────────────────────────
+    const setText = (id, txt, cls) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = txt;
+        if (cls) el.className = 'sb-val ' + cls;
+    };
+    setText('sbPnlHoy',    `${pnlToday >= 0 ? '+' : ''}$${fmt(pnlToday)} USDT`, pnlHCls);
+    setText('sbUnreal',    `${unrealPnl >= 0 ? '+' : ''}$${fmt(unrealPnl)} USDT`, unrealCls);
+    setText('sbWr',        `${fmt(wr,1)}%`, wrCls);
+    setText('sbPf',        fmt(pf), pfCls);
+    setText('sbPositions', `${positions.length}/${maxPos}`, positions.length >= maxPos ? 'sb-val negative' : 'sb-val');
+    const sbExpEl = document.getElementById('sbExposure');
+    if (sbExpEl) { sbExpEl.textContent = `${expPct.toFixed(1)}%`; sbExpEl.style.color = expColor; }
+
+    // Alerts in status bar
+    const sbAlerts = document.getElementById('sbAlerts');
+    if (sbAlerts) {
+        const alerts = [];
+        if (expPct >= maxExpPct * 0.90) alerts.push(`Exposición ${expPct.toFixed(0)}%`);
+        const closeSL = positions.filter(p => {
+            const cur = parseFloat(p.current_price||0), sl = parseFloat(p.stop_loss||0);
+            return sl>0 && cur>0 && Math.abs((sl-cur)/cur*100)<1.0;
+        });
+        if (closeSL.length) alerts.push(`${closeSL.length} pos cerca SL`);
+        if (fng < 20) alerts.push(`F&G: ${fng} — Miedo Extremo`);
+        sbAlerts.innerHTML = alerts.map(a => `<span class="sb-alert">⚠ ${a}</span>`).join('');
+    }
+
+    // ── Header unreal PnL chip ────────────────────────────────────────────────
+    const hUnreal = document.getElementById('chipPnlUnreal');
+    if (hUnreal) { hUnreal.textContent = `${unrealPnl>=0?'+':''}$${fmt(unrealPnl)}`; hUnreal.className = `chip-val ${unrealCls}`; }
+    const hRegime = document.getElementById('chipRegime');
+    if (hRegime) hRegime.textContent = mode;
+
+    // ── Performance tab KPI cards ─────────────────────────────────────────────
+    const setText2 = (id, txt, cls) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = txt;
+        if (cls !== undefined) el.className = 'pkc-val ' + cls;
+    };
+    setText2('perfKpiPnlHoy',    `${pnlToday>=0?'+':''}$${fmt(pnlToday)}`, pnlHCls);
+    setText2('perfKpiWr',        `${fmt(wr,1)}%`, wrCls);
+    setText2('perfKpiPf',        fmt(pf), pfCls);
+
+    // ── Legacy KPI tiles (if present in DOM) ──────────────────────────────────
     const kpiTotal    = document.getElementById('kpiTotal');
     const kpiLiquid   = document.getElementById('kpiLiquid');
     const kpiExp      = document.getElementById('kpiExposure');
@@ -376,10 +460,17 @@ function renderKPIRow(data) {
 // ── Render functions (pure – no fetch) ───────────────────────────────────────
 function renderSystemStatus(d) {
     if (!d) return;
+    const state = (d.state || 'unknown').toLowerCase();
     const dot = document.querySelector('.status-dot');
     const txt = document.querySelector('.status-text');
-    if (dot) dot.className = 'status-dot ' + (d.state || 'unknown').toLowerCase();
+    if (dot) dot.className = 'status-dot ' + state;
     if (txt) txt.textContent = d.state || '—';
+    // Header health chip
+    const hDot  = document.getElementById('healthDot');
+    const hText = document.getElementById('healthText');
+    const color = state === 'running' ? '#4ecca3' : state === 'paused' ? '#f39c12' : '#e74c3c';
+    if (hDot)  { hDot.style.background = color; hDot.style.boxShadow = `0 0 5px ${color}`; }
+    if (hText) hText.textContent = d.state || 'Unknown';
 }
 
 function renderPortfolio(d) {
@@ -2076,6 +2167,15 @@ async function updateDashboard() {
     renderMarketContext(data.market_context);
     renderTickerBar(data.daily_ticker);
 
+    // ── New tab renders ────────────────────────────────────────────────────────
+    renderBTCContext(data.market_regime);
+    renderPairScanner(data.pair_screener);
+    renderPredEvalMarket(data.open_positions);
+    renderSignalsMarket(data.signals);
+    renderPnlSvgChart('pnlChartSvg', data.pnl_history);
+    renderPnlSvgChart('pnlChartSvgPerf', data.pnl_history);
+    renderPredVsRealChart('predVsRealChart', data.expectativa_vs_realidad);
+
     // Optimized params: separate lightweight call (cached 30s in backend)
     try {
         const sp = await fetch(`${API_BASE}/strategy/params`);
@@ -2112,7 +2212,244 @@ async function controlAction(path) {
     } catch (e) { console.error('Control error:', e); }
 }
 
+// ── SVG PnL Chart ─────────────────────────────────────────────────────────────
+function renderPnlSvgChart(containerId, pnlHistory) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const pnlH = pnlHistory || {};
+    const days = pnlH.last_30_days || pnlH.daily_breakdown || [];
+    if (!days.length) {
+        container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:160px;color:#444;font-size:12px">Sin datos de historial</div>';
+        return;
+    }
+    const W = container.clientWidth || 600, H = 160;
+    const PAD = { t:12, r:16, b:28, l:52 };
+    const chartW = W - PAD.l - PAD.r;
+    const chartH = H - PAD.t - PAD.b;
+
+    // cumulative PnL
+    let cum = 0;
+    const points = days.map((d, i) => {
+        const v = parseFloat(d.pnl ?? d.total_pnl ?? 0);
+        cum += v;
+        return { x: i, y: cum, v };
+    });
+
+    const minY = Math.min(0, ...points.map(p => p.y));
+    const maxY = Math.max(0, ...points.map(p => p.y));
+    const rangeY = maxY - minY || 1;
+    const scaleX = chartW / Math.max(points.length - 1, 1);
+    const scaleY = chartH / rangeY;
+
+    const toX = i  => PAD.l + i * scaleX;
+    const toY = yv => PAD.t + chartH - (yv - minY) * scaleY;
+    const zeroY = toY(0);
+
+    // Build SVG path
+    const pts = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(p.y).toFixed(1)}`).join(' ');
+    const fillPts = `${pts} L${toX(points.length-1).toFixed(1)},${zeroY.toFixed(1)} L${toX(0).toFixed(1)},${zeroY.toFixed(1)} Z`;
+
+    const lastY = points[points.length-1]?.y ?? 0;
+    const lineColor = lastY >= 0 ? '#4ecca3' : '#e74c3c';
+    const fillColor = lastY >= 0 ? 'rgba(78,204,163,0.15)' : 'rgba(231,76,60,0.15)';
+
+    // Y-axis labels
+    const yTicks = 3;
+    const yLabels = Array.from({length: yTicks+1}, (_, i) => {
+        const v = minY + (rangeY / yTicks) * i;
+        return `<text x="${PAD.l-6}" y="${toY(v).toFixed(1)}" text-anchor="end" fill="#555" font-size="10" dominant-baseline="middle">${v>=0?'+':''}${v.toFixed(1)}</text>`;
+    }).join('');
+
+    // X-axis labels (every ~7 days)
+    const xLabels = points.filter((_, i) => i % 7 === 0 || i === points.length-1).map(p => {
+        const d2 = days[p.x]; const label = d2?.date ? d2.date.slice(5) : p.x;
+        return `<text x="${toX(p.x).toFixed(1)}" y="${H-6}" text-anchor="middle" fill="#555" font-size="9">${label}</text>`;
+    }).join('');
+
+    container.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+        <defs>
+            <linearGradient id="pnlGrad${containerId}" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="${lineColor}" stop-opacity="0.4"/>
+                <stop offset="100%" stop-color="${lineColor}" stop-opacity="0.02"/>
+            </linearGradient>
+        </defs>
+        <line x1="${PAD.l}" y1="${zeroY.toFixed(1)}" x2="${W-PAD.r}" y2="${zeroY.toFixed(1)}" stroke="#333" stroke-width="1" stroke-dasharray="3,3"/>
+        <path d="${fillPts}" fill="url(#pnlGrad${containerId})"/>
+        <path d="${pts}" fill="none" stroke="${lineColor}" stroke-width="1.5" stroke-linejoin="round"/>
+        ${yLabels}
+        ${xLabels}
+    </svg>`;
+}
+
+// ── BTC Context render ────────────────────────────────────────────────────────
+function renderBTCContext(regime) {
+    const el = document.getElementById('btcContextData');
+    if (!el || !regime) return;
+    const btcPrice = parseFloat(regime.btc_price || 0);
+    const btc24h   = parseFloat(regime.btc_24h_change_pct ?? regime.btc_7d_change_pct ?? 0);
+    const btc7d    = parseFloat(regime.btc_7d_change_pct ?? 0);
+    const btc30d   = parseFloat(regime.btc_30d_change_pct ?? 0);
+    const vol      = parseFloat(regime.btc_volume_24h_usd ?? 0);
+    const trend    = regime.btc_trend || regime.btc_4h_trend || '—';
+    const rsi      = parseFloat(regime.btc_rsi ?? 0);
+    const priceCls = btc24h >= 0 ? 'positive' : 'negative';
+    const trendCls = trend === 'UP' ? 'positive' : trend === 'DOWN' ? 'negative' : '';
+
+    el.innerHTML = `
+        <div style="margin-bottom:10px">
+            <span class="btc-price-big">$${btcPrice ? btcPrice.toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0}) : '—'}</span>
+            <span class="btc-change ${priceCls}">${btc24h>=0?'+':''}${btc24h.toFixed(2)}% (24h)</span>
+        </div>
+        <div class="btc-metrics">
+            <div class="btc-metric">
+                <div class="btc-metric-label">Tendencia 4h</div>
+                <div class="btc-metric-val ${trendCls}">${trend === 'UP' ? '⬆ UP' : trend === 'DOWN' ? '⬇ DOWN' : '→ FLAT'}</div>
+            </div>
+            <div class="btc-metric">
+                <div class="btc-metric-label">RSI 4h</div>
+                <div class="btc-metric-val ${rsi>70?'negative':rsi<30?'positive':''}">${rsi ? rsi.toFixed(1) : '—'}</div>
+            </div>
+            <div class="btc-metric">
+                <div class="btc-metric-label">7d</div>
+                <div class="btc-metric-val ${btc7d>=0?'positive':'negative'}">${btc7d>=0?'+':''}${btc7d.toFixed(2)}%</div>
+            </div>
+            <div class="btc-metric">
+                <div class="btc-metric-label">30d</div>
+                <div class="btc-metric-val ${btc30d>=0?'positive':'negative'}">${btc30d>=0?'+':''}${btc30d.toFixed(2)}%</div>
+            </div>
+        </div>
+        ${vol ? `<div style="font-size:11px;color:#555;margin-top:6px">Vol 24h: $${(vol/1e9).toFixed(2)}B</div>` : ''}
+    `;
+}
+
+// ── Pair Scanner render ───────────────────────────────────────────────────────
+function renderPairScanner(pairScreener) {
+    const el = document.getElementById('pairScannerData');
+    if (!el) return;
+    const pairs = Array.isArray(pairScreener) ? pairScreener : (pairScreener?.pairs || pairScreener?.candidates || []);
+    if (!pairs.length) {
+        el.innerHTML = '<div class="loading">Sin datos del screener</div>';
+        return;
+    }
+    const header = `<div class="scanner-row scanner-header">
+        <span class="scanner-sym">PAR</span>
+        <span>SCORE</span>
+        <span>RSI</span>
+        <span>Vol</span>
+        <span>24h%</span>
+        <span>Trend</span>
+        <span>BIAS</span>
+    </div>`;
+    el.innerHTML = header + pairs.slice(0, 20).map(p => {
+        const score = parseFloat(p.composite_score ?? p.score ?? 0);
+        const rsi   = parseFloat(p.rsi_4h ?? p.rsi ?? 0);
+        const vol   = parseFloat(p.vol_spike ?? p.volume_spike_ratio ?? 0);
+        const chg24 = parseFloat(p.change_24h ?? p.price_change_24h ?? 0);
+        const trend = p.trend_4h ?? p.trend ?? '—';
+        const bias  = p.bias ?? (score >= 0.6 ? 'LONG' : score <= 0.35 ? 'SHORT' : 'NEUTRAL');
+        const bCls  = bias === 'LONG' ? 'scanner-long' : bias === 'SHORT' ? 'scanner-short' : 'scanner-neutral';
+        const chgCls = chg24 >= 0 ? 'scanner-up' : 'scanner-down';
+        const trendCls = trend === 'UP' ? 'scanner-up' : trend === 'DOWN' ? 'scanner-down' : 'scanner-flat';
+        const scoreCls = score >= 0.65 ? 'positive' : score >= 0.50 ? '' : 'negative';
+        return `<div class="scanner-row">
+            <span class="scanner-sym">${p.symbol || '—'}</span>
+            <span class="${scoreCls}">${(score*100).toFixed(0)}%</span>
+            <span style="color:${rsi>70?'#e74c3c':rsi<30?'#4ecca3':'#aaa'}">${rsi.toFixed(1)}</span>
+            <span style="color:${vol>1.5?'#4ecca3':'#888'}">${vol.toFixed(1)}x</span>
+            <span class="${chgCls}">${chg24>=0?'+':''}${chg24.toFixed(2)}%</span>
+            <span class="${trendCls}">${trend}</span>
+            <span><span class="scanner-badge ${bCls}">${bias}</span></span>
+        </div>`;
+    }).join('');
+}
+
+// ── PredEval render (Tab 2) ───────────────────────────────────────────────────
+function renderPredEvalMarket(openPositions) {
+    const el = document.getElementById('predEvalMarketData');
+    if (!el) return;
+    const positions = openPositions?.positions || [];
+    const withPred = positions.filter(p => p.prediction);
+    if (!withPred.length) {
+        el.innerHTML = '<div class="loading">Sin predicciones activas</div>';
+        return;
+    }
+    el.innerHTML = withPred.map(p => {
+        const pred = p.prediction || {};
+        const ep = parseFloat(pred.expected_pnl || 0);
+        const sp = parseFloat(pred.success_probability || 0);
+        const ev = parseFloat(pred.ev_score ?? ep);
+        const evCls = ev >= 0 ? 'positive' : 'negative';
+        const statusLabel = ev >= 0.5 ? '🟢 Mantener' : ev >= 0 ? '🟡 Vigilar' : '🔴 Riesgo';
+        return `<div class="predeval-item">
+            <span class="predeval-sym">${p.symbol}</span>
+            <span class="predeval-status">${statusLabel} <span style="color:#555;font-size:10px">(${(sp*100).toFixed(0)}%)</span></span>
+            <span class="predeval-ev ${evCls}">${ev>=0?'+':''}${ev.toFixed(3)}</span>
+        </div>`;
+    }).join('');
+}
+
+// ── Signals mirror for Market tab ─────────────────────────────────────────────
+function renderSignalsMarket(d) {
+    const targetId = 'signalsDataMarket';
+    const elM = document.getElementById(targetId);
+    if (!elM || !d) return;
+    const elMain = document.getElementById('signalsData');
+    if (elMain) elM.innerHTML = elMain.innerHTML;
+}
+
+// ── Performance SVG: Expectativa vs Realidad scatter ─────────────────────────
+function renderPredVsRealChart(containerId, expectativaData) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const data = expectativaData || {};
+    const items = (data.details || data.items || []).filter(d => d.prediction_pnl != null && d.actual_pnl != null);
+    if (!items.length) {
+        container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:200px;color:#444;font-size:12px">Sin datos de predicción</div>';
+        return;
+    }
+    const W = container.clientWidth || 400, H = 200;
+    const PAD = 36;
+    const chartW = W - PAD*2, chartH = H - PAD*2;
+
+    const xs = items.map(d => parseFloat(d.prediction_pnl));
+    const ys = items.map(d => parseFloat(d.actual_pnl));
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const rx = maxX - minX || 1, ry = maxY - minY || 1;
+    const toX = v => PAD + (v - minX) / rx * chartW;
+    const toY = v => PAD + chartH - (v - minY) / ry * chartH;
+
+    // Diagonal (perfect prediction line)
+    const dx1 = Math.min(minX, minY), dx2 = Math.max(maxX, maxY);
+    const diag = `M${toX(dx1).toFixed(1)},${toY(dx1).toFixed(1)} L${toX(dx2).toFixed(1)},${toY(dx2).toFixed(1)}`;
+
+    const dots = items.map(d => {
+        const cx = toX(parseFloat(d.prediction_pnl)).toFixed(1);
+        const cy = toY(parseFloat(d.actual_pnl)).toFixed(1);
+        const win = parseFloat(d.actual_pnl) >= 0;
+        const color = win ? '#4ecca3' : '#e74c3c';
+        return `<circle cx="${cx}" cy="${cy}" r="4" fill="${color}" fill-opacity="0.7" stroke="${color}" stroke-width="1"/>`;
+    }).join('');
+
+    container.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+        <line x1="${PAD}" y1="${PAD}" x2="${PAD}" y2="${H-PAD}" stroke="#333" stroke-width="1"/>
+        <line x1="${PAD}" y1="${H-PAD}" x2="${W-PAD}" y2="${H-PAD}" stroke="#333" stroke-width="1"/>
+        <path d="${diag}" stroke="#444" stroke-width="1" stroke-dasharray="4,4" fill="none"/>
+        ${dots}
+        <text x="${PAD}" y="${H-4}" font-size="9" fill="#555">Predicción USDT</text>
+        <text x="4" y="${H/2}" font-size="9" fill="#555" transform="rotate(-90,4,${H/2})">Real USDT</text>
+    </svg>`;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+    // ── Tab navigation ────────────────────────────────────────────────────────
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const tabId = btn.dataset.tab;
+            if (tabId) switchTab(tabId);
+        });
+    });
+
     document.getElementById('pauseBtn').addEventListener('click', () => controlAction('/control/pause'));
     document.getElementById('stopBtn').addEventListener('click', () => controlAction('/control/stop'));
     document.getElementById('startBtn').addEventListener('click', () => controlAction('/control/start'));

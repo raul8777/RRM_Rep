@@ -1,321 +1,428 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Crypto Trading Agent Dashboard</title>
-    <link rel="stylesheet" href="/frontend/styles.css?v=19">
+    <title>Crypto Agent — Dashboard</title>
+    <link rel="stylesheet" href="/frontend/styles.css?v=20">
 </head>
-<body>
-    <div class="container">
-        <header>
-            <h1>Crypto Trading Agent</h1>
-            <div class="header-right">
-                <div class="trading-mode-badge" id="tradingModeBadge" title="">
-                    <span class="mode-dot" id="tradingModeDot"></span>
-                    <span class="mode-label">Modo</span>
-                    <span class="mode-text" id="tradingModeText">...</span>
-                </div>
-                <div class="market-regime-badge" id="marketRegime" title="">
-                    <span class="regime-dot" id="marketRegimeDot"></span>
-                    <span class="regime-label" id="marketRegimeLabel">Mercado</span>
-                    <span class="regime-text" id="marketRegimeText">...</span>
-                </div>
-                <div class="fng-badge" id="fngBadge" title="Crypto Fear &amp; Greed Index">
-                    <span class="fng-dot" id="fngDot"></span>
-                    <span class="fng-label">F&amp;G</span>
-                    <span class="fng-value" id="fngValue">—</span>
-                </div>
-                <!-- Capital summary in header -->
-                <div class="header-capital" id="headerCapital" title="Capital disponible vs total">
-                    <span class="header-capital-label">Líquido</span>
-                    <span class="header-capital-value" id="headerLiquid">—</span>
-                    <span class="header-capital-sep">/</span>
-                    <span class="header-capital-total" id="headerTotal">—</span>
-                </div>
-                <!-- Prominent cycle countdown -->
-                <div class="header-countdown" id="headerCountdown" title="Próximo ciclo de trading">
-                    <span class="header-countdown-label">Ciclo</span>
-                    <span class="header-countdown-value" id="headerCountdownValue">—:——</span>
-                </div>
-                <div class="status-indicator" id="systemStatus">
-                    <span class="status-dot"></span>
-                    <span class="status-text">Loading...</span>
-                </div>
-                <div id="healthBadge" title="Estado del sistema" style="cursor:pointer" onclick="document.getElementById('errorCard').scrollIntoView({behavior:'smooth'})">
-                    <span id="healthDot" style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#888;margin-right:4px"></span>
-                    <span id="healthText" style="font-size:0.85rem;color:#ccc">Health...</span>
-                </div>
-            </div>
-        </header>
+<body class="mode-FUTURES_SHORT" id="appBody">
 
-        <div class="controls">
-            <button id="pauseBtn" class="btn btn-warning">PAUSAR</button>
-            <button id="stopBtn" class="btn btn-danger">DETENER</button>
-            <button id="startBtn" class="btn btn-success">ENCENDER</button>
+<!-- ══ HEADER FIJO ══════════════════════════════════════════════════════════ -->
+<header class="app-header" id="appHeader">
+    <div class="header-left">
+        <div class="app-logo">⚡</div>
+        <div class="app-title">Crypto<span>Agent</span></div>
+        <div class="mode-pill" id="modePill">
+            <span class="mode-pill-dot" id="modePillDot"></span>
+            <span class="mode-pill-text" id="modePillText">...</span>
         </div>
-
-        <!-- Market Ticker Bar -->
-        <div class="ticker-bar" id="tickerBar">
-            <div class="ticker-track" id="tickerTrack">
-                <span class="ticker-loading">Cargando precios...</span>
-            </div>
+    </div>
+    <div class="header-center">
+        <div class="status-chip" id="fngChip" title="Fear &amp; Greed Index">
+            <span class="chip-icon">😱</span>
+            <span class="chip-val" id="headerFng">—</span>
+            <span class="chip-label">F&amp;G</span>
         </div>
+        <div class="status-chip" id="capitalChip">
+            <span class="chip-icon">💰</span>
+            <span class="chip-val" id="headerLiquid">—</span>
+            <span class="chip-label">liq</span>
+            <span class="chip-sep">/</span>
+            <span class="chip-val2" id="headerTotal">—</span>
+        </div>
+        <div class="status-chip" id="pnlChip">
+            <span class="chip-icon">📈</span>
+            <span class="chip-val" id="chipPnlUnreal">—</span>
+            <span class="chip-label">unreal</span>
+        </div>
+        <div class="status-chip countdown-chip" id="cycleChip" title="Próximo ciclo">
+            <span class="chip-icon">⏱</span>
+            <span class="chip-val countdown" id="headerCountdownValue">—:——</span>
+            <span class="chip-label" id="chipRegime">—</span>
+        </div>
+        <div class="status-chip" id="healthChip" onclick="switchTab('tab-system')" style="cursor:pointer">
+            <span id="healthDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#888;margin-right:4px;flex-shrink:0"></span>
+            <span id="healthText" style="font-size:11px;color:#ccc">Health</span>
+        </div>
+    </div>
+    <div class="header-right">
+        <button id="pauseBtn" class="hdr-btn hdr-warn" title="Pausar sistema">⏸ PAUSAR</button>
+        <button id="stopBtn"  class="hdr-btn hdr-danger" title="Detener sistema">⏹ STOP</button>
+        <button id="startBtn" class="hdr-btn hdr-success" title="Iniciar sistema">▶ ON</button>
+        <div class="system-dot-wrap">
+            <span class="status-dot" id="sysDot"></span>
+            <span class="status-text" id="sysText">...</span>
+        </div>
+    </div>
+</header>
 
-        <div class="dashboard-grid">
+<!-- ══ TICKER BAR ════════════════════════════════════════════════════════════ -->
+<div class="ticker-bar" id="tickerBar">
+    <div class="ticker-track" id="tickerTrack">
+        <span class="ticker-loading">Cargando precios...</span>
+    </div>
+</div>
 
-            <!-- ══ ZONA 1: RESUMEN EJECUTIVO ══════════════════════════════════ -->
-            <div class="card card-full card-executive" id="executiveSummaryCard">
-                <h2>🧠 Resumen Ejecutivo</h2>
-                <div id="executiveSummaryData">
-                    <p class="loading">Generando resumen...</p>
-                </div>
-            </div>
+<!-- ══ STATUS BAR ════════════════════════════════════════════════════════════ -->
+<div class="status-bar" id="statusBar">
+    <div class="sb-item">
+        <span class="sb-label">PnL Hoy</span>
+        <span class="sb-val" id="sbPnlHoy">—</span>
+    </div>
+    <div class="sb-sep"></div>
+    <div class="sb-item">
+        <span class="sb-label">No Realizado</span>
+        <span class="sb-val" id="sbUnreal">—</span>
+    </div>
+    <div class="sb-sep"></div>
+    <div class="sb-item">
+        <span class="sb-label">Win Rate</span>
+        <span class="sb-val" id="sbWr">—</span>
+    </div>
+    <div class="sb-sep"></div>
+    <div class="sb-item">
+        <span class="sb-label">Profit Factor</span>
+        <span class="sb-val" id="sbPf">—</span>
+    </div>
+    <div class="sb-sep"></div>
+    <div class="sb-item">
+        <span class="sb-label">Posiciones</span>
+        <span class="sb-val" id="sbPositions">—</span>
+    </div>
+    <div class="sb-sep"></div>
+    <div class="sb-item">
+        <span class="sb-label">Exposición</span>
+        <span class="sb-val" id="sbExposure">—</span>
+    </div>
+    <div class="sb-sep"></div>
+    <div class="sb-alerts" id="sbAlerts"></div>
+</div>
 
-            <!-- ══ ZONA 2: KPI ROW ════════════════════════════════════════════ -->
-            <div class="card card-full card-kpi-row">
-                <div class="kpi-grid" id="kpiRow">
-                    <div class="kpi-item">
-                        <div class="kpi-label">Capital Total</div>
-                        <div class="kpi-value" id="kpiTotal">—</div>
-                        <div class="kpi-sub" id="kpiLiquid">Líquido: —</div>
-                    </div>
-                    <div class="kpi-item">
-                        <div class="kpi-label">Exposición</div>
-                        <div class="kpi-value" id="kpiExposure">—</div>
-                        <div class="kpi-sub" id="kpiExposureCap">Cap: —</div>
-                    </div>
-                    <div class="kpi-item">
-                        <div class="kpi-label">PnL No Realizado</div>
-                        <div class="kpi-value" id="kpiUnrealPnl">—</div>
-                        <div class="kpi-sub" id="kpiPnlHoy">Hoy: —</div>
-                    </div>
-                    <div class="kpi-item">
-                        <div class="kpi-label">Win Rate</div>
-                        <div class="kpi-value" id="kpiWr">—</div>
-                        <div class="kpi-sub" id="kpiPf">Profit Factor: —</div>
-                    </div>
-                    <div class="kpi-item">
-                        <div class="kpi-label">Posiciones</div>
-                        <div class="kpi-value" id="kpiPositions">—</div>
-                        <div class="kpi-sub" id="kpiPositionsSub">Abiertas</div>
-                    </div>
-                    <div class="kpi-item">
-                        <div class="kpi-label">Próximo Ciclo</div>
-                        <div class="kpi-value kpi-countdown countdown" id="kpiCountdown">—:——</div>
-                        <div class="kpi-sub" id="kpiCycleSub">Régimen: —</div>
-                    </div>
-                </div>
-            </div>
+<!-- ══ TAB NAV ════════════════════════════════════════════════════════════════ -->
+<nav class="tab-nav" id="tabNav">
+    <button class="tab-btn active" data-tab="tab-ops"    onclick="switchTab('tab-ops')">
+        <span class="tab-icon">📊</span> Operaciones
+    </button>
+    <button class="tab-btn"        data-tab="tab-market" onclick="switchTab('tab-market')">
+        <span class="tab-icon">🌡️</span> Mercado
+    </button>
+    <button class="tab-btn"        data-tab="tab-perf"   onclick="switchTab('tab-perf')">
+        <span class="tab-icon">📈</span> Rendimiento
+    </button>
+    <button class="tab-btn"        data-tab="tab-system" onclick="switchTab('tab-system')">
+        <span class="tab-icon">🔧</span> Sistema
+    </button>
+</nav>
 
-            <!-- ══ ZONA 3: MERCADO + MODO (fusionados) ════════════════════════ -->
-            <div class="card card-wide">
-                <h2>🌡️ Contexto de Mercado</h2>
-                <div id="marketContextData">
-                    <p class="loading">Cargando contexto...</p>
-                </div>
-            </div>
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- TAB 1 — OPERACIONES                                                       -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="tab-content active" id="tab-ops">
+    <div class="ops-layout">
 
-            <div class="card card-wide">
-                <h2>⚙️ Régimen de Trading</h2>
-                <div id="tradingModeData">
-                    <p class="loading">Detectando régimen...</p>
-                </div>
-            </div>
+        <!-- LEFT COLUMN -->
+        <div class="ops-main">
 
-            <!-- ══ ZONA 4: SEÑALES ════════════════════════════════════════════ -->
-            <div class="card card-full">
-                <h2>📡 Señales Recientes <span style="font-size:12px;font-weight:400;color:#888">(BUY &amp; SELL)</span></h2>
-                <div id="signalsData">
-                    <p>Cargando señales...</p>
-                </div>
-            </div>
-
-            <!-- ══ ZONA 5: POSICIONES ABIERTAS ════════════════════════════════ -->
-            <div class="card card-full">
-                <h2>📂 Posiciones Abiertas
-                    <span style="display:flex;align-items:center;gap:8px">
-                        <label class="toggle-mxn-label">
-                            <input type="checkbox" id="toggleMxn"> Ver MXN
+            <!-- Posiciones Abiertas — Spot + Futures unificadas -->
+            <div class="card" id="openPosCard">
+                <div class="card-header">
+                    <h2>📂 Posiciones Abiertas</h2>
+                    <div class="card-actions">
+                        <label class="toggle-label">
+                            <input type="checkbox" id="toggleMxn"> MXN
                         </label>
-                        <button class="btn btn-primary btn-sm" id="syncBalanceBtn" title="Importar activos de Binance no rastreados como posiciones gestionables">⇄ Sincronizar</button>
-                    </span>
-                </h2>
-                <div id="openPositionsData">
-                    <p>Loading open positions...</p>
-                </div>
-            </div>
-
-            <!-- ══ ZONA 5.5: EXPECTATIVA VS REALIDAD ═══════════════════════════ -->
-            <div class="card card-full">
-                <h2>🎯 Expectativa vs Realidad</h2>
-                <div id="expectativaVsRealidadData">
-                    <p class="loading">Analizando predicciones...</p>
-                </div>
-            </div>
-
-            <!-- ══ ZONA 5.6: AUDITORÍA VOLSPIKE OVERRIDE ═══════════════════════ -->
-            <div class="card card-full">
-                <h2>⚡ Auditoría Override (VolSpike)</h2>
-                <div id="volSpikeAuditData">
-                    <p class="loading">Cargando métricas de auditoría...</p>
-                </div>
-            </div>
-
-            <!-- ══ ZONA 6: FUTUROS ABIERTAS ═══════════════════════════════════ -->
-            <div class="card card-full" id="futuresCard">
-                <h2>� Posiciones Futuros Abiertas (2×)</h2>
-                <div id="futuresPositionsData">
-                    <p class="loading">Cargando posiciones de futuros...</p>
-                </div>
-            </div>
-
-            <!-- ══ ZONA 6.5: FUTUROS CERRADOS ════════════════════════════════════ -->
-            <div class="card card-full" id="futuresClosedCard">
-                <h2>📈 Futuros Cerrados (últimos 3 días)</h2>
-                <div id="futuresClosedData">
-                    <p class="loading">Cargando futuros cerrados...</p>
-                </div>
-            </div>
-
-            <!-- ══ ZONA 7: PERFORMANCE HISTÓRICA (PnL + Análisis fusionados) ══ -->
-            <div class="card card-wide">
-                <h2>📊 Performance Histórica</h2>
-                <div id="pnlHistoryData">
-                    <p>Loading PnL history...</p>
-                </div>
-            </div>
-
-            <div class="card card-wide">
-                <h2>📈 Estadísticas del Sistema</h2>
-                <div id="analysisSummaryData">
-                    <p>Loading analysis summary...</p>
-                </div>
-            </div>
-
-            <!-- ══ ZONA 8: POSICIONES CERRADAS ════════════════════════════════ -->
-            <div class="card card-full">
-                <h2>✅ Posiciones Cerradas (Últimas 20)</h2>
-                <div id="closedPositionsData">
-                    <p>Loading closed positions...</p>
-                </div>
-            </div>
-
-            <!-- ══ ZONA 9: BALANCE DETALLADO ══════════════════════════════════ -->
-            <div class="card card-wide">
-                <h2>💼 Balance</h2>
-                <div id="balanceData">
-                    <p>Loading balance data...</p>
-                </div>
-            </div>
-
-            <!-- ══ ZONA 10: PROYECCIÓN DE GANANCIAS ═══════════════════════════ -->
-            <div class="card card-wide">
-                <h2>💰 Proyección de Ganancias</h2>
-                <div id="profitProjectionData">
-                    <p class="loading">Calculando proyección...</p>
-                </div>
-            </div>
-
-            <!-- ══ ZONA 11: MONTE CARLO (colapsable) ══════════════════════════ -->
-            <div class="card card-full card-collapsible" id="mcCard">
-                <h2 class="collapsible-header" onclick="toggleSection('mcBody', 'mcChevron')">
-                    📊 Proyección Monte Carlo — 180 días
-                    <span class="chevron" id="mcChevron">▶</span>
-                </h2>
-                <div id="mcBody" class="collapsible-body collapsed">
-                    <div id="monteCarloData">
-                        <p class="loading">Cargando proyección...</p>
+                        <button class="btn btn-primary btn-xs" id="syncBalanceBtn" title="Sincronizar con Binance">⇄ Sync</button>
                     </div>
                 </div>
+                <div id="openPositionsData"><p class="loading">Cargando posiciones...</p></div>
             </div>
 
-            <!-- ══ ZONA 12: ANÁLISIS AVANZADO (colapsable) ════════════════════ -->
-            <div class="card card-full card-collapsible card-advanced">
-                <h2 class="collapsible-header" onclick="toggleSection('advancedBody', 'advChevron')">
-                    ⚙️ Análisis Avanzado
-                    <span class="chevron" id="advChevron">▶</span>
-                </h2>
-                <div id="advancedBody" class="collapsible-body collapsed">
-                    <div class="advanced-grid">
+            <!-- Futuros Abiertos (visible solo en FUTURES_SHORT) -->
+            <div class="card" id="futuresCard">
+                <div class="card-header">
+                    <h2>📉 Futuros SHORT Abiertos <span class="badge-lev">2×</span></h2>
+                </div>
+                <div id="futuresPositionsData"><p class="loading">Cargando futuros...</p></div>
+            </div>
 
-                        <!-- Aprendizaje -->
-                        <div class="adv-card">
-                            <h3>🤖 Aprendizaje del Sistema</h3>
-                            <div id="learningData">
-                                <p class="loading">Cargando datos de aprendizaje...</p>
-                            </div>
-                            <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
-                                <button class="btn btn-primary btn-sm" id="triggerLearningBtn">⚡ Re-Aprender</button>
-                                <button class="btn btn-success btn-sm" id="bootstrapBtn" title="Cargar 90 días de historia de Binance para calibrar el predictor de PnL">📊 Bootstrap Predictor (90d)</button>
-                            </div>
-                        </div>
+            <!-- Posiciones Cerradas -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>✅ Trades Cerrados <span class="card-sub">últimos 3 días</span></h2>
+                </div>
+                <div id="closedPositionsData"><p class="loading">Cargando...</p></div>
+            </div>
 
-                        <!-- Estrategia Activa -->
-                        <div class="adv-card">
-                            <h3>🎯 Estrategia Activa</h3>
-                            <div id="strategyData">
-                                <p class="loading">Cargando estrategia...</p>
-                            </div>
-                        </div>
+            <!-- Futuros Cerrados -->
+            <div class="card" id="futuresClosedCard">
+                <div class="card-header">
+                    <h2>📦 Futuros Cerrados <span class="card-sub">últimos 3 días</span></h2>
+                </div>
+                <div id="futuresClosedData"><p class="loading">Cargando...</p></div>
+            </div>
 
-                        <!-- Parámetros Optimizados -->
-                        <div class="adv-card">
-                            <h3>� Parámetros Optimizados</h3>
-                            <div id="optimizedParamsData">
-                                <p class="loading">Cargando parámetros...</p>
-                            </div>
-                        </div>
+        </div>
 
-                    </div>
+        <!-- RIGHT COLUMN -->
+        <div class="ops-side">
 
-                    <!-- Backtesting -->
-                    <div class="adv-backtest">
-                        <h3>🔬 Backtesting
-                            <span class="backtest-controls">
-                                <select id="backtestSymbol" class="bt-select">
-                                    <option value="BTCUSDT">BTCUSDT</option>
-                                    <option value="ETHUSDT">ETHUSDT</option>
-                                    <option value="BNBUSDT">BNBUSDT</option>
-                                    <option value="SOLUSDT">SOLUSDT</option>
-                                    <option value="XRPUSDT">XRPUSDT</option>
-                                </select>
-                                <select id="backtestDays" class="bt-select">
-                                    <option value="14">14d</option>
-                                    <option value="30" selected>30d</option>
-                                    <option value="60">60d</option>
-                                    <option value="90">90d</option>
-                                </select>
-                                <button class="btn btn-success btn-sm" id="runBacktestBtn">▶ Ejecutar</button>
-                            </span>
-                        </h3>
-                        <div id="backtestData">
-                            <p class="loading">Sin backtests ejecutados aún.</p>
-                        </div>
-                    </div>
+            <!-- Mini PnL Chart -->
+            <div class="card card-chart">
+                <div class="card-header">
+                    <h2>📈 PnL Acumulado</h2>
+                    <span class="card-sub" id="pnlChartSub">últimos trades</span>
+                </div>
+                <div id="pnlChartSvg" class="chart-container">
+                    <p class="loading">Sin datos...</p>
                 </div>
             </div>
 
-            <!-- ══ ZONA 13: SISTEMA & ERRORES ═════════════════════════════════ -->
-            <div class="card card-full" id="errorCard">
-                <h2>🔧 Sistema &amp; Errores
-                    <span style="float:right;display:flex;gap:8px">
-                        <button class="btn btn-primary btn-sm" id="refreshHealthBtn">&#x21bb; Actualizar</button>
-                        <button class="btn btn-warning btn-sm" id="clearErrorsBtn">&#x1F9F9; Limpiar</button>
-                    </span>
-                </h2>
-                <div id="healthChecksData">
-                    <p class="loading">Cargando health checks...</p>
+            <!-- Resumen Portfolio -->
+            <div class="card">
+                <div class="card-header"><h2>💼 Portfolio</h2></div>
+                <div id="balanceData"><p class="loading">Cargando balance...</p></div>
+            </div>
+
+            <!-- Señales recientes -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>📡 Señales <span class="card-sub">recientes</span></h2>
                 </div>
-                <h3 style="margin-top:16px;color:#aaa;font-size:14px">Errores recientes</h3>
-                <div id="errorsData" class="errors-scroll">
-                    <p class="loading">Cargando errores...</p>
-                </div>
+                <div id="signalsData"><p class="loading">Cargando señales...</p></div>
+            </div>
+
+            <!-- Auditoría VolSpike -->
+            <div class="card">
+                <div class="card-header"><h2>⚡ Override VolSpike</h2></div>
+                <div id="volSpikeAuditData"><p class="loading">Cargando...</p></div>
             </div>
 
         </div>
     </div>
+</div>
 
-    <script src="/frontend/dashboard.js?v=19"></script>
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- TAB 2 — MERCADO                                                           -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-market">
+    <div class="market-layout">
+
+        <!-- Col 1: Régimen Activo -->
+        <div class="market-col-regime">
+            <div class="card card-regime" id="regimeCard">
+                <div class="card-header"><h2>⚙️ Régimen Activo</h2></div>
+                <div id="tradingModeData"><p class="loading">Detectando...</p></div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2>🌡️ Fear &amp; Greed</h2></div>
+                <div id="marketContextData"><p class="loading">Cargando...</p></div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2>📊 BTC Contexto</h2></div>
+                <div id="btcContextData"><p class="loading">Cargando BTC...</p></div>
+            </div>
+        </div>
+
+        <!-- Col 2: Scanner de pares -->
+        <div class="market-col-scanner">
+            <div class="card card-scanner">
+                <div class="card-header">
+                    <h2>🔍 Scanner de Pares</h2>
+                    <span class="card-sub" id="scannerSub">análisis técnico</span>
+                </div>
+                <div id="pairScannerData"><p class="loading">Cargando análisis...</p></div>
+            </div>
+        </div>
+
+        <!-- Col 3: Señales + PredEval -->
+        <div class="market-col-signals">
+            <div class="card">
+                <div class="card-header"><h2>📡 Señales Recientes</h2></div>
+                <div id="signalsDataMarket"><p class="loading">Cargando...</p></div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2>🧠 PredEval Activo</h2></div>
+                <div id="predEvalMarketData"><p class="loading">Cargando evaluaciones...</p></div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- TAB 3 — RENDIMIENTO                                                       -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-perf">
+    <div class="perf-layout">
+
+        <!-- Gráfica PnL principal -->
+        <div class="card card-pnl-full">
+            <div class="card-header">
+                <h2>📈 PnL Acumulado — Expectativa vs Realidad</h2>
+                <div class="chart-legend">
+                    <span class="legend-dot" style="background:#4ecca3"></span><span>Real</span>
+                    <span class="legend-dot" style="background:#9b59b6;margin-left:12px"></span><span>Esperado</span>
+                </div>
+            </div>
+            <div id="pnlFullChart" class="chart-container chart-tall"></div>
+        </div>
+
+        <!-- KPI Row rendimiento -->
+        <div class="perf-kpi-row">
+            <div class="perf-kpi-card">
+                <div class="pkc-label">Win Rate Real</div>
+                <div class="pkc-val" id="perfKpiWr">—</div>
+                <div class="pkc-sub" id="perfWrSub">—</div>
+            </div>
+            <div class="perf-kpi-card">
+                <div class="pkc-label">Profit Factor</div>
+                <div class="pkc-val" id="perfKpiPf">—</div>
+                <div class="pkc-sub">ratio gana/pierde</div>
+            </div>
+            <div class="perf-kpi-card">
+                <div class="pkc-label">Accuracy Predictor</div>
+                <div class="pkc-val" id="perfKpiAcc">—</div>
+                <div class="pkc-sub">predicción vs real</div>
+            </div>
+            <div class="perf-kpi-card">
+                <div class="pkc-label">Avg Hold</div>
+                <div class="pkc-val" id="perfKpiHold">—</div>
+                <div class="pkc-sub">tiempo promedio</div>
+            </div>
+            <div class="perf-kpi-card">
+                <div class="pkc-label">PnL Hoy</div>
+                <div class="pkc-val" id="perfKpiPnlHoy">—</div>
+                <div class="pkc-sub" id="perfPnlSemana">semana: —</div>
+            </div>
+            <div class="perf-kpi-card">
+                <div class="pkc-label">WR por Categoría</div>
+                <div class="pkc-val" id="perfKpiWrCat">—</div>
+                <div class="pkc-sub">mejor categoría</div>
+            </div>
+        </div>
+
+        <!-- Expectativa vs Realidad tabla -->
+        <div class="card">
+            <div class="card-header">
+                <h2>🎯 Expectativa vs Realidad</h2>
+                <span class="card-sub">últimas posiciones con predicción</span>
+            </div>
+            <div id="expectativaVsRealidadData"><p class="loading">Analizando...</p></div>
+        </div>
+
+        <!-- Gráfica Barras dual Exp vs Real -->
+        <div class="card">
+            <div class="card-header">
+                <h2>� Predicción vs Resultado <span class="card-sub">últimos 10 trades</span></h2>
+            </div>
+            <div id="predVsRealChart" class="chart-container"></div>
+        </div>
+
+        <!-- Win Rate por categoría -->
+        <div class="card">
+            <div class="card-header"><h2>📊 Estadísticas del Sistema</h2></div>
+            <div id="analysisSummaryData"><p class="loading">Cargando...</p></div>
+        </div>
+
+        <!-- Proyección -->
+        <div class="card">
+            <div class="card-header"><h2>💰 Proyección de Ganancias</h2></div>
+            <div id="profitProjectionData"><p class="loading">Calculando...</p></div>
+        </div>
+
+        <!-- Monte Carlo (colapsable) -->
+        <div class="card card-collapsible" id="mcCard">
+            <h2 class="collapsible-header" onclick="toggleSection('mcBody','mcChevron')">
+                📊 Monte Carlo — 180 días
+                <span class="chevron" id="mcChevron">▶</span>
+            </h2>
+            <div id="mcBody" class="collapsible-body collapsed">
+                <div id="monteCarloData"><p class="loading">Cargando...</p></div>
+            </div>
+        </div>
+
+        <!-- Avanzado (colapsable) -->
+        <div class="card card-collapsible card-advanced">
+            <h2 class="collapsible-header" onclick="toggleSection('advancedBody','advChevron')">
+                ⚙️ Análisis Avanzado
+                <span class="chevron" id="advChevron">▶</span>
+            </h2>
+            <div id="advancedBody" class="collapsible-body collapsed">
+                <div class="advanced-grid">
+                    <div class="adv-card">
+                        <h3>🤖 Aprendizaje del Sistema</h3>
+                        <div id="learningData"><p class="loading">Cargando...</p></div>
+                        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+                            <button class="btn btn-primary btn-xs" id="triggerLearningBtn">⚡ Re-Aprender</button>
+                            <button class="btn btn-success btn-xs" id="bootstrapBtn">📊 Bootstrap (90d)</button>
+                        </div>
+                    </div>
+                    <div class="adv-card">
+                        <h3>🎯 Estrategia Activa</h3>
+                        <div id="strategyData"><p class="loading">Cargando...</p></div>
+                    </div>
+                    <div class="adv-card">
+                        <h3>🔧 Parámetros Optimizados</h3>
+                        <div id="optimizedParamsData"><p class="loading">Cargando...</p></div>
+                    </div>
+                </div>
+                <div class="adv-backtest">
+                    <h3>🔬 Backtesting
+                        <span class="backtest-controls">
+                            <select id="backtestSymbol" class="bt-select">
+                                <option value="BTCUSDT">BTCUSDT</option>
+                                <option value="ETHUSDT">ETHUSDT</option>
+                                <option value="BNBUSDT">BNBUSDT</option>
+                                <option value="SOLUSDT">SOLUSDT</option>
+                                <option value="XRPUSDT">XRPUSDT</option>
+                            </select>
+                            <select id="backtestDays" class="bt-select">
+                                <option value="14">14d</option>
+                                <option value="30" selected>30d</option>
+                                <option value="60">60d</option>
+                                <option value="90">90d</option>
+                            </select>
+                            <button class="btn btn-success btn-xs" id="runBacktestBtn">▶ Ejecutar</button>
+                        </span>
+                    </h3>
+                    <div id="backtestData"><p class="loading">Sin backtests.</p></div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- TAB 4 — SISTEMA                                                           -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-system">
+    <div class="system-layout">
+        <div class="card" id="errorCard">
+            <div class="card-header">
+                <h2>🔧 Health Checks</h2>
+                <div class="card-actions">
+                    <button class="btn btn-primary btn-xs" id="refreshHealthBtn">↻ Actualizar</button>
+                    <button class="btn btn-warning btn-xs" id="clearErrorsBtn">🧹 Limpiar</button>
+                </div>
+            </div>
+            <div id="healthChecksData"><p class="loading">Cargando...</p></div>
+        </div>
+        <div class="card">
+            <div class="card-header"><h2>🚨 Errores Recientes</h2></div>
+            <div id="errorsData" class="errors-scroll"><p class="loading">Cargando errores...</p></div>
+        </div>
+        <div class="card">
+            <div class="card-header"><h2>📊 PnL Historia</h2></div>
+            <div id="pnlHistoryData"><p class="loading">Cargando...</p></div>
+        </div>
+    </div>
+</div>
+
+<!-- ══ MODAL DETALLE POSICIÓN ════════════════════════════════════════════════ -->
+<!-- Injected dynamically by JS -->
+
+<script src="/frontend/dashboard.js?v=20"></script>
 </body>
 </html>
