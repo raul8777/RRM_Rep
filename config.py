@@ -321,6 +321,7 @@ class Settings(BaseSettings):
     futures_enabled: bool = Field(default=False, env="FUTURES_ENABLED")  # must opt-in explicitly
     futures_leverage: int = Field(default=2, env="FUTURES_LEVERAGE")           # hard max 2x
     futures_max_shorts: int = Field(default=5, env="FUTURES_MAX_SHORTS")       # max simultaneous shorts
+    futures_max_largecap_shorts: int = Field(default=5, env="FUTURES_MAX_LARGECAP_SHORTS")  # max LARGE_CAP shorts simultaneously (diversification guard — raise MAX_SHORTS but keep this at 5 to force MID-CAP slots)
     futures_usdt_per_trade: float = Field(default=20.0, env="FUTURES_USDT_PER_TRADE")  # margin per short
     futures_sl_pct: float = Field(default=3.0, env="FUTURES_SL_PCT")           # SL % above entry
     futures_tp_pct: float = Field(default=5.0, env="FUTURES_TP_PCT")           # TP % below entry
@@ -328,6 +329,9 @@ class Settings(BaseSettings):
     futures_symbols: list = Field(default=[
         'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT',
     ], env="FUTURES_SYMBOLS")   # symbols eligible for shorting
+    futures_largecap_symbols: list = Field(default=[
+        'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT',
+    ], env="FUTURES_LARGECAP_SYMBOLS")   # LARGE_CAP futures symbols for category cap
     futures_no_short_btc_4h_threshold: float = Field(default=2.0, env="FUTURES_NO_SHORT_BTC_4H_THRESHOLD")
     # Futures overflow: allow extra SHORTs beyond futures_max_shorts when signal is exceptional
     futures_overflow_max_extra: int   = Field(default=3,    env="FUTURES_OVERFLOW_MAX_EXTRA")    # max extra simultaneous overflow SHORTs (3+3=6 total) — review after 1 week

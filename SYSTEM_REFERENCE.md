@@ -52,17 +52,17 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 17 2026 18:41 UTC-6 |
-| Capital total | ~$3,000 USDT |
-| Capital spot líquido | ~$469 USDT |
-| Capital invertido spot | ~$581 USDT (TRX/TON/U/INJ) |
-| Capital futuros | ~$810 USDT ($300 margin usado en 3 SHORTs) |
-| Régimen activo | **FUTURES_SHORT** (confirmado — BTC 30d=-16.7%) |
+| Fecha última actualización | jun 18 2026 16:30 UTC-6 |
+| Capital total | ~$2,840 USDT |
+| Capital spot líquido | ~$1,642 USDT |
+| Capital invertido spot | ~$53 USDT (UUSDT stablecoin) |
+| Capital futuros total | ~$1,198 USDT ($662 margin + $523 libre + $27 unrealized PnL) |
+| Régimen activo | **FUTURES_SHORT** (confirmado — BTC 30d=-19.0%) |
 | Fear & Greed | **15 — Capitulación** |
 | BTC 4h trend | DOWN (EMA9 < EMA21) |
-| BTC 7d | +1.6% |
-| BTC 30d | -16.7% (bear estructural activo) |
-| Screener dinámico | ✅ ACTIVO — 41 spot / 9 futures |
+| BTC 7d | -1.2% |
+| BTC 30d | -19.0% (bear estructural activo) |
+| Screener dinámico | ✅ ACTIVO — 41 spot / 19 futures (F2 expansión jun 18) |
 | Screener v2 Top-100 | ✅ CONFIGURADO — quality filters $10M vol, max volatility 50% |
 | Expansión activos E1 | ✅ COMPLETADA — 24→41 tokens con datos históricos reales |
 | Hedge mode Binance | ✅ ACTIVADO (`dualSidePosition=true`) |
@@ -70,7 +70,11 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 | Dashboard Auditoría PnL | ✅ COMPLETADO — métricas de expectativa vs realidad |
 | Futuros monitoring | ✅ check_positions() corre cada ciclo independiente de régimen |
 | Shorts protección ganancia | ✅ futures_protect_profit_usdt=1.0 — solo cierra shorts en pérdida al cambiar régimen |
-| Futuros SHORTs activos | **3** — BTC(entry=64,546), ETH(entry=1,753), SOL(entry=72.26) — SL/TP activos |
+| Futuros SHORTs activos | **5/5** — BTC(+2.75%), ETH(+2.97%), SOL(+3.89%), BNB(+0.34%), XRP(+0.76%) — unrealized +$27 |
+| FUTURES_MAX_SHORTS | **5** (subido de 3 jun 18 2026) |
+| FUTURES_MAX_LARGECAP_SHORTS | **5** (guard activo — al escalar a 7, mantener en 5 para forzar MIDs) |
+| CapBridge | ✅ ACTIVO — transferencia autónoma bidireccional spot↔futuros (jun 18 2026) |
+| B2 auto-close spots bear | ✅ ACTIVO — cierra spot LONGs +0.3% PnL en FUTURES_SHORT regime |
 | Docker | live, sin errores |
 | dry_run | False |
 | allow_real_trading | True |
@@ -81,6 +85,12 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 | **Bias correction** | **1.111 promedio (cap 1.5 para sintéticos, sube con trades reales)** |
 | Win rate histórico (sim) | **37.9% en bear market** — normal, PRESERVATION protege capital |
 | **Datos históricos** | **Parquet 1h: 41 archivos, 0.13 GB / 50 GB — `/app/historical_data/`** |
+
+### ⏱ Próxima decisión de slots (revisión en 48-72h)
+- SOL está a ~2.2% del TP → slot se libera pronto → NEAR/SUI/AVAX entran automáticamente
+- **Si los primeros 2-3 cierres son TP (no SL) → subir `FUTURES_MAX_SHORTS=7` + mantener `FUTURES_MAX_LARGECAP_SHORTS=5`**
+- Los 2 slots nuevos (6 y 7) serán MIDs automáticamente por el LARGECAP_CAP guard
+- Guard ya implementado en `futures_client.py._pre_entry_checks()` — commit pendiente de activar
 
 ---
 

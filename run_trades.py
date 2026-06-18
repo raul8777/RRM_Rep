@@ -49,6 +49,10 @@ def _get_futures_client(settings) -> FuturesClient:
         if getattr(settings, 'futures_hedge_mode_enabled', True):
             _futures_client.enable_hedge_mode()
         print("[Futures] FuturesClient initialized")
+    # Always sync category cap from settings (survives hot-config changes)
+    _futures_client.max_largecap_shorts = getattr(settings, 'futures_max_largecap_shorts', 3)
+    _lc_raw = getattr(settings, 'futures_largecap_symbols', ['BTCUSDT','ETHUSDT','BNBUSDT','XRPUSDT','SOLUSDT'])
+    _futures_client.largecap_symbols = set(_lc_raw)
     return _futures_client
 
 

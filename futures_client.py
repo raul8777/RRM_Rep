@@ -77,6 +77,8 @@ class FuturesClient:
         self.dry_run    = dry_run
         self.max_shorts = max_shorts       # configurable via settings.futures_max_shorts
         self.max_longs  = max_longs        # configurable via settings.futures_max_longs
+        self.max_largecap_shorts: int = 3  # max LARGE_CAP shorts simultaneously — set by _get_futures_client
+        self.largecap_symbols: set = {'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT'}  # updated from settings
         # Key format: "{SYMBOL}_{SIDE}" e.g. "BTCUSDT_SHORT", "ETHUSDT_LONG"
         self._open_positions: Dict[str, FuturesPosition] = {}
         self._price_cache: Dict[str, Tuple[float, float]] = {}  # {symbol: (price, ts)}
@@ -712,6 +714,15 @@ class FuturesClient:
         key = self._pos_key(symbol, side)
         if key in self._open_positions and not self._open_positions[key].closed:
             return False, f"Already have open {side} on {symbol}"
+
+        # 2b. LARGE_CAP category cap — prevents opening >max_largecap_shorts correlated LARGE_CAPs simultaneously
+        if side == "SHORT" and symbol in self.largecap_symbols:
+            n_lc = sum(1 for k, p in self._open_positions.items()
+                       if not p.closed and p.side == "SHORT" and p.symbol in self.largecap_symbols)
+            if n_lc >= self.max_largecap_shorts:
+                return False, (f"LARGECAP_CAP: {n_lc}/{self.max_largecap_shorts} large-cap shorts open "
+                               f"({', '.join(p.symbol for p in self._open_positions.values() if not p.closed and p.side=='SHORT' and p.symbol in self.largecap_symbols)}) "
+                               f"— prefer MID-CAP slot for {symbol}")
 
         # 3. Funding rate check (inverted logic for LONG vs SHORT)
         funding = self.get_funding_rate(symbol)
