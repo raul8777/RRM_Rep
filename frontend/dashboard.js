@@ -17,6 +17,9 @@ function _authHeaders() {
 // ── Frontend cache ────────────────────────────────────────────────────────────
 let _lastFetch = 0;
 let _cachedData = null;
+let _futuresUnrealPnl = 0;  // Updated by renderFuturesPositions each cycle
+let _cachedFuturesPositions = [];  // Updated by renderFuturesPositions each cycle
+let _cachedFuturesClosed = [];     // Updated by renderFuturesClosed each cycle
 const CACHE_TTL_MS = 15000;   // 15 s frontend cache
 const POLL_INTERVAL_MS = 30000; // 30 s poll (was 5 s → 6× less traffic)
 let _fetchInProgress = false;
@@ -209,7 +212,8 @@ function renderExecutiveSummary(data) {
     const positions   = openPos.positions || [];
     const invested    = positions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
     const exposurePct = totalUsdt > 0 ? ((invested / totalUsdt) * 100).toFixed(1) : '0.0';
-    const unrealPnl   = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
+    const unrealPnlSpot = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
+    const unrealPnl   = unrealPnlSpot + _futuresUnrealPnl;  // Spot + Futures
     const pnlToday    = parseFloat((pnlH.day && pnlH.day.total_pnl) || 0);
     const mode        = regime.trading_mode || 'SPOT_BULL';
     const modeInfo    = MODE_CFG[mode] || MODE_CFG['SPOT_BULL'];
@@ -346,7 +350,8 @@ function renderKPIRow(data) {
     const invested   = positions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
     const expPct     = totalUsdt > 0 ? ((invested / totalUsdt) * 100) : 0;
     const maxExpPct  = 75;
-    const unrealPnl  = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
+    const unrealPnlSpot = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
+    const unrealPnl  = unrealPnlSpot + _futuresUnrealPnl;  // Spot + Futures
     const pnlToday   = parseFloat((pnlH.day && pnlH.day.total_pnl) || 0);
     const m          = perf.metrics || {};
     const wr         = parseFloat(m.win_rate || 0);
@@ -354,7 +359,12 @@ function renderKPIRow(data) {
     const cycleMins  = cycle.interval_minutes || '—';
     const secsLeft   = cycle.seconds_until_next;
     const mode       = regime.trading_mode || 'SPOT_BULL';
-    const maxPos     = 12;
+    // Dynamic position limits per regime
+    const isFutShort = mode === 'FUTURES_SHORT';
+    const maxSpot    = openPos.max_positions || 12;
+    const futCount   = _cachedFuturesPositions.length;
+    const futMax     = isFutShort ? (_cachedFuturesPositions.length > 0 ? Math.max(futCount, 5) : 7) : 0;
+    const maxPos     = maxSpot;  // kept for legacy KPI tiles
     const ctx        = data.market_context || {};
     const fng        = ctx.fear_greed_value ?? 50;
     const fngLabel   = ctx.fear_greed_label || 'Neutral';
@@ -394,7 +404,18 @@ function renderKPIRow(data) {
     setText('sbUnreal',    `${unrealPnl >= 0 ? '+' : ''}$${fmt(unrealPnl)} USDT`, unrealCls);
     setText('sbWr',        `${fmt(wr,1)}%`, wrCls);
     setText('sbPf',        fmt(pf), pfCls);
-    setText('sbPositions', `${positions.length}/${maxPos}`, positions.length >= maxPos ? 'sb-val negative' : 'sb-val');
+    // Multimodal position counter
+    const spotOverflow = positions.length > maxSpot;
+    const futOverflow  = isFutShort && futCount > futMax;
+    let posStr, posCls;
+    if (isFutShort) {
+        posStr = `Spot: ${positions.length}/${maxSpot} | Fut: ${futCount}/${futMax}`;
+        posCls = (spotOverflow || futOverflow) ? 'negative' : 'positive';
+    } else {
+        posStr = `Spot: ${positions.length}/${maxSpot}`;
+        posCls = spotOverflow ? 'negative' : 'positive';
+    }
+    setText('sbPositions', posStr, posCls);
     const sbExpEl = document.getElementById('sbExposure');
     if (sbExpEl) { sbExpEl.textContent = `${expPct.toFixed(1)}%`; sbExpEl.style.color = expColor; }
 
@@ -451,8 +472,8 @@ function renderKPIRow(data) {
     if (kpiPnlHoy)  { kpiPnlHoy.textContent = `Hoy: ${pnlToday >= 0 ? '+' : ''}$${fmt(pnlToday)}`; kpiPnlHoy.className = `kpi-sub ${pnlHCls}`; }
     if (kpiWr)      { kpiWr.textContent = `${fmt(wr, 1)}%`; kpiWr.className = `kpi-value ${wrCls}`; }
     if (kpiPf)      { kpiPf.textContent = `PF: ${fmt(pf)}`; kpiPf.className = `kpi-sub ${pfCls}`; }
-    if (kpiPos)     { kpiPos.textContent = `${positions.length}/${maxPos}`; kpiPos.className = `kpi-value ${positions.length >= maxPos ? 'negative' : 'positive'}`; }
-    if (kpiPosSub)  kpiPosSub.textContent  = `Abiertas (max ${maxPos})`;
+    if (kpiPos)     { kpiPos.textContent = isFutShort ? `${positions.length}s+${futCount}f` : `${positions.length}/${maxPos}`; kpiPos.className = `kpi-value ${(spotOverflow || futOverflow) ? 'negative' : 'positive'}`; }
+    if (kpiPosSub)  kpiPosSub.textContent  = isFutShort ? `Spot: ${positions.length}/${maxSpot} | Fut: ${futCount}/${futMax}` : `Abiertas (max ${maxPos})`;
     if (kpiCd)      kpiCd.textContent      = countdownStr;
     if (kpiCycleSub)kpiCycleSub.textContent = `${mode} · ${cycleMins}min`;
 }
@@ -1173,10 +1194,19 @@ function showPositionDetailModal(symbol, positionId, status) {
                     </div>
                     
                     <div class="modal-section">
+                        <h4>📊 COMPORTAMIENTO DEL PRECIO</h4>
+                        <div class="modal-price-chart" id="spotChartWrap">
+                            <div style="text-align:center;color:#888;padding:20px;">Cargando datos históricos...</div>
+                        </div>
+                    </div>
+
+                    <div class="modal-section">
                         <h4>🛡️ TARGETS CALCULADOS</h4>
                         <div class="detail-grid">
-                            <div><label>Stop Loss:</label><span class="negative">$${fmt(position.stop_loss)} (${((position.stop_loss - position.entry_price) / position.entry_price * 100).toFixed(1)}%)</span></div>
-                            <div><label>Take Profit:</label><span class="positive">$${fmt(position.take_profit)} (+${((position.take_profit - position.entry_price) / position.entry_price * 100).toFixed(1)}%)</span></div>
+                            <div><label>Stop Loss Final:</label><span class="negative">$${fmt(position.stop_loss)} (${((position.stop_loss - position.entry_price) / position.entry_price * 100).toFixed(1)}%)</span></div>
+                            <div><label>Take Profit Final:</label><span class="positive">$${fmt(position.take_profit)} (+${((position.take_profit - position.entry_price) / position.entry_price * 100).toFixed(1)}%)</span></div>
+                            ${pred.stop_loss_initial ? `<div><label>Stop Loss Inicial:</label><span class="negative">$${fmt(pred.stop_loss_initial)}</span></div>` : ''}
+                            ${pred.take_profit_initial ? `<div><label>Take Profit Inicial:</label><span class="positive">$${fmt(pred.take_profit_initial)}</span></div>` : ''}
                         </div>
                     </div>
                     
@@ -1206,6 +1236,46 @@ function showPositionDetailModal(symbol, positionId, status) {
     
     modal.style.display = 'block';
     document.body.style.overflow = 'hidden';
+    
+    // Load time series chart for closed positions or use range chart for open
+    const chartWrap = document.getElementById('spotChartWrap');
+    if (status === 'closed' && position.entry_time && position.exit_time) {
+        // Load historical data for closed positions
+        loadPriceHistory(symbol, position.entry_time, position.exit_time).then(priceData => {
+            if (priceData && priceData.data && chartWrap) {
+                const chart = buildTimeSeriesChart(
+                    priceData.data,
+                    position.entry_price,
+                    position.exit_price,
+                    pred.stop_loss_initial || position.stop_loss,
+                    pred.take_profit_initial || position.take_profit,
+                    position.stop_loss,
+                    position.take_profit,
+                    position.quantity
+                );
+                chartWrap.innerHTML = chart.html;
+                attachTimeSeriesChartHover(chart);
+            } else if (chartWrap) {
+                // Fallback to range chart
+                const _sc = buildPriceRangeChart(
+                    position.entry_price,
+                    position.exit_price,
+                    position.stop_loss, position.take_profit, 'LONG');
+                chartWrap.innerHTML = _sc.html;
+                attachChartHover(_sc.uid, _sc.entry, _sc.isShort, _sc.rangeMin, _sc.rangeSpan, _sc.chartL, _sc.chartW, position.quantity);
+            }
+        });
+    } else {
+        // Use range chart for open positions or if no timestamps
+        const _sc = buildPriceRangeChart(
+            position.entry_price,
+            status === 'open' ? position.current_price : position.exit_price,
+            position.stop_loss, position.take_profit, 'LONG');
+        if (chartWrap && _sc.html) {
+            chartWrap.innerHTML = _sc.html;
+            attachChartHover(_sc.uid, _sc.entry, _sc.isShort, _sc.rangeMin, _sc.rangeSpan, _sc.chartL, _sc.chartW, position.quantity);
+        }
+    }
 }
 
 function closePositionDetailModal() {
@@ -1213,6 +1283,470 @@ function closePositionDetailModal() {
     if (modal) {
         modal.style.display = 'none';
         document.body.style.overflow = '';
+    }
+}
+
+// ── Time Series Chart SVG (with hover tooltip) ───────────────────────────────
+let _chartUid = 0;
+
+function buildTimeSeriesChart(priceData, entryPrice, exitPrice, slInitial, tpInitial, slFinal, tpFinal, qty) {
+    const uid = ++_chartUid;
+    const W = 620;
+    const H = 180;
+    const padding = { top: 20, right: 60, bottom: 30, left: 60 };
+    const chartW = W - padding.left - padding.right;
+    const chartH = H - padding.top - padding.bottom;
+    
+    if (!priceData || priceData.length === 0) {
+        return {
+            html: `<div style="width:${W}px;height:${H}px;display:flex;align-items:center;justify-content:center;color:#888;">
+                <span>Sin datos históricos disponibles</span>
+            </div>`,
+            uid, entry: entryPrice, isShort: false, rangeMin: 0, rangeSpan: 0, chartL: 0, chartW: 0
+        };
+    }
+    
+    // Extract price data
+    const prices = priceData.map(d => d.close);
+    const minPrice = Math.min(...prices, entryPrice, exitPrice, slInitial || entryPrice, tpInitial || entryPrice, slFinal || entryPrice, tpFinal || entryPrice);
+    const maxPrice = Math.max(...prices, entryPrice, exitPrice, slInitial || entryPrice, tpInitial || entryPrice, slFinal || entryPrice, tpFinal || entryPrice);
+    const priceRange = maxPrice - minPrice || 1;
+    
+    // Time range
+    const minTime = priceData[0].timestamp;
+    const maxTime = priceData[priceData.length - 1].timestamp;
+    const timeRange = maxTime - minTime || 1;
+    
+    // Scale functions
+    const xScale = (t) => padding.left + ((t - minTime) / timeRange) * chartW;
+    const yScale = (p) => padding.top + chartH - ((p - minPrice) / priceRange) * chartH;
+    
+    // Build SVG path for price line
+    let pathData = priceData.map((d, i) => {
+        const x = xScale(d.timestamp);
+        const y = yScale(d.close);
+        return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`;
+    }).join(' ');
+    
+    // Find closest data points for markers
+    const findClosestDataPoint = (targetPrice, targetTime) => {
+        let closest = priceData[0];
+        let minDist = Infinity;
+        
+        for (const d of priceData) {
+            const priceDist = Math.abs(d.close - targetPrice);
+            const timeDist = Math.abs(d.timestamp - targetTime);
+            const dist = priceDist + (timeDist / timeRange) * priceRange * 0.1; // Weight time less
+            
+            if (dist < minDist) {
+                minDist = dist;
+                closest = d;
+            }
+        }
+        return closest;
+    };
+    
+    const entryPoint = findClosestDataPoint(entryPrice, minTime);
+    const exitPoint = findClosestDataPoint(exitPrice, maxTime);
+    
+    // Generate SVG
+    const svg = `
+    <svg id="prc-svg-${uid}" width="${W}" height="${H}" style="background:#1a1a1a;border-radius:8px;">
+        <!-- Grid lines -->
+        ${[0, 25, 50, 75, 100].map(pct => {
+            const y = padding.top + (pct / 100) * chartH;
+            const price = maxPrice - (pct / 100) * priceRange;
+            return `
+                <line x1="${padding.left}" y1="${y}" x2="${W - padding.right}" y2="${y}" 
+                      stroke="#333" stroke-width="0.5"/>
+                <text x="${padding.left - 5}" y="${y + 3}" text-anchor="end" 
+                      fill="#666" font-size="10">$${price.toFixed(entryPrice > 10 ? 2 : 4)}</text>
+            `;
+        }).join('')}
+        
+        <!-- Price line -->
+        <path d="${pathData}" fill="none" stroke="#4ecca3" stroke-width="1.5" opacity="0.8"/>
+        
+        <!-- Entry marker -->
+        <circle cx="${xScale(entryPoint.timestamp).toFixed(1)}" cy="${yScale(entryPrice).toFixed(1)}" 
+                r="4" fill="#888" stroke="white" stroke-width="1">
+            <title>Entrada: $${fmt(entryPrice)}</title>
+        </circle>
+        
+        <!-- Exit/Current marker -->
+        <circle cx="${xScale(exitPoint.timestamp).toFixed(1)}" cy="${yScale(exitPrice).toFixed(1)}" 
+                r="4" fill="${exitPrice >= entryPrice ? '#4ecca3' : '#e74c3c'}" stroke="white" stroke-width="1">
+            <title>${exitPrice >= entryPrice ? 'Salida' : 'Actual'}: $${fmt(exitPrice)}</title>
+        </circle>
+        
+        <!-- SL markers -->
+        ${slInitial && slInitial !== entryPrice ? `
+            <line x1="${padding.left}" y1="${yScale(slInitial).toFixed(1)}" 
+                  x2="${W - padding.right}" y2="${yScale(slInitial).toFixed(1)}" 
+                  stroke="#e74c3c" stroke-width="1" stroke-dasharray="5,5" opacity="0.6"/>
+            <text x="${W - padding.right + 5}" y="${yScale(slInitial).toFixed(1) + 3}" 
+                  fill="#e74c3c" font-size="10">SL Inicial</text>
+        ` : ''}
+        
+        ${slFinal && slFinal !== slInitial ? `
+            <line x1="${padding.left}" y1="${yScale(slFinal).toFixed(1)}" 
+                  x2="${W - padding.right}" y2="${yScale(slFinal).toFixed(1)}" 
+                  stroke="#e74c3c" stroke-width="1.5" opacity="0.8"/>
+            <text x="${W - padding.right + 5}" y="${yScale(slFinal).toFixed(1) + 3}" 
+                  fill="#e74c3c" font-size="10">SL Final</text>
+        ` : ''}
+        
+        <!-- TP markers -->
+        ${tpInitial && tpInitial !== entryPrice ? `
+            <line x1="${padding.left}" y1="${yScale(tpInitial).toFixed(1)}" 
+                  x2="${W - padding.right}" y2="${yScale(tpInitial).toFixed(1)}" 
+                  stroke="#4ecca3" stroke-width="1" stroke-dasharray="5,5" opacity="0.6"/>
+            <text x="${W - padding.right + 5}" y="${yScale(tpInitial).toFixed(1) + 3}" 
+                  fill="#4ecca3" font-size="10">TP Inicial</text>
+        ` : ''}
+        
+        ${tpFinal && tpFinal !== tpInitial ? `
+            <line x1="${padding.left}" y1="${yScale(tpFinal).toFixed(1)}" 
+                  x2="${W - padding.right}" y2="${yScale(tpFinal).toFixed(1)}" 
+                  stroke="#4ecca3" stroke-width="1.5" opacity="0.8"/>
+            <text x="${W - padding.right + 5}" y="${yScale(tpFinal).toFixed(1) + 3}" 
+                  fill="#4ecca3" font-size="10">TP Final</text>
+        ` : ''}
+        
+        <!-- Hover line (initially hidden) -->
+        <line id="prc-ln-${uid}" x1="0" y1="0" x2="0" y2="${H}" 
+              stroke="#ffd700" stroke-width="1" opacity="0.8" style="display:none"/>
+        
+        <!-- Tooltip -->
+        <div id="prc-tip-${uid}" class="price-tooltip" style="display:none;"></div>
+    </svg>`;
+    
+    return {
+        html: svg,
+        uid, 
+        entry: entryPrice, 
+        isShort: false, 
+        rangeMin: minPrice, 
+        rangeSpan: priceRange, 
+        chartL: padding.left, 
+        chartW: chartW,
+        priceData: priceData,
+        exitPrice: exitPrice,
+        slInitial: slInitial,
+        tpInitial: tpInitial,
+        slFinal: slFinal,
+        tpFinal: tpFinal,
+        qty: qty
+    };
+}
+
+// ── Price Range Chart SVG (legacy, kept for compatibility) ───────────────────────
+
+// Load price history data from API
+async function loadPriceHistory(symbol, startTime, endTime) {
+    try {
+        const response = await fetch(`${API_BASE}/price-history/${symbol}?start_time=${startTime}&end_time=${endTime}`, {
+            headers: _authHeaders()
+        });
+        if (!response.ok) return null;
+        const data = await response.json();
+        return data.error ? null : data;
+    } catch (e) {
+        console.error('Error loading price history:', e);
+        return null;
+    }
+}
+
+// Enhanced attachChartHover for time series charts
+function attachTimeSeriesChartHover(chartData) {
+    const { uid, entry, priceData, exitPrice, slInitial, tpInitial, slFinal, tpFinal, qty } = chartData;
+    console.log('[attachTimeSeriesChartHover] uid=' + uid + ' entry=' + entry + ' dataPoints=' + (priceData?.length || 0));
+    
+    const svg = document.getElementById('prc-svg-' + uid);
+    const tip = document.getElementById('prc-tip-' + uid);
+    const ln  = document.getElementById('prc-ln-'  + uid);
+    
+    if (!svg || !tip || !ln || !priceData || priceData.length === 0) {
+        console.warn('[attachTimeSeriesChartHover] Missing elements or data');
+        return;
+    }
+    
+    const W = 620;
+    const padding = { top: 20, right: 60, bottom: 30, left: 60 };
+    const chartW = W - padding.left - padding.right;
+    
+    // Time range for scaling
+    const minTime = priceData[0].timestamp;
+    const maxTime = priceData[priceData.length - 1].timestamp;
+    const timeRange = maxTime - minTime || 1;
+    
+    svg.addEventListener('mousemove', function(e) {
+        const rect = svg.getBoundingClientRect();
+        const scale = (rect.width || W) / W;
+        const mx = (e.clientX - rect.left) / scale;
+        
+        // Check if within chart area
+        if (mx < padding.left || mx > padding.left + chartW) {
+            tip.style.display = 'none'; ln.style.display = 'none'; return;
+        }
+        
+        // Find corresponding time and price
+        const timeRatio = (mx - padding.left) / chartW;
+        const targetTime = minTime + (timeRatio * timeRange);
+        
+        // Find closest data point
+        let closestPoint = priceData[0];
+        let minDist = Math.abs(priceData[0].timestamp - targetTime);
+        
+        for (let i = 1; i < priceData.length; i++) {
+            const dist = Math.abs(priceData[i].timestamp - targetTime);
+            if (dist < minDist) {
+                minDist = dist;
+                closestPoint = priceData[i];
+            }
+        }
+        
+        const hoverPrice = closestPoint.close;
+        const pnlEstUnit = exitPrice >= entry ? (hoverPrice - entry) : (entry - hoverPrice);
+        const pnlEst = pnlEstUnit * qty;
+        const pnlPct = entry > 0 ? (pnlEstUnit / entry * 100) : 0;
+        const col = pnlEst >= 0 ? '#4ecca3' : '#e74c3c';
+        
+        // Format time
+        const timeStr = new Date(closestPoint.timestamp).toLocaleString('es-MX', {
+            month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit'
+        });
+        
+        tip.style.display = 'block';
+        tip.style.left = (e.clientX + 12) + 'px';
+        tip.style.top = (e.clientY - 45) + 'px';
+        tip.style.borderColor = col;
+        tip.innerHTML = `
+            <span style="color:#aaa;font-size:10px">${timeStr}</span><br>
+            <strong style="color:#fff">$${hoverPrice.toFixed(hoverPrice > 10 ? 2 : 4)}</strong><br>
+            <span style="color:${col};font-weight:700">
+                ${pnlEst >= 0 ? '+' : ''}${pnlEst.toFixed(4)} USDT (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)
+            </span>
+        `;
+        
+        ln.setAttribute('x1', mx); ln.setAttribute('x2', mx);
+        ln.style.display = 'block';
+    });
+    
+    svg.addEventListener('mouseleave', function() {
+        tip.style.display = 'none'; ln.style.display = 'none';
+    });
+}
+
+// Legacy attachChartHover for compatibility
+function attachChartHover(uid, entry, isShort, rangeMin, rangeSpan, cL, cW, qty) {
+    console.log('[attachChartHover] uid=' + uid + ' entry=' + entry + ' isShort=' + isShort + ' qty=' + qty);
+    const svg = document.getElementById('prc-svg-' + uid);
+    const tip = document.getElementById('prc-tip-' + uid);
+    const ln  = document.getElementById('prc-ln-'  + uid);
+    console.log('[attachChartHover] elements:', {svg: !!svg, tip: !!tip, ln: !!ln, 
+        svgId: 'prc-svg-' + uid, tipId: 'prc-tip-' + uid, lnId: 'prc-ln-' + uid});
+    if (!svg || !tip || !ln) {
+        console.warn('[attachChartHover] Missing elements, aborting');
+        return;
+    }
+    const W = 620;
+    svg.addEventListener('mousemove', function(e) {
+        const rect  = svg.getBoundingClientRect();
+        const scale = (rect.width || W) / W;
+        const mx    = (e.clientX - rect.left) / scale;
+        if (mx < cL || mx > cL + cW) { tip.style.display = 'none'; ln.style.display = 'none'; return; }
+        const hoverPrice = rangeMin + ((mx - cL) / cW) * rangeSpan;
+        const pnlEstUnit = isShort ? (entry - hoverPrice) : (hoverPrice - entry);
+        const pnlEst     = pnlEstUnit * qty;  // PnL real en USD
+        const pnlPct     = entry > 0 ? (pnlEstUnit / entry * 100) : 0;  // Porcentaje basado en unit price
+        const col        = pnlEst >= 0 ? '#4ecca3' : '#e74c3c';
+        tip.style.display    = 'block';
+        tip.style.left       = (e.clientX + 12) + 'px';
+        tip.style.top        = (e.clientY - 38) + 'px';
+        tip.style.borderColor = col;
+        tip.innerHTML = '<span style="color:#aaa;font-size:10px">Si precio: </span>' +
+            '<strong style="color:#fff">$' + hoverPrice.toFixed(hoverPrice > 10 ? 2 : 4) + '</strong><br>' +
+            '<span style="color:' + col + ';font-weight:700">' +
+            (pnlEst >= 0 ? '+' : '') + pnlEst.toFixed(4) + ' USDT (' +
+            (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(2) + '%)</span>';
+        ln.setAttribute('x1', mx); ln.setAttribute('x2', mx);
+        ln.style.display = 'block';
+    });
+    svg.addEventListener('mouseleave', function() {
+        tip.style.display = 'none'; ln.style.display = 'none';
+    });
+}
+
+function buildPriceRangeChart(entry, current, sl, tp, side) {
+    entry   = parseFloat(entry)   || 0;
+    current = parseFloat(current) || 0;
+    sl      = parseFloat(sl)      || 0;
+    tp      = parseFloat(tp)      || 0;
+    if (!entry || !sl || !tp) return { html: '', uid: 0 };
+
+    const isShort = side === 'SHORT';
+    const lo  = isShort ? Math.min(tp, sl, entry, current) : Math.min(sl, tp, entry, current);
+    const hi  = isShort ? Math.max(tp, sl, entry, current) : Math.max(sl, tp, entry, current);
+    const span = hi - lo || 1;
+    const pad  = span * 0.08;
+    const rangeMin = lo - pad;
+    const rangeMax = hi + pad;
+    const rangeSpan = rangeMax - rangeMin;
+
+    const W = 620, H = 110;  // extra height for tooltip row
+    const chartL = 16, chartR = W - 16;
+    const chartW = chartR - chartL;
+    const trackY  = 38;
+    const labelY  = 58;
+    const priceY  = 72;
+
+    function xOf(price) {
+        return chartL + ((price - rangeMin) / rangeSpan) * chartW;
+    }
+    function priceOfX(x) {
+        return rangeMin + ((x - chartL) / chartW) * rangeSpan;
+    }
+
+    const xSL  = xOf(sl);
+    const xTP  = xOf(tp);
+    const xEnt = xOf(entry);
+    const xCur = xOf(current);
+
+    const profitable = isShort ? current < entry : current > entry;
+    const curColor   = profitable ? '#4ecca3' : '#e74c3c';
+    const fillColor  = profitable ? 'rgba(78,204,163,0.18)' : 'rgba(231,76,60,0.18)';
+    const fillX1 = Math.min(xEnt, xCur);
+    const fillX2 = Math.max(xEnt, xCur);
+
+    const fmtP = (v) => {
+        if (v >= 10000) return '$' + (v/1000).toFixed(1) + 'k';
+        if (v >= 1000)  return '$' + v.toFixed(0);
+        if (v >= 100)   return '$' + v.toFixed(1);
+        if (v >= 1)     return '$' + v.toFixed(2);
+        return '$' + v.toFixed(4);
+    };
+
+    const slAnchor = xSL < W / 2 ? 'start' : 'end';
+    const tpAnchor = xTP < W / 2 ? 'start' : 'end';
+    const uid = ++_chartUid;
+    const svgId  = `prc-svg-${uid}`;
+    const tipId  = `prc-tip-${uid}`;
+    const lineId = `prc-ln-${uid}`;
+
+    const html = `<div style="position:relative">
+<svg id="${svgId}" class="modal-chart-svg" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="cursor:crosshair">
+  <line x1="${chartL}" y1="${trackY}" x2="${chartR}" y2="${trackY}" stroke="#333" stroke-width="3" stroke-linecap="round"/>
+  <rect x="${fillX1}" y="${trackY - 6}" width="${fillX2 - fillX1}" height="12" fill="${fillColor}" rx="3"/>
+  <line x1="${xSL}" y1="${trackY - 10}" x2="${xSL}" y2="${trackY + 10}" stroke="#e74c3c" stroke-width="2"/>
+  <circle cx="${xSL}" cy="${trackY}" r="6" fill="#e74c3c"/>
+  <text x="${xSL}" y="${labelY}" text-anchor="${slAnchor}" fill="#e74c3c" font-size="10" font-weight="600">SL</text>
+  <text x="${xSL}" y="${priceY}" text-anchor="${slAnchor}" fill="#e74c3c" font-size="9">${fmtP(sl)}</text>
+  <line x1="${xTP}" y1="${trackY - 10}" x2="${xTP}" y2="${trackY + 10}" stroke="#4ecca3" stroke-width="2"/>
+  <circle cx="${xTP}" cy="${trackY}" r="6" fill="#4ecca3"/>
+  <text x="${xTP}" y="${labelY}" text-anchor="${tpAnchor}" fill="#4ecca3" font-size="10" font-weight="600">TP</text>
+  <text x="${xTP}" y="${priceY}" text-anchor="${tpAnchor}" fill="#4ecca3" font-size="9">${fmtP(tp)}</text>
+  <line x1="${xEnt}" y1="${trackY - 13}" x2="${xEnt}" y2="${trackY + 13}" stroke="#ffffff" stroke-width="2" stroke-dasharray="3,2"/>
+  <circle cx="${xEnt}" cy="${trackY}" r="5" fill="#fff" stroke="#888" stroke-width="1"/>
+  <text x="${xEnt}" y="${labelY}" text-anchor="middle" fill="#ccc" font-size="10" font-weight="600">Entrada</text>
+  <text x="${xEnt}" y="${priceY}" text-anchor="middle" fill="#ccc" font-size="9">${fmtP(entry)}</text>
+  <circle cx="${xCur}" cy="${trackY}" r="7" fill="${curColor}" stroke="#1a1a2e" stroke-width="2"/>
+  <text x="${xCur}" y="${trackY - 16}" text-anchor="middle" fill="${curColor}" font-size="10" font-weight="700">▼ Actual</text>
+  <text x="${xCur}" y="${priceY}" text-anchor="middle" fill="${curColor}" font-size="9" font-weight="600">${fmtP(current)}</text>
+  <line id="${lineId}" x1="0" y1="${trackY - 14}" x2="0" y2="${trackY + 14}" stroke="rgba(255,255,255,0.25)" stroke-width="1" stroke-dasharray="3,2" style="display:none"/>
+  <text x="${W/2}" y="${H - 6}" text-anchor="middle" fill="#444" font-size="9">Mueve el mouse sobre la barra para ver PnL estimado</text>
+</svg>
+<div id="${tipId}" style="display:none;position:fixed;background:#1e1e2e;border:1px solid #4ecca3;border-radius:6px;padding:5px 9px;font-size:12px;pointer-events:none;z-index:9999;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,0.5)"></div>
+</div>`;
+
+    return { html, uid, entry, isShort, rangeMin, rangeSpan, chartL, chartW };
+}
+
+// ── Modal: Detalle Futuros ─────────────────────────────────────────────────────
+function showFuturesDetailModal(symbol, side) {
+    const pos = _cachedFuturesPositions.find(p => p.symbol === symbol && p.side === side);
+    if (!pos) return;
+
+    const modalId = 'positionDetailModal';
+    let modal = document.getElementById(modalId);
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = modalId;
+        modal.className = 'modal-detail';
+        document.body.appendChild(modal);
+    }
+
+    const upnl     = parseFloat(pos.unrealized_pnl || 0);
+    const upnlCls  = upnl >= 0 ? 'positive' : 'negative';
+    const isShort  = side === 'SHORT';
+    const sideLabel = isShort
+        ? '<span style="color:#9b59b6;font-weight:700">▼ SHORT</span>'
+        : '<span style="color:#27ae60;font-weight:700">▲ LONG</span>';
+    modal.innerHTML = `
+        <div class="modal-overlay" onclick="closePositionDetailModal()">
+            <div class="modal-content" onclick="event.stopPropagation()">
+                <div class="modal-header">
+                    <h3>📉 ${symbol} — Futuro ${side} Abierto <span style="font-size:11px;color:#888">2× Leverage</span></h3>
+                    <button class="modal-close" onclick="closePositionDetailModal()">×</button>
+                </div>
+                <div class="modal-body">
+                    <div class="modal-section">
+                        <h4>📍 POSICIÓN</h4>
+                        <div class="detail-grid">
+                            <div><label>Símbolo:</label><span style="font-weight:700">${symbol}</span></div>
+                            <div><label>Lado:</label><span>${sideLabel}</span></div>
+                            <div><label>Cantidad:</label><span>${parseFloat(pos.qty || 0).toFixed(4)}</span></div>
+                            <div><label>Abierto:</label><span>${pos.opened_at ? relativeTime(pos.opened_at) : '—'}</span></div>
+                        </div>
+                    </div>
+                    <div class="modal-section">
+                        <h4>💵 PRECIOS</h4>
+                        <div class="detail-grid">
+                            <div><label>Entrada:</label><span>$${fmt(pos.entry_price)}</span></div>
+                            <div><label>Actual:</label><span class="${upnlCls}">$${fmt(pos.current_price)}</span></div>
+                            <div><label>Stop Loss:</label><span class="negative">$${fmt(pos.sl_price)} (${pos.sl_dist_pct >= 0 ? '+' : ''}${fmt(pos.sl_dist_pct)}% dist)</span></div>
+                            <div><label>Take Profit:</label><span class="positive">$${fmt(pos.tp_price)} (${pos.tp_dist_pct >= 0 ? '+' : ''}${fmt(pos.tp_dist_pct)}% dist)</span></div>
+                        </div>
+                    </div>
+                    <div class="modal-section">
+                        <h4>📊 COMPORTAMIENTO DEL PRECIO</h4>
+                        <div class="modal-price-chart" id="futChartWrap"></div>
+                    </div>
+                    <div class="modal-section">
+                        <h4>🛡️ TARGETS CALCULADOS</h4>
+                        <div class="detail-grid">
+                            <div><label>Stop Loss:</label><span class="negative">$${fmt(pos.sl_price)} (${((pos.sl_price - pos.entry_price) / pos.entry_price * 100).toFixed(1)}%)</span></div>
+                            <div><label>Take Profit:</label><span class="positive">$${fmt(pos.tp_price)} (+${((pos.tp_price - pos.entry_price) / pos.entry_price * 100).toFixed(1)}%)</span></div>
+                        </div>
+                    </div>
+                    <div class="modal-section">
+                        <h4>💰 RESULTADO ACTUAL</h4>
+                        <div class="detail-grid">
+                            <div><label>PnL No Realizado:</label><span class="${upnlCls}" style="font-size:16px;font-weight:700">${upnl >= 0 ? '+' : ''}${fmt(upnl, 4)} USDT</span></div>
+                            <div><label>Movimiento %:</label><span class="${upnlCls}">${upnl >= 0 ? '+' : ''}${fmt(upnl * 100 / (pos.entry_price * pos.qty))}%</span></div>
+                            <div><label>Dirección:</label><span>${isShort ? '📉 SHORT — ganancia al bajar' : '📈 LONG — ganancia al subir'}</span></div>
+                        </div>
+                    </div>
+                    <div class="modal-section">
+                        <h4>💰 PnL NO REALIZADO</h4>
+                        <div class="detail-grid">
+                            <div><label>PnL USDT:</label><span class="${upnlCls}" style="font-size:16px;font-weight:700">${upnl >= 0 ? '+' : ''}${fmt(upnl, 4)} USDT</span></div>
+                            <div><label>Dirección objetivo:</label><span>${isShort ? '📉 Precio baja = ganancia' : '📈 Precio sube = ganancia'}</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    modal.style.display = 'block';
+    document.body.style.overflow = 'hidden';
+    // Attach chart hover AFTER innerHTML is set
+    const _fc = buildPriceRangeChart(pos.entry_price, pos.current_price, pos.sl_price, pos.tp_price, side);
+    const _fw = document.getElementById('futChartWrap');
+    if (_fw && _fc.html) {
+        _fw.innerHTML = _fc.html;
+        attachChartHover(_fc.uid, _fc.entry, _fc.isShort, _fc.rangeMin, _fc.rangeSpan, _fc.chartL, _fc.chartW, pos.qty);
     }
 }
 
@@ -1532,6 +2066,65 @@ function renderErrors(data) {
         </tr></thead>
         <tbody>${rows}</tbody>
     </table>`;
+}
+
+function renderFullHealthCheck(data) {
+    const el = document.getElementById('fullHealthData');
+    const verEl = document.getElementById('fullHealthVersion');
+    if (!data) { el.innerHTML = '<p class="loading" style="color:#f44">Sin datos del servidor</p>'; return; }
+
+    const STATUS_COLOR = { pass: '#4caf50', fail: '#f44336', warn: '#ff9800' };
+    const STATUS_ICON  = { pass: '✅', fail: '❌', warn: '⚠️' };
+    const s = data.summary || {};
+    const overallColor = data.overall === 'ok' ? '#4caf50' : data.overall === 'warn' ? '#ff9800' : '#f44336';
+    const overallIcon  = data.overall === 'ok' ? '✅' : data.overall === 'warn' ? '⚠️' : '❌';
+
+    if (verEl) verEl.textContent = `v${data.version || '?'} · ${new Date(data.timestamp).toLocaleTimeString('es-MX')}`;
+
+    const summary = `<div class="health-summary" style="display:flex;gap:16px;align-items:center;padding:10px 0 14px;flex-wrap:wrap">
+        <span style="font-size:22px;font-weight:bold;color:${overallColor}">${overallIcon} ${(data.overall || '?').toUpperCase()}</span>
+        <span class="hc-pill" style="background:#2a2a2a;padding:4px 10px;border-radius:20px">
+            🔢 Total: <b>${s.total || 0}</b>
+        </span>
+        <span class="hc-pill" style="background:#1a3a1a;padding:4px 10px;border-radius:20px;color:#4caf50">
+            ✅ Passed: <b>${s.passed || 0}</b>
+        </span>
+        <span class="hc-pill" style="background:#3a1a1a;padding:4px 10px;border-radius:20px;color:#f44336">
+            ❌ Failed: <b>${s.failed || 0}</b>
+        </span>
+        <span class="hc-pill" style="background:#3a2a1a;padding:4px 10px;border-radius:20px;color:#ff9800">
+            ⚠️ Warned: <b>${s.warned || 0}</b>
+        </span>
+    </div>`;
+
+    const cats = (data.categories || []).map(cat => {
+        const checks = (cat.checks || []);
+        const catFailed = checks.filter(c => c.status === 'fail').length;
+        const catWarned = checks.filter(c => c.status === 'warn').length;
+        const catOk     = checks.filter(c => c.status === 'pass').length;
+        const catColor  = catFailed ? '#f44336' : catWarned ? '#ff9800' : '#4caf50';
+        const rows = checks.map(c => {
+            const color = STATUS_COLOR[c.status] || '#888';
+            const icon  = STATUS_ICON[c.status]  || '•';
+            const detail = c.detail ? `<small style="color:#aaa;display:block;margin-top:2px;word-break:break-word">${c.detail}</small>` : '';
+            return `<div class="hc-check-row" style="padding:4px 0;border-bottom:1px solid #1a1a1a">
+                <span style="color:${color};margin-right:8px">${icon}</span>
+                <span style="font-family:monospace;font-size:12px">${c.name}</span>
+                ${detail}
+            </div>`;
+        }).join('');
+        return `<div class="hc-category" style="margin-bottom:12px">
+            <div class="hc-cat-header" style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:2px solid ${catColor}30;margin-bottom:4px">
+                <span style="color:${catColor};font-weight:bold;font-size:13px">${cat.label || cat.name}</span>
+                <span style="color:#4caf50;font-size:11px">✅ ${catOk}</span>
+                ${catFailed ? `<span style="color:#f44336;font-size:11px">❌ ${catFailed}</span>` : ''}
+                ${catWarned ? `<span style="color:#ff9800;font-size:11px">⚠️ ${catWarned}</span>` : ''}
+            </div>
+            ${rows}
+        </div>`;
+    }).join('');
+
+    el.innerHTML = summary + `<div class="hc-categories" style="margin-top:4px">${cats}</div>`;
 }
 
 async function updateHealthAndErrors() {
@@ -1944,6 +2537,8 @@ async function renderFuturesPositions() {
             return;
         }
         const totalPnl = data.positions.reduce((s, p) => s + (p.unrealized_pnl || 0), 0);
+        _futuresUnrealPnl = totalPnl;  // Update global so KPI row can include it
+        _cachedFuturesPositions = data.positions;  // Cache for modal click
         const pnlCls = totalPnl >= 0 ? 'positive' : 'negative';
         el.innerHTML = `
         <div class="table-scroll-10">
@@ -1965,7 +2560,7 @@ async function renderFuturesPositions() {
                 const sideLabel = isLong
                     ? `<span style="color:#27ae60">▲ LONG</span>`
                     : `<span style="color:#9b59b6">▼ SHORT</span>`;
-                return `<tr>
+                return `<tr style="cursor:pointer" onclick="showFuturesDetailModal('${p.symbol}','${p.side}')">
                     <td style="color:#9b59b6;font-weight:600">${p.symbol}</td>
                     <td>${sideLabel}</td>
                     <td>${parseFloat(p.qty || 0).toFixed(4)}</td>
@@ -2021,6 +2616,7 @@ async function renderFuturesClosed() {
         }
 
         if (card) card.style.display = '';
+        _cachedFuturesClosed = d.positions;  // Cache for modal click
 
         // Helper para formatear fechas en local (México)
         const fmtDateLocal = (isoStr) => {
@@ -2052,10 +2648,10 @@ async function renderFuturesClosed() {
                 <th>Cerrado</th>
             </tr></thead>
             <tbody>
-            ${d.positions.map(p => {
+            ${d.positions.map((p, i) => {
                 const pnlCls = (p.pnl || 0) >= 0 ? 'positive' : 'negative';
                 const closedAt = fmtDateLocal(p.closed_at || p.opened_at);
-                return `<tr>
+                return `<tr style="cursor:pointer" onclick="showFuturesClosedDetailModal('${p.symbol}','${p.side}',${i})">
                     <td><span class="badge-futures">FUT</span> <strong style="color:#9b59b6">${p.symbol}</strong></td>
                     <td><span style="color:#9b59b6">${p.side === 'SHORT' ? '▼ SHORT' : '▲ LONG'}</span></td>
                     <td>$${fmt(p.entry_price)} → $${fmt(p.exit_price)}</td>
@@ -2073,6 +2669,143 @@ async function renderFuturesClosed() {
     } catch (e) {
         el.innerHTML = '<p class="loading">Error cargando futuros cerrados</p>';
         if (card) card.style.display = 'none';
+    }
+}
+
+// ── Modal: Detalle Futuros Cerrados ──────────────────────────────────────────────
+function showFuturesClosedDetailModal(symbol, side, idx) {
+    const pos = _cachedFuturesClosed[idx] ||
+                _cachedFuturesClosed.find(p => p.symbol === symbol && p.side === side);
+    if (!pos) return;
+
+    const modalId = 'positionDetailModal';
+    let modal = document.getElementById(modalId);
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = modalId;
+        modal.className = 'modal-detail';
+        document.body.appendChild(modal);
+    }
+
+    const pnl      = parseFloat(pos.pnl || 0);
+    const pnlCls   = pnl >= 0 ? 'positive' : 'negative';
+    const isShort  = (pos.side || '').toUpperCase() === 'SHORT';
+    const sideLabel = isShort
+        ? '<span style="color:#9b59b6;font-weight:700">▼ SHORT</span>'
+        : '<span style="color:#27ae60;font-weight:700">▲ LONG</span>';
+
+    const entryP  = parseFloat(pos.entry_price || 0);
+    const exitP   = parseFloat(pos.exit_price  || 0);
+    const pnlPct  = entryP > 0 ? ((exitP - entryP) / entryP * 100 * (isShort ? -1 : 1)) : 0;
+
+    // Simplified entry→exit bar (no SL/TP range needed since position is closed)
+    const lo = Math.min(entryP, exitP);
+    const hi = Math.max(entryP, exitP);
+    const range = hi - lo || 1;
+    const entryPct = ((entryP - lo) / range * 100).toFixed(1);
+    const exitPct  = ((exitP  - lo) / range * 100).toFixed(1);
+    const slInfo   = pos.sl_price  ? `$${fmt(pos.sl_price)}`  : '—';
+    const tpInfo   = pos.tp_price  ? `$${fmt(pos.tp_price)}`  : '—';
+
+    const fmtDateLocal = (isoStr) => {
+        if (!isoStr) return '—';
+        try {
+            return new Date(isoStr).toLocaleString('es-MX', {
+                timeZone: 'America/Mexico_City',
+                day: '2-digit', month: 'short',
+                hour: '2-digit', minute: '2-digit', hour12: false
+            });
+        } catch(e) { return isoStr; }
+    };
+
+    modal.innerHTML = `
+        <div class="modal-overlay" onclick="closePositionDetailModal()">
+            <div class="modal-content" onclick="event.stopPropagation()">
+                <div class="modal-header">
+                    <h3>📦 ${symbol} — Futuro ${side} Cerrado</h3>
+                    <button class="modal-close" onclick="closePositionDetailModal()">×</button>
+                </div>
+                <div class="modal-body">
+                    <div class="modal-section">
+                        <h4>📍 POSICIÓN</h4>
+                        <div class="detail-grid">
+                            <div><label>Símbolo:</label><span style="font-weight:700">${symbol}</span></div>
+                            <div><label>Lado:</label><span>${sideLabel}</span></div>
+                            <div><label>Cantidad:</label><span>${parseFloat(pos.qty || 0).toFixed(4)}</span></div>
+                            <div><label>Cerrado:</label><span>${fmtDateLocal(pos.closed_at || pos.opened_at)}</span></div>
+                        </div>
+                    </div>
+                    
+                    <div class="modal-section">
+                        <h4>📊 COMPORTAMIENTO DEL PRECIO</h4>
+                        <div class="modal-price-chart" id="futChartWrap">
+                            <div style="text-align:center;color:#888;padding:20px;">Cargando datos históricos...</div>
+                        </div>
+                    </div>
+                    
+                    <div class="modal-section">
+                        <h4>💵 PRECIOS</h4>
+                        <div class="detail-grid">
+                            <div><label>Entrada:</label><span>$${fmt(entryP)}</span></div>
+                            <div><label>Salida:</label><span class="${pnlCls}">$${fmt(exitP)}</span></div>
+                            <div><label>Stop Loss Final:</label><span class="negative">${slInfo}</span></div>
+                            <div><label>Take Profit Final:</label><span class="positive">${tpInfo}</span></div>
+                        </div>
+                    </div>
+                    
+                    <div class="modal-section">
+                        <h4>💰 RESULTADO FINAL</h4>
+                        <div class="detail-grid">
+                            <div><label>PnL Realizado:</label><span class="${pnlCls}" style="font-size:16px;font-weight:700">${pnl >= 0 ? '+' : ''}${fmt(pnl, 4)} USDT</span></div>
+                            <div><label>Movimiento %:</label><span class="${pnlCls}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%</span></div>
+                            <div><label>Dirección:</label><span>${isShort ? '📉 SHORT — ganancia al bajar' : '📈 LONG — ganancia al subir'}</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    modal.style.display = 'block';
+    document.body.style.overflow = 'hidden';
+    
+    // Load time series chart for closed futures
+    const chartWrap = document.getElementById('futChartWrap');
+    if (pos.opened_at && pos.closed_at) {
+        loadPriceHistory(symbol, pos.opened_at, pos.closed_at).then(priceData => {
+            if (priceData && priceData.data && chartWrap) {
+                const chart = buildTimeSeriesChart(
+                    priceData.data,
+                    entryP,
+                    exitP,
+                    pos.sl_price_initial || pos.sl_price,
+                    pos.tp_price_initial || pos.tp_price,
+                    pos.sl_price,
+                    pos.tp_price,
+                    pos.qty
+                );
+                chartWrap.innerHTML = chart.html;
+                attachTimeSeriesChartHover(chart);
+            } else if (chartWrap) {
+                // Fallback to simple range display
+                chartWrap.innerHTML = `
+                    <div style="position:relative;height:32px;background:#1a1a1a;border-radius:6px;margin:8px 0">
+                        <div style="position:absolute;left:0;top:0;bottom:0;width:100%;display:flex;align-items:center;padding:0 8px;box-sizing:border-box">
+                            <span style="font-size:10px;color:#aaa">$${fmt(lo)}</span>
+                            <div style="flex:1;position:relative;height:6px;background:#333;border-radius:3px;margin:0 8px">
+                                <div style="position:absolute;left:${entryPct}%;top:-3px;width:2px;height:12px;background:#888;border-radius:1px" title="Entrada"></div>
+                                <div style="position:absolute;left:${exitPct}%;top:-3px;width:2px;height:12px;background:${pnl >= 0 ? '#4caf50' : '#f44336'};border-radius:1px" title="Salida"></div>
+                            </div>
+                            <span style="font-size:10px;color:#aaa">$${fmt(hi)}</span>
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:16px;font-size:11px;color:#888;margin-top:4px">
+                        <span>● Entrada: <strong style="color:#ccc">$${fmt(entryP)}</strong></span>
+                        <span style="color:${pnl >= 0 ? '#4caf50' : '#f44336'}">● Salida: <strong>$${fmt(exitP)}</strong></span>
+                    </div>
+                `;
+            }
+        });
     }
 }
 
@@ -2173,7 +2906,7 @@ async function updateDashboard() {
     renderPredEvalMarket(data.open_positions);
     renderSignalsMarket(data.signals);
     renderPnlSvgChart('pnlChartSvg', data.pnl_history);
-    renderPnlSvgChart('pnlChartSvgPerf', data.pnl_history);
+    renderPnlSvgChart('pnlFullChart', data.pnl_history);
     renderPredVsRealChart('predVsRealChart', data.expectativa_vs_realidad);
 
     // Optimized params: separate lightweight call (cached 30s in backend)
@@ -2285,7 +3018,9 @@ function renderPnlSvgChart(containerId, pnlHistory) {
 function renderBTCContext(regime) {
     const el = document.getElementById('btcContextData');
     if (!el || !regime) return;
-    const btcPrice = parseFloat(regime.btc_price || 0);
+    // Fallback: get BTC price from daily_ticker if regime.btc_price not populated
+    const _btcTicker = (_cachedData?.daily_ticker || []).find(t => t.symbol === 'BTCUSDT');
+    const btcPrice = parseFloat(regime.btc_price || _btcTicker?.current_price || 0);
     const btc24h   = parseFloat(regime.btc_24h_change_pct ?? regime.btc_7d_change_pct ?? 0);
     const btc7d    = parseFloat(regime.btc_7d_change_pct ?? 0);
     const btc30d   = parseFloat(regime.btc_30d_change_pct ?? 0);
@@ -2368,13 +3103,13 @@ function renderPredEvalMarket(openPositions) {
     const el = document.getElementById('predEvalMarketData');
     if (!el) return;
     const positions = openPositions?.positions || [];
-    const withPred = positions.filter(p => p.prediction);
+    const withPred = positions.filter(p => p.pnl_prediction);
     if (!withPred.length) {
         el.innerHTML = '<div class="loading">Sin predicciones activas</div>';
         return;
     }
     el.innerHTML = withPred.map(p => {
-        const pred = p.prediction || {};
+        const pred = p.pnl_prediction || {};
         const ep = parseFloat(pred.expected_pnl || 0);
         const sp = parseFloat(pred.success_probability || 0);
         const ev = parseFloat(pred.ev_score ?? ep);
@@ -2564,6 +3299,32 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('clearErrorsBtn').addEventListener('click', async () => {
         await fetch(`${API_BASE}/errors/clear`, { method: 'POST' });
         await updateHealthAndErrors();
+    });
+
+    // ── Full Health Check button ──────────────────────────────────
+    document.getElementById('runFullHealthBtn').addEventListener('click', async () => {
+        const btn = document.getElementById('runFullHealthBtn');
+        const card = document.getElementById('fullHealthCard');
+        const dataEl = document.getElementById('fullHealthData');
+        btn.disabled = true;
+        btn.textContent = '⏳ Ejecutando...';
+        card.style.display = 'block';
+        dataEl.innerHTML = '<p class="loading">Ejecutando 80+ checks del sistema...</p>';
+        try {
+            const res = await fetch(`${API_BASE}/health/full-check`);
+            const data = res.ok ? await res.json() : null;
+            renderFullHealthCheck(data);
+        } catch (e) {
+            dataEl.innerHTML = `<p class="loading" style="color:#f44">Error: ${e.message}</p>`;
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '🩺 Full Health';
+        }
+    });
+
+    // ── Close Full Health panel ───────────────────────────────────
+    document.getElementById('closeFullHealthBtn').addEventListener('click', () => {
+        document.getElementById('fullHealthCard').style.display = 'none';
     });
 
     updateDashboard();

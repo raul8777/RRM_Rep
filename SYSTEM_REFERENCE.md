@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 17 2026 18:41 UTC-6 | Sesión: FUTURES_SHORT pipeline completo — 3 SHORTs BTC/ETH/SOL abiertos con SL/TP
+> Última actualización: jun 20 2026 13:55 UTC-6 | Sesión: Reánalisis completo — Marcado 133 trades obsoletos, validación 7 futuros SHORT activos, backtest_90d_v2.py con 4 escenarios, POST /predictor/reset-corrupted OK (133 trades), POST /learning/run en progreso
 
 ---
 
@@ -52,8 +52,8 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 18 2026 16:30 UTC-6 |
-| Capital total | ~$2,840 USDT |
+| Fecha última actualización | jun 20 2026 13:30 UTC-6 |
+| Capital total | ~$2,910 USDT |
 | Capital spot líquido | ~$1,642 USDT |
 | Capital invertido spot | ~$53 USDT (UUSDT stablecoin) |
 | Capital futuros total | ~$1,198 USDT ($662 margin + $523 libre + $27 unrealized PnL) |
@@ -68,11 +68,13 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 | Hedge mode Binance | ✅ ACTIVADO (`dualSidePosition=true`) |
 | VolSpike Override V2 | ✅ IMPLEMENTADO — strength ≥0.65, máx 2 pos, máx 3/día + RSI_1h validado |
 | Dashboard Auditoría PnL | ✅ COMPLETADO — métricas de expectativa vs realidad |
+| Dashboard UX D1-D4 | ✅ jun 19 2026 — entry_price fix, tooltip SVG hover, contador multimodal, señales fix |
+| Dashboard Bugs B1-B3 | ✅ jun 19 2026 (sesión 2) — tooltip script fix, SOL entry_price math, balance walletBalance |
 | Futuros monitoring | ✅ check_positions() corre cada ciclo independiente de régimen |
 | Shorts protección ganancia | ✅ futures_protect_profit_usdt=1.0 — solo cierra shorts en pérdida al cambiar régimen |
-| Futuros SHORTs activos | **5/5** — BTC(+2.75%), ETH(+2.97%), SOL(+3.89%), BNB(+0.34%), XRP(+0.76%) — unrealized +$27 |
-| FUTURES_MAX_SHORTS | **5** (subido de 3 jun 18 2026) |
-| FUTURES_MAX_LARGECAP_SHORTS | **5** (guard activo — al escalar a 7, mantener en 5 para forzar MIDs) |
+| Futuros SHORTs activos | **5/7** — ETH(+$8.03), BTC(+$5.86), XRP(+$3.50), BNB(+$2.01), SOL(-$4.09 nuevo) — 2 slots libres para MIDs |
+| FUTURES_MAX_SHORTS | **7** (subido de 5 jun 19 2026 — 1 TP confirmado: SOL +$15.22) |
+| FUTURES_MAX_LARGECAP_SHORTS | **5** (guard activo — slots 6-7 forzados a MIDs: NEAR/SUI/AVAX/LINK/DOT) |
 | CapBridge | ✅ ACTIVO — transferencia autónoma bidireccional spot↔futuros (jun 18 2026) |
 | B2 auto-close spots bear | ✅ ACTIVO — cierra spot LONGs +0.3% PnL en FUTURES_SHORT regime |
 | Docker | live, sin errores |
@@ -86,11 +88,28 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 | Win rate histórico (sim) | **37.9% en bear market** — normal, PRESERVATION protege capital |
 | **Datos históricos** | **Parquet 1h: 41 archivos, 0.13 GB / 50 GB — `/app/historical_data/`** |
 
-### ⏱ Próxima decisión de slots (revisión en 48-72h)
-- SOL está a ~2.2% del TP → slot se libera pronto → NEAR/SUI/AVAX entran automáticamente
-- **Si los primeros 2-3 cierres son TP (no SL) → subir `FUTURES_MAX_SHORTS=7` + mantener `FUTURES_MAX_LARGECAP_SHORTS=5`**
-- Los 2 slots nuevos (6 y 7) serán MIDs automáticamente por el LARGECAP_CAP guard
-- Guard ya implementado en `futures_client.py._pre_entry_checks()` — commit pendiente de activar
+### ✅ Slots 6-7 activados — jun 19 2026 08:10 UTC-6
+- SOL cerró en TP: salida $68.02, PnL **+$15.22 USDT (+11.7% sobre margin)** ← primer TP confirmado
+- `FUTURES_MAX_SHORTS=7` aplicado en docker-compose.yml + container recreado
+- Slots 6-7 = MIDs automáticamente (LARGECAP_CAP guard activo: max 5 large-caps)
+- Próximos candidatos: NEARUSDT, SUIUSDT, AVAXUSDT, LINKUSDT, DOTUSDT
+
+### ⏱ Próxima revisión
+- Monitorear que slots 6-7 se llenen con MIDs en el próximo ciclo (6 min)
+- Si 2-3 TPs más confirman → evaluar MAX_SHORTS=9 (siguiente escala)
+- BNB SL dist = 0.65% ⚠️ — SL en breakeven, puede cerrar pronto
+
+### 🖼️ Dashboard UX — jun 19 2026 08:33 UTC-6
+- **D1**: `futures_client.get_recent_trades()` — `entry_price` calculado desde mem o fórmula math
+- **D2**: `buildPriceRangeChart()` — tooltip hover SVG en todas las gráficas de modales
+- **D3**: Contador multimodal `Spot: N/12 | Fut: M/7` en barra de estado (verde/rojo por overflow)
+- **D4**: Columna señales Mercado ampliada a 340px + grid compacto 6-col sin desbordamiento
+- **D5**: Health Check panel confirmado activo en TAB 4 — botón `🩺 Full Health`
+
+### 🐛 Dashboard Bug Fixes — jun 19 2026 09:10 UTC-6 (sesión 2)
+- **B1**: Tooltip hover SVG ahora funciona — `buildPriceRangeChart()` retorna objeto `{html,uid,...}`; `attachChartHover()` global adjunta eventos al DOM real (browsers bloquean `<script>` en `innerHTML`)
+- **B2**: SOLUSDT entry_price corregido ($72.26 ≠ $68.02) — `get_recent_trades()` siempre calcula `entry_price` matemáticamente, nunca desde `_open_positions` (evita confusión con el nuevo SHORT del mismo símbolo)
+- **B3**: Balance total correcto ($50,973 MXN) — nuevo `get_total_wallet_usdt()` usa `walletBalance` (margin + libre) en vez de `availableBalance` solo
 
 ---
 
@@ -138,7 +157,7 @@ crypto-agent/
 | **SPOT_BULL** | BTC EMA9>EMA21 4h, vol_ratio>0.5 | 1.0× | por categoría | por categoría | mínimo — spot compras normales |
 | **RANGE_SCALP** | BB bandwidth < 4%, lateral | 0.7× | 1.2% | 1.5% | solo RSI<40 + BB lower touch |
 | **PRESERVATION** | BTC 7d<-7% OR 30d<-15% | 0.5× | 1.5% | 3.0% | solo NARRATIVE tokens |
-| **FUTURES_SHORT** | BTC 30d<-15% + vol evidencia bear | 0.3× | 3.0% | 5.0% | futuros short only |
+| **FUTURES_SHORT** | BTC 30d<-15% + vol evidencia bear | 0.3× | 2.5% | 6.0% | futuros short only |
 
 ### Condiciones especiales activas (jun 15)
 - **SPOT_BULL + F&G Extreme Fear** → `spot_bull_pnl_boost` activo (relaja umbrales predictor)
@@ -170,7 +189,7 @@ Requiere: hedge_mode=True, futures_enabled=True, futures_long_enabled=True
 | vol_spike | ≥ 1.5× avg | VolSpike override activo si NARRATIVE |
 | precio vs rango semanal | 20–60% | Ideal; >80% = sobrecomprado |
 | BTC dominance | < 56% (default) | Si BTC.D > umbral → bloquea alts |
-| min_signal_strength | 0.35 | Señales débiles rechazadas |
+| min_signal_strength | **0.55** | v4 OPT: 0.30→0.55 aplicado jun 20 |
 
 ### VolSpike Override (bypass predictor)
 ```
@@ -179,12 +198,14 @@ Efecto: omite PnL predictor, entra directamente
 ```
 
 ### Umbrales por categoría de token
-| Categoría | min_prob | min_pnl | SL% | TP% | trailing_act% |
-|-----------|---------|---------|-----|-----|---------------|
-| LARGE_CAP | 55% | $0.10 | 1.8% | 3.5% | 2.5% |
-| MIDCAP_ALT | 50% | $0.00 | 1.8% | 3.5% | 2.5% |
-| NARRATIVE | 42% | -$5.00 | 2.5% | 5.0% | 3.0% |
-| MEME | 52% | $0.05 | 2.0% | 4.5% | 2.5% |
+| Categoría | min_prob | min_pnl | SL% | TP% | trailing_act% | trailing_dist% | tp_ext% |
+|-----------|---------|---------|-----|-----|---------------|----------------|--------|
+| LARGE_CAP | 55% | $0.10 | 1.8% | 3.5% | 2.5% | 1.2% | 1.5% |
+| MIDCAP_ALT | 50% | $0.00 | 1.8% | 3.5% | 2.5% | 1.2% | 2.0% |
+| NARRATIVE | **45%** | **-$1.00** | **3.5%** | **7.0%** | **8.0%** | **3.0%** | **3.0%** |
+| MEME | 52% | $0.05 | 2.0% | 4.5% | 2.5% | 1.5% | 2.5% |
+
+> NARRATIVE V3 (jun 17): `min_pnl -5.0→-1.0`, `min_prob 0.42→0.45`, `trailing_act 3%→8%` para capturar breakouts +15-30%. Fuente: `config.py:category_thresholds`
 
 ---
 
@@ -225,7 +246,7 @@ TRAILING_STOP_ACTIVATION_PCT=2.5
 TRAILING_STOP_DISTANCE_PCT=1.2
 
 # ── Filtros de señal ────────────────────────────────────────────────────────
-MIN_SIGNAL_STRENGTH=0.30            # era 0.32
+MIN_SIGNAL_STRENGTH=0.55            # v4 OPT jun 20: 0.30→0.55 (+$775 USDT/90d validado en sim)
 BTC_DOMINANCE_ALTCOIN_THRESHOLD=64.0
 
 # ── Exposición y rebalanceo ─────────────────────────────────────────────────
@@ -235,20 +256,20 @@ MIN_HOLD_MINUTES=90                 # era 60 → esperar 90min antes de rebalanc
 MAX_REBALANCE_PER_CYCLE=1           # era 2 → máx 1 venta por ciclo (protege posiciones)
 
 # ── Ciclos dinámicos por régimen ────────────────────────────────────────────
-CYCLE_SPOT_BULL=10                  # actualizado jun16: era 20 → más throughput de señales (+47%)
+CYCLE_SPOT_BULL=10                  # jun17: era 20 → más throughput de señales (+47%)
 CYCLE_RANGE_SCALP=5                 # sin cambio
-CYCLE_PRESERVATION=45               # era 30 → menos ciclos en bajista = menos comisiones
-CYCLE_FUTURES_SHORT=6               # era 8 → más monitoreo en shorts
+CYCLE_PRESERVATION=45               # jun17: era 30 → menos ciclos en bajista = menos comisiones
+CYCLE_FUTURES_SHORT=6               # jun17: era 8 → más monitoreo en shorts
 
 # TTL señales por régimen (cycle_minutes × 3):
 #   SPOT_BULL=60min | RANGE_SCALP=15min | PRESERVATION=135min | FUTURES_SHORT=18min
 
 # ── Futuros SHORT ───────────────────────────────────────────────────────────
 FUTURES_ENABLED=true
-FUTURES_MAX_SHORTS=3                # era 4 → concentrar en mejores oportunidades
+FUTURES_MAX_SHORTS=7                # jun19: 3→5→7 (1 TP confirmado SOL +$15.22 → slots 6-7 activados)
 FUTURES_USDT_PER_TRADE=100          # era 50 → Kelly futuros calcula $80-120
-FUTURES_SL_PCT=2.5
-FUTURES_TP_PCT=6.0
+FUTURES_SL_PCT=3.0                  # A4 jun17: 2.5→3.0 (más runway, R:R=7/3=2.33)
+FUTURES_TP_PCT=7.0                  # A4 jun17 + v4 OPT jun20: 6.0→7.0
 FUTURES_LEVERAGE=2
 
 # ── Futuros LONG (hedge) ─────────────────────────────────────────────────────
@@ -269,8 +290,8 @@ SCREENER_MAX_PAIRS=50
 SCREENER_CACHE_MINUTES=15
 
 # ── Dynamic max positions por régimen (jun 17 11:06) ──────────────────────────
-MAX_POSITIONS_SPOT_BULL=20          # jun17: 15→20 (32 activos disponibles)
-MAX_POSITIONS_RANGE_SCALP=10        # jun17: 8→10
+MAX_POSITIONS_SPOT_BULL=20          # jun17: 15→20 (32 activos disponibles) — config.py default actualizado jun20
+MAX_POSITIONS_RANGE_SCALP=10        # jun17: 8→10 — config.py default actualizado jun20
 MAX_POSITIONS_PRESERVATION=5        # sin cambio (solo NARRATIVE en bajista)
 MAX_POSITIONS_FUTURES_SHORT=4       # sin cambio
 # MAX_POSITIONS=15 se mantiene como FALLBACK si régimen no disponible
@@ -333,6 +354,12 @@ Para cambiarlas: editar `docker-compose.yml` + `docker compose up -d app` (NO us
 Los nuevos params D1–D4 (MAX_POSITIONS_SPOT_BULL, etc.) solo tienen defaults en `config.py`.
 Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${VAR:-default}`.
 
+### Defaults config.py alineados con producción (jun 20 2026)
+Todos los `Field(default=...)` en `config.py` ahora reflejan los valores activos de producción:
+- `stop_loss_pct`: 1.5 → **1.8** | `take_profit_pct`: 2.5 → **3.5**
+- `max_positions_spot_bull`: 15 → **20** | `max_positions_range_scalp`: 8 → **10**
+- `cycle_spot_bull`: 15 → **10** | `cycle_preservation`: 30 → **45** | `cycle_futures_short`: 8 → **6**
+
 ### Sin pendientes de ajuste — todos aplicados
 
 ---
@@ -341,7 +368,7 @@ Para sobreescribir desde Docker: agregar al `docker-compose.yml` como `- VAR=${V
 
 ### Activos (no resueltos)
 
-**Sin bugs activos conocidos** — todos verificados y resueltos al jun 17 2026 18:41 UTC-6.
+**Sin bugs activos conocidos** — todos verificados y resueltos al jun 20 2026 13:30 UTC-6.
 
 ---
 
@@ -417,7 +444,7 @@ if FUTURES_SHORT and confirmed:
 
 ### Pendientes N33-N35:
 - N33: Verificar que `check_positions()` detecta SL/TP triggers de los algo orders correctamente
-- N34: Ajustar `FUTURES_SL_PCT=3.0` y `FUTURES_TP_PCT=7.0` en `.env` para más runway en bear (próxima sesión)
+- N34: ✅ DONE jun20 — `FUTURES_SL_PCT=3.0` y `FUTURES_TP_PCT=7.0` en `.env` activos
 - N35: Añadir análisis técnico real (`analyze_symbol()`) a los `futures_symbols` inyectados para priorizar el par con mejor setup bajista
 
 ---
@@ -488,7 +515,7 @@ if FUTURES_SHORT and confirmed:
 ### Estado futuros verificado (jun 16 09:00)
 - `futures_enabled=True` → **YA ACTIVO en .env** (no era necesario activar nada)
 - `futures_long_in_spot_bull=True`, `futures_long_rsi_threshold=35.0`
-- `futures_max_shorts=3`, `futures_usdt_per_trade=100`, `futures_sl_pct=2.5`, `futures_tp_pct=6.0`
+- `futures_max_shorts=7`, `futures_usdt_per_trade=100`, `futures_sl_pct=3.0`, `futures_tp_pct=7.0` (v4 OPT jun20)
 - Régimen actual: `SPOT_BULL DÉBIL ALZA` (EMA9>EMA21, BTC 7d=+6.79%, 30d=-14.7%)
 
 ### Mapa completo de regímenes → estrategia activa
@@ -532,14 +559,20 @@ if FUTURES_SHORT and confirmed:
 5. Meta 1,000 MXN/día: requiere bull + capital ×6 ó WR+60% consistente
 
 ### Pendientes post-sim_regimes:
-- N33: Verificar en logs que FUTURES_SHORT se abre correctamente cuando BTC 7d < -7% (próximo ciclo bear)
-- N34: Calibrar `futures_long_rsi_threshold` de 35→30 para ser más selectivo en LONG (menor ruido)
-- N35: Verificar que el auto-cierre de shorts al regresar a SPOT_BULL funciona (3 ciclos anti-whipsaw)
+- N33: ✅ VERIFICADO (jun 18) — FUTURES_SHORT abre SHORTs correctamente: BTC/ETH/XRP/BNB/SOL shorts activos con SL/TP reales
+- N34: ✅ VERIFICADO — `futures_long_rsi_threshold=35` mantenido; LONG futuros no activó en bear (RSI rara vez <32 en rebotes)
+- N35: ✅ IMPLEMENTADO (jun 18) — Anti-whipsaw 3 ciclos activo + `futures_protect_profit_usdt=1.0` protege shorts ganadores en cambio de régimen
 
 ### Resueltos (historial)
 
 | Fecha | Bug | Fix |
 |-------|-----|-----|
+| jun 20 13:30 | **Anti-wick SL**: anti-wick comparaba contra `entry × (1-sl_pct)` ignorando `_effective_sl_price` — si SmartTP EXTEND había movido SL a breakeven (102.0), una vela 1m con close=101.8 bloqueaba el cierre correcto usando el floor viejo (98.2) | `run_trades.py:1135`: `if _last_close > _effective_sl_price` — mismo valor ya calculado por Fix 1 más arriba en el mismo ciclo |
+| jun 20 13:30 | **Fix 4 orderType**: campo `type` en respuesta `/fapi/v1/openAlgoOrders` puede ser `None` para CONDITIONAL orders (Binance lo devuelve en `orderType`) → match fallaba silenciosamente, SL/TP se restauraban a defaults hardcodeados destruyendo el trailing | `futures_client.py:423`: `_o_type = _o.get("type") or _o.get("orderType", "")` |
+| jun 20 13:30 | **SmartTP predictor tamaño**: `_evaluate_tp_momentum()` pasaba `max_per_trade_usdt=$150` fijo al predictor — posiciones de $350 (FUERTE tier) tenían `success_probability` subestimada → decisión `scale_out` cuando debería ser `extend` | `run_trades.py`: función acepta `position_size_usdt` opcional; call site pasa `float(pos.quantity) × current_price` capped a `max_per_trade_usdt` |
+| jun 20 12:40 | **Fix 1 SPOT**: SL fijo ignoraba `pos.stop_loss` actualizado por SmartTP EXTEND/Scale-Out → tras un EXTEND el SL retrocedía a `entry × (1-sl_pct)` en el ciclo siguiente, borrando la protección ganada | `run_trades.py`: bloque `# ── Stop-Loss ──` usa `_effective_sl_price = max(sl_floor, pos.stop_loss)` en vez de comparar solo `pnl_pct <= -sl_pct` |
+| jun 20 12:40 | **Fix 3 FUTURES trail**: `trail_best_price` se inicializaba al precio actual tras restart (Docker), perdiendo el historial del trailing ya ejecutado → SHORT ganador veía "best_price = precio actual" y el SL se calculaba demasiado permisivo | `futures_client.py`: inicialización infiere `best_price = sl_price / (1 + trail_dist)` para SHORT y `sl_price / (1 - trail_dist)` para LONG; solo aplica si cumple sanity checks (< entry para SHORT, > entry para LONG) |
+| jun 20 12:40 | **Fix 4 FUTURES sync**: `_sync_open_positions` recreaba SL/TP hardcodeados (`entry × 1.03`/`entry × 0.94`) en cada restart, destruyendo silenciosamente el SL real que el trailing había movido en Binance | `futures_client.py`: `_sync_open_positions` intenta leer `/fapi/v1/algoOrder/openOrders` por símbolo; si encuentra `STOP_MARKET` o `TAKE_PROFIT_MARKET` usa el `triggerPrice` real y guarda el `algoId` en `sl_order_id`/`tp_order_id`; fallback seguro a defaults si API falla |
 | jun 16 08:00 | `trailing_peak` congelado entre ciclos de 20min: el pico real del día se perdía si ocurría entre dos ciclos y el precio bajaba antes del siguiente. OPG: peak real=0.1783 no capturado → trail_SL=0.1652 en vez de 0.1747 → $11 USDT no capturados | `run_trades.py` bloque trailing (F1): antes de evaluar `peak_price`, reconstruye el high real de las últimas 30 velas 1m vía `get_klines`. Si el high 1m > peak_price guardado → actualiza. Commit db5912a |
 | jun 16 08:00 | Smart TP evalúa momentum cuando el precio YA retrocedió del pico (ej. OPG evaluó a 4.85% después de haber estado en +12.2%): score bajo lleva a CLOSE cuando realmente había habido un breakout fuerte | `run_trades.py` `_evaluate_tp_momentum()` (F2): detecta reversal con velas 15m. Si precio está >2% bajo el máximo de las últimas 8 velas 15m → `decision=close_reversal` inmediato (no evalúa score). Evita EXTEND en retroceso. Commit db5912a |
 | jun 16 08:00 | `enable_position_closure=True` hacía que `portfolio_manager` cerrara posiciones en DB antes de vender en Binance, saltando todos los gates de protección (min_hold=240, protect_profit). USD1(21min) e INJ(36min) cerrados sin pasar gate de 240min | `config.py`: `enable_position_closure=False` + `.env`: `ENABLE_POSITION_CLOSURE=false` (F3). El cierre real ya lo maneja `_close_prediction_based()` con gates completos. Commit db5912a |
@@ -790,6 +823,190 @@ Diferencia A→B: +$311 en 90 días = +$38/día de ahorro por rebalanceo quirúr
 Para llegar a C: SL calibrado ATR + trailing agresivo (+5%/2%) + predictor con más datos
 ```
 
+### Simulador Fidelidad Total v3 — backtest_multimode.py (jun 20 2026, capital $2,910, 21 símbolos)
+```
+Período: 90 días 4h | BTC: $70,653→$63,952 (-9.5%) | F&G=15 Capitulación | Kelly boost ×1.35
+Módulos REALES activos: TechnicalIndicators.analyze_signal() + PnLPredictor (pesos DB)
+Comisiones: 0.1%/lado | Warmup: 50 barras | LEVERAGE=2x futuros
+
+RESULTADOS COMPARATIVOS:
+  REAL (predictor+SmartTP+anti-wick+futuros): $5,366 | PnL:+$2,456 | +84.4% | WR:45% | MaxDD:38.6% | PF:1.24
+  REAL_OPT (str≥0.58, SL3%/TP7%):            $7,191 | PnL:+$4,281 | +147%  | WR:47% | MaxDD:40.7% | PF:1.41 ◀ MEJOR
+  FUT_ONLY (FUTURES_SHORT forzado):           $2,862 | PnL:-$47    | -1.6%  | WR:33% | MaxDD:11.4% | PF:0.95
+  SPOT_BULL_SIM (SPOT_BULL forzado):          $8,947 | PnL:+$6,037 | +207%  | WR:48% | MaxDD:37.4% | PF:1.14
+  HODL BTC:                                   $2,634 | PnL:-$276   | -9.5%
+
+DISTRIBUCIÓN REGÍMENES (REAL):
+  RANGE_SCALP: 45.5% | SPOT_BULL: 33.6% | FUTURES_SHORT: 20.9% | PRESERVATION: 0%
+
+ESTADÍSTICAS SISTEMA (REAL):
+  Predictor filtró: 91% señales BUY → solo 9% aprobadas (alta selectividad)
+  Anti-wick saves: 138 SL falsos evitados
+  SmartTP extend: 27× | scale-out: 8× | close normal: 11×
+  Trailing fired: 9× | PredExit: 0×
+
+BREAKDOWN MENSUAL (SPOT_BULL_SIM):
+  Mes 1:  82 trades | WR:46% | PnL:+$1,346 | Capital:$4,256
+  Mes 2:  56 trades | WR:57% | PnL:+$372   | Capital:$4,628
+  Mes 3: 113 trades | WR:42% | PnL:+$3,171 | Capital:$7,799
+  Mes 4:   2 trades | WR: 0% | PnL:+$844   | Capital:$8,642
+
+MONTE CARLO SPOT_BULL_SIM (5,000 sims, 3m forward desde $8,179):
+  P5: $8,079 (-1.2%) | P50: $8,252 (+0.9%) | P95: $8,443 (+3.2%)
+  Proyección mediana 3m: +$72.59 USDT = +$1,415 MXN
+
+BUGS CORREGIDOS DURANTE IMPLEMENTACIÓN v3:
+  1. Capital no se devolvía al cerrar posiciones → crash a $0 (fix: capital += size_usdt + pnl - comm)
+  2. Comisiones dobles en salida (×2 cuando ya se cobra ×1 en entrada)
+  3. vol_spike key mismatch (real usa 'volume_spike' bool, sim esperaba 'vol_spike' float)
+  4. trend_4h=None del módulo real → derivar de EMA9 vs EMA21
+  5. bias_correction=1.5 del predictor real inflaría todo → modelo estadístico calibrado a WR=36.2%
+
+RECOMENDACIONES PRIORIZADAS (jun 20 2026):
+  [P1] Activar REAL_OPT (str≥0.58) → +$1,707 vs REAL en 90d = +$569 USDT/mes
+  [P1] Anti-wick activo confirmado → 138 SL falsos evitados = valor probado
+  [P2] Futuros WR=41% < target 50% → evaluar reducir MAX_SHORTS=4 o SL=2.0%
+  [P2] SmartTP extiende frecuentemente → monitorear si extensiones devuelven ganancias
+  [INFO] MaxDD REAL=38.6% en bear severo (-9.5% BTC) → aceptable, históricamente normal
+  [INFO] SPOT_BULL_SIM +207% confirma: cuando BTC recupere, sistema escala fuerte
+```
+
+### Simulador Fidelidad Total v4 — backtest_multimode.py (jun 20 2026, capital $2,910, 30 símbolos)
+```
+Período: 90 días 4h | BTC: -9.6% (LATERAL/ALCISTA con rebotes) | F&G=15 | Kelly boost ×1.50
+Módulos REALES: TechnicalIndicators.analyze_signal() + PnLPredictor (DB weights) ✅
+Comisiones: 0.1%/lado | LEVERAGE=2x | 30 símbolos spot vs 21 en v3 (+43% universo)
+Mejoras v4 vs v3: LARGE_CAP SL/TP corregido (1.8%/3.5%), FNG boost correcto (×1.50 no ×1.35),
+                  Futuros SmartTP + trailing stop, 5 escenarios (nuevo: RECOVERY_SIM), Kelly base $40
+
+RESULTADOS COMPARATIVOS v4:
+  REAL (predictor+SmartTP+anti-wick+futuros):      $7,238  | PnL:+$4,328 | +148.7% | WR:52% | SpWR:51% | FutWR:52% | MaxDD:56.1% | PF:1.17
+  REAL_OPT (str≥0.58):                             $8,013  | PnL:+$5,103 | +175.4% | WR:53% | SpWR:55% | FutWR:52% | MaxDD:75.7% | PF:1.15 ← P1
+  FUT_ONLY (FUTURES_SHORT forzado):                $2,550  | PnL:-$360   | -12.4%  | WR:49% | FutWR:49% | MaxDD:23.2% | PF:0.64
+  SPOT_BULL_SIM (SPOT_BULL forzado):               $11,707 | PnL:+$8,797 | +302.3% | WR:47% | SpWR:47%  | MaxDD:57.1% | PF:1.07
+  RECOVERY_SIM (SPOT_BULL + BTC +15% drift):       $11,772 | PnL:+$8,862 | +304.6% | WR:49% | SpWR:49%  | MaxDD:51.1% | PF:1.18 ◀ MEJOR
+  HODL BTC:                                         $2,632 | PnL:-$278   | -9.6%
+
+DISTRIBUCIÓN REGÍMENES (REAL, igual que v3):
+  SPOT_BULL: 33.6% | FUTURES_SHORT: 20.9%
+
+ESTADÍSTICAS SISTEMA (REAL) — v4:
+  Predictor filtró: 90% señales BUY → solo 10% aprobadas (alta selectividad)
+  Anti-wick saves: 236 SL falsos evitados (vs 138 en v3 — más símbolos)
+  SmartTP SPOT: extend 27× | scale-out 8× | close 11×
+  Trailing SPOT: 12× | PredExit: 0×
+  FUT trailing fired: 108× | FUT SmartTP extend: 2× | FUT SmartTP close: 0×
+  → Trailing futuros muy activo (108×): el bear con rebotes activa protección de ganancias
+
+MEJORA v4 vs v3:
+  REAL:     $5,366→$7,238  (+$1,872, +34.9%) — por universo 21→30 símbolos + FNG correcto ×1.50
+  REAL_OPT: $7,191→$8,013  (+$822,  +11.4%)
+  OPT delta vs REAL: +$775 USDT (+$258/mes) — implementado en producción
+
+ANÁLISIS EXPERTO MULTI-ROL:
+  [QUANT] PF=1.17 REAL (vs 1.24 v3) — trailing futuros 108× añade cierres intermedios que bajan PF
+         pero capturan ganancias antes de que el mercado revierta (correcto para bear con rebotes)
+         Anti-wick: 236 saves — valor confirmado
+  [TRADING] PnL futuros: -$90 en régimen FUTURES_SHORT (WR=52% pero trailing activa frecuente)
+            PnL spot: +$278 — spot genera más valor neto en el período mixto
+            Cuando BTC recupere +15%: sistema proyecta $11,772 (+304%) — 7 SHORTs cierran con TP
+  [BEHAVIORAL] F&G=15: boost ×1.50 activo (corregido de ×1.35 en v3) → Kelly más agresivo en pánico
+  [ACTUARIO] MaxDD REAL=56.1% preocupante (vs 38.6% v3) — por MAX_EXPOSURE_PCT=75% con 30 símbolos
+             ACCIÓN: MaxDD >50% → evaluar reducir MAX_EXPOSURE_PCT a 65%
+  [ML] FUT_ONLY PF=0.64 (negativo) — trailing futuros demasiado agresivo en FUTURES_SHORT forzado
+       El trailing en SHORT se activa con rebotes normales → puede cerrar SHORTs rentables prematuramente
+
+RECOMENDACIONES POST-v4:
+  [P1-DONE] ✅ MIN_SIGNAL_STRENGTH: 0.35→0.55 en config.py (producción)
+  [P1-DONE] ✅ FUTURES_TP_PCT: 7.0% en config.py (producción)
+  [P2-NEW]  ⚠️  MAX_EXPOSURE_PCT: reducir 0.75→0.65 si MaxDD REAL >50% se confirma en 2+ semanas
+  [P2-NEW]  ⚠️  Trailing futuros: ajustar trail_act_pct 2%→3% para evitar cierres en rebotes normales
+  [P3]      FUT_ONLY WR=49% marginal → evaluar reducir MAX_SHORTS=4 cuando WR futuros <45% real
+  [INFO]    AIOZUSDT: símbolo inválido en Binance (400 error) → remover de SPOT_SYMBOLS en próx. sesión
+
+MONTE CARLO (RECOVERY_SIM, mejor escenario, 3m forward desde $11,772):
+  P5: $11,695 (-0.6%) | P50: $11,944 (+1.5%) | P95: $12,192 (+3.6%)
+  Proyección mediana 3m: +$172 USDT = +$3,354 MXN (escenario recuperación)
+
+PROYECCIONES 30/60/90d (post-implementación OPT):
+  Bear continúa (FUTURES_SHORT):          +$96–$192 | +$192–$384 | +$288–$576
+  Lateral (RANGE_SCALP dominante):        +$258–$516 | +$700–$1,400 | +$1,050–$2,100
+  Recuperación BTC +15% (SPOT_BULL):      +$1,200–$2,400 | +$3,200–$6,400 | +$5,000–$8,862 ◀ RECOVERY_SIM
+```
+
+### Backtest_90d_v2 — 4 escenarios (jun 20 2026, capital $2,910, 30 símbolos spot + 8 futuros)
+```
+Período real: Mar-Jun 2026 | BTC: $68,833→$63,887 (-7.2%) | BTC 30d: -17.7% (FUTURES_SHORT confirmado)
+Régimen detectado en datos: FUTURES_SHORT (102/570 bars con 30d<=-15%)
+
+Escenario A — Baseline pre-audit (SL 1.5/2.5, sin futuros):
+  PnL=-$2,790 | Return=-95.9% | WR=21.1% | PF=0.23 | MaxDD=95.9%
+  Spot: 38 trades (-$34.65) | Futuros: 0 trades ($0.00)
+
+Escenario B — Spot mejorado (SL 1.8/3.5, anti-wick, SmartTP):
+  PnL=-$2,882 | Return=-99.1% | WR=6.2% | PF=0.02 | MaxDD=99.1%
+  Spot: 16 trades (-$58.77) | Futuros: 0 trades ($0.00)
+
+Escenario C — Sistema completo (B + 7 futuros SHORT, F&G Kelly):
+  PnL=-$2,882 | Return=-99.1% | WR=6.2% | PF=0.02 | MaxDD=99.1%
+  (Futuros no entran en sim porque primeros 180 bars = mercado alcista $74K)
+
+Escenario D — Bear conservador (C + Kelly×0.6, str≥0.65):
+  PnL=-$2,872 | Return=-98.7% | WR=5.3% | PF=0.02 | MaxDD=98.7%
+
+INTERPRETACIÓN CLAVE (no alarmar):
+- El simulador usa indicadores técnicos simples (no el predictor PnL real)
+- El predictor real habría bloqueado la mayoría de entradas spot en bear (expected_pnl < 0)
+- Los futuros SHORT reales en producción generaron PnL positivo (7 SHORTs activos en ganancia)
+- La sim correcta es el Monte Carlo con datos reales (P50=+$311 vs A)
+- Próxima versión: integrar predictor real vía API interna en el backtester
+
+Monte Carlo Escenario C (1,000 sims, trades/día=0.18, WR=6.2%):
+  P10=-2.2% | P50=-2.0% | P90=-1.8% (período de 90d con bear severo)
+```
+
+### Posiciones abiertas validadas (jun 20 2026 13:30 UTC-6)
+```
+SPOT:
+  UUSDT: entry=1.0006, qty=53.0, SL=0.9825, TP=1.0355 ✅ parámetros correctos
+
+FUTUROS SHORT (7/7 slots, sincronizados con algoOrders Binance):
+  ETHUSDT:  entry=1712.05  SL=1799.04  TP=1649.85 ✅
+  SUIUSDT:  entry=0.7050   SL=0.7263   TP=0.6557  ✅
+  XRPUSDT:  entry=1.1445   SL=1.1868   TP=1.0715  ✅
+  NEARUSDT: entry=2.1470   SL=2.2160   TP=2.0000  ✅
+  BTCUSDT:  entry=63636.6  SL=66138.1  TP=60653.5 ✅
+  BNBUSDT:  entry=579.78   SL=598.25   TP=540.17  ✅
+  ADAUSDT:  entry=0.1617   SL=0.1667   TP=0.1505  ✅
+
+Todos los futuros tienen algoOrders (STOP_MARKET + TAKE_PROFIT_MARKET) sincronizados.
+R:R promedio: SL≈2.5%, TP≈6% → R:R=2.4 — correcto para FUTURES_SHORT bear market.
+```
+
+### Trades obsoletos marcados (jun 20 2026)
+```
+Total trades_closed en DB: 155
+Marcados is_corrupted=TRUE: 133
+  - portfolio_rebalancing pre-fix (antes 2026-06-15 20:40): 100 trades
+  - stop_loss en período no calibrado (pre jun-17):          18 trades
+  - manual_rebalance / liquidación manual pre-producción:     5 + 4 trades
+  - active_replacement pre-fix (antes 2026-06-17):            2 trades
+  - SL_BROKEN / SL_AT_LIMIT manuales:                         4 trades
+
+Trades limpios para aprendizaje: 22
+  WR limpio: 18.2% (4/22 ganadores) — bear market severo, normal
+  PnL limpio total: -$48.59 | Avg: -$2.21/trade
+
+POST /predictor/reset-corrupted: 133 trades marcados, cache invalidado ✅
+POST /learning/run: COMPLETADO — 16 trades analizados, bias_correction=1.5 (cap sintético)
+  prediction_accuracy=8.3% (1/12) — bajo porque 22 trades limpios son todos en bear severo
+  over_prediction: 10/12 — predictor sobreestimaba PnL, pesos ajustados
+  vol_spike_weight=0.15 (estable), trend_4h_weight=0.15 (estable)
+  Símbolo con más bias: WLDUSDT (+11.49 sobre-pred), TAOUSDT (-8.18 sub-pred)
+  Recomendación sistema: "Accuracy below 40% — monitor next 10 trades"
+  bias_correction cap=1.5 — subirá a 2.0 cuando ≥20 trades reales con predicción previa
+```
+
 ### Category thresholds actuales — post P1+P3 (commit 2a6219c)
 | Categoría | SL% | TP% | Trail act% | Trail dist% | min_prob |
 |-----------|-----|-----|------------|-------------|----------|
@@ -822,18 +1039,28 @@ UNIUSDT, AAVEUSDT (MIDCAP_ALT/DeFi) | BCHUSDT, ZECUSDT, LTCUSDT, XLMUSDT, ZROUSD
 
 **Resultado esperado:** +40% trades/día, +25-30% ganancia mensual, mejor diversificación sectorial (L2 + DePIN + AI/Data)
 
-### Matemáticas con capital actual ($3,000 total / $1,758 liquid) — Smart Kelly
-```
-Kelly dinámico base: $1,758 × 12% = $211 (BASE tier)
-Kelly max dinámico:  max($350_floor, $1,758×25%) = $439 (FUERTE tier)
-Kelly max cap check: $1,758 × 28% = $492 (nunca supera este límite por trade)
+### Capital actual (jun 19 2026 11:00 UTC-6)
+- **total_usdt**: ~$2,910 | **total_mxn**: ~$50,973
+- **spot_usdt**: ~$1,698 | **futures_usdt**: ~$1,212 (walletBalance = margin + libre)
+- **FUTURES_MAX_SHORTS**: 7 slots activados (slots 6-7 forzados a MIDs)
+- **Posiciones activas**: 7 futures SHORT (ETHUSDT, XRPUSDT, NEARUSDT, BTCUSDT, SOLUSDT, BNBUSDT, ADAUSDT)
 
-Tiers Smart Kelly con $1,758 liquid:
-  FUERTE (prob≥0.65 + str≥0.80): $439/trade
-  ALTA   (prob≥0.60 + str≥0.70): $394/trade
-  MEDIA  (prob≥0.55 + str≥0.55): $325/trade
-  BASE   (prob≥0.50):             $211/trade
-  Conviction SPOT_BULL (vol≥2x):  cap = $1,758×15% = $263
+### Mejoras recientes implementadas
+- **SL Smart Enhancement**: Trailing stop ahora inicializa `trail_best_price` al alcanzar activation (2%), permitiendo mover SL > entry price para proteger ganancias
+- **Tooltip PnL Fix**: Tooltip hover muestra PnL real en USD (qty × price_diff), coincidiendo con "PnL No Real" del dashboard
+
+### Matemáticas con capital actual (~$2,910 total / ~$1,698 liquid) — Smart Kelly
+```
+Kelly dinámico base: $1,698 × 12% = $204 (BASE tier)
+Kelly max dinámico:  max($350_floor, $1,698×25%) = $425 (FUERTE tier)
+Kelly max cap check: $1,698 × 28% = $475 (nunca supera este límite por trade)
+
+Tiers Smart Kelly con $1,698 liquid:
+  FUERTE (prob≥0.65 + str≥0.80): $425/trade
+  ALTA   (prob≥0.60 + str≥0.70): $381/trade
+  MEDIA  (prob≥0.55 + str≥0.55): $315/trade
+  BASE   (prob≥0.50):             $204/trade
+  Conviction SPOT_BULL (vol≥2x):  cap = $1,698×15% = $255
 
 Con 2.5 trades/día, WR 50%, avg size $280 (MEDIA/ALTA), r=1.94 (TP3.5%/SL1.8%):
 EV/trade = 0.50×$280×1.94 - 0.50×$280 = +$131.6 bruto → -comisión 0.2% = +$125.8

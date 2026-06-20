@@ -974,16 +974,23 @@ def _get_market_regime() -> Dict:
 
         # Mode descriptions (single source of truth)
         _MODE_DESC = {
-            "SPOT_BULL":     "Compras en breakout con Kelly dinámico. Trailing stop activo. Scale-out en TP.",
+            "SPOT_BULL":     "Compras en breakout con Kelly dinamico. Trailing stop activo. Scale-out en TP.",
             "RANGE_SCALP":   "Compras en soporte BB inferior (RSI<40), venta en BB superior. TP ajustado 1.5%.",
-            "PRESERVATION":  "Capital 80%+ en USDT. Solo NARRATIVE con VolSpike≥2x. Kelly×0.5.",
-            "FUTURES_SHORT": "Shorts 2× en pares Tier A screener (BTCUSDT, ETHUSDT, SOLUSDT…). LONG en soporte. SL SHORT 3% / LONG 2.5% | TP 5%. Hedge mode activo.",
+            "PRESERVATION":  "Capital 80%+ en USDT. Solo NARRATIVE con VolSpike>=2x. Kelly x0.5.",
+            "FUTURES_SHORT": "Shorts 2x en pares Tier A (BTCUSDT, ETHUSDT, SOLUSDT...). LONG en soporte. SL SHORT 3% / LONG 2.5% | TP 7%. Hedge mode activo.",
         }
         _MODE_COLOR = {
             "SPOT_BULL": "#4ecca3", "RANGE_SCALP": "#f39c12",
             "PRESERVATION": "#e74c3c", "FUTURES_SHORT": "#9b59b6",
         }
 
+        # Fetch BTC current price for dashboard context
+        _btc_price = 0.0
+        _btc_rsi = 0.0
+        try:
+            _btc_price = float(comp.binance_client.get_symbol_price("BTCUSDT"))
+        except Exception:
+            pass
         result = {
             "regime":           r.regime,
             "color":            r.color,
@@ -993,9 +1000,11 @@ def _get_market_regime() -> Dict:
             "bb_bandwidth":     r.bb_bandwidth,
             "btc_7d_change_pct": r.btc_7d_pct,
             "btc_30d_change_pct": r.btc_30d_pct,
+            "btc_price":        _btc_price,
+            "btc_24h_change_pct": r.btc_day_pct,
             "trading_mode":     r.mode,
             "mode_color":       _MODE_COLOR.get(r.mode, "#888"),
-            "mode_reason":      r.reason + (" [pendiente confirmación]" if not r.confirmed else ""),
+            "mode_reason":      r.reason + (" [pendiente confirmacion]" if not r.confirmed else ""),
             "mode_desc":        _MODE_DESC.get(r.mode, ""),
             "mode_confirmed":   r.confirmed,
             "regime_sl_pct":    r.sl_pct,
@@ -1037,9 +1046,11 @@ async def get_dashboard_summary() -> Dict:
     result = {}
 
     # Exchange rate (computed once, reused across blocks)
-    _usd_mxn = 17.5
+    _usd_mxn = 17.5  # Fixed display rate MXN/USD (USDCUSDT ≈1.0 on Binance, not a real FX source)
     try:
-        _usd_mxn = binance_client.get_symbol_price("USDCUSDT") * 17.5 or 17.5
+        _usdmxn_candidate = binance_client.get_symbol_price("USDTMXN") or 0
+        if _usdmxn_candidate > 10:  # sanity check: real MXN rate is always > 10
+            _usd_mxn = _usdmxn_candidate
     except Exception:
         pass
 
@@ -1096,7 +1107,7 @@ async def get_dashboard_summary() -> Dict:
         try:
             from run_trades import _get_futures_client
             _fc_bal = _get_futures_client(settings)
-            _futures_usdt = _fc_bal.get_available_usdt()
+            _futures_usdt = _fc_bal.get_total_wallet_usdt()  # includes margin + available
         except Exception:
             pass
         _grand_total = total_usdt + _futures_usdt
@@ -1243,10 +1254,64 @@ async def get_dashboard_summary() -> Dict:
             return {"total_pnl": total, "total_trades": count, "pnl_percentage": 0.0}
 
         closed = position_manager.get_closed_positions(limit=500)
+
+        # Build daily_breakdown for the last 30 days (for chart)
+        def _daily_breakdown(positions, since_days=30):
+            from collections import defaultdict
+            cutoff = to_mexico_time(datetime.utcnow()) - timedelta(days=since_days)
+            daily = defaultdict(float)
+            for p in positions:
+                if not p.exit_time:
+                    continue
+                try:
+                    if isinstance(p.exit_time, str):
+                        dt = to_mexico_time(datetime.fromisoformat(p.exit_time.replace('Z', '+00:00')))
+                    else:
+                        t = p.exit_time
+                        if t.tzinfo is None:
+                            t = t.replace(tzinfo=timezone.utc)
+                        dt = to_mexico_time(t)
+                    if dt >= cutoff:
+                        daily[dt.strftime('%Y-%m-%d')] += float(p.pnl)
+                except Exception:
+                    pass
+            # Fill all days in range (even zero-trade days)
+            result_days = []
+            for i in range(since_days, 0, -1):
+                d = (to_mexico_time(datetime.utcnow()) - timedelta(days=i)).strftime('%Y-%m-%d')
+                result_days.append({"date": d, "pnl": round(daily.get(d, 0.0), 4)})
+            return result_days
+
+        # Also include futures closed PnL in daily breakdown
+        _fut_closed_pnl_by_day = {}
+        try:
+            from run_trades import _get_futures_client as _gfc
+            _fc2 = _gfc(settings)
+            _fut_closed = _fc2.get_closed_positions_db(days=30) if hasattr(_fc2, 'get_closed_positions_db') else []
+            from collections import defaultdict as _dd2
+            _fday = _dd2(float)
+            for fp in _fut_closed:
+                _fd = fp.get('closed_at') or fp.get('opened_at', '')
+                if _fd:
+                    try:
+                        _fdt = datetime.fromisoformat(str(_fd).replace('Z', '+00:00'))
+                        _fday[_fdt.strftime('%Y-%m-%d')] += float(fp.get('pnl', 0))
+                    except Exception:
+                        pass
+            _fut_closed_pnl_by_day = dict(_fday)
+        except Exception:
+            pass
+
+        _breakdown = _daily_breakdown(closed, since_days=30)
+        # Merge futures PnL into breakdown
+        for day_item in _breakdown:
+            day_item['pnl'] = round(day_item['pnl'] + _fut_closed_pnl_by_day.get(day_item['date'], 0.0), 4)
+
         result["pnl_history"] = {
             "day": _pnl_for_period(closed, day_start),
             "week": _pnl_for_period(closed, week_start),
             "year": _pnl_for_period(closed, year_start),
+            "daily_breakdown": _breakdown,
         }
     except Exception as e:
         result["pnl_history"] = {"error": str(e)}
@@ -1317,6 +1382,43 @@ async def get_dashboard_summary() -> Dict:
                     "is_overflow": symbol in _ov_positions,
                     "trade_type": "spot",
                 })
+        # Add futures positions to the dashboard
+        try:
+            from run_trades import _get_futures_client
+            fc = _get_futures_client(settings)
+            futures_positions = fc.get_open_positions_summary()
+            
+            for fp in futures_positions:
+                # Add futures position to the open_list
+                open_list.append({
+                    "symbol": fp["symbol"],
+                    "position_id": f"futures_{fp['symbol']}_{fp['side']}",
+                    "entry_number": 1,
+                    "side": fp["side"],
+                    "category": "FUTURES",
+                    "origin": "",
+                    "quantity": fp["qty"],
+                    "entry_price": fp["entry_price"],
+                    "current_price": fp["current_price"],
+                    "invested_usdt": round(fp["entry_price"] * fp["qty"], 4),
+                    "invested_mxn": round(fp["entry_price"] * fp["qty"] * _usd_mxn, 2),
+                    "current_value_usdt": round(fp["current_price"] * fp["qty"], 4),
+                    "current_value_mxn": round(fp["current_price"] * fp["qty"] * _usd_mxn, 2),
+                    "unrealized_pnl": fp["unrealized_pnl"],
+                    "unrealized_pnl_mxn": round(fp["unrealized_pnl"] * _usd_mxn, 2),
+                    "entry_time": fp.get("opened_at", ""),
+                    "hours_held": 0.0,  # Could calculate if needed
+                    "entry_commission": 0.0,
+                    "stop_loss": fp["sl_price"],
+                    "take_profit": fp["tp_price"],
+                    "pnl_prediction": None,
+                    "is_overflow": False,
+                    "trade_type": "futures",
+                })
+        except Exception as e:
+            # If futures client fails, continue with spot positions only
+            print(f"Warning: Could not fetch futures positions for dashboard: {e}")
+        
         result["open_positions"] = {"positions": open_list, "count": len(open_list)}
     except Exception as e:
         result["open_positions"] = {"positions": [], "count": 0, "error": str(e)}
@@ -1471,6 +1573,68 @@ async def get_dashboard_summary() -> Dict:
         result["daily_ticker"] = []
 
     result["monte_carlo_projection"] = _get_monte_carlo_projection()
+
+    # Pair Screener — build from analysis_cache (per-symbol technical data)
+    try:
+        _all_cached = analysis_cache.get_all()
+        _screener_data = []
+        for _sym, _cdata in _all_cached.items():
+            _ind = _cdata.get("indicators", {}) if isinstance(_cdata, dict) else {}
+            _score = float(_cdata.get("technical_score", 0.5)) if isinstance(_cdata, dict) else 0.5
+            _rsi = float(_ind.get("rsi", 50.0)) if _ind else 50.0
+            _vol = float(_ind.get("vol_spike", 0.5)) if _ind else 0.5
+            _trend = _ind.get("trend_4h", "FLAT") if _ind else "FLAT"
+            _chg = float(_ind.get("change_24h", 0.0)) if _ind else 0.0
+            _bias = "LONG" if _score >= 0.6 else ("SHORT" if _score <= 0.35 else "NEUTRAL")
+            _screener_data.append({
+                "symbol": _sym,
+                "composite_score": round(_score, 3),
+                "rsi_4h": round(_rsi, 1),
+                "vol_spike": round(_vol, 2),
+                "change_24h": round(_chg, 2),
+                "trend_4h": _trend,
+                "bias": _bias,
+            })
+        # Sort by composite score descending
+        _screener_data.sort(key=lambda x: x["composite_score"], reverse=True)
+        if not _screener_data:
+            # Last resort fallback: daily_ticker with basic metrics
+            for t in result.get("daily_ticker", []):
+                _chg = t.get("change_pct", 0)
+                _screener_data.append({
+                    "symbol": t["symbol"],
+                    "composite_score": 0.5,
+                    "rsi_4h": 50.0,
+                    "vol_spike": 0.5,
+                    "change_24h": round(_chg, 2),
+                    "trend_4h": "DOWN" if _chg < -1 else ("UP" if _chg > 1 else "FLAT"),
+                    "bias": "SHORT" if _chg < -1 else ("LONG" if _chg > 1 else "NEUTRAL"),
+                })
+        result["pair_screener"] = _screener_data
+    except Exception as _se:
+        result["pair_screener"] = []
+
+    # Expectativa vs Realidad — build from closed positions with predictions
+    try:
+        _evr_closed = position_manager.get_closed_positions(limit=200)
+        _evr_details = []
+        for _p in _evr_closed:
+            _pred = _p.pnl_prediction
+            if _pred and isinstance(_pred, dict):
+                _ep = float(_pred.get("expected_pnl") or 0)
+                _ap = float(_p.pnl or 0)
+                _evr_details.append({
+                    "symbol": _p.symbol,
+                    "prediction_pnl": round(_ep, 4),
+                    "actual_pnl": round(_ap, 4),
+                    "exit_time": to_mexico_time_str(_p.exit_time) if _p.exit_time else "",
+                })
+        result["expectativa_vs_realidad"] = {
+            "details": _evr_details[-50:],
+            "count": len(_evr_details),
+        }
+    except Exception as _evre:
+        result["expectativa_vs_realidad"] = {"details": [], "count": 0}
 
     result["timestamp"] = to_mexico_time(datetime.utcnow()).isoformat()
     return result
@@ -1731,6 +1895,78 @@ async def get_futures_positions() -> Dict:
         return {"enabled": False, "positions": [], "count": 0, "error": str(e)}
 
 
+@app.get("/price-history/{symbol}")
+async def get_price_history(symbol: str, start_time: str, end_time: str):
+    """
+    Get historical price data for a symbol between start_time and end_time.
+    Times should be ISO format strings or Unix timestamps in milliseconds.
+    Returns klines data for charting.
+    """
+    try:
+        # Parse timestamps
+        if start_time.isdigit():
+            start_ms = int(start_time)
+        else:
+            start_ms = int(datetime.fromisoformat(start_time.replace('Z', '+00:00')).timestamp() * 1000)
+        
+        if end_time.isdigit():
+            end_ms = int(end_time)
+        else:
+            end_ms = int(datetime.fromisoformat(end_time.replace('Z', '+00:00')).timestamp() * 1000)
+        
+        # Get klines data directly from Binance API (public endpoint)
+        import aiohttp
+        import asyncio
+        
+        # Calculate number of intervals needed (max 1000 klines per request)
+        duration_ms = end_ms - start_ms
+        interval_ms = 5 * 60 * 1000  # 5 minutes
+        num_intervals = min(1000, max(1, duration_ms // interval_ms))
+        
+        # Build URL for Binance public API
+        base_url = "https://api.binance.com/api/v3/klines"
+        params = {
+            "symbol": symbol,
+            "interval": "5m",
+            "startTime": start_ms,
+            "endTime": end_ms,
+            "limit": num_intervals
+        }
+        
+        # Fetch klines data
+        async with aiohttp.ClientSession() as session:
+            async with session.get(base_url, params=params) as response:
+                if response.status != 200:
+                    return {"error": f"Binance API error: {response.status}", "symbol": symbol, "data": []}
+                klines = await response.json()
+        
+        if not klines:
+            return {"symbol": symbol, "data": [], "interval": "5m"}
+        
+        # Format data for frontend
+        formatted_data = []
+        for k in klines:
+            formatted_data.append({
+                "timestamp": k[0],
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4]),
+                "volume": float(k[5])
+            })
+        
+        return {
+            "symbol": symbol,
+            "interval": "5m",
+            "data": formatted_data,
+            "start_time": start_ms,
+            "end_time": end_ms
+        }
+        
+    except Exception as e:
+        print(f"Error getting price history for {symbol}: {e}")
+        return {"error": str(e), "symbol": symbol, "data": []}
+
 @app.get("/futures/closed")
 async def get_futures_closed_positions(limit: int = 20, days: int = 3) -> Dict:
     """Return closed futures positions queried live from Binance userTrades (last N days).
@@ -1758,14 +1994,31 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 3) -> Dict:
         closed = []
         for t in raw:
             closed_at_raw = t.get("closed_at")
+            # Try to get opened_at from trade timestamp or estimate from closed_at
+            opened_at_raw = t.get("time") or t.get("timestamp")
+            if not opened_at_raw and closed_at_raw:
+                # Estimate opened_at as 1-24 hours before closed_at for typical futures trades
+                from datetime import datetime, timedelta
+                if isinstance(closed_at_raw, str):
+                    try:
+                        closed_dt = datetime.fromisoformat(closed_at_raw.replace('Z', '+00:00'))
+                        opened_dt = closed_dt - timedelta(hours=6)  # Estimate 6 hours duration
+                        opened_at_raw = opened_dt.isoformat()
+                    except:
+                        opened_at_raw = None
+                else:
+                    opened_at_raw = None
+            
             closed.append({
                 "symbol":      t["symbol"],
                 "side":        t["side"],
                 "qty":         t["qty"],
                 "entry_price": t.get("entry_price"),
                 "exit_price":  t.get("exit_price"),
+                "sl_price":    t.get("sl_price"),
+                "tp_price":    t.get("tp_price"),
                 "pnl":         t.get("pnl"),
-                "opened_at":   None,
+                "opened_at":   to_mexico_time_str(opened_at_raw) if opened_at_raw else None,
                 "closed_at":   to_mexico_time_str(closed_at_raw) if closed_at_raw else None,
                 "trade_type":  "futures",
             })
@@ -1964,7 +2217,9 @@ async def get_health_status() -> Dict:
     # Trade cycle freshness
     last_cycle = orchestrator.last_trade_cycle_at
     if last_cycle:
-        age_min = (datetime.utcnow() - last_cycle).total_seconds() / 60
+        _now_utc = datetime.now(timezone.utc)
+        _last_cycle_aware = last_cycle if last_cycle.tzinfo else last_cycle.replace(tzinfo=timezone.utc)
+        age_min = (_now_utc - _last_cycle_aware).total_seconds() / 60
         _stale_threshold = orchestrator.current_cycle_minutes * 1.5
         stale = age_min > _stale_threshold
         checks["trade_cycle"] = {
@@ -2162,6 +2417,234 @@ async def clear_errors() -> Dict:
     """Clear the in-memory error log."""
     ec.clear_errors()
     return {"status": "cleared", "timestamp": to_mexico_time(datetime.utcnow()).isoformat()}
+
+
+@app.get("/health/full-check")
+async def get_health_full_check() -> Dict:
+    """
+    Full system health check: runs internal assertions on config, regime logic,
+    futures core, spot pipeline, Kelly sizing, and capital flow.
+    Returns categorised PASS/FAIL/WARN report consumable by the dashboard.
+    """
+    from config import Settings
+    import traceback
+
+    HEALTH_VERSION = "2026-06-18-v1"
+    categories = []
+    total = passed = failed = warned = 0
+
+    def _check(name: str, fn, warn_only: bool = False):
+        nonlocal total, passed, failed, warned
+        total += 1
+        try:
+            fn()
+            passed += 1
+            return {"name": name, "status": "pass"}
+        except AssertionError as e:
+            if warn_only:
+                warned += 1
+                return {"name": name, "status": "warn", "detail": str(e)}
+            failed += 1
+            return {"name": name, "status": "fail", "detail": str(e)}
+        except Exception as e:
+            if warn_only:
+                warned += 1
+                return {"name": name, "status": "warn", "detail": f"{type(e).__name__}: {e}"}
+            failed += 1
+            return {"name": name, "status": "fail", "detail": f"{type(e).__name__}: {e}"}
+
+    # ── Cat 1: Config Integrity ───────────────────────────────────────────────
+    cfg = Settings()
+    cat1_checks = [
+        _check("kelly_base_lt_kelly_max",
+               lambda: assert_(cfg.kelly_base_usdt < cfg.kelly_max_usdt,
+                               f"kelly_base={cfg.kelly_base_usdt} >= kelly_max={cfg.kelly_max_usdt}")),
+        _check("futures_breakeven_lt_trailing_act",
+               lambda: assert_(cfg.futures_breakeven_activation_pct < cfg.futures_trailing_activation_pct,
+                               "breakeven must activate before trailing")),
+        _check("futures_smart_tp_score_in_range",
+               lambda: assert_(1 <= cfg.futures_smart_tp_extend_score_threshold <= 4,
+                               f"score_threshold={cfg.futures_smart_tp_extend_score_threshold}")),
+        _check("smart_tp_disabled_regimes_is_list",
+               lambda: assert_(isinstance(cfg.smart_tp_extend_disabled_regimes, list),
+                               "must be list")),
+        _check("kelly_max_pct_liquid_lt_60pct",
+               lambda: assert_(cfg.kelly_max_pct_liquid < 0.60,
+                               f"kelly_max_pct_liquid={cfg.kelly_max_pct_liquid} too high"),
+               warn_only=True),
+    ]
+    categories.append({"name": "config_integrity", "label": "Config Integrity",
+                        "checks": cat1_checks})
+
+    # ── Cat 2: Market Regime ──────────────────────────────────────────────────
+    from market_regime import _build_regime, _CONFIRM_CYCLES
+    def _raw_regime(mode): return {
+        "mode": mode, "regime": "test", "color": "#fff",
+        "btc_7d_pct": -8.0, "btc_30d_pct": -18.0, "btc_day_pct": -1.0,
+        "vol_ratio": 0.5, "ema9_vs_ema21": "DOWN", "bb_bandwidth": 0.03, "reason": "hc"
+    }
+    cat2_checks = [
+        _check("anti_whipsaw_cycles_geq2",
+               lambda: assert_(_CONFIRM_CYCLES >= 2, f"_CONFIRM_CYCLES={_CONFIRM_CYCLES}")),
+        _check("futures_short_sl_lt_tp",
+               lambda: assert_(_build_regime(_raw_regime("FUTURES_SHORT"), True).sl_pct <
+                               _build_regime(_raw_regime("FUTURES_SHORT"), True).tp_pct,
+                               "FUTURES_SHORT SL >= TP")),
+        _check("range_scalp_kelly_reduced",
+               lambda: assert_(_build_regime(_raw_regime("RANGE_SCALP"), True).kelly_multiplier < 1.0,
+                               "RANGE_SCALP Kelly not reduced")),
+        _check("preservation_narrative_only",
+               lambda: assert_(_build_regime(_raw_regime("PRESERVATION"), True).narrative_only is True,
+                               "PRESERVATION should be narrative_only")),
+        _check("spot_bull_not_in_disabled_regimes",
+               lambda: assert_("SPOT_BULL" not in cfg.smart_tp_extend_disabled_regimes,
+                               "SPOT_BULL incorrectly disabled")),
+    ]
+    categories.append({"name": "market_regime", "label": "Market Regime Logic",
+                        "checks": cat2_checks})
+
+    # ── Cat 3: Futures Core ───────────────────────────────────────────────────
+    from futures_client import FuturesClient, FuturesPosition
+    from dataclasses import fields as _dc_fields
+    cat3_checks = [
+        _check("smart_meta_is_dataclass_field",
+               lambda: assert_('_smart_meta' in {f.name for f in _dc_fields(FuturesPosition)},
+                               "_smart_meta not in dataclass fields")),
+        _check("smart_meta_not_shared",
+               lambda: _test_smart_meta_isolation()),
+        _check("update_sl_tp_exists",
+               lambda: assert_(hasattr(FuturesClient, 'update_sl_tp'),
+                               "update_sl_tp missing")),
+        _check("evaluate_short_momentum_returns_minus1_without_client",
+               lambda: _test_momentum_no_client()),
+        _check("pre_entry_rejects_duplicate",
+               lambda: _test_pre_entry_duplicate()),
+    ]
+    categories.append({"name": "futures_core", "label": "Futures Client Core",
+                        "checks": cat3_checks})
+
+    # ── Cat 4: SPOT Pipeline ──────────────────────────────────────────────────
+    from run_trades import _check_sl_tp_positions, _wire_futures_client
+    import inspect as _inspect
+    cat4_checks = [
+        _check("range_scalp_in_disabled_regimes",
+               lambda: assert_("RANGE_SCALP" in cfg.smart_tp_extend_disabled_regimes,
+                               "RANGE_SCALP not in disabled list")),
+        _check("preservation_in_disabled_regimes",
+               lambda: assert_("PRESERVATION" in cfg.smart_tp_extend_disabled_regimes,
+                               "PRESERVATION not in disabled list")),
+        _check("check_sl_tp_has_regime_param",
+               lambda: assert_('regime' in _inspect.signature(_check_sl_tp_positions).parameters,
+                               "regime param missing")),
+        _check("wire_futures_client_works",
+               lambda: _test_wire_futures_client()),
+    ]
+    categories.append({"name": "spot_pipeline", "label": "SPOT SL/TP Pipeline",
+                        "checks": cat4_checks})
+
+    # ── Cat 5: Kelly Sizing ───────────────────────────────────────────────────
+    from run_trades import _kelly_position_size
+    cat5_checks = [
+        _check("kelly_hard_cap_not_exceeded",
+               lambda: assert_(
+                   _kelly_position_size(cfg, 0.99, {"success_probability": 0.99}, 1000.0,
+                                       sl_pct=0.018, tp_pct=0.035) <= 1000.0 * cfg.kelly_max_pct_liquid + 0.01,
+                   "Kelly exceeded hard cap")),
+        _check("kelly_disabled_uses_max_per_trade",
+               lambda: assert_(
+                   abs(_kelly_position_size(type('S', (), {'kelly_enabled': False,
+                                                           'max_per_trade_usdt': 75.0})(),
+                                           0.99, {}, 1000.0) - 75.0) < 0.01,
+                   "Kelly disabled not using max_per_trade")),
+        _check("kelly_zero_liquid_no_crash",
+               lambda: assert_(
+                   _kelly_position_size(cfg, 0.65, {"success_probability": 0.65}, 0.0,
+                                       sl_pct=0.018, tp_pct=0.035) >= 0,
+                   "Negative result with 0 liquid")),
+    ]
+    categories.append({"name": "kelly_sizing", "label": "Kelly Sizing",
+                        "checks": cat5_checks})
+
+    # ── Cat 6: Capital Flow ───────────────────────────────────────────────────
+    cat6_checks = [
+        _check("capbridge_min_transfer_geq10",
+               lambda: assert_(
+                   getattr(cfg, 'futures_capital_bridge_min_transfer', 10.0) >= 10.0,
+                   "Min transfer < $10")),
+        _check("capbridge_enabled_flag_exists",
+               lambda: assert_(
+                   getattr(cfg, 'futures_capital_bridge_enabled', None) is not None,
+                   "futures_capital_bridge_enabled missing"),
+               warn_only=True),
+        _check("smart_rebalance_capital_exists",
+               lambda: assert_(hasattr(FuturesClient, 'smart_rebalance_capital'),
+                               "smart_rebalance_capital missing")),
+    ]
+    categories.append({"name": "capital_flow", "label": "CapBridge & Capital Flow",
+                        "checks": cat6_checks})
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    overall = "ok" if failed == 0 else ("warn" if warned > 0 else "error")
+    if failed > 0:
+        overall = "error"
+    elif warned > 0:
+        overall = "warn"
+
+    return {
+        "version": HEALTH_VERSION,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "overall": overall,
+        "summary": {"total": total, "passed": passed, "failed": failed, "warned": warned},
+        "categories": categories,
+    }
+
+
+def assert_(condition: bool, msg: str = "") -> None:
+    """Helper: raise AssertionError if condition is False."""
+    if not condition:
+        raise AssertionError(msg)
+
+
+def _test_smart_meta_isolation():
+    from futures_client import FuturesPosition
+    a = FuturesPosition(symbol="BTC", side="SHORT", qty=1.0, entry_price=100.0,
+                        sl_price=103.0, tp_price=93.0, order_id="A",
+                        sl_order_id="SA", tp_order_id="TA")
+    b = FuturesPosition(symbol="ETH", side="SHORT", qty=1.0, entry_price=100.0,
+                        sl_price=103.0, tp_price=93.0, order_id="B",
+                        sl_order_id="SB", tp_order_id="TB")
+    a._smart_meta['x'] = 1
+    assert_('x' not in b._smart_meta, "_smart_meta shared between instances!")
+
+
+def _test_momentum_no_client():
+    from futures_client import FuturesClient
+    fc = FuturesClient(api_key="test", api_secret="test", dry_run=True)
+    fc._binance_client_ref = None
+    score, _ = fc._evaluate_short_momentum("BTCUSDT", None)
+    assert_(score == -1, f"Expected -1 score when no client ref, got {score}")
+
+
+def _test_pre_entry_duplicate():
+    import time
+    from futures_client import FuturesClient, FuturesPosition
+    fc = FuturesClient(api_key="test", api_secret="test", dry_run=True)
+    fc.max_shorts = 10
+    pos = FuturesPosition(symbol="BTCUSDT", side="SHORT", qty=1.0, entry_price=100.0,
+                          sl_price=103.0, tp_price=93.0, order_id="X",
+                          sl_order_id="SX", tp_order_id="TX")
+    fc._open_positions["BTCUSDT_SHORT"] = pos
+    ok, reason = fc._pre_entry_checks("BTCUSDT", 100.0, "SHORT")
+    assert_(not ok, "Should reject duplicate position")
+    assert_("Already have" in reason, f"Unexpected reason: {reason}")
+
+
+def _test_wire_futures_client():
+    from futures_client import FuturesClient
+    from run_trades import _wire_futures_client
+    fc = FuturesClient(api_key="test", api_secret="test", dry_run=True)
+    _wire_futures_client(fc, "mock", None)
+    assert_(fc._binance_client_ref == "mock", "_binance_client_ref not set")
 
 
 @app.get("/analysis/predictions")

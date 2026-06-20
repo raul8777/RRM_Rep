@@ -52,6 +52,7 @@ class FuturesPosition:
     closed_at: Optional[datetime] = None
     exit_price: Optional[float] = None
     pnl: Optional[float] = None
+    _smart_meta: Dict = field(default_factory=dict, repr=False, compare=False)
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == "LONG":
@@ -84,6 +85,7 @@ class FuturesClient:
         self._price_cache: Dict[str, Tuple[float, float]] = {}  # {symbol: (price, ts)}
         self._leverage_set: set = set()   # symbols with leverage already configured
         self._hedge_mode: Optional[bool] = None  # None = unknown until checked
+        self._binance_client_ref = None  # set by _get_futures_client() for momentum eval
         if not dry_run:
             self._sync_open_positions()
 
@@ -246,6 +248,15 @@ class FuturesClient:
         for pos in self._open_positions.values():
             symbols_to_check.add(pos.symbol)
 
+        # Build entry_price lookup from in-memory open positions (available after sync)
+        _entry_lookup: dict = {}
+        for pos in self._open_positions.values():
+            _entry_lookup[(pos.symbol, pos.side)] = {
+                "entry_price": pos.entry_price,
+                "sl_price":    pos.sl_price,
+                "tp_price":    pos.tp_price,
+            }
+
         results = []
         for sym in symbols_to_check:
             try:
@@ -265,12 +276,36 @@ class FuturesClient:
                         continue
                     side = side_raw if side_raw in ("LONG", "SHORT") else ("LONG" if is_buyer else "SHORT")
                     closed_at = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+
+                    # Always derive entry_price mathematically from the trade itself.
+                    # Never use _open_positions lookup: if the same symbol reopened
+                    # after closing (e.g. SOL), the lookup returns the new position's
+                    # entry price which equals the old exit price, giving wrong data.
+                    # For SHORT: pnl = (entry - exit) * qty  →  entry = exit + pnl/qty
+                    # For LONG:  pnl = (exit - entry) * qty  →  entry = exit - pnl/qty
+                    entry_price = None
+                    if qty > 0:
+                        try:
+                            if side == "SHORT":
+                                entry_price = round(price + pnl / qty, 6)
+                            else:
+                                entry_price = round(price - pnl / qty, 6)
+                        except Exception:
+                            entry_price = None
+
+                    # sl/tp from memory are reference-only (may belong to new open pos)
+                    mem = _entry_lookup.get((sym, side), {})
+                    sl_price = mem.get("sl_price")
+                    tp_price = mem.get("tp_price")
+
                     results.append({
                         "symbol":      sym,
                         "side":        side,
                         "qty":         qty,
-                        "entry_price": None,   # not available per-trade from userTrades
+                        "entry_price": entry_price,
                         "exit_price":  price,
+                        "sl_price":    sl_price,
+                        "tp_price":    tp_price,
                         "pnl":         round(pnl, 4),
                         "opened_at":   None,
                         "closed_at":   closed_at,
@@ -348,6 +383,13 @@ class FuturesClient:
         """Rebuild _open_positions from Binance on startup (survives restarts)."""
         try:
             positions = self.get_positions()
+            # Fix 4: fetch all active algo orders once — used to restore real SL/TP per position
+            _all_algo_orders: list = []
+            try:
+                _algo_resp = self._get("/fapi/v1/openAlgoOrders", signed=True)
+                _all_algo_orders = _algo_resp if isinstance(_algo_resp, list) else _algo_resp.get("orders", _algo_resp.get("algoOrders", []))
+            except Exception as _ae:
+                print(f"[Futures/Sync] openAlgoOrders fetch failed ({_ae}) — SL/TP will use entry-based defaults")
             for p in positions:
                 sym = p.get("symbol", "")
                 amt = float(p.get("positionAmt", 0))
@@ -368,14 +410,36 @@ class FuturesClient:
                 else:  # LONG
                     sl_price = self._align_price(entry * 0.97, tick)
                     tp_price = self._align_price(entry * 1.06, tick)
+                # Fix 4: restore real SL/TP from _all_algo_orders (fetched once above the loop)
+                _sl_order_id = None
+                _tp_order_id = None
+                for _o in _all_algo_orders:
+                    if _o.get("symbol") != sym:
+                        continue
+                    _o_pos_side = _o.get("positionSide", "BOTH")
+                    _o_matches = (_o_pos_side == side) or (_o_pos_side == "BOTH")
+                    if not _o_matches:
+                        continue
+                    _o_type = _o.get("type") or _o.get("orderType", "")
+                    _trigger = float(_o.get("triggerPrice", 0))
+                    if _trigger <= 0:
+                        continue
+                    if _o_type == "STOP_MARKET":
+                        sl_price = _trigger
+                        _sl_order_id = str(_o.get("algoId", _o.get("orderId", "")))
+                    elif _o_type == "TAKE_PROFIT_MARKET":
+                        tp_price = _trigger
+                        _tp_order_id = str(_o.get("algoId", _o.get("orderId", "")))
+                print(f"[Futures/Sync] {sym} {side}: SL={sl_price:.4f} TP={tp_price:.4f}"
+                      f"{' (from algoOrders)' if _sl_order_id or _tp_order_id else ' (entry defaults)'}")
                 pos = FuturesPosition(
                     symbol=sym, side=side, qty=qty,
                     entry_price=entry, sl_price=sl_price, tp_price=tp_price,
-                    order_id=f"SYNC_{sym}_{side}", sl_order_id=None, tp_order_id=None,
+                    order_id=f"SYNC_{sym}_{side}", sl_order_id=_sl_order_id, tp_order_id=_tp_order_id,
                 )
                 key = self._pos_key(sym, side)
                 self._open_positions[key] = pos
-                print(f"[Futures] Synced position: {side} {sym} qty={qty} entry={entry:.4f} (SL={sl_price}, TP={tp_price})")
+                print(f"[Futures] Synced position: {side} {sym} qty={qty} entry={entry:.4f} (SL={sl_price:.4f}, TP={tp_price:.4f})")
             if self._open_positions:
                 print(f"[Futures] FuturesClient initialized — synced {len(self._open_positions)} open position(s)")
             else:
@@ -405,6 +469,18 @@ class FuturesClient:
             for asset in account.get("assets", []):
                 if asset.get("asset") == "USDT":
                     return float(asset.get("availableBalance", 0))
+        except Exception:
+            pass
+        return 0.0
+
+    def get_total_wallet_usdt(self) -> float:
+        """Return total USDT in futures wallet: margin + available + unrealized PnL.
+        Uses walletBalance which includes committed margin, unlike availableBalance."""
+        try:
+            account = self.get_account_info()
+            for asset in account.get("assets", []):
+                if asset.get("asset") == "USDT":
+                    return float(asset.get("walletBalance", 0))
         except Exception:
             pass
         return 0.0
@@ -1077,23 +1153,240 @@ class FuturesClient:
             print(f"[Futures] close_short {symbol} failed: {e}")
             return None
 
-    def check_positions(self) -> List[dict]:
+    def update_sl_tp(
+        self,
+        symbol: str,
+        side: str,
+        new_sl: Optional[float] = None,
+        new_tp: Optional[float] = None,
+    ) -> bool:
+        """
+        Move stop-loss and/or take-profit on a live futures position.
+
+        Process:
+          1. Cancel the existing algo orders for SL/TP.
+          2. Place new algo orders at the updated levels.
+          3. Update in-memory FuturesPosition state.
+
+        Returns True on success, False if anything failed (position stays managed
+        by the old levels in Binance — silent failure does NOT close the position).
+
+        IMPORTANT: Binance may reject the cancel with -2011 (order already filled)
+        if the SL/TP triggered between our cycles.  This is handled gracefully —
+        we proceed to place the new order (it will fail with no-position error and
+        check_positions() will detect the closure on the next cycle).
+        """
+        key = self._pos_key(symbol, side.upper())
+        pos = self._open_positions.get(key)
+        if not pos or pos.closed:
+            return False
+
+        if self.dry_run:
+            if new_sl is not None:
+                pos.sl_price = new_sl
+            if new_tp is not None:
+                pos.tp_price = new_tp
+            print(f"[Futures/Trail] DRY update {symbol} {side}: SL={new_sl} TP={new_tp}")
+            return True
+
+        tick = self._get_tick_size(symbol)
+        success = True
+
+        # ── Cancel existing SL algo order ─────────────────────────────────────
+        if new_sl is not None and pos.sl_order_id:
+            try:
+                self._delete("/fapi/v1/algoOrder", {"symbol": symbol, "algoId": pos.sl_order_id})
+            except Exception as _e:
+                _emsg = str(_e)
+                if "-2011" in _emsg or "Unknown order" in _emsg:
+                    print(f"[Futures/Trail] SL cancel {symbol}: order already gone (-2011), treating as closed")
+                    pos.closed = True
+                    return False
+                print(f"[Futures/Trail] SL cancel {symbol}: {_e} — placing new order anyway")
+
+        # ── Cancel existing TP algo order ─────────────────────────────────────
+        if new_tp is not None and pos.tp_order_id:
+            try:
+                self._delete("/fapi/v1/algoOrder", {"symbol": symbol, "algoId": pos.tp_order_id})
+            except Exception as _e:
+                _emsg = str(_e)
+                if "-2011" in _emsg or "Unknown order" in _emsg:
+                    print(f"[Futures/Trail] TP cancel {symbol}: order already gone (-2011)")
+                else:
+                    print(f"[Futures/Trail] TP cancel {symbol}: {_e} — placing new order anyway")
+
+        # ── Place new SL algo order ───────────────────────────────────────────
+        if new_sl is not None:
+            try:
+                _sl_aligned = self._align_price(new_sl, tick)
+                _sl_side   = "BUY" if side.upper() == "SHORT" else "SELL"
+                _pos_side  = side.upper()
+                _sl_type   = "STOP_MARKET"
+                _sl_order  = self._post("/fapi/v1/algoOrder", {
+                    "symbol": symbol, "side": _sl_side,
+                    "algoType": "CONDITIONAL", "type": _sl_type,
+                    "quantity": str(pos.qty), "triggerPrice": str(_sl_aligned),
+                    "positionSide": _pos_side, "timeInForce": "GTC",
+                })
+                pos.sl_order_id = str(_sl_order.get("algoId", _sl_order.get("orderId", "")))
+                pos.sl_price    = _sl_aligned
+                print(f"[Futures/Trail] {symbol} {side}: SL moved → {_sl_aligned:.4f} (algoId={pos.sl_order_id})")
+            except Exception as _e:
+                print(f"[Futures/Trail] {symbol}: failed to place new SL order: {_e}")
+                success = False
+
+        # ── Place new TP algo order ───────────────────────────────────────────
+        if new_tp is not None:
+            try:
+                _tp_aligned = self._align_price(new_tp, tick)
+                _tp_side   = "BUY" if side.upper() == "SHORT" else "SELL"
+                _pos_side  = side.upper()
+                _tp_type   = "TAKE_PROFIT_MARKET"
+                _tp_order  = self._post("/fapi/v1/algoOrder", {
+                    "symbol": symbol, "side": _tp_side,
+                    "algoType": "CONDITIONAL", "type": _tp_type,
+                    "quantity": str(pos.qty), "triggerPrice": str(_tp_aligned),
+                    "positionSide": _pos_side, "timeInForce": "GTC",
+                })
+                pos.tp_order_id = str(_tp_order.get("algoId", _tp_order.get("orderId", "")))
+                pos.tp_price    = _tp_aligned
+                print(f"[Futures/Trail] {symbol} {side}: TP moved → {_tp_aligned:.4f} (algoId={pos.tp_order_id})")
+            except Exception as _e:
+                print(f"[Futures/Trail] {symbol}: failed to place new TP order: {_e}")
+                success = False
+
+        return success
+
+    def check_positions(self, settings=None) -> List[dict]:
         """
         Check all tracked positions (LONG and SHORT) for SL/TP hits.
-        Returns list of closed positions with PnL.
-        Called from run_trades.py each cycle.
+
+        Per-cycle logic (executed in order):
+          1. Breakeven SL — when unrealized PnL% reaches futures_breakeven_activation_pct,
+             move SL to entry price (protects capital, never reduces realized gains).
+          2. Trailing stop — when unrealized PnL% reaches futures_trailing_activation_pct,
+             trail the SL (SHORT: move SL down toward price; LONG: move SL up toward price)
+             by futures_trailing_distance_pct.  Also trails the TP proportionally for SHORTs
+             (when price drops more than TP, lower TP to lock in more profit).
+          3. Smart TP EXTEND — when TP is hit and futures_smart_tp_enabled, evaluate SHORT
+             momentum (RSI, vol_spike, trend_4h, success_prob).  If score >= threshold:
+             EXTEND (lower TP, raise SL to current price). Otherwise CLOSE.
+          4. SL hit — close immediately.
+
+        Returns list of closed positions dicts with keys: symbol, side, reason, pnl.
         """
         closed = []
+
+        # Read settings — use safe defaults if not provided
+        _trailing_enabled      = getattr(settings, 'futures_trailing_enabled', True)      if settings else True
+        _trail_act_pct        = getattr(settings, 'futures_trailing_activation_pct', 2.0) if settings else 2.0
+        _trail_dist_pct       = getattr(settings, 'futures_trailing_distance_pct', 1.0)   if settings else 1.0
+        _breakeven_act_pct    = getattr(settings, 'futures_breakeven_activation_pct', 1.2) if settings else 1.2
+        _smart_tp             = getattr(settings, 'futures_smart_tp_enabled', True)        if settings else True
+        _smart_tp_max_ext     = getattr(settings, 'futures_smart_tp_max_extensions', 2)   if settings else 2
+        _smart_tp_max_pnl     = getattr(settings, 'futures_smart_tp_max_pnl_pct', 12.0)  if settings else 12.0
+        _smart_tp_threshold   = getattr(settings, 'futures_smart_tp_extend_score_threshold', 3) if settings else 3
+        _smart_tp_ext_pct     = getattr(settings, 'futures_smart_tp_extension_pct', 2.0)  if settings else 2.0
+
         for key, pos in list(self._open_positions.items()):
             if pos.closed:
                 continue
             symbol = pos.symbol
             try:
-                price = self.get_price(symbol)
-                unr   = pos.unrealized_pnl(price)
-                print(f"[Futures] {symbol} {pos.side} check: price={price:.4f}, "
-                      f"entry={pos.entry_price:.4f}, unr_pnl=${unr:.2f}")
+                price   = self.get_price(symbol)
+                unr     = pos.unrealized_pnl(price)
+                entry   = pos.entry_price
+                pnl_pct = unr / (entry * pos.qty) if entry > 0 and pos.qty > 0 else 0.0
 
+                print(f"[Futures] {symbol} {pos.side} check: price={price:.4f}, "
+                      f"entry={entry:.4f}, unr_pnl=${unr:.2f} ({pnl_pct*100:.2f}%), "
+                      f"SL={pos.sl_price:.4f}, TP={pos.tp_price:.4f}")
+
+                # ── 1. Breakeven SL ─────────────────────────────────────────────
+                if _trailing_enabled and pnl_pct >= _breakeven_act_pct / 100.0:
+                    if not pos._smart_meta.get('breakeven_done'):
+                        _be_ok = False
+                        if pos.side == "SHORT" and entry < pos.sl_price:
+                            # SHORT: SL is above entry. Move SL to entry (price must rise to entry to stop out)
+                            _be_ok = self.update_sl_tp(symbol, pos.side, new_sl=entry)
+                        elif pos.side == "LONG" and entry > pos.sl_price:
+                            # LONG: SL is below entry. Move SL to entry
+                            _be_ok = self.update_sl_tp(symbol, pos.side, new_sl=entry)
+                        if _be_ok:
+                            pos._smart_meta['breakeven_done'] = True
+                            print(f"[Futures/Breakeven] {symbol} {pos.side}: SL → entry={entry:.4f} "
+                                  f"(PnL={pnl_pct*100:.2f}% >= {_breakeven_act_pct}%)")
+
+                # ── 2. Trailing stop ────────────────────────────────────────────
+                if _trailing_enabled and pnl_pct >= _trail_act_pct / 100.0:
+                    _trail_dist = _trail_dist_pct / 100.0
+                    tick = self._get_tick_size(symbol)
+
+                    if pos.side == "SHORT":
+                        # SHORT profits when price falls. "Best price" = lowest seen.
+                        # Trailing SL = best_price * (1 + trail_dist) — moves down as price falls.
+                        # Trailing TP = best_price * (1 - trail_dist/2) — trails TP downward.
+                        _best_price = pos._smart_meta.get('trail_best_price', price)
+
+                        # Fix 3: Initialize trail_best_price from current SL (not from price).
+                        # After a restart, SL may already be trailing-moved (Fix 4 restores it).
+                        # Inferring best_price from SL prevents resetting progress: best = SL / (1 + dist)
+                        if 'trail_best_price' not in pos._smart_meta:
+                            _inferred_best = pos.sl_price / (1.0 + _trail_dist)
+                            # Only use inferred value if it's lower than current price (valid for SHORT)
+                            # and lower than entry (confirms trailing already happened)
+                            if _inferred_best < pos.entry_price and _inferred_best < price:
+                                pos._smart_meta['trail_best_price'] = _inferred_best
+                                _best_price = _inferred_best
+                                print(f"[Futures/Trail] {symbol} SHORT: trail_best_price inferred from SL={pos.sl_price:.4f} → best={_inferred_best:.4f} (PnL={pnl_pct*100:.2f}%)")
+                            else:
+                                pos._smart_meta['trail_best_price'] = price
+                                _best_price = price
+                                print(f"[Futures/Trail] {symbol} SHORT: Trailing activated at {price:.4f} (PnL={pnl_pct*100:.2f}%)")
+
+                        if price < _best_price:  # new low = new best for SHORT
+                            _best_price = price
+                            pos._smart_meta['trail_best_price'] = _best_price
+                            # New SL = best_price * (1 + trail_dist) — stays above best price
+                            _new_sl = self._align_price(_best_price * (1.0 + _trail_dist), tick)
+                            # Only lower SL (SHORT: lower sl_price = tighter stop = more profit protected)
+                            if _new_sl < pos.sl_price:
+                                self.update_sl_tp(symbol, pos.side, new_sl=_new_sl)
+                                print(f"[Futures/Trail] {symbol} SHORT: SL trailed down → {_new_sl:.4f} "
+                                      f"(best={_best_price:.4f}, dist={_trail_dist_pct}%)")
+                            # Also trail TP downward (lock in more profit on deep moves)
+                            _new_tp = self._align_price(_best_price * (1.0 - _trail_dist / 2.0), tick)
+                            if _new_tp < pos.tp_price:  # only move TP toward more profit
+                                self.update_sl_tp(symbol, pos.side, new_tp=_new_tp)
+                                print(f"[Futures/Trail] {symbol} SHORT: TP trailed → {_new_tp:.4f}")
+
+                    elif pos.side == "LONG":
+                        # LONG profits when price rises. "Best price" = highest seen.
+                        _best_price = pos._smart_meta.get('trail_best_price', price)
+                        # Fix 3 (LONG): infer trail_best_price from SL on first activation after restart
+                        # For LONG: SL = best_price * (1 - dist) → best = SL / (1 - dist)
+                        if 'trail_best_price' not in pos._smart_meta:
+                            _inferred_best = pos.sl_price / (1.0 - _trail_dist) if (1.0 - _trail_dist) > 0 else price
+                            if _inferred_best > pos.entry_price and _inferred_best > price:
+                                pos._smart_meta['trail_best_price'] = _inferred_best
+                                _best_price = _inferred_best
+                                print(f"[Futures/Trail] {symbol} LONG: trail_best_price inferred from SL={pos.sl_price:.4f} → best={_inferred_best:.4f} (PnL={pnl_pct*100:.2f}%)")
+                            else:
+                                pos._smart_meta['trail_best_price'] = price
+                                _best_price = price
+                                print(f"[Futures/Trail] {symbol} LONG: Trailing activated at {price:.4f} (PnL={pnl_pct*100:.2f}%)")
+                        if price > _best_price:  # new high = new best for LONG
+                            _best_price = price
+                            pos._smart_meta['trail_best_price'] = _best_price
+                            _new_sl = self._align_price(_best_price * (1.0 - _trail_dist), tick)
+                            if _new_sl > pos.sl_price:  # only raise SL (LONG: protect more)
+                                self.update_sl_tp(symbol, pos.side, new_sl=_new_sl)
+                                print(f"[Futures/Trail] {symbol} LONG: SL trailed up → {_new_sl:.4f}")
+
+                # ── Re-read pos.sl_price / pos.tp_price (may have changed above) ──
+                # Note: pos is a reference — updates in update_sl_tp() are reflected here.
+
+                # ── 3. Check SL hit ─────────────────────────────────────────────
                 if pos.is_sl_hit(price):
                     result = (self.close_long(symbol, reason="stop_loss")
                               if pos.side == "LONG"
@@ -1101,16 +1394,128 @@ class FuturesClient:
                     if result:
                         closed.append({"symbol": symbol, "side": pos.side,
                                        "reason": "stop_loss", "pnl": pos.pnl or unr})
-                elif pos.is_tp_hit(price):
-                    result = (self.close_long(symbol, reason="take_profit")
-                              if pos.side == "LONG"
-                              else self.close_short(symbol, reason="take_profit"))
+                    continue  # done with this position
+
+                # ── 4. Check TP hit — Smart TP EXTEND or close ───────────────
+                if pos.is_tp_hit(price):
+                    _ext_count = pos._smart_meta.get('tp_extensions_count', 0)
+                    _can_extend = (_smart_tp
+                                   and _ext_count < _smart_tp_max_ext
+                                   and pnl_pct < _smart_tp_max_pnl / 100.0)
+
+                    if _can_extend:
+                        try:
+                            _pos_size_real = float(pos.quantity) * float(pos.entry_price)
+                            _score, _details = self._evaluate_short_momentum(symbol, settings, position_size_usdt=_pos_size_real)
+                        except Exception as _me:
+                            print(f"[Futures/SmartTP] {symbol}: momentum eval failed: {_me} — closing")
+                            _score, _details = -1, {}
+
+                        print(f"[Futures/SmartTP] {symbol} {pos.side}: PnL={pnl_pct*100:.2f}% "
+                              f"score={_score}/4 ext={_ext_count}/{_smart_tp_max_ext} "
+                              f"→ {'EXTEND' if _score >= _smart_tp_threshold else 'CLOSE'}")
+
+                        if _score >= _smart_tp_threshold:
+                            tick = self._get_tick_size(symbol)
+                            if pos.side == "SHORT":
+                                # Extend: lower TP (SHORT profits on price drop)
+                                _new_tp = self._align_price(price * (1.0 - _smart_tp_ext_pct / 100.0), tick)
+                                # Raise SL to just above current price (lock in gains)
+                                _new_sl = self._align_price(price * 1.005, tick)
+                                # Only raise SL if new_sl is lower than current sl (SHORT: lower sl_price = tighter stop)
+                                _update_sl = _new_sl < pos.sl_price
+                            else:  # LONG
+                                _new_tp = self._align_price(price * (1.0 + _smart_tp_ext_pct / 100.0), tick)
+                                _new_sl = self._align_price(price * 0.995, tick)
+                                _update_sl = _new_sl > pos.sl_price
+
+                            pos._smart_meta['tp_extensions_count'] = _ext_count + 1
+
+                            self.update_sl_tp(
+                                symbol, pos.side,
+                                new_sl=_new_sl if _update_sl else None,
+                                new_tp=_new_tp
+                            )
+                            print(f"[Futures/SmartTP] EXTEND {symbol} {pos.side}: "
+                                  f"TP → {pos.tp_price:.4f}, SL → {pos.sl_price:.4f} "
+                                  f"(ext {_ext_count+1}/{_smart_tp_max_ext})")
+                            continue  # do NOT close — let it run
+
+                    # Not extending — close the position
+                    _close_fn = self.close_long if pos.side == "LONG" else self.close_short
+                    result = _close_fn(symbol, reason="take_profit")
                     if result:
+                        _reason = (f"smart_tp_take_profit (ext={_ext_count})" if _ext_count > 0
+                                   else "take_profit")
                         closed.append({"symbol": symbol, "side": pos.side,
-                                       "reason": "take_profit", "pnl": pos.pnl or unr})
+                                       "reason": _reason, "pnl": pos.pnl or unr})
+
             except Exception as e:
                 print(f"[Futures] check_positions {key}: {e}")
         return closed
+
+    def _evaluate_short_momentum(self, symbol: str, settings, position_size_usdt: float = None) -> tuple:
+        """
+        Evaluate whether the current SHORT momentum justifies extending the TP.
+
+        For a SHORT to be extended:
+          - vol_spike < 1.0 (low buying volume — sellers still in control)
+          - RSI 4h > 60 (overbought / still elevated — shorts benefit)
+          - trend_4h == DOWN (confirmed bear)
+          - success_prob < 0.45 (low probability of reversal)
+
+        Score: 1 point per bearish SHORT condition (max 4).
+        Returns (score: int, details: dict). -1 score = evaluation failed.
+        """
+        details = {"vol_spike": 1.0, "rsi": 50.0, "trend_4h": 0.0, "success_prob": 0.5}
+        try:
+            from autonomous_signals import AutonomousSignalGenerator
+            from binance_client import BinanceClient as _BC
+
+            # Re-use an existing BinanceClient if possible (avoid creating a new one)
+            _bc = getattr(self, '_binance_client_ref', None)
+            if _bc is None:
+                return -1, details  # no client available, safe fallback
+
+            sig_gen = AutonomousSignalGenerator(_bc)
+            sig = sig_gen.analyze_symbol(symbol, interval='1h', use_multi_timeframe=True)
+            ind = sig.get("indicators", {})
+
+            vol_spike  = float(ind.get("vol_spike") or ind.get("volume_ratio") or 1.0)
+            rsi        = float(ind.get("rsi") or 50.0)
+            trend_4h   = float(ind.get("trend_4h") or 0.0)  # 1.0=UP, 0.0=DOWN
+
+            # Run predictor to get success probability
+            from pnl_service import PnlPredictionService
+            _pnl_svc = PnlPredictionService()
+            _default_size = float(getattr(settings, 'futures_usdt_per_trade', 20.0))
+            _max_size = float(getattr(settings, 'max_per_trade_usdt', 150.0))
+            _effective_size = min(position_size_usdt, _max_size) if position_size_usdt else _default_size
+            prediction, _ = _pnl_svc.predict_for_symbol(
+                symbol=symbol, client=_bc, settings=settings,
+                position_size_usdt=_effective_size
+            )
+            success_prob = float((prediction or {}).get("success_probability", 0.5))
+
+            details.update({
+                "vol_spike": round(vol_spike, 3),
+                "rsi": round(rsi, 2),
+                "trend_4h": round(trend_4h, 2),
+                "success_prob": round(success_prob, 4),
+            })
+
+            # Score for SHORT extension — each point = SHORT-friendly condition
+            score = 0
+            if vol_spike < 1.2:     score += 1  # low buying pressure
+            if rsi > 55.0:          score += 1  # price still elevated (short is winning)
+            if trend_4h < 0.5:      score += 1  # 4h trend is DOWN (0.0=DOWN, 1.0=UP)
+            if success_prob < 0.48: score += 1  # predictor says low upside probability
+
+            return score, details
+
+        except Exception as _e:
+            print(f"[Futures/SmartTP] Momentum eval error for {symbol}: {_e}")
+            return -1, details
 
     def get_open_positions_summary(self) -> List[dict]:
         """Summary of all tracked open positions (LONG and SHORT) for dashboard."""

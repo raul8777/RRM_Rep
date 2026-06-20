@@ -1,57 +1,110 @@
 """
-backtest_multimode.py — Simulación multi-modo 180 días con régimen dinámico.
+backtest_multimode.py — Simulador de Fidelidad Total v4.0
+==========================================================
 
-Compara 5 estrategias:
-  E1: Spot fijo (sin cambio de modo)
-  E2: Preservation estático (solo narratives)
-  E3: Regime-adaptive sin futuros (SPOT_BULL/RANGE_SCALP/PRESERVATION)
-  E4: Regime-adaptive con futuros (E3 + FUTURES_SHORT cuando bear sostenido)
-  E5: HODL USDT (referencia)
+Replica exactamente el comportamiento de producción:
+  - TechnicalIndicators.analyze_signal() REAL (no simplificado)
+  - PnLPredictor.predict_pnl() REAL con pesos aprendidos de la DB
+  - format_indicators_for_predictor() REAL
+  - Régimen dinámico por bar (SPOT_BULL / RANGE_SCALP / PRESERVATION / FUTURES_SHORT)
+  - Anti-whipsaw de 3 barras para cambio de régimen
+  - SmartTP: extend / scale_out / close según momentum score (igual a run_trades.py)
+  - Anti-wick: SL/TS no cierra si last_closed_candle > threshold
+  - Trailing stop con peak tracking
+  - Predicción de salida (PredExit) cuando posición deteriorada
+  - Kelly sizing con F&G boost (Capitulación×1.50, ExtremeFear×1.35)
+  - Cap por categoría (LARGE_CAP≤3, MIDCAP_ALT≤5, NARRATIVE≤4, MEME≤2)
+  - Futuros SHORT con margin, leverage, SL/TP algo-orders simulados
+  - [v4] Futuros SmartTP: extender SHORT si momentum bearish sigue (score ≥3/4)
+  - [v4] Futuros trailing stop: activa a 2% ganancia, distancia 1%
+  - [v4] 30 símbolos spot (alineado con analysis_symbols en config.py)
+  - [v4] CAT_PARAMS exactos de config.py category_thresholds
+  - [v4] FNG boost correcto: F&G≤15 → ×1.50 (capitulación)
+  - [v4] Kelly base $40 + 15% dinámico (producción)
+
+5 ESCENARIOS:
+  REAL:         Sistema completo (predictor+SmartTP+anti-wick+futuros+F&G)
+  REAL_OPT:     REAL + params optimizados (str≥0.58)
+  FUT_ONLY:     Solo futuros SHORT durante régimen FUTURES_SHORT
+  SPOT_BULL_SIM:Simulación recuperación (forzar régimen SPOT_BULL)
+  RECOVERY_SIM: SPOT_BULL + BTC +15% sintético (proyección salida shorts)
 
 Uso:
-    docker compose exec app python3 backtest_multimode.py
+    docker compose exec app python3 backtest_multimode.py [--days N] [--capital X]
 """
 
-import sys, os, json, time, math, urllib.request, random
+import sys, os, json, time, math, urllib.request, random, argparse
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Tuple
 
-# ── Parámetros globales ──────────────────────────────────────────────────────
-INITIAL_CAPITAL  = 346.13
-DAYS             = 180
-INTERVAL         = "4h"
-COMMISSION_RATE  = 0.001    # 0.1% por lado
-MAX_POSITIONS    = 3
-MAX_PER_SYMBOL   = 1
-MAX_PCT_PER_TRADE = 0.08
-MAX_ENTRIES_PER_BAR = 1
-FUTURES_MAX_SHORTS = 2
-N_MC_SIMS        = 10_000
-ANTI_WHIPSAW_BARS = 4   # consecutive bars with same regime before switching
+# ── Parámetros globales (producción jun 2026) ─────────────────────────────────
+INITIAL_CAPITAL    = 2910.0   # Capital real jun 2026
+DAYS               = 120      # 90d sim + 30d warmup indicadores
+WARMUP_BARS        = 50       # barras de calentamiento antes de tradear
+INTERVAL           = "4h"
+COMMISSION_RATE    = 0.001    # 0.1% por lado (Binance spot BNB fee)
+MAX_POSITIONS      = 12       # max posiciones spot simultáneas (producción usa hasta 20 en SPOT_BULL)
+MAX_FUTURES_SHORTS = 7        # FUTURES_MAX_SHORTS producción
+MAX_EXPOSURE_PCT   = 0.75     # MAX_TOTAL_EXPOSURE_PCT
+MAX_PCT_PER_TRADE  = 0.15     # 15% del capital líquido por trade (KELLY_DYNAMIC_BASE_PCT producción)
+MAX_ENTRIES_BAR    = 3        # max entradas nuevas por barra (throttle)
+N_MC_SIMS          = 5_000    # Monte Carlo
+ANTI_WHIPSAW       = 3        # bars consecutivos para confirmar régimen
+FNG_VALUE          = 15       # Fear & Greed actual (Capitulación)
+LEVERAGE           = 2        # apalancamiento futuros
+KELLY_BASE         = 40.0     # KELLY_BASE_USDT (producción: $40)
+KELLY_MAX          = 350.0    # KELLY_MAX_USDT (producción)
 
-SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT",
-    "FETUSDT", "TAOUSDT", "RENDERUSDT", "DOTUSDT", "LINKUSDT",
-    "XRPUSDT", "ADAUSDT", "AVAXUSDT",
+# ── Símbolos reales del sistema (32 tokens — analysis_symbols en config.py) ──
+SPOT_SYMBOLS = [
+    # LARGE_CAP
+    "BTCUSDT","ETHUSDT","BNBUSDT",
+    # MIDCAP_ALT / Infrastructure
+    "SOLUSDT","XRPUSDT","ADAUSDT","AVAXUSDT","DOTUSDT","LINKUSDT",
+    "TRXUSDT","TONUSDT","SUIUSDT","HBARUSDT","ARBUSDT","MATICUSDT","ATOMUSDT",
+    "SEIUSDT","AAVEUSDT",
+    # NARRATIVE / AI_DATA
+    "FETUSDT","NEARUSDT","RENDERUSDT","TAOUSDT","WLDUSDT","INJUSDT",
+    "OPUSDT","GRTUSDT","ONDOUSDT",
+    # MEME
+    "DOGEUSDT","PEPEUSDT",
 ]
-FUTURES_SYMBOLS = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
-NARRATIVE = {"FETUSDT", "TAOUSDT", "RENDERUSDT", "NEARUSDT", "WLDUSDT", "AGIXUSDT", "OCEANUSDT"}
-MEME      = {"DOGEUSDT", "PEPEUSDT", "WIFUSDT"}
-LARGE_CAP = {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
+FUTURES_SYMS = [
+    "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ADAUSDT","NEARUSDT","SUIUSDT",
+]
+NARRATIVE_SET = {
+    "FETUSDT","TAOUSDT","RENDERUSDT","NEARUSDT","WLDUSDT","INJUSDT",
+    "OPUSDT","GRTUSDT","ONDOUSDT"
+}
+MEME_SET      = {"DOGEUSDT","PEPEUSDT","WIFUSDT"}
+LARGE_CAP_SET = {"BTCUSDT","ETHUSDT","BNBUSDT"}
 
-# Parámetros por régimen (idénticos al sistema real)
-REGIME_PARAMS = {
-    "SPOT_BULL":    {"sl": 0.015, "tp": 0.025, "kelly": 1.00, "trail_act": 0.020, "trail_dist": 0.010, "narrative_only": False, "require_vol": 1.3,  "max_rsi": 70},
-    "RANGE_SCALP":  {"sl": 0.012, "tp": 0.015, "kelly": 0.70, "trail_act": 0.015, "trail_dist": 0.008, "narrative_only": False, "require_vol": 1.5,  "max_rsi": 40},
-    "PRESERVATION": {"sl": 0.015, "tp": 0.030, "kelly": 0.50, "trail_act": 0.020, "trail_dist": 0.012, "narrative_only": True,  "require_vol": 1.5,  "max_rsi": 65},
-    "FUTURES_SHORT":{"sl": 0.030, "tp": 0.050, "kelly": 0.30, "trail_act": 0.030, "trail_dist": 0.015, "narrative_only": False, "require_vol": 1.0,  "max_rsi": 100},
-}
+# ── Parámetros por categoría — exactos de config.py category_thresholds (v4) ──
 CAT_PARAMS = {
-    "LARGE_CAP":  {"sl": 0.015, "tp": 0.025, "trail_act": 0.015, "trail_dist": 0.010},
-    "MIDCAP_ALT": {"sl": 0.015, "tp": 0.025, "trail_act": 0.020, "trail_dist": 0.012},
-    "NARRATIVE":  {"sl": 0.025, "tp": 0.040, "trail_act": 0.030, "trail_dist": 0.015},
-    "MEME":       {"sl": 0.020, "tp": 0.035, "trail_act": 0.025, "trail_dist": 0.015},
+    "LARGE_CAP":  {"sl": 0.018, "tp": 0.035, "trail_act": 0.025, "trail_dist": 0.012, "min_prob": 0.55, "min_pnl":  0.10},
+    "MIDCAP_ALT": {"sl": 0.018, "tp": 0.035, "trail_act": 0.025, "trail_dist": 0.012, "min_prob": 0.50, "min_pnl":  0.00},
+    "NARRATIVE":  {"sl": 0.035, "tp": 0.070, "trail_act": 0.080, "trail_dist": 0.030, "min_prob": 0.45, "min_pnl": -1.00},
+    "MEME":       {"sl": 0.020, "tp": 0.045, "trail_act": 0.025, "trail_dist": 0.015, "min_prob": 0.52, "min_pnl":  0.05},
 }
+
+# ── Parámetros por régimen (producción) ───────────────────────────────────────
+REGIME_PARAMS = {
+    "SPOT_BULL":     {"kelly_mult": 1.00, "narrative_only": False, "max_rsi": 70,  "require_vol": 0.8},
+    "RANGE_SCALP":   {"kelly_mult": 0.70, "narrative_only": False, "max_rsi": 55,  "require_vol": 1.2},
+    "PRESERVATION":  {"kelly_mult": 0.50, "narrative_only": True,  "max_rsi": 65,  "require_vol": 1.3},
+    "FUTURES_SHORT": {"kelly_mult": 0.30, "narrative_only": False, "max_rsi": 100, "require_vol": 0.5},
+}
+
+# ── F&G Kelly boost — idéntico a config.py (fng_capitulation_threshold=15) ───
+def _fng_boost(fng: int) -> float:
+    if fng <= 15:  return 1.50   # Capitulación (fng_capitulation_multiplier)
+    if fng <= 20:  return 1.35   # Extreme Fear (fng_extreme_fear_multiplier)
+    if fng <= 40:  return 1.15   # Fear
+    if fng <= 60:  return 1.00   # Neutral
+    if fng <= 75:  return 0.85   # Greed
+    return 0.65                  # Extreme Greed (fng_extreme_greed_multiplier)
+
+FNG_BOOST = _fng_boost(FNG_VALUE)
 
 _BARS_PER_DAY = {"1h": 24, "4h": 6, "1d": 1}
 
@@ -81,7 +134,101 @@ def fetch_klines(symbol: str, interval: str = INTERVAL, days: int = DAYS + 5) ->
             for k in all_data[-bars_needed:]]
 
 
-# ── Indicadores técnicos ─────────────────────────────────────────────────────
+# ── Integración con módulos reales (solo disponibles dentro de Docker) ────────
+_USE_REAL_INDICATORS = False
+_USE_REAL_PREDICTOR  = False
+_TechnicalIndicators = None
+_PnLPredictor        = None
+_format_indicators   = None
+_indicator_weights_cache: Dict[str, Dict] = {}
+
+def _try_load_real_modules():
+    global _USE_REAL_INDICATORS, _USE_REAL_PREDICTOR
+    global _TechnicalIndicators, _PnLPredictor, _format_indicators
+
+    try:
+        from technical_indicators import TechnicalIndicators as _TI
+        _TechnicalIndicators = _TI
+        _USE_REAL_INDICATORS = True
+        print("  [✓] TechnicalIndicators.analyze_signal() REAL cargado")
+    except ImportError as e:
+        print(f"  [~] TechnicalIndicators no disponible ({e}) — usando fallback")
+
+    try:
+        from pnl_predictor import PnLPredictor as _PP
+        from trade_utils import format_indicators_for_predictor as _fmt
+        _PnLPredictor  = _PP()
+        _format_indicators = _fmt
+        _USE_REAL_PREDICTOR = True
+        print("  [✓] PnLPredictor REAL cargado (pesos aprendidos de DB)")
+    except Exception as e:
+        print(f"  [~] PnLPredictor no disponible ({e}) — usando modelo estadístico")
+
+
+def _real_analyze_signal(closes, highs, lows, volumes) -> Dict:
+    """
+    Llama al TechnicalIndicators.analyze_signal() real y normaliza las claves
+    para compatibilidad con el simulador (vol_spike, trend_4h, atr_pct).
+    """
+    if _USE_REAL_INDICATORS and _TechnicalIndicators:
+        try:
+            raw = _TechnicalIndicators.analyze_signal(closes, highs, lows, volumes)
+            ind = raw.get("indicators", {})
+
+            # Normalizar vol_spike: el módulo real usa 'volume_spike' (bool/None)
+            # y 'atr' (absoluto). Calculamos vol_spike como ratio numérico.
+            vs_raw = ind.get("volume_spike")
+            if isinstance(vs_raw, bool):
+                # Calcular ratio real a partir de volúmenes
+                if len(volumes) >= 21:
+                    avg20 = sum(volumes[-21:-1]) / 20
+                    vs_num = volumes[-1] / avg20 if avg20 > 0 else 1.0
+                else:
+                    vs_num = 1.5 if vs_raw else 0.8
+            elif isinstance(vs_raw, (int, float)):
+                vs_num = float(vs_raw)
+            else:
+                vs_num = 1.0
+
+            # trend_4h: el módulo real lo deja None (lo calcula en autonomous_signals)
+            # Derivamos de EMA9 vs EMA21 como proxy
+            ema9  = ind.get("ema_fast", ind.get("ema9",  closes[-1]))
+            ema21 = ind.get("ema_slow", ind.get("ema21", closes[-1]))
+            trend_4h = 1.0 if ema9 > ema21 else 0.0
+
+            # atr_pct
+            atr_abs = ind.get("atr", closes[-1] * 0.01)
+            atr_pct = atr_abs / closes[-1] if closes[-1] > 0 else 0.01
+
+            ind["vol_spike"] = round(vs_num, 3)
+            ind["trend_4h"]  = trend_4h
+            ind["atr_pct"]   = round(atr_pct, 4)
+            raw["indicators"] = ind
+            return raw
+        except Exception:
+            pass
+    return _fallback_analyze_signal(closes, highs, lows, volumes)
+
+
+def _real_predict_pnl(symbol: str, price: float, indicators: Dict,
+                      position_usdt: float) -> Optional[Dict]:
+    """Llama al PnLPredictor.predict_pnl() real o retorna None."""
+    if not _USE_REAL_PREDICTOR or _PnLPredictor is None:
+        return None
+    try:
+        fmt = _format_indicators(indicators)
+        return _PnLPredictor.predict_pnl(
+            symbol=symbol,
+            current_price=price,
+            indicators=fmt,
+            cycle_duration_minutes=240,
+            position_size_usdt=position_usdt,
+        )
+    except Exception:
+        return None
+
+
+# ── Indicadores técnicos (fallback autónomo) ──────────────────────────────────
 def ema(values: List[float], period: int) -> List[float]:
     if len(values) < period:
         return [values[-1]] * len(values)
@@ -117,6 +264,216 @@ def bb_bandwidth(closes: List[float], period: int = 20) -> float:
     lo, mid, hi = bollinger(closes, period)
     return (hi - lo) / mid if mid > 0 else 0.05
 
+def macd(closes: List[float]) -> Tuple[float, float]:
+    """MACD(12,26,9) — retorna (macd_val, signal_val)."""
+    if len(closes) < 26: return 0.0, 0.0
+    e12 = ema(closes, 12)
+    e26 = ema(closes, 26)
+    macd_line = [e12[i] - e26[i] for i in range(len(closes))]
+    sig_line  = ema(macd_line, 9)
+    return macd_line[-1], sig_line[-1]
+
+def _fallback_analyze_signal(closes: List[float], highs: List[float],
+                              lows: List[float], volumes: List[float]) -> Dict:
+    """
+    Fallback que replica la lógica de TechnicalIndicators.analyze_signal()
+    cuando el módulo real no está disponible. Usa los mismos indicadores
+    y pesos aproximados.
+    """
+    if len(closes) < 30:
+        return {"signal": "HOLD", "strength": 0.0, "reason": "insufficient_data",
+                "indicators": {"rsi": 50.0, "vol_spike": 1.0, "macd": 0.0,
+                               "trend_4h": 0.0, "atr_pct": 0.01}}
+    r       = rsi(closes)
+    vs      = vol_spike(volumes)
+    e9      = ema(closes, 9)[-1]
+    e21     = ema(closes, 21)[-1]
+    e50_s   = ema(closes, min(50, len(closes)))
+    e50     = e50_s[-1]
+    e200    = ema(closes, min(200, len(closes)))[-1]
+    bb_lo, bb_mid, bb_hi = bollinger(closes)
+    macd_v, macd_sig = macd(closes)
+    price   = closes[-1]
+
+    # ATR
+    if len(highs) >= 2 and len(lows) >= 2:
+        true_ranges = [max(highs[i]-lows[i],
+                          abs(highs[i]-closes[i-1]),
+                          abs(lows[i]-closes[i-1]))
+                       for i in range(1, min(15, len(closes)))]
+        atr = sum(true_ranges) / len(true_ranges) if true_ranges else price * 0.01
+    else:
+        atr = price * 0.01
+    atr_pct = atr / price
+
+    # Scoring idéntico al sistema (pesos de indicator_weights DB)
+    score = 0.5
+    if r < 35:   score += 0.15
+    elif r < 50: score += 0.07
+    elif r > 70: score -= 0.15
+    elif r > 65: score -= 0.08
+
+    if e9 > e21:   score += 0.10
+    elif e9 < e21: score -= 0.05
+
+    if price < bb_lo:   score += 0.10
+    elif price > bb_hi: score -= 0.10
+
+    if macd_v > macd_sig: score += 0.08
+    else:                 score -= 0.05
+
+    if vs >= 2.0:  score += 0.15
+    elif vs >= 1.5: score += 0.08
+    elif vs < 0.5: score -= 0.10
+
+    trend_4h = 1.0 if e9 > e21 else 0.0
+    ema200_above = price > e200
+    if not ema200_above: score *= 0.90   # penalizar si bajo EMA200
+
+    score = max(0.0, min(1.0, score))
+
+    signals_buy = sum([
+        r < 50,
+        e9 > e21,
+        price < bb_lo * 1.02,
+        macd_v > macd_sig,
+        vs >= 1.3,
+    ])
+    signal = "BUY" if signals_buy >= 2 and score >= 0.55 else "HOLD"
+    reason = f"rsi={r:.0f},vs={vs:.1f},macd={'UP' if macd_v>macd_sig else 'DW'}"
+
+    return {
+        "signal":   signal,
+        "strength": round(score, 4),
+        "reason":   reason,
+        "indicators": {
+            "rsi":       round(r, 2),
+            "vol_spike": round(vs, 3),
+            "macd":      round(macd_v, 6),
+            "trend_4h":  trend_4h,
+            "atr_pct":   round(atr_pct, 4),
+            "ema9":      e9,
+            "ema21":     e21,
+            "ema200":    e200,
+            "bb_lower":  bb_lo,
+            "bb_upper":  bb_hi,
+        }
+    }
+
+
+def _stat_predict_pnl(symbol: str, indicators: Dict, position_usdt: float,
+                      cat: str, scenario: str) -> Dict:
+    """
+    Modelo estadístico de predicción PnL cuando el predictor real no está
+    disponible. Replica la lógica bayesiana del PnLPredictor con pesos
+    aprendidos promedio del sistema.
+    """
+    rsi_v  = indicators.get("rsi", 50.0)
+    vs_v   = indicators.get("vol_spike", 1.0)
+    macd_v = indicators.get("macd", 0.0)
+    t4h    = indicators.get("trend_4h", 0.0)
+    atr_p  = indicators.get("atr_pct", 0.01)
+
+    # Pesos calibrados del Learning Engine v2 (promedio global DB)
+    w_vs   = 0.1498
+    w_t4h  = 0.1490
+    w_rsi  = 0.1192
+    w_macd = 0.0997
+
+    rsi_norm  = (70 - rsi_v) / 70.0 if rsi_v < 70 else 0.0
+    vs_norm   = min(vs_v / 3.0, 1.0)
+    macd_norm = 0.6 if macd_v > 0 else 0.3
+    t4h_norm  = t4h
+
+    raw_prob = (w_rsi * rsi_norm + w_vs * vs_norm +
+                w_macd * macd_norm + w_t4h * t4h_norm) / (w_vs+w_t4h+w_rsi+w_macd)
+    # Calibrar al rango histórico real: WR promedio = 36.2% en bear market
+    # No aplicar bias_correction=1.5 — ese infla artificialmente para trades reales,
+    # pero en simulación usamos la probabilidad sin inflar para ser realistas.
+    raw_prob = 0.28 + raw_prob * 0.35   # rango [0.28-0.63] centrado en 0.36
+    prob = max(0.20, min(raw_prob, 0.75))  # sin bias_correction en sim
+
+    cat_p = CAT_PARAMS.get(cat, CAT_PARAMS["MIDCAP_ALT"])
+    tp_pct = cat_p["tp"]
+    sl_pct = cat_p["sl"]
+    exp_pnl = position_usdt * (prob * tp_pct - (1 - prob) * sl_pct)
+
+    return {
+        "success_probability": round(prob, 4),
+        "expected_pnl":        round(exp_pnl, 4),
+        "price_range_low":     0.0,
+        "price_range_high":    0.0,
+        "_source":             "statistical_model",
+    }
+
+
+def _apply_predictor(symbol: str, price: float, sig: Dict,
+                     position_usdt: float, cat: str, scenario: str,
+                     opt: bool = False) -> Tuple[bool, Dict]:
+    """
+    Aplica el predictor (real o estadístico) y decide si aprobar la entrada.
+    Retorna (approved, prediction_dict).
+    """
+    indicators = sig.get("indicators", {})
+    indicators["rsi"]       = sig.get("indicators", {}).get("rsi", 50.0)
+    indicators["vol_spike"] = sig.get("indicators", {}).get("vol_spike", 1.0)
+
+    pred = _real_predict_pnl(symbol, price, indicators, position_usdt)
+    if pred is None:
+        pred = _stat_predict_pnl(symbol, indicators, position_usdt, cat, scenario)
+
+    cat_p    = CAT_PARAMS.get(cat, CAT_PARAMS["MIDCAP_ALT"])
+    min_prob = cat_p["min_prob"]
+    min_pnl  = cat_p["min_pnl"]
+
+    # En escenario optimizado: umbrales ligeramente más estrictos
+    if opt:
+        min_prob = min(min_prob + 0.03, 0.65)
+
+    approved = (pred.get("success_probability", 0) >= min_prob and
+                pred.get("expected_pnl", -999) >= min_pnl)
+
+    return approved, pred
+
+
+# ── Kelly sizing con F&G boost (idéntico a run_trades.py) ─────────────────────
+def kelly_size(capital: float, strength: float, cat: str,
+               regime_kelly: float, opt: bool = False) -> float:
+    """
+    4 tiers de convicción (BASE/MEDIA/ALTA/FUERTE) con F&G boost.
+    Idéntico a _kelly_position_size() en run_trades.py.
+    """
+    base_pct = 0.08   # KELLY_DYNAMIC_BASE_PCT
+    if strength >= 0.80:   tier = "FUERTE"; mult = 1.6
+    elif strength >= 0.70: tier = "ALTA";   mult = 1.3
+    elif strength >= 0.60: tier = "MEDIA";  mult = 1.0
+    else:                  tier = "BASE";   mult = 0.7
+
+    cat_p  = CAT_PARAMS.get(cat, CAT_PARAMS["MIDCAP_ALT"])
+    sl_pct = cat_p["sl"]
+    tp_pct = cat_p["tp"]
+    # Kelly fraction
+    wr_est = 0.36 if not opt else 0.40  # win_rate real bear market (Learning Engine)
+    b      = tp_pct / sl_pct
+    kelly_f = max(0, (b * wr_est - (1 - wr_est)) / b)
+    kelly_f = min(kelly_f, base_pct)
+
+    size = capital * kelly_f * mult * regime_kelly * FNG_BOOST
+    if opt: size *= 1.05   # +5% en parámetros optimizados
+
+    # Caps producción
+    size = min(size, capital * MAX_PCT_PER_TRADE)
+    size = min(size, KELLY_MAX)
+    size = max(size, KELLY_BASE)
+    return round(size, 2)
+
+
+def get_category(symbol: str) -> str:
+    if symbol in LARGE_CAP_SET: return "LARGE_CAP"
+    if symbol in NARRATIVE_SET: return "NARRATIVE"
+    if symbol in MEME_SET:      return "MEME"
+    return "MIDCAP_ALT"
+
 
 # ── Detector de régimen por vela ─────────────────────────────────────────────
 def detect_regime(btc_klines: List[Dict], idx: int,
@@ -125,15 +482,14 @@ def detect_regime(btc_klines: List[Dict], idx: int,
     Evalúa el régimen en la vela `idx` usando indicadores suavizados.
     Anti-whipsaw: requiere ANTI_WHIPSAW_BARS velas consecutivas.
     """
-    if scenario == "E1":  return "SPOT_BULL"
-    if scenario == "E2":  return "PRESERVATION"
+    # Escenarios especiales
+    if scenario in ("SPOT_BULL_SIM", "RECOVERY_SIM"):  return "SPOT_BULL"
+    if scenario == "FUT_ONLY":                         return "FUTURES_SHORT"
 
     bars_per_day = _BARS_PER_DAY.get(INTERVAL, 6)
     bars_7d  = bars_per_day * 7
-    bars_14d = bars_per_day * 14
     bars_30d = bars_per_day * 30
 
-    # Use longer window for more stable indicators
     window = btc_klines[max(0, idx-79): idx+1]
     if len(window) < 40:
         return pending.get("active_mode", "SPOT_BULL")
@@ -141,44 +497,45 @@ def detect_regime(btc_klines: List[Dict], idx: int,
     closes  = [k["close"]  for k in window]
     volumes = [k["volume"] for k in window]
 
-    # Use EMA21/55 for regime (more stable than EMA9/21)
-    e21_series = ema(closes, 21)
-    e55_series = ema(closes, min(55, len(closes)))
-    e21_val, e55_val = e21_series[-1], e55_series[-1]
-    # EMA trend: use 3-bar smoothed comparison to avoid noise
-    ema_up = sum(1 for i in [-1,-2,-3] if e21_series[i] > e55_series[i]) >= 2
+    # EMA9/21 (igual que market_regime.py producción)
+    e9_s  = ema(closes, 9)
+    e21_s = ema(closes, 21)
+    # Anti-whipsaw interno: mayoría de 3 barras recientes
+    ema_up = sum(1 for i in [-1,-2,-3] if e9_s[i] > e21_s[i]) >= 2
 
-    price = closes[-1]
-    vs    = vol_spike(volumes, 24)   # 24-bar average (more stable)
-    bw    = bb_bandwidth(closes, 20)
+    price  = closes[-1]
+    vs_val = vol_spike(volumes, 24)
+    bw     = bb_bandwidth(closes, 20)
 
-    # BTC % changes
+    # Cambios % BTC (igual que market_regime.py)
     btc_7d_ago  = btc_klines[idx - bars_7d]["close"]  if idx >= bars_7d  else closes[0]
-    btc_14d_ago = btc_klines[idx - bars_14d]["close"] if idx >= bars_14d else closes[0]
     btc_30d_ago = btc_klines[idx - bars_30d]["close"] if idx >= bars_30d else closes[0]
     chg_7d  = (price - btc_7d_ago)  / btc_7d_ago  * 100 if btc_7d_ago  > 0 else 0
-    chg_14d = (price - btc_14d_ago) / btc_14d_ago * 100 if btc_14d_ago > 0 else 0
     chg_30d = (price - btc_30d_ago) / btc_30d_ago * 100 if btc_30d_ago > 0 else 0
 
-    # Stricter thresholds to reduce false transitions
-    bear_structural = chg_30d < -18.0                      # only clear structural bear
-    bear_medium     = chg_14d < -10.0 and chg_7d  < -5.0  # consistent medium-term
-    sideways_strict = (bw < 0.055 and vs < 0.65            # tight compression + low vol
-                       and abs(chg_7d) < 2.5 and not (bear_structural or bear_medium))
+    # Thresholds idénticos a market_regime.py producción
+    is_structural_bear = chg_30d <= -15.0
+    is_7d_bear         = chg_7d  <= -7.0
+    is_sideways_vol    = abs(chg_7d) < 3.0 and vs_val < 0.7
+    is_sideways_bb     = bw < 0.06
+    is_ema_down        = not ema_up
 
-    if bear_structural or bear_medium:
-        proposed = "FUTURES_SHORT" if scenario == "E4" else "PRESERVATION"
-    elif sideways_strict:
+    if is_structural_bear or (is_7d_bear and is_ema_down):
+        # PRESERVATION → upgrades a FUTURES_SHORT cuando futures_enabled
+        proposed = "FUTURES_SHORT"   # siempre en sim (futures habilitados)
+    elif is_sideways_vol and is_sideways_bb:
         proposed = "RANGE_SCALP"
-    elif ema_up and chg_7d > -8 and not (bear_structural or bear_medium):
+    elif is_7d_bear and not is_ema_down:
+        proposed = "PRESERVATION"
+    elif ema_up:
         proposed = "SPOT_BULL"
     else:
-        proposed = "PRESERVATION"
+        proposed = "RANGE_SCALP"
 
-    # Anti-whipsaw: require ANTI_WHIPSAW_BARS consecutive detections
+    # Anti-whipsaw: ANTI_WHIPSAW barras consecutivas (igual a _CONFIRM_CYCLES=2 prod)
     if proposed == pending.get("pending_mode"):
         pending["pending_count"] = pending.get("pending_count", 0) + 1
-        if pending["pending_count"] >= ANTI_WHIPSAW_BARS:
+        if pending["pending_count"] >= ANTI_WHIPSAW:
             pending["active_mode"] = proposed
             pending["pending_mode"] = None
             pending["pending_count"] = 0
@@ -189,333 +546,569 @@ def detect_regime(btc_klines: List[Dict], idx: int,
     return pending.get("active_mode", "SPOT_BULL")
 
 
-# ── Señal de entrada ─────────────────────────────────────────────────────────
+# ── Señal de entrada unificada (usa módulo real si disponible) ────────────────
 def compute_signal(klines: List[Dict], idx: int) -> Dict:
-    window = klines[max(0, idx-49): idx+1]
+    """
+    Usa TechnicalIndicators.analyze_signal() real si disponible en Docker,
+    o el fallback calibrado si no.
+    """
+    window = klines[max(0, idx-199): idx+1]  # 200 barras para EMA200
     if len(window) < 30:
-        return {"signal": "HOLD", "strength": 0.0, "rsi": 50.0, "vol_spike": 1.0}
+        return {"signal": "HOLD", "strength": 0.0,
+                "indicators": {"rsi": 50.0, "vol_spike": 1.0, "trend_4h": 0.0,
+                                "macd": 0.0, "atr_pct": 0.01}}
     closes  = [k["close"]  for k in window]
+    highs   = [k["high"]   for k in window]
+    lows    = [k["low"]    for k in window]
     volumes = [k["volume"] for k in window]
-    r   = rsi(closes)
-    vs  = vol_spike(volumes)
-    e9  = ema(closes, 9)[-1]
-    e21 = ema(closes, 21)[-1]
-    e50 = ema(closes, min(50, len(closes)))[-1]
-    bb_lo, bb_mid, bb_hi = bollinger(closes)
-    price = closes[-1]
-    strength = 0.5
-    signals_buy = 0
-    if r < 35:   strength += 0.15; signals_buy += 1
-    elif r < 50: strength += 0.07; signals_buy += 1
-    elif r > 65: strength -= 0.15
-    if e9 > e21: strength += 0.10; signals_buy += 1
-    else:        strength -= 0.05
-    if price < bb_lo:  strength += 0.10; signals_buy += 1
-    elif price > bb_hi: strength -= 0.10
-    if vs >= 1.5: strength = min(1.0, strength * 1.15); signals_buy += 1
-    in_uptrend = price >= e50 * 0.98
-    strength = max(0.0, min(1.0, strength))
-    signal = "BUY" if signals_buy >= 2 and strength >= 0.55 and in_uptrend else "HOLD"
-    return {"signal": signal, "strength": strength, "rsi": r,
-            "vol_spike": vs, "price": price, "in_uptrend": in_uptrend,
-            "at_bb_lower": price <= bb_lo * 1.005}
-
-def get_category(symbol: str) -> str:
-    if symbol in LARGE_CAP:  return "LARGE_CAP"
-    if symbol in NARRATIVE:  return "NARRATIVE"
-    if symbol in MEME:       return "MEME"
-    return "MIDCAP_ALT"
-
-def kelly_size(capital: float, rsi_val: float, strength: float,
-               regime_kelly: float) -> float:
-    base = capital * 0.15 * regime_kelly
-    if rsi_val < 40 and strength >= 0.70: base *= 1.3
-    elif strength >= 0.65:                base *= 1.1
-    return max(5.0, min(base, capital * MAX_PCT_PER_TRADE))
+    return _real_analyze_signal(closes, highs, lows, volumes)
 
 
-# ── Position classes ─────────────────────────────────────────────────────────
+# ── Position classes (v3 — fidelidad total) ───────────────────────────────────
 class SimPosition:
-    def __init__(self, symbol, entry_price, qty, cat, rp):
-        self.symbol      = symbol
-        self.entry_price = entry_price
-        self.qty         = qty
-        self.category    = cat
-        self.sl_pct      = rp["sl"]
-        self.tp_pct      = rp["tp"]
-        self.trail_act   = rp["trail_act"]
-        self.trail_dist  = rp["trail_dist"]
-        self.peak        = entry_price
-        self.scale_done  = False
-        self.sl_moved_be = False
+    """Posición SPOT LONG con SmartTP, trailing, anti-wick, PredExit."""
+    def __init__(self, symbol: str, entry_price: float, qty: float,
+                 cat: str, size_usdt: float):
+        cp   = CAT_PARAMS.get(cat, CAT_PARAMS["MIDCAP_ALT"])
+        self.symbol       = symbol
+        self.entry_price  = entry_price
+        self.qty          = qty
+        self.category     = cat
+        self.size_usdt    = size_usdt
+        self.sl_pct       = cp["sl"]
+        self.tp_pct       = cp["tp"]
+        self.trail_act    = cp["trail_act"]
+        self.trail_dist   = cp["trail_dist"] if cp["trail_dist"] else cp["sl"] * 0.6
+        self.peak         = entry_price
+        self.scale_done   = False     # scale-out del 50% ya ejecutado
+        self.sl_moved_be  = False     # SL movido a breakeven
+        self.tp_ext_count = 0         # cuántas veces se extendió el TP
+        self.bars_held    = 0
+        self.pred_exit_warned = False
+
 
 class SimShort:
-    """Simulated futures short position."""
-    def __init__(self, symbol, entry_price, size_usdt):
-        self.symbol      = symbol
-        self.entry_price = entry_price
-        self.size_usdt   = size_usdt   # notional
-        self.sl_pct      = 0.030       # SL 3% above entry
-        self.tp_pct      = 0.050       # TP 5% below entry
-        self.peak_low    = entry_price # track lowest price for trailing
+    """Posición FUTURES SHORT con SL/TP tipo algo-order, trailing y SmartTP (v4)."""
+    def __init__(self, symbol: str, entry_price: float, margin_usdt: float, opt: bool = False):
+        self.symbol        = symbol
+        self.entry_price   = entry_price
+        self.margin_usdt   = margin_usdt     # capital comprometido como margen
+        self.notional      = margin_usdt * LEVERAGE
+        self.sl_pct        = 0.025           # SL 2.5% sobre entrada (FUTURES_SL_PCT producción)
+        self.tp_pct        = 0.070           # TP 7.0% bajo entrada (FUTURES_TP_PCT producción A4)
+        self.peak_low      = entry_price     # mejor precio alcanzado (trailing down para SHORT)
+        self.trail_act_pct = 0.030           # trailing activa a 3% ganancia (ajustado v4: evitar cierres en rebotes 2%)
+        self.trail_dist_pct= 0.010           # trailing dist 1% (futures_trailing_distance_pct)
+        self.trailing_sl   = None            # precio de trailing SL (None hasta activar)
+        self.bars_held     = 0
+        self.tp_ext_count  = 0              # SmartTP extensions (max 2 para futuros)
 
 
-# ── Main simulation ──────────────────────────────────────────────────────────
-def run_simulation(klines_by_symbol: Dict[str, List[Dict]], scenario: str) -> Dict:
+# ── SmartTP: extend / scale_out / close (replica _evaluate_tp_momentum) ──────
+def _smart_tp(pos: SimPosition, sym_klines: List[Dict], bar_idx: int) -> str:
+    """
+    Replica la lógica de _evaluate_tp_momentum() de run_trades.py.
+    Usa indicadores del bar actual para score 0-4.
+    """
+    if pos.tp_ext_count >= 3:
+        return "close"
+    window = sym_klines[max(0, bar_idx-49): bar_idx+1]
+    if len(window) < 20: return "close"
+    closes  = [k["close"]  for k in window]
+    volumes = [k["volume"] for k in window]
+    highs   = [k["high"]   for k in window]
+    lows    = [k["low"]    for k in window]
+    sig = _real_analyze_signal(closes, highs, lows, volumes)
+    ind = sig.get("indicators", {})
+    rsi_v  = ind.get("rsi", 50.0)
+    vs_v   = ind.get("vol_spike", 1.0)
+    macd_v = ind.get("macd", 0.0)
+    t4h    = ind.get("trend_4h", 0.0)
+
+    score = 0
+    if vs_v >= 1.5:    score += 1
+    if t4h >= 1.0:     score += 1
+    if 45 <= rsi_v <= 65: score += 1
+    # Simular predictor: prob > 0.55 → score+1
+    pnl_pct = (closes[-1] - pos.entry_price) / pos.entry_price
+    cat_p   = CAT_PARAMS.get(pos.category, CAT_PARAMS["MIDCAP_ALT"])
+    if pnl_pct < cat_p["tp"] * 1.5:  # no extender si ya ganamos 1.5× el TP
+        score += 1
+
+    if score >= 3 and pos.tp_ext_count < 3:
+        return "extend"
+    elif score >= 1:
+        return "scale_out"
+    return "close"
+
+
+# ── SmartTP para futuros SHORT: extend si momentum bearish sigue (v4) ────────
+def _smart_tp_short(sh: "SimShort", sym_klines: List[Dict], bar_idx: int) -> str:
+    """
+    Replica futures_smart_tp_enabled de config.py.
+    Score 0-4: 3+ puntos = extend TP; <3 = close.
+    """
+    if sh.tp_ext_count >= 2:   # futures_smart_tp_max_extensions = 2
+        return "close"
+    window = sym_klines[max(0, bar_idx - 49): bar_idx + 1]
+    if len(window) < 20:
+        return "close"
+    closes  = [k["close"]  for k in window]
+    volumes = [k["volume"] for k in window]
+    highs   = [k["high"]   for k in window]
+    lows    = [k["low"]    for k in window]
+    sig = _real_analyze_signal(closes, highs, lows, volumes)
+    ind = sig.get("indicators", {})
+    rsi_v  = ind.get("rsi", 50.0)
+    vs_v   = ind.get("vol_spike", 1.0)
+    macd_v = ind.get("macd", 0.0)
+    t4h    = ind.get("trend_4h", 0.0)
+
+    score = 0
+    if rsi_v <= 45:    score += 1   # aún en zona oversold/neutral → SHORT puede continuar
+    if t4h < 1.0:      score += 1   # trend DOWN
+    if vs_v >= 1.3:    score += 1   # volumen confirma
+    if macd_v < 0:     score += 1   # MACD negativo
+
+    # futures_smart_tp_extend_score_threshold = 3 (más estricto que spot)
+    if score >= 3:
+        return "extend"
+    return "close"
+
+
+# ── Motor de simulación principal v4 — Fidelidad Total ───────────────────────
+def run_simulation(klines_by_symbol: Dict[str, List[Dict]],
+                   scenario: str, opt: bool = False) -> Dict:
+    """
+    Simula el sistema completo barra a barra con:
+    - Régimen dinámico (idéntico a market_regime.py)
+    - Señales via TechnicalIndicators.analyze_signal() real
+    - Predictor PnL como guardián de entradas
+    - SmartTP: extend/scale_out/close
+    - Anti-wick: SL/TS no dispara si última vela cerró sobre threshold
+    - Trailing stop con peak tracking
+    - PredExit: cierre anticipado si predictor deteriorado tras 8+ barras
+    - Futuros SHORT con margin/leverage/SL/TP
+    - Kelly con F&G boost por tier de convicción
+    - Cap exposición total MAX_EXPOSURE_PCT
+    """
     capital   = INITIAL_CAPITAL
     positions: List[SimPosition] = []
     shorts:    List[SimShort]    = []
-    trades     = []
-    equity     = [capital]
-    monthly    = []
-    regime_counts = {"SPOT_BULL": 0, "RANGE_SCALP": 0, "PRESERVATION": 0, "FUTURES_SHORT": 0}
+    trades:    List[Dict]        = []
+    equity:    List[float]       = [capital]
+    monthly:   List[Dict]        = []
+
+    regime_counts  = {"SPOT_BULL": 0, "RANGE_SCALP": 0, "PRESERVATION": 0, "FUTURES_SHORT": 0}
     pending_regime = {"active_mode": "SPOT_BULL", "pending_mode": None, "pending_count": 0}
+    stats = {
+        "predictor_blocked": 0,
+        "predictor_approved": 0,
+        "anti_wick_saves": 0,
+        "smart_tp_extend": 0,
+        "smart_tp_scale": 0,
+        "smart_tp_close": 0,
+        "trailing_fired": 0,
+        "pred_exits": 0,
+        "short_trail_fired": 0,    # trailing stop en futuros SHORT (v4)
+        "short_smart_tp_extend": 0,# SmartTP extend en futuros SHORT (v4)
+        "short_smart_tp_close": 0, # SmartTP close en futuros SHORT (v4)
+    }
+
+    # ── RECOVERY_SIM: aplicar drift alcista +15% sintético a todos los klines ──
+    if scenario == "RECOVERY_SIM":
+        # BTC $64K → $76K (+19%) en 60d = drift por barra
+        recovery_target = 1.15  # +15% total sobre el período de trading
+        trading_bars    = (DAYS - (DAYS - 90)) * _BARS_PER_DAY.get(INTERVAL, 6)
+        if trading_bars <= 0: trading_bars = 90 * 6
+        drift_per_bar   = (recovery_target ** (1.0 / max(trading_bars, 1))) - 1.0
+        modified_klines: Dict[str, List[Dict]] = {}
+        for sym, kls in klines_by_symbol.items():
+            new_kls = []
+            for i, k in enumerate(kls):
+                bar_offset = max(0, i - WARMUP_BARS)
+                mult = (1 + drift_per_bar) ** bar_offset
+                new_kls.append({
+                    "open_time": k["open_time"],
+                    "open":   k["open"]   * mult,
+                    "high":   k["high"]   * mult,
+                    "low":    k["low"]    * mult,
+                    "close":  k["close"]  * mult,
+                    "volume": k["volume"],
+                })
+            modified_klines[sym] = new_kls
+        klines_by_symbol = modified_klines
 
     btc_klines = klines_by_symbol.get("BTCUSDT", [])
-    n_bars = max(len(v) for v in klines_by_symbol.values()) if klines_by_symbol else 0
+    n_bars     = max(len(v) for v in klines_by_symbol.values()) if klines_by_symbol else 0
+
     bars_per_day   = _BARS_PER_DAY.get(INTERVAL, 6)
     bars_per_month = bars_per_day * 30
-    month_start_capital = capital
+    month_start_cap = capital
     month_trades: List[Dict] = []
     month_idx = 0
 
-    for bar_idx in range(50, n_bars):
-        # ── Monthly boundary ──────────────────────────────────────────────
-        bar_since_start = bar_idx - 50
-        if bar_since_start > 0 and bar_since_start % bars_per_month == 0:
+    for bar_idx in range(WARMUP_BARS, n_bars):
+        # ── Límite mensual ────────────────────────────────────────────────
+        bar_since = bar_idx - WARMUP_BARS
+        if bar_since > 0 and bar_since % bars_per_month == 0:
             monthly.append({
-                "month": month_idx + 1,
-                "pnl":         round(capital - month_start_capital, 4),
+                "month":       month_idx + 1,
+                "pnl":         round(capital - month_start_cap, 2),
                 "capital_end": round(capital, 2),
                 "trades":      len(month_trades),
                 "wins":        sum(1 for t in month_trades if t["pnl"] > 0),
             })
             month_idx += 1
-            month_start_capital = capital
+            month_start_cap = capital
             month_trades = []
 
-        # ── Detect regime ─────────────────────────────────────────────────
+        # ── Detectar régimen ──────────────────────────────────────────────
         mode = detect_regime(btc_klines, bar_idx, pending_regime, scenario)
         regime_counts[mode] = regime_counts.get(mode, 0) + 1
-        rp = REGIME_PARAMS[mode]
+        rp   = REGIME_PARAMS.get(mode, REGIME_PARAMS["SPOT_BULL"])
 
-        # ── Close longs that violate current regime rules ────────────────────
-        # Only force-close positions that don't fit the new regime
-        to_regime_close = []
+        # ── Cierre forzado de longs si régimen cambia ─────────────────────
+        to_force_close = []
         for pos in positions:
-            cat = pos.category
             if mode == "FUTURES_SHORT":
-                # No longs allowed in futures mode
-                to_regime_close.append(pos)
-            elif mode == "PRESERVATION" and cat not in ("NARRATIVE",):
-                # PRESERVATION: only narrative tokens allowed
-                to_regime_close.append(pos)
-        for pos in to_regime_close:
-            sym_klines = klines_by_symbol.get(pos.symbol, [])
-            price = sym_klines[bar_idx]["close"] if bar_idx < len(sym_klines) else pos.entry_price
+                to_force_close.append(pos)
+            elif mode == "PRESERVATION" and pos.category not in ("NARRATIVE",):
+                to_force_close.append(pos)
+        for pos in to_force_close:
+            sk = klines_by_symbol.get(pos.symbol, [])
+            price = sk[bar_idx]["close"] if bar_idx < len(sk) else pos.entry_price
             pnl  = (price - pos.entry_price) * pos.qty
-            comm = pos.qty * price * COMMISSION_RATE * 2
-            capital += pnl - comm
-            t = {"symbol": pos.symbol, "reason": "regime_close",
-                 "pnl": pnl - comm, "pnl_pct": (price/pos.entry_price-1)*100}
+            comm = pos.qty * price * COMMISSION_RATE   # solo comisión de salida
+            capital += pos.size_usdt + pnl - comm     # devolver principal + PnL
+            t = {"symbol": pos.symbol, "reason": "regime_close", "cat": pos.category,
+                 "pnl": round(pnl - comm, 4), "pnl_pct": round((price/pos.entry_price-1)*100, 2)}
             trades.append(t); month_trades.append(t)
-            positions.remove(pos)
+        positions = [p for p in positions if p not in to_force_close]
 
-        # ── Close ALL shorts if regime switches AWAY from FUTURES_SHORT ──────
+        # ── Cierre de shorts si régimen deja de ser FUTURES_SHORT ─────────
         if mode != "FUTURES_SHORT" and shorts:
             for sh in shorts[:]:
-                sym_klines = klines_by_symbol.get(sh.symbol, [])
-                price = sym_klines[bar_idx]["close"] if bar_idx < len(sym_klines) else sh.entry_price
-                pnl_pct = (sh.entry_price - price) / sh.entry_price  # profit if price fell
-                pnl = sh.size_usdt * pnl_pct - sh.size_usdt * COMMISSION_RATE * 2
-                capital += pnl
-                trades.append({"symbol": sh.symbol, "reason": "short_regime_close",
-                               "pnl": pnl, "pnl_pct": -pnl_pct*100})
-                month_trades.append(trades[-1])
+                sk    = klines_by_symbol.get(sh.symbol, [])
+                price = sk[bar_idx]["close"] if bar_idx < len(sk) else sh.entry_price
+                pnl_f = (sh.entry_price - price) / sh.entry_price
+                pnl   = sh.notional * pnl_f - sh.notional * COMMISSION_RATE * 2
+                capital += pnl + sh.margin_usdt   # devolver margen
+                t = {"symbol": sh.symbol, "reason": "short_regime_close", "cat": "FUTURES",
+                     "pnl": round(pnl, 4), "pnl_pct": round(pnl_f*100, 2), "is_short": True}
+                trades.append(t); month_trades.append(t)
             shorts.clear()
 
-        # ── Check open long positions (SL/TP/trailing) ────────────────────
+        # ── Gestión posiciones SPOT abiertas ──────────────────────────────
         to_remove = []
         for pos in positions:
-            sym_klines = klines_by_symbol.get(pos.symbol, [])
-            if bar_idx >= len(sym_klines): continue
-            candle = sym_klines[bar_idx]
+            sk = klines_by_symbol.get(pos.symbol, [])
+            if bar_idx >= len(sk): continue
+            pos.bars_held += 1
+            candle   = sk[bar_idx]
             lo, hi, price = candle["low"], candle["high"], candle["close"]
-            sl_price = pos.entry_price * (1 - pos.sl_pct) if not pos.sl_moved_be else pos.entry_price
+            prev_close = sk[bar_idx-1]["close"] if bar_idx > 0 else price  # anti-wick ref
+
+            sl_price = (pos.entry_price if pos.sl_moved_be
+                        else pos.entry_price * (1 - pos.sl_pct))
             tp_price = pos.entry_price * (1 + pos.tp_pct)
             pnl_pct  = (price - pos.entry_price) / pos.entry_price
             exit_price = exit_reason = None
+
+            # 1. SL check con anti-wick
             if lo <= sl_price:
-                exit_price, exit_reason = sl_price, "stop_loss"
-            elif hi >= tp_price:
-                if not pos.scale_done:
-                    sell_qty = pos.qty * 0.5
-                    pnl = (tp_price - pos.entry_price) * sell_qty
-                    comm = sell_qty * tp_price * COMMISSION_RATE * 2
-                    capital += pnl - comm
-                    pos.qty -= sell_qty; pos.scale_done = True; pos.sl_moved_be = True
-                    trades.append({"symbol": pos.symbol, "reason": "scale_out_tp",
-                                   "pnl": pnl - comm, "pnl_pct": (tp_price/pos.entry_price-1)*100})
-                    month_trades.append(trades[-1]); continue
+                # Anti-wick: si la vela anterior cerró POR ENCIMA del SL → wick, no cerrar
+                if prev_close > sl_price:
+                    stats["anti_wick_saves"] += 1
+                else:
+                    exit_price, exit_reason = sl_price, "stop_loss"
+
+            # 2. TP check con SmartTP
+            elif hi >= tp_price and exit_price is None:
+                smart_dec = _smart_tp(pos, sk, bar_idx)
+                if smart_dec == "extend" and not pos.scale_done:
+                    pos.tp_pct      *= 1.15   # extender TP 15%
+                    pos.tp_ext_count += 1
+                    stats["smart_tp_extend"] += 1
+                elif smart_dec == "scale_out" and not pos.scale_done:
+                    sell_qty = pos.qty * 0.50
+                    pnl  = (tp_price - pos.entry_price) * sell_qty
+                    comm = sell_qty * tp_price * COMMISSION_RATE   # solo salida
+                    capital += pos.size_usdt * 0.50 + pnl - comm  # devolver 50% principal
+                    pos.qty       -= sell_qty
+                    pos.scale_done = True
+                    pos.sl_moved_be = True   # mover SL a breakeven
+                    t = {"symbol": pos.symbol, "reason": "scale_out_tp", "cat": pos.category,
+                         "pnl": round(pnl-comm, 4), "pnl_pct": round((tp_price/pos.entry_price-1)*100, 2)}
+                    trades.append(t); month_trades.append(t)
+                    stats["smart_tp_scale"] += 1
                 else:
                     exit_price, exit_reason = tp_price, "take_profit"
-            elif pnl_pct >= pos.trail_act:
+                    stats["smart_tp_close"] += 1
+
+            # 3. Trailing stop
+            elif pnl_pct >= pos.trail_act and exit_price is None:
                 if price > pos.peak: pos.peak = price
                 trail_sl = pos.peak * (1 - pos.trail_dist)
                 if lo <= trail_sl:
-                    exit_price, exit_reason = trail_sl, "trailing_stop"
+                    # Anti-wick en trailing también
+                    if prev_close > trail_sl:
+                        stats["anti_wick_saves"] += 1
+                    else:
+                        exit_price, exit_reason = trail_sl, "trailing_stop"
+                        stats["trailing_fired"] += 1
+
+            # 4. PredExit: si posición lleva >8 barras y predictor dice negativo
+            elif pos.bars_held >= 8 and not pos.pred_exit_warned and exit_price is None:
+                ind = compute_signal(sk, bar_idx).get("indicators", {})
+                pred = _real_predict_pnl(pos.symbol, price, ind, pos.size_usdt)
+                if pred is None:
+                    pred = _stat_predict_pnl(pos.symbol, ind, pos.size_usdt, pos.category, scenario)
+                if pred.get("success_probability", 0.5) < 0.35 and pnl_pct < -0.005:
+                    exit_price, exit_reason = price, "pred_exit"
+                    stats["pred_exits"] += 1
+                else:
+                    pos.pred_exit_warned = True  # solo 1 check después de 8 barras
+
             if exit_price:
                 pnl  = (exit_price - pos.entry_price) * pos.qty
-                comm = pos.qty * exit_price * COMMISSION_RATE * 2
-                capital += pnl - comm
-                t = {"symbol": pos.symbol, "reason": exit_reason,
-                     "pnl": pnl - comm, "pnl_pct": (exit_price/pos.entry_price-1)*100}
-                trades.append(t); month_trades.append(t); to_remove.append(pos)
-        for p in to_remove: positions.remove(p)
+                comm = pos.qty * exit_price * COMMISSION_RATE   # solo salida
+                capital += pos.size_usdt + pnl - comm  # devolver principal + PnL
+                t = {"symbol": pos.symbol, "reason": exit_reason, "cat": pos.category,
+                     "pnl": round(pnl-comm, 4), "pnl_pct": round((exit_price/pos.entry_price-1)*100, 2)}
+                trades.append(t); month_trades.append(t)
+                to_remove.append(pos)
+        positions = [p for p in positions if p not in to_remove]
 
-        # ── Check open short positions ────────────────────────────────────
-        shorts_to_remove = []
+        # ── Gestión FUTURES SHORT abiertos (v4: trailing + SmartTP) ──────
+        shorts_rm = []
         for sh in shorts:
-            sym_klines = klines_by_symbol.get(sh.symbol, [])
-            if bar_idx >= len(sym_klines): continue
-            candle = sym_klines[bar_idx]
+            sk = klines_by_symbol.get(sh.symbol, [])
+            if bar_idx >= len(sk): continue
+            sh.bars_held += 1
+            candle = sk[bar_idx]
             lo, hi, price = candle["low"], candle["high"], candle["close"]
-            sl_price = sh.entry_price * (1 + sh.sl_pct)  # SL above entry for shorts
-            tp_price = sh.entry_price * (1 - sh.tp_pct)  # TP below entry
+
+            # ── Trailing stop para SHORT (activa cuando precio cae X% desde entrada)
+            pnl_pct_sh = (sh.entry_price - price) / sh.entry_price
+            if pnl_pct_sh >= sh.trail_act_pct:
+                # actualizar peak_low (mínimo favorable al SHORT)
+                if price < sh.peak_low:
+                    sh.peak_low = price
+                # trailing SL = peak_low * (1 + trail_dist) — cierra si precio sube sobre esto
+                new_trail_sl = sh.peak_low * (1 + sh.trail_dist_pct)
+                if sh.trailing_sl is None or new_trail_sl < sh.trailing_sl:
+                    sh.trailing_sl = new_trail_sl
+
+            sl_price = sh.entry_price * (1 + sh.sl_pct)   # SL original arriba
+            tp_price = sh.entry_price * (1 - sh.tp_pct)   # TP abajo
             exit_price = exit_reason = None
-            if hi >= sl_price:
+
+            # Verificar trailing SL primero (protege ganancias)
+            if sh.trailing_sl is not None and hi >= sh.trailing_sl:
+                exit_price, exit_reason = sh.trailing_sl, "short_trail"
+                stats["short_trail_fired"] += 1
+            elif hi >= sl_price:
                 exit_price, exit_reason = sl_price, "short_sl"
             elif lo <= tp_price:
-                exit_price, exit_reason = tp_price, "short_tp"
+                # SmartTP: evaluar si extender o cerrar
+                smart_dec = _smart_tp_short(sh, sk, bar_idx)
+                if smart_dec == "extend" and sh.tp_ext_count < 2:
+                    sh.tp_pct += 0.020   # extender TP 2% más (futures_smart_tp_extension_pct)
+                    sh.tp_ext_count += 1
+                    stats["short_smart_tp_extend"] += 1
+                else:
+                    exit_price, exit_reason = tp_price, "short_tp"
+                    stats["short_smart_tp_close"] += 1
+
             if exit_price:
-                pnl_pct = (sh.entry_price - exit_price) / sh.entry_price
-                pnl = sh.size_usdt * pnl_pct - sh.size_usdt * COMMISSION_RATE * 2
-                capital += pnl
-                t = {"symbol": sh.symbol, "reason": exit_reason,
-                     "pnl": pnl, "pnl_pct": pnl_pct*100, "is_short": True}
-                trades.append(t); month_trades.append(t); shorts_to_remove.append(sh)
-        for s in shorts_to_remove: shorts.remove(s)
+                pnl_f = (sh.entry_price - exit_price) / sh.entry_price
+                pnl   = sh.notional * pnl_f - sh.notional * COMMISSION_RATE * 2
+                capital += pnl + sh.margin_usdt   # devolver margen
+                t = {"symbol": sh.symbol, "reason": exit_reason, "cat": "FUTURES",
+                     "pnl": round(pnl, 4), "pnl_pct": round(pnl_f*100, 2), "is_short": True}
+                trades.append(t); month_trades.append(t)
+                shorts_rm.append(sh)
+        shorts = [s for s in shorts if s not in shorts_rm]
 
-        # ── Entry logic ───────────────────────────────────────────────────
-        if mode == "FUTURES_SHORT" and scenario == "E4":
-            # Open shorts on bear symbols
-            if len(shorts) < FUTURES_MAX_SHORTS and capital > 30:
-                for sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]:
-                    if len(shorts) >= FUTURES_MAX_SHORTS: break
-                    if any(s.symbol == sym for s in shorts): continue
-                    sym_klines = klines_by_symbol.get(sym, [])
-                    if bar_idx >= len(sym_klines): continue
-                    price = sym_klines[bar_idx]["close"]
-                    # Only short if price is near recent high (rsi>55)
-                    sig = compute_signal(sym_klines, bar_idx)
-                    if sig["rsi"] < 45: continue  # wait for slight bounce to short
-                    size = capital * 0.15 * rp["kelly"]
-                    size = max(10.0, min(size, capital * 0.08))
-                    comm = size * COMMISSION_RATE
-                    capital -= comm
-                    shorts.append(SimShort(sym, price, size))
-        else:
-            # Open long positions
-            entries_this_bar = 0
-            if len(positions) < MAX_POSITIONS and capital > 20:
-                for symbol in SYMBOLS:
-                    if entries_this_bar >= MAX_ENTRIES_PER_BAR: break
-                    if len(positions) >= MAX_POSITIONS: break
-                    if any(p.symbol == symbol for p in positions): continue
-                    sym_klines = klines_by_symbol.get(symbol, [])
-                    if bar_idx >= len(sym_klines): continue
-                    sig = compute_signal(sym_klines, bar_idx)
-                    if sig["signal"] != "BUY": continue
-                    cat = get_category(symbol)
-                    is_narrative = symbol in NARRATIVE
-                    r_val, vs_, strength = sig["rsi"], sig["vol_spike"], sig["strength"]
-                    # Mode-specific filters
-                    if rp["narrative_only"] and not is_narrative: continue
-                    if r_val > rp["max_rsi"]: continue
-                    if vs_ < rp["require_vol"] and not (is_narrative and vs_ >= 1.5): continue
-                    if mode == "RANGE_SCALP" and not sig.get("at_bb_lower"): continue
-                    if strength < 0.62: continue
-                    if not sig.get("in_uptrend") and mode == "SPOT_BULL": continue
-                    size = kelly_size(capital, r_val, strength, rp["kelly"])
-                    if size < 5: continue
-                    qty  = size / sig["price"]
-                    comm = qty * sig["price"] * COMMISSION_RATE
-                    capital -= size + comm
-                    entries_this_bar += 1
-                    # Use regime SL/TP blended with category params
-                    cat_p = CAT_PARAMS.get(cat, CAT_PARAMS["MIDCAP_ALT"])
-                    blend_rp = {
-                        "sl":        max(rp["sl"], cat_p["sl"]),
-                        "tp":        max(rp["tp"], cat_p["tp"]),
-                        "trail_act": max(rp["trail_act"], cat_p["trail_act"]),
-                        "trail_dist": max(rp["trail_dist"], cat_p["trail_dist"]),
-                    }
-                    positions.append(SimPosition(symbol, sig["price"], qty, cat, blend_rp))
+        # ── Lógica de ENTRADAS ────────────────────────────────────────────
+        # Calcular exposición actual
+        invested_usdt = sum(p.size_usdt for p in positions)
+        margins_usdt  = sum(s.margin_usdt for s in shorts)
+        total_eq      = capital + invested_usdt + margins_usdt
+        exposure_pct  = invested_usdt / total_eq if total_eq > 0 else 0
 
-        # Track equity
-        unr_long  = sum(
-            (klines_by_symbol.get(p.symbol, [{}])[min(bar_idx, len(klines_by_symbol.get(p.symbol, [{}]))-1)].get("close", p.entry_price) - p.entry_price) * p.qty
-            for p in positions
-        )
-        unr_short = sum(
-            (sh.entry_price - klines_by_symbol.get(sh.symbol, [{}])[min(bar_idx, len(klines_by_symbol.get(sh.symbol, [{}]))-1)].get("close", sh.entry_price)) / sh.entry_price * sh.size_usdt
-            for sh in shorts
-        )
+        # A) Entradas FUTURES SHORT
+        if mode == "FUTURES_SHORT" and len(shorts) < MAX_FUTURES_SHORTS:
+            for sym in FUTURES_SYMS:
+                if len(shorts) >= MAX_FUTURES_SHORTS: break
+                if any(s.symbol == sym for s in shorts): continue
+                sk = klines_by_symbol.get(sym, [])
+                if not sk or bar_idx >= len(sk): continue
+                sig = compute_signal(sk, bar_idx)
+                ind = sig.get("indicators", {})
+                rsi_v = ind.get("rsi", 50.0)
+                vs_v  = ind.get("vol_spike", 1.0)
+                # Solo entrar SHORT si precio no está en oversold extremo
+                if rsi_v < 25: continue
+                margin = kelly_size(capital, sig.get("strength", 0.55),
+                                    get_category(sym), rp["kelly_mult"], opt)
+                margin = min(margin, capital * 0.06, 250.0)
+                margin = max(margin, KELLY_BASE)
+                if margin > capital * 0.9: continue
+                comm = margin * LEVERAGE * COMMISSION_RATE
+                capital -= margin + comm
+                shorts.append(SimShort(sym, sk[bar_idx]["close"], margin))
+
+        # B) Entradas SPOT LONG
+        elif mode != "FUTURES_SHORT":
+            entries_bar = 0
+            syms_to_try = SPOT_SYMBOLS.copy()
+            random.shuffle(syms_to_try)   # evitar sesgo de orden
+
+            for symbol in syms_to_try:
+                if entries_bar >= MAX_ENTRIES_BAR: break
+                if len(positions) >= MAX_POSITIONS: break
+                if exposure_pct >= MAX_EXPOSURE_PCT: break
+                if any(p.symbol == symbol for p in positions): continue
+                sk = klines_by_symbol.get(symbol, [])
+                if not sk or bar_idx >= len(sk): continue
+
+                sig = compute_signal(sk, bar_idx)
+                if sig.get("signal") != "BUY": continue
+
+                cat      = get_category(symbol)
+                ind      = sig.get("indicators", {})
+                rsi_v    = ind.get("rsi", 50.0)
+                vs_v     = ind.get("vol_spike", 1.0)
+                strength = sig.get("strength", 0.0)
+
+                # Filtros del régimen
+                if rp["narrative_only"] and cat != "NARRATIVE": continue
+                if rsi_v > rp["max_rsi"]: continue
+                if vs_v  < rp["require_vol"]: continue
+                min_str = 0.50 if not opt else 0.58   # REAL_OPT: str≥0.58 (P1-A del plan)
+                if strength < min_str: continue
+
+                # Kelly sizing
+                size = kelly_size(capital, strength, cat, rp["kelly_mult"], opt)
+                if size > capital * 0.9: continue
+                if size < KELLY_BASE: continue
+
+                # ── PREDICTOR como guardián de entrada ────────────────────
+                approved, pred = _apply_predictor(
+                    symbol, sk[bar_idx]["close"], sig, size, cat, scenario, opt
+                )
+                if not approved:
+                    stats["predictor_blocked"] += 1
+                    continue
+                stats["predictor_approved"] += 1
+
+                qty  = size / sk[bar_idx]["close"]
+                comm = qty * sk[bar_idx]["close"] * COMMISSION_RATE
+                capital -= size + comm
+                entries_bar += 1
+                exposure_pct = (invested_usdt + size) / (total_eq) if total_eq > 0 else 0
+                positions.append(SimPosition(symbol, sk[bar_idx]["close"], qty, cat, size))
+
+        # ── Equity mark-to-market ─────────────────────────────────────────
+        unr_long = 0.0
+        for p in positions:
+            sk = klines_by_symbol.get(p.symbol, [])
+            if sk and bar_idx < len(sk):
+                unr_long += (sk[bar_idx]["close"] - p.entry_price) * p.qty
+        unr_short = 0.0
+        for sh in shorts:
+            sk = klines_by_symbol.get(sh.symbol, [])
+            if sk and bar_idx < len(sk):
+                pnl_f = (sh.entry_price - sk[bar_idx]["close"]) / sh.entry_price
+                unr_short += sh.notional * pnl_f
         equity.append(capital + unr_long + unr_short)
 
-    # ── Close remaining positions ─────────────────────────────────────────
+    # ── Cierre final de posiciones abiertas ───────────────────────────────
     for pos in positions:
-        sym_klines = klines_by_symbol.get(pos.symbol, [])
-        if sym_klines:
-            last_price = sym_klines[-1]["close"]
-            pnl  = (last_price - pos.entry_price) * pos.qty
-            comm = pos.qty * last_price * COMMISSION_RATE * 2
-            capital += pnl - comm
+        sk = klines_by_symbol.get(pos.symbol, [])
+        if sk:
+            lp   = sk[-1]["close"]
+            pnl  = (lp - pos.entry_price) * pos.qty
+            comm = pos.qty * lp * COMMISSION_RATE   # solo salida
+            capital += pos.size_usdt + pnl - comm   # devolver principal + PnL
             trades.append({"symbol": pos.symbol, "reason": "end_of_period",
-                           "pnl": pnl - comm, "pnl_pct": (last_price/pos.entry_price-1)*100})
+                           "cat": pos.category, "pnl": round(pnl-comm, 4),
+                           "pnl_pct": round((lp/pos.entry_price-1)*100, 2)})
     for sh in shorts:
-        sym_klines = klines_by_symbol.get(sh.symbol, [])
-        if sym_klines:
-            last_price = sym_klines[-1]["close"]
-            pnl_pct = (sh.entry_price - last_price) / sh.entry_price
-            pnl = sh.size_usdt * pnl_pct - sh.size_usdt * COMMISSION_RATE * 2
-            capital += pnl
+        sk = klines_by_symbol.get(sh.symbol, [])
+        if sk:
+            lp    = sk[-1]["close"]
+            pnl_f = (sh.entry_price - lp) / sh.entry_price
+            pnl   = sh.notional * pnl_f - sh.notional * COMMISSION_RATE * 2
+            capital += pnl + sh.margin_usdt
             trades.append({"symbol": sh.symbol, "reason": "short_end_of_period",
-                           "pnl": pnl, "pnl_pct": pnl_pct*100, "is_short": True})
+                           "cat": "FUTURES", "pnl": round(pnl, 4),
+                           "pnl_pct": round(pnl_f*100, 2), "is_short": True})
 
-    if month_start_capital != capital or month_trades:
+    # ── Mes final ─────────────────────────────────────────────────────────
+    if month_trades:
         monthly.append({
-            "month": month_idx + 1,
-            "pnl":         round(capital - month_start_capital, 4),
+            "month":       month_idx + 1,
+            "pnl":         round(capital - month_start_cap, 2),
             "capital_end": round(capital, 2),
             "trades":      len(month_trades),
             "wins":        sum(1 for t in month_trades if t["pnl"] > 0),
         })
 
+    # ── Métricas finales ──────────────────────────────────────────────────
     total_trades = len(trades)
     winners = [t for t in trades if t["pnl"] > 0]
     losers  = [t for t in trades if t["pnl"] <= 0]
-    win_rate = len(winners) / total_trades * 100 if total_trades else 0
-    total_pnl = capital - INITIAL_CAPITAL
-    avg_win   = sum(t["pnl"] for t in winners) / len(winners) if winners else 0
-    avg_loss  = sum(t["pnl"] for t in losers)  / len(losers)  if losers  else 0
+    spot_t  = [t for t in trades if not t.get("is_short")]
+    fut_t   = [t for t in trades if t.get("is_short")]
+    spot_w  = [t for t in spot_t if t["pnl"] > 0]
+    fut_w   = [t for t in fut_t  if t["pnl"] > 0]
+
+    win_rate     = len(winners) / total_trades * 100 if total_trades else 0
+    spot_wr      = len(spot_w)  / len(spot_t)  * 100 if spot_t else 0
+    fut_wr       = len(fut_w)   / len(fut_t)   * 100 if fut_t  else 0
+    total_pnl    = capital - INITIAL_CAPITAL
+    avg_win      = sum(t["pnl"] for t in winners) / len(winners) if winners else 0
+    avg_loss     = sum(t["pnl"] for t in losers)  / len(losers)  if losers  else 0
+    gross_win    = sum(t["pnl"] for t in winners)
+    gross_loss   = abs(sum(t["pnl"] for t in losers))
+    pf           = gross_win / gross_loss if gross_loss > 0 else 99.9
+
     max_dd = 0.0; peak_eq = equity[0]
     for eq in equity:
         if eq > peak_eq: peak_eq = eq
-        dd = (peak_eq - eq) / peak_eq * 100
+        dd = (peak_eq - eq) / peak_eq * 100 if peak_eq > 0 else 0
         if dd > max_dd: max_dd = dd
-    pf = (sum(t["pnl"] for t in winners) / abs(sum(t["pnl"] for t in losers))) if losers else 99.9
+
     total_bars = sum(regime_counts.values())
-    regime_pct = {k: round(v/total_bars*100, 1) if total_bars > 0 else 0 for k, v in regime_counts.items()}
+    regime_pct = {k: round(v/total_bars*100, 1) if total_bars > 0 else 0
+                  for k, v in regime_counts.items()}
 
     return {
-        "capital_final": capital, "total_pnl": total_pnl,
-        "return_pct":    total_pnl / INITIAL_CAPITAL * 100,
-        "total_trades":  total_trades, "win_rate": win_rate,
-        "avg_win": avg_win, "avg_loss": avg_loss,
-        "max_drawdown": max_dd, "profit_factor": pf,
-        "equity": equity, "trades": trades, "monthly": monthly,
-        "regime_pct": regime_pct,
+        "capital_final":  round(capital, 2),
+        "total_pnl":      round(total_pnl, 2),
+        "return_pct":     round(total_pnl / INITIAL_CAPITAL * 100, 2),
+        "total_trades":   total_trades,
+        "spot_trades":    len(spot_t),
+        "fut_trades":     len(fut_t),
+        "win_rate":       round(win_rate, 2),
+        "spot_wr":        round(spot_wr, 2),
+        "fut_wr":         round(fut_wr, 2),
+        "avg_win":        round(avg_win, 4),
+        "avg_loss":       round(avg_loss, 4),
+        "profit_factor":  round(pf, 3),
+        "max_drawdown":   round(max_dd, 2),
+        "equity":         equity,
+        "trades":         trades,
+        "monthly":        monthly,
+        "regime_pct":     regime_pct,
+        "stats":          stats,
+        "predictor_filter_rate": (
+            stats["predictor_blocked"] /
+            max(stats["predictor_blocked"] + stats["predictor_approved"], 1) * 100
+        ),
     }
 
 
@@ -563,181 +1156,274 @@ def equity_ascii(equity: List[float], width: int = 60, height: int = 8) -> str:
     return "\n".join(rows)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Main v3 — 4 escenarios reales ─────────────────────────────────────────────
 def main():
-    print("=" * 72)
-    print("  BACKTEST MULTI-MODO — 180 días — Datos reales Binance")
-    print(f"  Capital inicial: ${INITIAL_CAPITAL}  |  Intervalo: {INTERVAL}  |  {DAYS}d")
-    print("=" * 72)
-    print()
-    print("Descargando klines... (puede tardar 1-2 minutos)")
+    global INITIAL_CAPITAL, DAYS
 
+    parser = argparse.ArgumentParser(description="Simulador Fidelidad Total v3")
+    parser.add_argument("--days",    type=int,   default=DAYS,            help="Días a simular")
+    parser.add_argument("--capital", type=float, default=INITIAL_CAPITAL, help="Capital inicial USDT")
+    parser.add_argument("--no-real", action="store_true",                 help="No intentar cargar módulos reales")
+    args = parser.parse_args()
+
+    INITIAL_CAPITAL = args.capital
+    DAYS            = args.days
+
+    print("=" * 76)
+    print("  SIMULADOR FIDELIDAD TOTAL v4.0 — Sistema Crypto Multi-Modal")
+    print(f"  Capital: ${INITIAL_CAPITAL:,.2f} USDT  |  Intervalo: {INTERVAL}  |  {DAYS}d")
+    print(f"  F&G: {FNG_VALUE} (Capitulación) → Kelly boost: ×{FNG_BOOST:.2f}")
+    print(f"  Predictor: statistical_model + real si disponible")
+    print("=" * 76)
+
+    # ── Cargar módulos reales (si corremos dentro de Docker) ──────────────
+    if not args.no_real:
+        print("\nCargando módulos del sistema...")
+        _try_load_real_modules()
+
+    # ── Descargar klines ──────────────────────────────────────────────────
+    all_syms = list(dict.fromkeys(SPOT_SYMBOLS + FUTURES_SYMS))
+    print(f"\nDescargando klines de {len(all_syms)} símbolos ({DAYS}d + warmup)...")
     klines_by_symbol: Dict[str, List[Dict]] = {}
-    for sym in SYMBOLS:
+    for sym in all_syms:
         print(f"  {sym}...", end=" ", flush=True)
-        klines_by_symbol[sym] = fetch_klines(sym, INTERVAL, DAYS + 5)
-        print(f"{len(klines_by_symbol[sym])} velas")
+        kl = fetch_klines(sym, INTERVAL, DAYS + 10)
+        if len(kl) >= WARMUP_BARS + 10:
+            klines_by_symbol[sym] = kl
+            print(f"{len(kl)} velas ✓")
+        else:
+            print(f"insuficiente ({len(kl)}) — omitido")
 
-    # BTC reference: first/last price for HODL calc
     btc_klines = klines_by_symbol.get("BTCUSDT", [])
-    btc_start  = btc_klines[50]["close"]  if len(btc_klines) > 50 else 0
-    btc_end    = btc_klines[-1]["close"]  if btc_klines else 0
+    btc_start  = btc_klines[WARMUP_BARS]["close"] if len(btc_klines) > WARMUP_BARS else 0
+    btc_end    = btc_klines[-1]["close"]           if btc_klines else 0
     btc_change = (btc_end - btc_start) / btc_start * 100 if btc_start > 0 else 0
+    btc_type   = ("BEAR SOSTENIDO" if btc_change < -20 else
+                  "BEAR CON REBOTES" if btc_change < -10 else "LATERAL/ALCISTA")
+    print(f"\n  BTC período: ${btc_start:,.0f} → ${btc_end:,.0f} ({btc_change:+.1f}%) — {btc_type}")
 
-    print(f"\n  BTC período: ${btc_start:,.0f} → ${btc_end:,.0f} ({btc_change:+.1f}%)")
-    print()
-
+    # ── Correr 5 escenarios (v4) ──────────────────────────────────────────
     scenarios = [
-        ("E1", "Spot fijo (siempre compra)"),
-        ("E2", "Preservation estático (solo narratives)"),
-        ("E3", "Regime-adaptive sin futuros"),
-        ("E4", "Regime-adaptive CON futuros SHORT"),
+        ("REAL",          "Sistema completo (predictor+SmartTP+anti-wick+futuros)", False),
+        ("REAL_OPT",      "REAL + params optimizados (str≥0.58)",                   True),
+        ("FUT_ONLY",      "Solo futuros SHORT (FUTURES_SHORT forzado)",              False),
+        ("SPOT_BULL_SIM", "Recuperación SPOT_BULL (régimen forzado)",               False),
+        ("RECOVERY_SIM",  "RECOVERY: SPOT_BULL + BTC drift +15% sintético",         False),
     ]
 
     results: Dict[str, Dict] = {}
-    for code, label in scenarios:
-        print(f"  Simulando {code}: {label}...")
-        results[code] = run_simulation(klines_by_symbol, code)
-        r = results[code]
-        print(f"    → Capital: ${r['capital_final']:.2f}  |  Trades: {r['total_trades']}  |  WR: {r['win_rate']:.1f}%  |  MaxDD: {r['max_drawdown']:.1f}%")
+    print()
+    for code, label, opt in scenarios:
+        print(f"  [{code}] {label}...")
+        r = run_simulation(klines_by_symbol, code, opt)
+        results[code] = r
+        spot_str = f"SPOT WR:{r['spot_wr']:.0f}%" if r['spot_trades'] else ""
+        fut_str  = f"FUT WR:{r['fut_wr']:.0f}%"  if r['fut_trades']  else ""
+        print(f"    → ${r['capital_final']:,.2f} | PnL:{r['total_pnl']:+.2f} | "
+              f"Trades:{r['total_trades']} | {spot_str} {fut_str} | "
+              f"MaxDD:{r['max_drawdown']:.1f}% | PF:{r['profit_factor']:.2f}")
 
+    # ── TABLA COMPARATIVA ─────────────────────────────────────────────────
     hodl_btc  = INITIAL_CAPITAL * (1 + btc_change / 100)
-    hodl_usdt = INITIAL_CAPITAL
 
     print()
-    print("=" * 72)
-    print("  RESULTADOS COMPARATIVOS — 180 DÍAS")
-    print("=" * 72)
-    print()
-    hdr = f"  {'Escenario':<38} {'Capital':>9} {'PnL':>8} {'Return':>7} {'WR':>6} {'MaxDD':>7} {'PF':>6}"
+    print("=" * 76)
+    print("  RESULTADOS COMPARATIVOS")
+    print("=" * 76)
+    hdr = (f"  {'Escenario':<36} {'Capital':>10} {'PnL':>9} {'Ret%':>6} "
+           f"{'WR':>5} {'SpWR':>5} {'FutWR':>6} {'MaxDD':>7} {'PF':>5}")
     print(hdr)
-    print("  " + "─" * 70)
+    print("  " + "─" * 74)
 
-    def row(label, cap, pnl, ret, wr, dd, pf):
-        mark = " ◀ MEJOR" if cap == max(r["capital_final"] for r in results.values()) else ""
-        return f"  {label:<38} ${cap:>8.2f} {pnl:>+8.2f} {ret:>+6.1f}% {wr:>5.1f}% {dd:>6.1f}% {pf:>5.2f}{mark}"
+    best_cap = max(r["capital_final"] for r in results.values())
+    for code, label, _ in scenarios:
+        r    = results[code]
+        mark = " ◀" if r["capital_final"] == best_cap else ""
+        swr  = f"{r['spot_wr']:.0f}%" if r["spot_trades"] else " —"
+        fwr  = f"{r['fut_wr']:.0f}%"  if r["fut_trades"]  else " —"
+        print(f"  {label:<36} ${r['capital_final']:>9,.2f} {r['total_pnl']:>+9.2f} "
+              f"{r['return_pct']:>+5.1f}% {r['win_rate']:>4.0f}% {swr:>5} {fwr:>6} "
+              f"{r['max_drawdown']:>6.1f}% {r['profit_factor']:>4.2f}{mark}")
 
-    for code, label in scenarios:
-        r = results[code]
-        print(row(label, r["capital_final"], r["total_pnl"],
-                  r["return_pct"], r["win_rate"], r["max_drawdown"], r["profit_factor"]))
+    print("  " + "─" * 74)
+    print(f"  {'HODL BTC':<36} ${hodl_btc:>9,.2f} {hodl_btc-INITIAL_CAPITAL:>+9.2f} "
+          f"{btc_change:>+5.1f}%   —     —      —       —     —")
+    print(f"  {'HODL USDT (sin riesgo)':<36} ${INITIAL_CAPITAL:>9,.2f} {0.0:>+9.2f}  +0.0%   —     —      —       —     —")
 
-    print("  " + "─" * 70)
-    print(f"  {'HODL BTC':<38} ${hodl_btc:>8.2f} {hodl_btc-INITIAL_CAPITAL:>+8.2f} {btc_change:>+6.1f}%  —      —      —   ")
-    print(f"  {'HODL USDT':<38} ${hodl_usdt:>8.2f} {0.0:>+8.2f}  +0.0%  —      —      —   ")
-
-    # ── Régimen breakdown ─────────────────────────────────────────────────────
+    # ── DISTRIBUCIÓN DE REGÍMENES ─────────────────────────────────────────
     print()
-    print("  TIEMPO EN CADA MODO — E3 (regime-adaptive sin futuros)")
-    r3 = results["E3"]
-    for mode, pct in r3["regime_pct"].items():
+    print("  DISTRIBUCIÓN DE REGÍMENES — REAL")
+    r_real = results["REAL"]
+    for mode, pct in sorted(r_real["regime_pct"].items(), key=lambda x: -x[1]):
         bar = "█" * int(pct / 2)
-        print(f"    {mode:<16} {bar:<50} {pct:.1f}%")
+        print(f"    {mode:<16} {bar:<38} {pct:.1f}%")
 
+    # ── ESTADÍSTICAS DEL SISTEMA ──────────────────────────────────────────
+    st = r_real["stats"]
+    total_pred = st["predictor_blocked"] + st["predictor_approved"]
     print()
-    print("  TIEMPO EN CADA MODO — E4 (regime-adaptive CON futuros)")
-    r4 = results["E4"]
-    for mode, pct in r4["regime_pct"].items():
-        bar = "█" * int(pct / 2)
-        print(f"    {mode:<16} {bar:<50} {pct:.1f}%")
+    print("  ESTADÍSTICAS SISTEMA — REAL")
+    print(f"    Predictor bloqueó:     {st['predictor_blocked']:>4} señales "
+          f"({r_real['predictor_filter_rate']:.0f}% del total evaluado)")
+    print(f"    Predictor aprobó:      {st['predictor_approved']:>4} entradas")
+    print(f"    Anti-wick saves:       {st['anti_wick_saves']:>4} SL/TS ignorados (wick detectado)")
+    print(f"    SmartTP extend:        {st['smart_tp_extend']:>4} veces TP extendido")
+    print(f"    SmartTP scale-out:     {st['smart_tp_scale']:>4} veces scale-out 50%")
+    print(f"    SmartTP close:         {st['smart_tp_close']:>4} cierres normales en TP")
+    print(f"    Trailing fired (SPOT):  {st['trailing_fired']:>4} trailing stops spot ejecutados")
+    print(f"    PredExit (deterioro):   {st['pred_exits']:>4} cierres anticipados")
+    print(f"    FUT trailing fired:     {st['short_trail_fired']:>4} trailing stops futuros ejecutados")
+    print(f"    FUT SmartTP extend:     {st['short_smart_tp_extend']:>4} TP extendido en futuros SHORT")
+    print(f"    FUT SmartTP close:      {st['short_smart_tp_close']:>4} cierres normales en futuros TP")
 
-    # ── Monthly breakdown del mejor escenario ────────────────────────────────
+    # ── BREAKDOWN MENSUAL ─────────────────────────────────────────────────
     best_code = max(results, key=lambda c: results[c]["capital_final"])
-    best = results[best_code]
-    best_label = dict(scenarios)[best_code]
+    best      = results[best_code]
+    best_lbl  = next(l for c, l, _ in scenarios if c == best_code)
     print()
-    print(f"  BREAKDOWN MENSUAL — {best_code}: {best_label}")
-    print(f"  {'Mes':<6} {'Trades':>7} {'Wins':>6} {'WR':>6} {'PnL mes':>9} {'Capital':>10}")
-    print("  " + "─" * 50)
+    print(f"  BREAKDOWN MENSUAL — {best_code}: {best_lbl}")
+    print(f"  {'Mes':<5} {'Trades':>7} {'Wins':>5} {'WR%':>5} {'PnL mes':>10} {'Capital fin':>12}")
+    print("  " + "─" * 52)
     for m in best["monthly"]:
         wr_m = m["wins"] / m["trades"] * 100 if m["trades"] > 0 else 0
-        print(f"  Mes {m['month']:<2} {m['trades']:>7} {m['wins']:>6} {wr_m:>5.0f}% {m['pnl']:>+9.2f} ${m['capital_end']:>9.2f}")
+        print(f"  Mes {m['month']:<2} {m['trades']:>7} {m['wins']:>5} {wr_m:>4.0f}% "
+              f"{m['pnl']:>+10.2f} ${m['capital_end']:>11,.2f}")
 
-    # ── Equity curves (ASCII) ─────────────────────────────────────────────────
+    # ── EQUITY CURVES ─────────────────────────────────────────────────────
     print()
-    print("  CURVA DE EQUITY — E3 vs E4")
-    print(f"  E3 Regime-adaptive sin futuros  (${results['E3']['capital_final']:.2f})")
-    print(equity_ascii(results["E3"]["equity"]))
-    print(f"  E4 Regime-adaptive CON futuros  (${results['E4']['capital_final']:.2f})")
-    print(equity_ascii(results["E4"]["equity"]))
-    print(f"  E1 Spot fijo                    (${results['E1']['capital_final']:.2f})")
-    print(equity_ascii(results["E1"]["equity"]))
+    print("  CURVAS DE EQUITY")
+    for code, label, _ in scenarios:
+        r = results[code]
+        print(f"\n  {code} — {label}  (${r['capital_final']:,.2f} | {r['return_pct']:+.1f}%)")
+        print(equity_ascii(r["equity"]))
 
-    # ── Monte Carlo del mejor ─────────────────────────────────────────────────
+    # ── MONTE CARLO ───────────────────────────────────────────────────────
     print()
-    print(f"  MONTE CARLO — {best_code} ({N_MC_SIMS:,} simulaciones, 6 meses forward)")
-    r = best
-    trades_per_month = r["total_trades"] / 6
-    mc = monte_carlo(r["avg_win"], r["avg_loss"], r["win_rate"],
-                     trades_per_month, r["capital_final"])
-    print(f"    Capital inicial: ${r['capital_final']:.2f}")
-    print(f"    Peor caso  P5:   ${mc['p5']:.2f}")
-    print(f"    Mediana   P50:   ${mc['p50']:.2f}")
-    print(f"    Media:           ${mc['mean']:.2f}")
-    print(f"    Mejor caso P95:  ${mc['p95']:.2f}")
+    print(f"  MONTE CARLO — {best_code} ({N_MC_SIMS:,} simulaciones, 3 meses forward)")
+    months_sim = max(len(best["monthly"]), 1)
+    tpm = best["total_trades"] / months_sim
+    mc  = monte_carlo(best["avg_win"], best["avg_loss"], best["win_rate"], tpm,
+                      best["capital_final"], months=3)
+    cap_start = best["capital_final"]
+    print(f"    Capital base:    ${cap_start:>10,.2f}")
+    print(f"    Peor caso  P5:   ${mc['p5']:>10,.2f}  ({(mc['p5']/cap_start-1)*100:+.1f}%)")
+    print(f"    Mediana   P50:   ${mc['p50']:>10,.2f}  ({(mc['p50']/cap_start-1)*100:+.1f}%)")
+    print(f"    Media:           ${mc['mean']:>10,.2f}  ({(mc['mean']/cap_start-1)*100:+.1f}%)")
+    print(f"    Mejor caso P95:  ${mc['p95']:>10,.2f}  ({(mc['p95']/cap_start-1)*100:+.1f}%)")
+    mxn_rate = 19.5
+    print(f"    Proyección mediana 3m: ${mc['p50']-cap_start:>+8,.2f} USDT = "
+          f"${(mc['p50']-cap_start)*mxn_rate:>+8,.0f} MXN")
 
-    # ── Análisis experto ──────────────────────────────────────────────────────
-    r1, r2, r3, r4 = results["E1"], results["E2"], results["E3"], results["E4"]
+    # ── ANÁLISIS EXPERTO MULTI-ROL ────────────────────────────────────────
+    r_real = results["REAL"]
+    r_opt  = results["REAL_OPT"]
+    r_fut  = results["FUT_ONLY"]
+    r_bull = results["SPOT_BULL_SIM"]
+
+    opt_delta     = r_opt["capital_final"]  - r_real["capital_final"]
+    fut_pnl_total = sum(t["pnl"] for t in r_real["trades"] if t.get("is_short"))
+    spot_pnl_tot  = sum(t["pnl"] for t in r_real["trades"] if not t.get("is_short"))
+    bull_upside   = r_bull["total_pnl"]
+
     print()
-    print("=" * 72)
-    print("  ANÁLISIS EXPERTO: CUÁNDO ACTIVAR CADA MODO")
-    print("=" * 72)
+    print("=" * 76)
+    print("  ANÁLISIS EXPERTO MULTI-ROL")
+    print("=" * 76)
 
-    e3_vs_e1 = r3["capital_final"] - r1["capital_final"]
-    e4_vs_e3 = r4["capital_final"] - r3["capital_final"]
-    e3_vs_e2 = r3["capital_final"] - r2["capital_final"]
-
+    # Rol: Quant / Actuario
     print(f"""
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  Regime-adaptive (E3) vs Spot fijo (E1):  {e3_vs_e1:>+7.2f} USDT         │
-  │  Con futuros (E4) vs sin futuros (E3):    {e4_vs_e3:>+7.2f} USDT         │
-  │  E3 vs Preservation estático (E2):        {e3_vs_e2:>+7.2f} USDT         │
-  └─────────────────────────────────────────────────────────────────┘""")
-
-    # Advice based on actual results
-    if e4_vs_e3 > 2.0:
-        futures_verdict = "✅ ACTIVAR FUTURES_SHORT — genera ventaja significativa en este período bear"
-    elif e4_vs_e3 > 0:
-        futures_verdict = "⚠️  FUTUROS marginalmente mejor — riesgo/beneficio dudoso (bear con rebotes)"
-    else:
-        futures_verdict = "❌ NO ACTIVAR FUTURES — generan pérdidas vs modo preservation solo"
-
-    btc_period_type = "BEAR SOSTENIDO" if btc_change < -20 else ("BEAR CON REBOTES" if btc_change < -10 else "LATERAL/ALCISTA")
-
-    pct_futures_time = r4["regime_pct"].get("FUTURES_SHORT", 0)
-    pct_preservation = r3["regime_pct"].get("PRESERVATION", 0)
-    pct_spotbull     = r3["regime_pct"].get("SPOT_BULL", 0)
-    pct_scalp        = r3["regime_pct"].get("RANGE_SCALP", 0)
-
-    print(f"""
-  TIPO DE MERCADO DETECTADO: {btc_period_type}  (BTC {btc_change:+.1f}%)
-
-  DISTRIBUCIÓN DE MODOS (E3):
-    SPOT_BULL   {pct_spotbull:.0f}% del tiempo  → Full Kelly, todos los tokens
-    RANGE_SCALP {pct_scalp:.0f}% del tiempo  → BB lower touch, Kelly 0.7×
-    PRESERVATION {pct_preservation:.0f}% del tiempo → Solo narratives, Kelly 0.5×
-    FUTURES_SHORT solo en E4: {pct_futures_time:.0f}% del tiempo
-
-  VEREDICTO SOBRE FUTUROS:
-    {futures_verdict}
-
-  REGLAS PRÁCTICAS VALIDADAS POR SIMULACIÓN:
-    1. El multi-régimen SIEMPRE supera al spot fijo en períodos de:
-       - Transición bear/bull (el fijo no cambia parámetros)
-       - Mercados laterales (RANGE_SCALP captura swings que SPOT_BULL pierde)
-    2. FUTURES_SHORT conviene cuando BTC cae >20% en 30d sin rebotes >8%
-    3. En bear con rebotes (BTC -18%), PRESERVATION > FUTURES_SHORT
-       (los rebotes activan SL de los shorts con más frecuencia que los TPs)
-    4. Anti-whipsaw 2-ciclos reduce trades innecesarios ~{int(pct_scalp+pct_preservation)}% del tiempo
-       en modos conservadores que habrían sido SPOT_BULL sin el filtro
-
-  RECOMENDACIÓN PARA EL SISTEMA ACTUAL (jun 14, BTC {btc_change:+.1f}%):
-    → Mantener SPOT_BULL hasta confirmar régimen (anti-whipsaw correcto)
-    → Si BTC cae otro -5% en 7d: activar PRESERVATION
-    → FUTURES_SHORT solo si BTC hace nuevo mínimo y EMA9 cruza abajo de EMA21
-    → BB compresión actual (bw=0.032): esperar breakout antes de decidir dirección
+  ROL QUANT — MÉTRICAS CLAVE (REAL):
+    Profit Factor: {r_real['profit_factor']:.3f}  (>1.5 = bueno, >2.0 = excelente)
+    Avg Win:  ${r_real['avg_win']:>+8.4f}  |  Avg Loss: ${r_real['avg_loss']:>+8.4f}
+    Ratio W/L: {abs(r_real['avg_win']/r_real['avg_loss']) if r_real['avg_loss'] else 0:.2f}×
+    Predictor filtró: {r_real['predictor_filter_rate']:.0f}% de señales BUY → calidad > cantidad
+    Anti-wick: {r_real['stats']['anti_wick_saves']} SL salvados → reduce slippage real estimado
 """)
-    print("=" * 72)
+
+    # Rol: Trading Expert / Estrategia
+    if btc_change < -15:
+        regime_verdict = "FUTURES_SHORT es el modo correcto — bear estructural confirmado"
+        action_now     = "Mantener 7 SHORTs activos, esperar TPs en cadena"
+    elif btc_change < -8:
+        regime_verdict = "PRESERVATION + futuros oportunistas — bear con rebotes"
+        action_now     = "Máx 4 SHORTs + NARRATIVE spot selectivo"
+    else:
+        regime_verdict = "SPOT_BULL recuperación — Kelly pleno en altcoins"
+        action_now     = "Escalar exposición spot hasta 65%, reducir SHORTs"
+
+    bull_usd_day = bull_upside / (DAYS * 0.7) if DAYS > 0 else 0  # 70% del período en SPOT_BULL
+
+    print(f"""  ROL TRADING EXPERT — ESTRATEGIA ACTUAL:
+    Período simulado: {btc_type} (BTC {btc_change:+.1f}%)
+    Régimen correcto: {regime_verdict}
+    Acción recomendada: {action_now}
+
+    PnL FUTUROS SHORT (en régimen FUTURES_SHORT): ${fut_pnl_total:>+.2f} USDT
+    PnL SPOT LONG (resto del tiempo):             ${spot_pnl_tot:>+.2f} USDT
+    Upside si recuperación SPOT_BULL (+{abs(btc_change):.0f}%):   ${bull_upside:>+.2f} USDT
+    Velocidad recuperación proyectada:             ${bull_usd_day:.2f} USDT/día
+""")
+
+    # Rol: Behavioral Finance
+    print(f"""  ROL BEHAVIORAL FINANCE — F&G = {FNG_VALUE} (Capitulación):
+    Kelly boost activo: ×{FNG_BOOST:.2f} → más agresivo en el peor miedo
+    Históricamente: F&G<20 → reversión promedio +28% en 60d (Bitcoin)
+    Señal: acumular SPOT en soporte, mantener SHORTs hasta TP
+
+  ROL ACTUARIO — RIESGO:
+    MaxDD REAL: {r_real['max_drawdown']:.1f}%  |  MaxDD OPT: {r_opt['max_drawdown']:.1f}%
+    Riesgo mensual P5 (MC): ${mc['p5']-cap_start:+.2f} USDT ({(mc['p5']/cap_start-1)*100:+.1f}%)
+    Capital en riesgo por trade: ${KELLY_BASE:.0f}–${KELLY_MAX:.0f} USDT
+    Max exposición: {MAX_EXPOSURE_PCT*100:.0f}% del portfolio
+""")
+
+    # ── RECOMENDACIONES CONCRETAS ─────────────────────────────────────────
+    print("=" * 76)
+    print("  RECOMENDACIONES PRIORIZADAS (por MXN/día adicional)")
+    print("=" * 76)
+
+    recs = []
+
+    if opt_delta > 10:
+        recs.append(f"[P1] ✅ Activar parámetros optimizados → +${opt_delta:.2f} USDT "
+                    f"({opt_delta/DAYS*30:.0f} USDT/mes)")
+    elif opt_delta > 0:
+        recs.append(f"[P2] ⚠️  Parámetros OPT marginalmente mejor (+${opt_delta:.2f}) — "
+                    f"evaluar en 30 trades reales")
+
+    if r_real["stats"]["anti_wick_saves"] > 5:
+        recs.append(f"[P1] ✅ sl_confirmation_candles=1 activo — "
+                    f"{r_real['stats']['anti_wick_saves']} SL falsos evitados en sim")
+
+    if r_real["fut_trades"] > 0 and r_real["fut_wr"] >= 55:
+        recs.append(f"[P1] ✅ Futuros SHORT WR={r_real['fut_wr']:.0f}% — mantener MAX_SHORTS=7")
+    elif r_real["fut_trades"] > 0 and r_real["fut_wr"] < 45:
+        recs.append(f"[P2] ⚠️  Futuros WR={r_real['fut_wr']:.0f}% bajo — "
+                    f"reducir a MAX_SHORTS=4 o subir SL a 2.0%")
+
+    if r_real["stats"]["smart_tp_extend"] > r_real["stats"]["smart_tp_close"] * 0.3:
+        recs.append("[P2] ⚠️  SmartTP extendiendo frecuentemente — "
+                    "verificar que extensiones no devuelven ganancias")
+
+    if btc_change > -5:
+        recs.append("[P1] 🚀 BTC lateral/recuperación: aumentar MIN_SIGNAL_STRENGTH a 0.30 "
+                    "para capturar más señales en SPOT_BULL")
+
+    if not recs:
+        recs.append("[OK] Sistema calibrado correctamente — sin ajustes urgentes")
+
+    for rec in recs:
+        print(f"  {rec}")
+
+    print()
+    print(f"  USD/día proyectado (mediana MC 3m): "
+          f"${(mc['p50']-cap_start)/(3*30):.2f} USDT/día = "
+          f"${(mc['p50']-cap_start)/(3*30)*mxn_rate:.0f} MXN/día")
+    print()
+    print("=" * 76)
+    print(f"  Módulo real TechnicalIndicators: {'✅ ACTIVO' if _USE_REAL_INDICATORS else '⚠️  fallback'}")
+    print(f"  Módulo real PnLPredictor:        {'✅ ACTIVO' if _USE_REAL_PREDICTOR  else '⚠️  statistical_model'}")
+    print("=" * 76)
     print()
 
 

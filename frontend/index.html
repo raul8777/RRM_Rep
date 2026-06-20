@@ -405,9 +405,20 @@
                 <div class="card-actions">
                     <button class="btn btn-primary btn-xs" id="refreshHealthBtn">↻ Actualizar</button>
                     <button class="btn btn-warning btn-xs" id="clearErrorsBtn">🧹 Limpiar</button>
+                    <button class="btn btn-success btn-xs" id="runFullHealthBtn" title="Ejecuta 80+ checks de todos los módulos">🩺 Full Health</button>
                 </div>
             </div>
             <div id="healthChecksData"><p class="loading">Cargando...</p></div>
+        </div>
+        <div class="card" id="fullHealthCard" style="display:none">
+            <div class="card-header">
+                <h2>🩺 System Health Report</h2>
+                <div class="card-actions">
+                    <span id="fullHealthVersion" style="font-size:10px;color:#888"></span>
+                    <button class="btn btn-xs" id="closeFullHealthBtn" style="margin-left:8px">✕ Cerrar</button>
+                </div>
+            </div>
+            <div id="fullHealthData"><p class="loading">Ejecutando checks...</p></div>
         </div>
         <div class="card">
             <div class="card-header"><h2>🚨 Errores Recientes</h2></div>

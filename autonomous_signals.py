@@ -326,7 +326,11 @@ class AutonomousSignalGenerator:
                         from config import Settings as _S
                         _narrative_syms = set(_S.__fields__['narrative_tokens'].default)
                     except Exception:
-                        _narrative_syms = {'FETUSDT','TAOUSDT','RENDERUSDT','NEARUSDT','WLDUSDT','AGIXUSDT','OCEANUSDT'}
+                        _narrative_syms = {
+                            'FETUSDT','TAOUSDT','RENDERUSDT','NEARUSDT','WLDUSDT','AGIXUSDT','OCEANUSDT',
+                            'ARBUSDT','MATICUSDT','ATOMUSDT','INJUSDT','APTUSDT','SUIUSDT','SEIUSDT',
+                            'TIAUSDT','PYTHUSDT','JTOUSDT','BRETTUSDT','EIGENUSDT',
+                        }
                     if symbol in _narrative_syms:
                         _avg_vol = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else None
                         _last_vol = volumes[-1] if volumes else 0

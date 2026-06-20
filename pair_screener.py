@@ -93,22 +93,27 @@ def get_screened_pairs(
         if vol < spot_min_vol:
             continue
 
-        score = vol * abs(chg_pct)  # momentum × liquidity
+        # Bullish score for spot ranking (penalizes tokens in downtrend)
+        # Bearish score kept separately — futures SHORT selection uses abs()
+        spot_score    = vol * max(0.0, chg_pct)   # 0 if falling — avoids long entries in downtrend
+        futures_score = vol * abs(chg_pct)         # full momentum for SHORT candidates
         candidates.append({
             "symbol": symbol,
             "vol_usdt": round(vol),
             "chg_pct": round(chg_pct, 2),
-            "score": score,
+            "score": spot_score,
+            "futures_score": futures_score,
         })
 
-    # Sort by score descending (highest momentum × volume first)
+    # Sort spot by bullish score (uptrend priority), futures by abs momentum score
     candidates.sort(key=lambda x: x["score"], reverse=True)
-
     spot_pairs    = [c["symbol"] for c in candidates[:max_spot]]
-    futures_pairs = [
-        c["symbol"] for c in candidates
-        if c["vol_usdt"] >= futures_min_vol
-    ][:max_futures]
+
+    futures_candidates = sorted(
+        [c for c in candidates if c["vol_usdt"] >= futures_min_vol],
+        key=lambda x: x["futures_score"], reverse=True
+    )
+    futures_pairs = [c["symbol"] for c in futures_candidates[:max_futures]]
 
     result = {
         "spot":    spot_pairs,

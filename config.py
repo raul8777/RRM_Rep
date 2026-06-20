@@ -84,6 +84,19 @@ class Settings(BaseSettings):
     smart_tp_max_extensions: int = Field(default=3, env="SMART_TP_MAX_EXTENSIONS")       # max extensions per position
     smart_tp_max_pnl_pct: float = Field(default=15.0, env="SMART_TP_MAX_PNL_PCT")        # never extend above this % gain
     smart_tp_extend_score_threshold: int = Field(default=2, env="SMART_TP_EXTEND_SCORE_THRESHOLD")  # min score/4 to EXTEND (was 3, now 2 = more aggressive)
+    # Smart TP: regime-aware behaviour — disable EXTEND in flat/defensive regimes (maximize realized gains)
+    smart_tp_extend_disabled_regimes: list = Field(default=["RANGE_SCALP", "PRESERVATION"], env="SMART_TP_EXTEND_DISABLED_REGIMES")
+    # Futures Smart TP EXTEND: evaluate SHORT momentum at TP hit before closing
+    futures_smart_tp_enabled: bool = Field(default=True, env="FUTURES_SMART_TP_ENABLED")
+    futures_smart_tp_max_extensions: int = Field(default=2, env="FUTURES_SMART_TP_MAX_EXTENSIONS")  # fewer extensions than spot (leverage risk)
+    futures_smart_tp_max_pnl_pct: float = Field(default=12.0, env="FUTURES_SMART_TP_MAX_PNL_PCT")  # cap at 12% PnL (2x leverage)
+    futures_smart_tp_extend_score_threshold: int = Field(default=3, env="FUTURES_SMART_TP_EXTEND_SCORE_THRESHOLD")  # stricter score (3/4) for shorts
+    futures_smart_tp_extension_pct: float = Field(default=2.0, env="FUTURES_SMART_TP_EXTENSION_PCT")  # extend TP by 2% of current price
+    # Futures trailing stop: protect unrealized gains during position lifecycle
+    futures_trailing_enabled: bool = Field(default=True, env="FUTURES_TRAILING_ENABLED")
+    futures_trailing_activation_pct: float = Field(default=2.0, env="FUTURES_TRAILING_ACTIVATION_PCT")  # activate when unrealized PnL >= 2%
+    futures_trailing_distance_pct: float = Field(default=1.0, env="FUTURES_TRAILING_DISTANCE_PCT")      # trail SL/TP 1% from best price
+    futures_breakeven_activation_pct: float = Field(default=1.2, env="FUTURES_BREAKEVEN_ACTIVATION_PCT")  # move SL to breakeven at 1.2% gain
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True, env="WR_SCREENER_ENABLED")
     wr_screener_consecutive_sl_block: int = Field(default=3, env="WR_SCREENER_CONSECUTIVE_SL_BLOCK")  # block after N consecutive SL
@@ -135,8 +148,8 @@ class Settings(BaseSettings):
     enable_prediction_based_closing: bool = Field(default=True, env="ENABLE_PREDICTION_BASED_CLOSING")
 
     # Stop-Loss / Take-Profit configuration
-    stop_loss_pct: float = Field(default=1.5, env="STOP_LOSS_PCT")       # % below entry price
-    take_profit_pct: float = Field(default=2.5, env="TAKE_PROFIT_PCT")   # % above entry price
+    stop_loss_pct: float = Field(default=1.8, env="STOP_LOSS_PCT")       # % below entry price
+    take_profit_pct: float = Field(default=3.5, env="TAKE_PROFIT_PCT")   # % above entry price
     trailing_stop_enabled: bool = Field(default=True, env="TRAILING_STOP_ENABLED")
     trailing_stop_activation_pct: float = Field(default=2.0, env="TRAILING_STOP_ACTIVATION_PCT")  # activate trailing after +2%
     trailing_stop_distance_pct: float = Field(default=1.0, env="TRAILING_STOP_DISTANCE_PCT")      # trail 1% below peak
@@ -168,8 +181,8 @@ class Settings(BaseSettings):
     rebalance_skip_if_bullish_signal: bool = Field(default=True, env="REBALANCE_SKIP_IF_BULLISH_SIGNAL")  # require technical negative signal before rebalancing
     rebalance_rsi_overbought: float = Field(default=60.0, env="REBALANCE_RSI_OVERBOUGHT")  # RSI1h threshold — rebalance only if RSI > this OR EMA9 descending
     # Dynamic max positions by regime (replaces single MAX_POSITIONS when regime is known)
-    max_positions_spot_bull: int = Field(default=15, env="MAX_POSITIONS_SPOT_BULL")
-    max_positions_range_scalp: int = Field(default=8, env="MAX_POSITIONS_RANGE_SCALP")
+    max_positions_spot_bull: int = Field(default=20, env="MAX_POSITIONS_SPOT_BULL")    # jun17: 15→20 (32 activos disponibles)
+    max_positions_range_scalp: int = Field(default=10, env="MAX_POSITIONS_RANGE_SCALP")  # jun17: 8→10
     max_positions_preservation: int = Field(default=5, env="MAX_POSITIONS_PRESERVATION")
     max_positions_futures_short: int = Field(default=4, env="MAX_POSITIONS_FUTURES_SHORT")
     # Active replacement: swap weakest open position for a better new signal
@@ -215,13 +228,13 @@ class Settings(BaseSettings):
     funding_rate_cache_minutes: int = Field(default=10, env="FUNDING_RATE_CACHE_MINUTES")
 
     # Dynamic cycle by regime (v2)
-    cycle_spot_bull: int = Field(default=15, env="CYCLE_SPOT_BULL")            # minutes per cycle in SPOT_BULL
+    cycle_spot_bull: int = Field(default=10, env="CYCLE_SPOT_BULL")            # jun17: 20→10 min (+47% throughput señales)
     cycle_range_scalp: int = Field(default=5, env="CYCLE_RANGE_SCALP")         # minutes per cycle in RANGE_SCALP
-    cycle_preservation: int = Field(default=30, env="CYCLE_PRESERVATION")      # minutes per cycle in PRESERVATION
-    cycle_futures_short: int = Field(default=8, env="CYCLE_FUTURES_SHORT")     # minutes per cycle in FUTURES_SHORT
+    cycle_preservation: int = Field(default=45, env="CYCLE_PRESERVATION")      # jun17: 30→45 min (menos ciclos en bajista = menos comisiones)
+    cycle_futures_short: int = Field(default=6, env="CYCLE_FUTURES_SHORT")     # jun17: 8→6 min (más monitoreo de shorts)
 
     # Signal quality filter
-    min_signal_strength: float = Field(default=0.35, env="MIN_SIGNAL_STRENGTH")  # 0.0 = accept all, 0.5 = moderate filter
+    min_signal_strength: float = Field(default=0.55, env="MIN_SIGNAL_STRENGTH")  # v4 OPT: 0.35→0.55 (+$570 USDT/mes validado en sim)
 
     # Narrative token classification (used by volspike override + bootstrap)
     narrative_tokens: list = Field(default=[
@@ -323,8 +336,8 @@ class Settings(BaseSettings):
     futures_max_shorts: int = Field(default=5, env="FUTURES_MAX_SHORTS")       # max simultaneous shorts
     futures_max_largecap_shorts: int = Field(default=5, env="FUTURES_MAX_LARGECAP_SHORTS")  # max LARGE_CAP shorts simultaneously (diversification guard — raise MAX_SHORTS but keep this at 5 to force MID-CAP slots)
     futures_usdt_per_trade: float = Field(default=20.0, env="FUTURES_USDT_PER_TRADE")  # margin per short
-    futures_sl_pct: float = Field(default=3.0, env="FUTURES_SL_PCT")           # SL % above entry
-    futures_tp_pct: float = Field(default=5.0, env="FUTURES_TP_PCT")           # TP % below entry
+    futures_sl_pct: float = Field(default=2.5, env="FUTURES_SL_PCT")           # SL % above entry (A4: 2.5%)
+    futures_tp_pct: float = Field(default=7.0, env="FUTURES_TP_PCT")           # TP % below entry (A4+v4: 7.0%, EV +1.40%/trade)
     futures_min_btc_7d_drop: float = Field(default=-7.0, env="FUTURES_MIN_BTC_7D_DROP")  # only short in bear
     futures_symbols: list = Field(default=[
         'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT',

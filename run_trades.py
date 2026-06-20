@@ -56,6 +56,11 @@ def _get_futures_client(settings) -> FuturesClient:
     return _futures_client
 
 
+def _wire_futures_client(fc: FuturesClient, client, settings) -> None:
+    """Attach BinanceClient reference to FuturesClient for momentum evaluation."""
+    fc._binance_client_ref = client
+
+
 _VOLSPIKE_COOLDOWN_HOURS = 4.0
 
 # NARRATIVE token buy cooldown: prevent buying the same symbol multiple times
@@ -742,15 +747,32 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                 
                 # Add autonomous signal to signal store for analysis cycle
                 try:
-                    add_signal({
+                    # Include all technical indicators needed for VolSpike Override
+                    signal_data = {
                         "symbol": signal['symbol'],
                         "action": "BUY",
                         "price": signal.get('current_price', 0),
                         "strength": signal['strength'],
                         "reason": signal['reason'],
                         "source": "autonomous"
-                    })
-                    print(f"Added autonomous signal for {signal['symbol']} to signal store")
+                    }
+                    
+                    # Add technical indicators if available (needed for VolSpike Override)
+                    if 'indicators' in signal:
+                        indicators = signal['indicators']
+                        signal_data.update({
+                            "vol_spike": indicators.get('vol_spike', 0),
+                            "rsi": indicators.get('rsi', 50),
+                            "trend_4h": indicators.get('trend_4h', 0),
+                            "atr_pct": indicators.get('atr_pct', 0),
+                            "bb_position": indicators.get('bb_position', 0.5),
+                            "ema_cross": indicators.get('ema_cross', 0),
+                            "macd": indicators.get('macd', 0),
+                            "stoch_k": indicators.get('stoch_k', 0.5)
+                        })
+                    
+                    add_signal(signal_data)
+                    print(f"Added autonomous signal for {signal['symbol']} to signal store with indicators")
                 except Exception as e:
                     print(f"Failed to add signal to store: {e}")
             
@@ -826,7 +848,7 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
 
 
 def _evaluate_tp_momentum(client: BinanceClient, symbol: str, current_price: float,
-                           pnl_pct: float, settings) -> Dict:
+                           pnl_pct: float, settings, position_size_usdt: float = 0.0) -> Dict:
     """
     Analyse current momentum at Take-Profit trigger to decide whether to extend,
     scale-out, or close the position.
@@ -860,8 +882,9 @@ def _evaluate_tp_momentum(client: BinanceClient, symbol: str, current_price: flo
         rsi         = float(ind.get("rsi") or 50.0)
         trend_4h    = float(ind.get("trend_4h") or 0.0)
 
-        # Run predictor with current indicators
-        position_size = float(getattr(settings, 'max_per_trade_usdt', 150.0))
+        # Run predictor with current indicators — use real position size for accurate probability
+        _max_trade = float(getattr(settings, 'max_per_trade_usdt', 150.0))
+        position_size = min(position_size_usdt, _max_trade) if position_size_usdt > 0 else _max_trade
         prediction, _ = pnl_service.predict_for_symbol(
             symbol=symbol, client=client, settings=settings,
             position_size_usdt=position_size
@@ -959,7 +982,7 @@ def _calc_atr_sl_pct(client: BinanceClient, symbol: str, settings, category_sl_p
         return category_sl_pct
 
 
-def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, news_client=None) -> List[Dict]:
+def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, news_client=None, regime: str = None) -> List[Dict]:
     """
     Check all open positions against Stop-Loss, Take-Profit, and Trailing Stop rules.
     Also performs prediction-based exit when EV deteriorates (C1).
@@ -970,8 +993,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
     if not position_manager:
         return closed
 
-    _global_sl_pct = getattr(settings, 'stop_loss_pct', 1.5)
-    _global_tp_pct = getattr(settings, 'take_profit_pct', 2.5)
+    _global_sl_pct = getattr(settings, 'stop_loss_pct', 1.8)
+    _global_tp_pct = getattr(settings, 'take_profit_pct', 3.5)
     trailing_enabled = getattr(settings, 'trailing_stop_enabled', True)
     _global_trail_act = getattr(settings, 'trailing_stop_activation_pct', 2.0)
     _global_trail_dist = getattr(settings, 'trailing_stop_distance_pct', 1.0)
@@ -1062,8 +1085,13 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         print(f"[PredEval] {symbol}: prediction check failed: {_pe}")
 
                 # ── Stop-Loss ──────────────────────────────────────────────
-                if close_reason is None and pnl_pct <= -sl_pct:
-                    close_reason = f"stop_loss ({pnl_pct*100:.2f}%)"
+                # Fix 1: use effective SL = max(category floor, saved pos.stop_loss)
+                # Prevents SL from retreating when SmartTP EXTEND or Scale-Out moved it forward
+                _sl_floor = entry_price * (1.0 - sl_pct)
+                _sl_saved = float(pos.stop_loss) if pos.stop_loss and float(pos.stop_loss) > 0 else _sl_floor
+                _effective_sl_price = max(_sl_floor, _sl_saved)
+                if close_reason is None and current_price <= _effective_sl_price:
+                    close_reason = f"stop_loss ({pnl_pct*100:.2f}%, sl={_effective_sl_price:.6f})"
 
                 # ── Take-Profit ────────────────────────────────────────────
                 if close_reason is None and pnl_pct >= tp_pct:
@@ -1081,6 +1109,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         if _klines_1m:
                             _candle_peak = max(float(k[2]) for k in _klines_1m)
                             if _candle_peak > peak_price:
+                                print(f"[Trail/F1] {symbol}: candle high {_candle_peak:.6f} > stored peak {peak_price:.6f} → updating")
                                 peak_price = _candle_peak
                     except Exception:
                         pass
@@ -1097,19 +1126,23 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         close_reason = f"trailing_stop (peak={peak_price:.4f}, trail={trail_stop_price:.4f})"
 
                 if close_reason:
-                    # ── Anti-wick: confirm SL with last closed candle ──────────
-                    if close_reason.startswith("stop_loss"):
+                    # ── Anti-wick: confirm SL/TS with last closed candle ───────
+                    _is_sl_trigger = close_reason.startswith("stop_loss")
+                    _is_ts_trigger = close_reason.startswith("trailing_stop")
+                    if _is_sl_trigger or _is_ts_trigger:
                         _confirm_n = getattr(settings, 'sl_confirmation_candles', 1)
                         if _confirm_n > 0:
                             try:
                                 _klines = client.client.get_klines(symbol=symbol, interval='1m', limit=2)
                                 _last_close = float(_klines[-2][4]) if len(_klines) >= 2 else current_price
-                                if _last_close > entry_price * (1.0 - sl_pct):
-                                    print(f"[AntiWick] SL skip {symbol}: spot={current_price:.6f} < SL threshold "
-                                          f"but last 1m close={_last_close:.6f} > SL — wick detected, holding")
+                                _wick_threshold = trail_stop_price if _is_ts_trigger else _effective_sl_price
+                                if _last_close > _wick_threshold:
+                                    _trigger_label = "TS" if _is_ts_trigger else "SL"
+                                    print(f"[AntiWick] {_trigger_label} skip {symbol}: spot={current_price:.6f} < threshold={_wick_threshold:.6f} "
+                                          f"but last 1m close={_last_close:.6f} > threshold — wick detected, holding")
                                     continue
                             except Exception as _aw_err:
-                                print(f"[AntiWick] klines fetch failed for {symbol}: {_aw_err} — proceeding with SL")
+                                print(f"[AntiWick] klines fetch failed for {symbol}: {_aw_err} — proceeding with {close_reason[:2].upper()}")
                     try:
                         filters = get_symbol_filters(client, symbol)
                         full_qty = float(pos.quantity)
@@ -1117,6 +1150,11 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         _scale_pct = getattr(settings, 'scale_out_first_close_pct', 0.5)
                         _is_tp = close_reason.startswith("take_profit")
                         _smart_tp = getattr(settings, 'smart_tp_enabled', True)
+                        # Regime-aware SmartTP: disable EXTEND in flat/defensive regimes
+                        _disabled_regimes = getattr(settings, 'smart_tp_extend_disabled_regimes', ['RANGE_SCALP', 'PRESERVATION'])
+                        if regime and regime in _disabled_regimes:
+                            _smart_tp = False
+                            print(f"[SmartTP] {symbol}: EXTEND disabled in regime={regime} — will scale-out or close")
 
                         # ── Smart TP: evaluate momentum before acting on TP ───────────
                         if _is_tp and _smart_tp:
@@ -1126,7 +1164,9 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             _max_pnl = float(getattr(settings, 'smart_tp_max_pnl_pct', 15.0)) / 100.0
                             _can_extend = (_ext_count < _max_ext) and (pnl_pct < _max_pnl)
 
-                            _tp_eval = _evaluate_tp_momentum(client, symbol, current_price, pnl_pct, settings)
+                            _pos_size_usdt = float(pos.quantity) * current_price
+                            _tp_eval = _evaluate_tp_momentum(client, symbol, current_price, pnl_pct, settings,
+                                                              position_size_usdt=_pos_size_usdt)
                             _decision = _tp_eval["decision"]
                             print(f"[SmartTP] {symbol}: pnl={pnl_pct*100:.2f}% score={_tp_eval['momentum_score']}/4"
                                   f" vol={_tp_eval['vol_spike']}x rsi={_tp_eval['rsi']} trend4h={_tp_eval['trend_4h']}"
@@ -2094,8 +2134,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         # Fase E: SL/TP base from category_thresholds (per token type) — fallback to global settings
         _sym_cat_e = getattr(settings, 'token_categories', {}).get(symbol, {}).get('market_behavior', 'MIDCAP_ALT')
         _cat_th_e  = getattr(settings, 'category_thresholds', {}).get(_sym_cat_e, {})
-        sl_pct = _cat_th_e.get('stop_loss_pct', getattr(settings, 'stop_loss_pct', 1.5)) / 100.0
-        tp_pct = _cat_th_e.get('take_profit_pct', getattr(settings, 'take_profit_pct', 2.5)) / 100.0
+        sl_pct = _cat_th_e.get('stop_loss_pct', getattr(settings, 'stop_loss_pct', 1.8)) / 100.0
+        tp_pct = _cat_th_e.get('take_profit_pct', getattr(settings, 'take_profit_pct', 3.5)) / 100.0
         # M1: ATR-Based SL — Kelly sizes trade against real volatility, not fixed %
         sl_pct = _calc_atr_sl_pct(client, symbol, settings, sl_pct)
 
@@ -2106,7 +2146,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 tp_pct = getattr(settings, 'range_scalp_tp_pct', 1.5) / 100.0
                 print(f"[Regime] RANGE_SCALP: SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}%")
             elif _regime_mode == "PRESERVATION":
-                sl_pct = getattr(settings, 'preservation_sl_pct', 1.5) / 100.0
+                sl_pct = getattr(settings, 'preservation_sl_pct', 1.8) / 100.0
                 tp_pct = getattr(settings, 'preservation_tp_pct', 3.0) / 100.0
                 print(f"[Regime] PRESERVATION: SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}%")
             else:
@@ -2217,8 +2257,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         _tok_cat = getattr(settings, 'token_categories', {}).get(symbol, {})
                         _cat_beh = _tok_cat.get('market_behavior', 'MIDCAP_ALT')
                         _cat_th  = getattr(settings, 'category_thresholds', {}).get(_cat_beh, {})
-                        sl_pct = _cat_th.get('stop_loss_pct',  getattr(settings, 'stop_loss_pct',  1.5)) / 100.0
-                        tp_pct = _cat_th.get('take_profit_pct', getattr(settings, 'take_profit_pct', 2.5)) / 100.0
+                        sl_pct = _cat_th.get('stop_loss_pct',  getattr(settings, 'stop_loss_pct',  1.8)) / 100.0
+                        tp_pct = _cat_th.get('take_profit_pct', getattr(settings, 'take_profit_pct', 3.5)) / 100.0
                         sl_price = price * (1 - sl_pct)
                         tp_price = price * (1 + tp_pct)
                         print(f"Category SL/TP for {symbol} ({_cat_beh}): SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}%")
@@ -2485,6 +2525,7 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
                         close_reason=_close_reason,
                     )
                 _overflow_positions.discard(sym)
+                _VOLSPIKE_POSITIONS.discard(sym)
                 print(f"[SlotPressure] {sym}: displaced @ {exit_price_sp:.4f} reason={_close_reason}")
             except Exception as sell_err:
                 print(f"[SlotPressure] {sym}: sell failed — {sell_err}")
@@ -2493,7 +2534,7 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
         print(f"Error in slot-pressure reallocation: {e}")
 
 
-def execute_once():
+def execute_once(monitor_only: bool = False):
     global _db_client_ref
     from init_components import get_components
     comp = get_components()
@@ -2507,6 +2548,29 @@ def execute_once():
     if _db_client_ref is None and hasattr(comp, 'db_client') and comp.db_client:
         _db_client_ref = comp.db_client
         _load_cooldowns_from_db()
+
+    # ── PAUSED / monitor_only: solo ejecutar SL/TP y retornar ───────────────────
+    if monitor_only:
+        print("[execute_once] monitor_only=True (system PAUSED) — running SL/TP monitor only")
+        _mon_closes = []
+        try:
+            _regime_mode_mon = "SPOT_BULL"
+            if getattr(settings, 'market_regime_enabled', True):
+                try:
+                    _regime_mon = get_regime(client, settings=settings)
+                    _regime_mode_mon = _regime_mon.mode
+                except Exception:
+                    pass
+            _mon_closes = _check_sl_tp_positions(
+                client, settings, position_manager,
+                news_client=news_client, regime=_regime_mode_mon
+            )
+            if _mon_closes:
+                print(f"[Monitor] Closed {len(_mon_closes)} position(s) while PAUSED: "
+                      f"{[c['symbol'] for c in _mon_closes]}")
+        except Exception as _mon_err:
+            print(f"[Monitor] SL/TP monitor error while PAUSED: {_mon_err}")
+        return {"top_symbols": [], "sell_orders": [], "buy_orders": [], "sl_tp_closes": _mon_closes}
 
     print(f"DRY_RUN={settings.dry_run}  ALLOW_REAL_TRADING={settings.allow_real_trading}  MAX_PER_TRADE_USDT={settings.max_per_trade_usdt}")
 
@@ -2592,6 +2656,8 @@ def execute_once():
                         _exit_p = float((_ord_excl.get('fills') or [{}])[0].get('price', 0) or _price_excl)
                         if position_manager:
                             position_manager.close_all_positions_for_symbol(_excl_sym, _exit_p, 'excluded_symbol_cleanup')
+                        _overflow_positions.discard(_excl_sym)
+                        _VOLSPIKE_POSITIONS.discard(_excl_sym)
                         ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
                                      f"[AuditStartup] Sold excluded {_excl_sym}: {_qty_sell} @ {_exit_p:.4f}")
                         print(f"[AuditStartup] Sold excluded {_excl_sym}: {_qty_sell} @ {_exit_p:.4f}")
@@ -2602,7 +2668,7 @@ def execute_once():
         _AUDIT_STARTUP_DONE = True
 
     # ── Step 0: SL/TP monitor — runs every cycle before any new trades ─────────
-    sl_tp_closes = _check_sl_tp_positions(client, settings, position_manager, news_client=news_client)
+    sl_tp_closes = _check_sl_tp_positions(client, settings, position_manager, news_client=news_client, regime=_regime_mode)
     if sl_tp_closes:
         print(f"SL/TP closed {len(sl_tp_closes)} position(s): {[c['symbol'] for c in sl_tp_closes]}")
 
@@ -2716,6 +2782,7 @@ def execute_once():
                                     _b2_exit = float(((_b2_order.get("fills") or [{}])[0]).get("price", 0) or _b2_price)
                                     position_manager.close_all_positions_for_symbol(_b2_sym, _b2_exit, "regime_futures_short_spot_cleanup", _commission_rate_b2)
                                     _overflow_positions.discard(_b2_sym)
+                                    _VOLSPIKE_POSITIONS.discard(_b2_sym)
                                     print(f"[B2] Closed spot LONG {_b2_sym} @ {_b2_exit:.4f} pnl_pct={_b2_pnl_pct:+.2f}% — FUTURES_SHORT regime, in profit")
                                 except Exception as _b2_err:
                                     print(f"[B2] Failed to close spot {_b2_sym}: {_b2_err}")
@@ -2755,8 +2822,9 @@ def execute_once():
 
             # CapBridge handles idle-funds return via smart_rebalance_capital (Case 3 above)
 
-            # Normal SL/TP cycle check
-            _cycle_closes = _fc.check_positions()
+            # Normal SL/TP cycle check (passes settings for trailing/SmartTP and client ref for momentum)
+            _wire_futures_client(_fc, client, settings)
+            _cycle_closes = _fc.check_positions(settings=settings)
             if _cycle_closes:
                 futures_closes.extend(_cycle_closes)
                 print(f"[Futures] Closed {len(_cycle_closes)} position(s) via SL/TP: {_cycle_closes}")
@@ -2836,10 +2904,10 @@ def execute_once():
 
     # ── Dynamic cycle scheduling — return next interval based on active regime ──
     _cycle_by_regime = {
-        "SPOT_BULL":     getattr(settings, 'cycle_spot_bull',    15),
+        "SPOT_BULL":     getattr(settings, 'cycle_spot_bull',    10),
         "RANGE_SCALP":   getattr(settings, 'cycle_range_scalp',   5),
-        "PRESERVATION":  getattr(settings, 'cycle_preservation',  30),
-        "FUTURES_SHORT": getattr(settings, 'cycle_futures_short',  8),
+        "PRESERVATION":  getattr(settings, 'cycle_preservation',  45),
+        "FUTURES_SHORT": getattr(settings, 'cycle_futures_short',  6),
     }
     _next_cycle = _cycle_by_regime.get(_regime_mode, getattr(settings, 'trade_cycle_minutes', 5))
     print(f"Completed cycle. Next cycle in {_next_cycle} min (regime={_regime_mode})")

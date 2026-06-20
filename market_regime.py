@@ -47,8 +47,8 @@ class MarketRegime:
     confirmed: bool              # True if 2 consecutive cycles agreed
     reason: str                  # Human-readable explanation
     # Mode-specific parameter overrides (applied by run_trades.py)
-    sl_pct: float = 1.5          # Stop-loss %
-    tp_pct: float = 2.5          # Take-profit %
+    sl_pct: float = 1.8          # Stop-loss %
+    tp_pct: float = 3.5          # Take-profit %
     kelly_multiplier: float = 1.0
     min_rsi_entry: float = 0.0   # Min RSI to enter (RANGE_SCALP uses this)
     max_rsi_entry: float = 100.0 # Max RSI to enter
@@ -200,9 +200,9 @@ def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
     """Convert raw detection dict to MarketRegime with mode-specific parameters."""
     mode = raw["mode"]
 
-    # Default parameters (SPOT_BULL)
-    sl_pct           = 1.5
-    tp_pct           = 2.5
+    # Default parameters (SPOT_BULL) — aligned with config.py production defaults
+    sl_pct           = 1.8
+    tp_pct           = 3.5
     kelly_mult       = 1.0
     min_rsi          = 0.0
     max_rsi          = 100.0
@@ -220,7 +220,7 @@ def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
 
     elif mode == "PRESERVATION":
         # Minimal risk: small positions, NARRATIVE only, strict vol requirement
-        sl_pct         = 1.5
+        sl_pct         = 1.8
         tp_pct         = 3.0    # wider TP to compensate fewer entries
         kelly_mult     = 0.5    # half size
         max_rsi        = 65.0

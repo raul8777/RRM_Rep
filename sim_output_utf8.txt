@@ -1,0 +1,182 @@
+﻿docker : time="2026-06-20T14:01:44-06:00" level=warning msg="S:\\Tools\\AI\\crypto-agent\\docker-compose.yml: the 
+attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+En línea: 1 Carácter: 1
++ docker compose exec app python3 backtest_multimode.py --days 90 --cap ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (time="2026-06-2...tial confusion":String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+============================================================================
+  SIMULADOR FIDELIDAD TOTAL v3.0 ÔÇö Sistema Crypto Multi-Modal
+  Capital: $2,910.00 USDT  |  Intervalo: 4h  |  90d
+  F&G: 15 (Capitulaci├│n) ÔåÆ Kelly boost: ├ù1.35
+  Predictor: statistical_model + real si disponible
+============================================================================
+
+Cargando m├│dulos del sistema...
+  [Ô£ô] TechnicalIndicators.analyze_signal() REAL cargado
+  [Ô£ô] PnLPredictor REAL cargado (pesos aprendidos de DB)
+
+Descargando klines de 21 s├¡mbolos (90d + warmup)...
+  BTCUSDT... 600 velas Ô£ô
+  ETHUSDT... 600 velas Ô£ô
+  BNBUSDT... 600 velas Ô£ô
+  SOLUSDT... 600 velas Ô£ô
+  XRPUSDT... 600 velas Ô£ô
+  ADAUSDT... 600 velas Ô£ô
+  DOGEUSDT... 600 velas Ô£ô
+  AVAXUSDT... 600 velas Ô£ô
+  DOTUSDT... 600 velas Ô£ô
+  LINKUSDT... 600 velas Ô£ô
+  FETUSDT... 600 velas Ô£ô
+  NEARUSDT... 600 velas Ô£ô
+  RENDERUSDT... 600 velas Ô£ô
+  TAOUSDT... 600 velas Ô£ô
+  WLDUSDT... 600 velas Ô£ô
+  INJUSDT... 600 velas Ô£ô
+  OPUSDT... 600 velas Ô£ô
+  TRXUSDT... 600 velas Ô£ô
+  TONUSDT... 600 velas Ô£ô
+  AAVEUSDT... 600 velas Ô£ô
+  SUIUSDT... 600 velas Ô£ô
+
+  BTC per├¡odo: $70,653 ÔåÆ $63,966 (-9.5%) ÔÇö LATERAL/ALCISTA
+
+  [REAL] Sistema completo (predictor+SmartTP+anti-wick+futuros)...
+    ÔåÆ $2,990.77 | PnL:+80.77 | Trades:143 |  FUT WR:40% | MaxDD:26.3% | PF:1.28
+  [REAL_OPT] REAL + params optimizados (strÔëÑ0.58, SL3%/TP7%)...
+    ÔåÆ $2,994.62 | PnL:+84.62 | Trades:143 |  FUT WR:40% | MaxDD:27.4% | PF:1.28
+  [FUT_ONLY] Solo futuros SHORT (FUTURES_SHORT forzado)...
+    ÔåÆ $2,837.87 | PnL:-72.13 | Trades:363 |  FUT WR:33% | MaxDD:30.3% | PF:0.98
+  [SPOT_BULL_SIM] Simulaci├│n recuperaci├│n (SPOT_BULL forzado)...
+    ÔåÆ $2,910.00 | PnL:+0.00 | Trades:0 |   | MaxDD:0.0% | PF:99.90
+
+============================================================================
+  RESULTADOS COMPARATIVOS
+============================================================================
+  Escenario                               Capital       PnL   Ret%    WR  SpWR  FutWR   MaxDD    PF
+  ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  Sistema completo (predictor+SmartTP+anti-wick+futuros) $ 2,990.77    +80.77  +2.8%   40%     ÔÇö    40%   26.3% 1.28
+  REAL + params optimizados (strÔëÑ0.58, SL3%/TP7%) $ 2,994.62    +84.62  +2.9%   40%     ÔÇö    40%   27.4% 1.28 ÔùÇ
+  Solo futuros SHORT (FUTURES_SHORT forzado) $ 2,837.87    -72.13  -2.5%   33%     ÔÇö    33%   30.3% 0.98
+  Simulaci├│n recuperaci├│n (SPOT_BULL forzado) $ 2,910.00     +0.00  +0.0%    0%     ÔÇö      ÔÇö    0.0% 99.90
+  ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  HODL BTC                             $ 2,634.61   -275.39  -9.5%   ÔÇö     ÔÇö      ÔÇö       ÔÇö     ÔÇö
+  HODL USDT (sin riesgo)               $ 2,910.00     +0.00  +0.0%   ÔÇö     ÔÇö      ÔÇö       ÔÇö     ÔÇö
+
+  DISTRIBUCI├ôN DE REG├ìMENES ÔÇö REAL
+    RANGE_SCALP      ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê                 45.5%
+    SPOT_BULL        ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê                       33.6%
+    FUTURES_SHORT    ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê                             20.9%
+    PRESERVATION                                            0.0%
+
+  ESTAD├ìSTICAS SISTEMA ÔÇö REAL
+    Predictor bloque├│:        0 se├▒ales (0% del total evaluado)
+    Predictor aprob├│:         0 entradas
+    Anti-wick saves:          0 SL/TS ignorados (wick detectado)
+    SmartTP extend:           0 veces TP extendido
+    SmartTP scale-out:        0 veces scale-out 50%
+    SmartTP close:            0 cierres normales en TP
+    Trailing fired:           0 trailing stops ejecutados
+    PredExit (deterioro):     0 cierres anticipados
+
+  BREAKDOWN MENSUAL ÔÇö REAL_OPT: REAL + params optimizados (strÔëÑ0.58, SL3%/TP7%)
+  Mes    Trades  Wins   WR%    PnL mes  Capital fin
+  ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  Mes 1        0     0    0%      +0.00 $   2,910.00
+  Mes 2        0     0    0%      +0.00 $   2,910.00
+  Mes 3      133    52   39%    -504.73 $   2,405.27
+  Mes 4        3     0    0%    +589.35 $   2,994.62
+
+  CURVAS DE EQUITY
+
+  REAL ÔÇö Sistema completo (predictor+SmartTP+anti-wick+futuros)  ($2,990.77 | +2.8%)
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê           
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê  Ôûê        
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê  Ôûê        
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê  Ôûê        
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê ÔûêÔûê Ôûê   Ôûê  
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê ÔûêÔûê ÔûêÔûêÔûêÔûêÔûêÔûê 
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê
+  ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+  REAL_OPT ÔÇö REAL + params optimizados (strÔëÑ0.58, SL3%/TP7%)  ($2,994.62 | +2.9%)
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê           
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê  Ôûê        
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê  Ôûê        
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê  Ôûê        
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê ÔûêÔûê Ôûê   Ôûê  
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê ÔûêÔûê ÔûêÔûêÔûêÔûêÔûêÔûê 
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê
+  ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+  FUT_ONLY ÔÇö Solo futuros SHORT (FUTURES_SHORT forzado)  ($2,837.87 | -2.5%)
+  Ôûê                                                           
+  Ôûê                                                           
+  Ôûê                                                  Ôûê        
+  Ôûê                                                  Ôûê        
+  ÔûêÔûê                                                 Ôûê        
+  ÔûêÔûêÔûêÔûêÔûêÔûê ÔûêÔûê Ôûê         ÔûêÔûê                            ÔûêÔûê ÔûêÔûê  Ôûê  
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê   Ôûê  ÔûêÔûêÔûêÔûê    ÔûêÔûêÔûêÔûê ÔûêÔûê Ôûê    ÔûêÔûêÔûêÔûê   Ôûê   ÔûêÔûê ÔûêÔûêÔûêÔûêÔûêÔûêÔûê
+  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê   ÔûêÔûê ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûê
+  ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+  SPOT_BULL_SIM ÔÇö Simulaci├│n recuperaci├│n (SPOT_BULL forzado)  ($2,910.00 | +0.0%)
+
+
+  MONTE CARLO ÔÇö REAL_OPT (5,000 simulaciones, 3 meses forward)
+    Capital base:    $  2,994.62
+    Peor caso  P5:   $  2,969.29  (-0.8%)
+    Mediana   P50:   $  3,076.42  (+2.7%)
+    Media:           $  3,073.65  (+2.6%)
+    Mejor caso P95:  $  3,183.56  (+6.3%)
+    Proyecci├│n mediana 3m: $  +81.80 USDT = $  +1,595 MXN
+
+============================================================================
+  AN├üLISIS EXPERTO MULTI-ROL
+============================================================================
+
+  ROL QUANT ÔÇö M├ëTRICAS CLAVE (REAL):
+    Profit Factor: 1.276  (>1.5 = bueno, >2.0 = excelente)
+    Avg Win:  $ +8.4344  |  Avg Loss: $ -4.3827
+    Ratio W/L: 1.92├ù
+    Predictor filtr├│: 0% de se├▒ales BUY ÔåÆ calidad > cantidad
+    Anti-wick: 0 SL salvados ÔåÆ reduce slippage real estimado
+
+  ROL TRADING EXPERT ÔÇö ESTRATEGIA ACTUAL:
+    Per├¡odo simulado: LATERAL/ALCISTA (BTC -9.5%)
+    R├®gimen correcto: PRESERVATION + futuros oportunistas ÔÇö bear con rebotes
+    Acci├│n recomendada: M├íx 4 SHORTs + NARRATIVE spot selectivo
+
+    PnL FUTUROS SHORT (en r├®gimen FUTURES_SHORT): $+103.85 USDT
+    PnL SPOT LONG (resto del tiempo):             $+0.00 USDT
+    Upside si recuperaci├│n SPOT_BULL (+9%):   $+0.00 USDT
+    Velocidad recuperaci├│n proyectada:             $0.00 USDT/d├¡a
+
+  ROL BEHAVIORAL FINANCE ÔÇö F&G = 15 (Capitulaci├│n):
+    Kelly boost activo: ├ù1.35 ÔåÆ m├ís agresivo en el peor miedo
+    Hist├│ricamente: F&G<20 ÔåÆ reversi├│n promedio +28% en 60d (Bitcoin)
+    Se├▒al: acumular SPOT en soporte, mantener SHORTs hasta TP
+
+  ROL ACTUARIO ÔÇö RIESGO:
+    MaxDD REAL: 26.3%  |  MaxDD OPT: 27.4%
+    Riesgo mensual P5 (MC): $-25.33 USDT (-0.8%)
+    Capital en riesgo por trade: $20ÔÇô$350 USDT
+    Max exposici├│n: 75% del portfolio
+
+============================================================================
+  RECOMENDACIONES PRIORIZADAS (por MXN/d├¡a adicional)
+============================================================================
+  [P2] ÔÜá´©Å  Par├ímetros OPT marginalmente mejor (+$3.85) ÔÇö evaluar en 30 trades reales
+  [P2] ÔÜá´©Å  Futuros WR=40% bajo ÔÇö reducir a MAX_SHORTS=4 o subir SL a 2.0%
+
+  USD/d├¡a proyectado (mediana MC 3m): $0.91 USDT/d├¡a = $18 MXN/d├¡a
+
+============================================================================
+  M├│dulo real TechnicalIndicators: Ô£à ACTIVO
+  M├│dulo real PnLPredictor:        Ô£à ACTIVO
+============================================================================
+
+

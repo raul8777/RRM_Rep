@@ -348,9 +348,13 @@ class Orchestrator:
         Run a cycle function periodically.
         interval_minutes is used as default; trade cycle may override it dynamically
         from the returned result's 'next_cycle_minutes' key.
+
+        When PAUSED: trade cycle still runs in monitor-only mode (SL/TP protection)
+        by passing monitor_only=True. New trade entries are blocked inside execute_once.
         """
         first_run = True
         _next_interval = interval_minutes
+        _is_trade_cycle = False  # determined on first run
         while self.should_run:
             if not first_run:
                 time.sleep(max(1, _next_interval) * 60)
@@ -360,6 +364,7 @@ class Orchestrator:
                     result = cycle_func()
                     # Dynamic cycle: trade cycle may return next_cycle_minutes
                     if isinstance(result, dict) and 'next_cycle_minutes' in result:
+                        _is_trade_cycle = True
                         _next_interval = int(result['next_cycle_minutes'])
                         if cycle_func == getattr(self, '_trade_cycle_func', None):
                             self.current_cycle_minutes = _next_interval
@@ -368,7 +373,17 @@ class Orchestrator:
                     else:
                         _next_interval = interval_minutes
                 elif self.can_monitor_positions():
-                    logger.debug("System paused, skipping trade execution")
+                    # PAUSED: run trade cycle in monitor-only mode to protect open positions
+                    _is_trade_cycle = cycle_func == getattr(self, '_trade_cycle_func', None)
+                    if _is_trade_cycle:
+                        try:
+                            result = cycle_func(monitor_only=True)
+                            logger.debug("System paused — monitor-only SL/TP cycle executed")
+                        except TypeError:
+                            # cycle_func does not accept monitor_only kwarg (e.g. analysis cycle)
+                            logger.debug("System paused, skipping non-trade cycle")
+                    else:
+                        logger.debug("System paused, skipping non-trade cycle")
                 else:
                     logger.debug("System stopped, skipping cycle")
             except Exception as e:

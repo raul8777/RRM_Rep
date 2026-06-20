@@ -1,8 +1,10 @@
 # Notas de desarrollo
 
+> ⚠️ **Diseño original (obsoleto desde jun 15 2026)** — el sistema opera en modo `auto` con trading real (`DRY_RUN=false`, `ALLOW_REAL_TRADING=true`). Las notas de implementación activas comienzan en las secciones de fecha.
+
 - El agente debe priorizar datos de Binance y TradingView.
 - Las noticias deben provenir de Coindesk y Reuters mediante RSS para asegurar información verificable.
-- El modo inicial será `suggest`, con opción de `auto` más adelante.
+- El modo inicial será `suggest`, con opción de `auto` más adelante. ← **SUPERADO: modo auto activo**
 - Mantener la implementación privada y local.
 
 ---
@@ -50,18 +52,117 @@
 | BNBUSDT SHORT | +0.34% | 5.73% |
 **Total unrealized: +$26.89 sobre $661.95 margin = +4.07%**
 
-### Decisión pendiente: slots 6-7
-- Trigger: cuando los primeros 2-3 trades cierren con TP (no SL)
-- Acción: `FUTURES_MAX_SHORTS=7` en docker-compose.yml + restart
-- Guard ya está implementado — no requiere más código
-- Revisar en 48-72h
+### ✅ Slots 6-7 activados — jun 19 2026 08:10 UTC-6
+- SOL SHORT cerró en TP: entrada $72.26 → salida $68.02 = **+$15.22 USDT (+11.7% sobre margin)**
+- `FUTURES_MAX_SHORTS=7` en docker-compose.yml + `docker-compose up -d app`
+- Slots 6-7 = forzados a MIDs por LARGECAP_CAP guard (FUTURES_MAX_LARGECAP_SHORTS=5)
+- Sistema reabrió SOLUSDT automáticamente en $68.02 (nuevo SHORT, en -$4.09 al momento del deploy)
+- Próximos candidatos MIDs: NEAR, SUI, AVAX, LINK, DOT
 
-### Archivos modificados esta sesión
+### Archivos modificados esta sesión (18 jun)
 - `run_trades.py` — B2, CapBridge call, _get_futures_client sync
 - `futures_client.py` — smart_rebalance_capital(), LARGECAP_CAP guard, max_largecap_shorts attr
 - `config.py` — MAX_SHORTS default, overflow thresholds, bridge params, largecap params
-- `docker-compose.yml` — MAX_SHORTS=5, overflow hardcoded, bridge + largecap params
-- `SYSTEM_REFERENCE.md` — estado actualizado a jun 18 2026
+- `docker-compose.yml` — MAX_SHORTS=5→7, overflow hardcoded, bridge + largecap params
+- `SYSTEM_REFERENCE.md` — estado actualizado
+
+---
+
+## 19 Jun 2026 — Dashboard UX: modales, hover PnL, multimodal counter, señales
+
+### D1 — Fix `entry_price null` en Futuros Cerrados (`futures_client.py`)
+- `get_recent_trades()`: lookup entry_price desde `_open_positions` en memoria
+- Fallback matemático: SHORT → `entry = exit + pnl/qty`; LONG → `entry = exit - pnl/qty`
+- Agrega `sl_price` y `tp_price` al resultado de trades cerrados (referencia para modal)
+- La tabla "Entrada → Salida" en futuros cerrados ahora muestra precio real de entrada
+
+### D2 — Tooltip hover PnL interactivo en gráfica SVG (`dashboard.js`)
+- `buildPriceRangeChart()` ahora genera SVG con `cursor:crosshair`
+- Al mover el mouse sobre la barra: línea crosshair vertical + tooltip flotante
+- Tooltip muestra: `Si precio: $X.XX` + `PnL estimado: ±X.XXXX USDT (±Y%)`
+- Color verde si PnL positivo, rojo si negativo (SHORT-aware: sentido invertido)
+- Funciona en modales de: spot abierto, spot cerrado, futuros abierto
+
+### D3 — Contador multimodal de posiciones (`dashboard.js`)
+- `renderKPIRow()`: reemplaza `maxPos=12` hardcodeado por `openPos.max_positions` dinámico
+- En `FUTURES_SHORT`: barra estado = `Spot: N/12 | Fut: M/7` (verde normal, rojo si overflow)
+- En otros modos: `Spot: N/max` solo
+- KPI tiles legacy: valor = `Ns+Mf`, sub = `Spot: N/12 | Fut: M/7`
+
+### D4 — Señales Recientes overflow fix tab Mercado (`styles.css`)
+- `market-col-signals` ampliada: 280px → 340px en el grid
+- `#signalsDataMarket .signal-row`: columnas compactas 6-col (85px 52px 72px 40px 1fr 38px)
+- Columna DECISIÓN ocultada en tab Mercado (`nth-child(5) { display:none }`)
+
+### D5 — Health Check panel (verificado)
+- ✅ Ya implementado completamente en TAB 4 (Sistema) — botón `🩺 Full Health`
+- No requirió cambios adicionales
+
+### Archivos modificados (19 jun, sesión 1)
+- `futures_client.py` — D1: entry_price fallback, sl_price/tp_price en trades cerrados
+- `frontend/dashboard.js` — D2: tooltip SVG hover; D3: contador multimodal
+- `frontend/styles.css` — D4: market-col-signals ancho + compact signal-row
+- `docker-compose.yml` — MAX_SHORTS=7 (slots 6-7 activados)
+
+---
+
+## 19 Jun 2026 — Bug Fixes: Tooltip, SOL entry_price, Balance Total (sesión 2)
+
+### B1 — Tooltip hover PnL no funcionaba en gráficas SVG
+- **Causa raíz**: navegadores bloquean `<script>` insertado via `innerHTML` (seguridad DOM estándar)
+- **Fix**: `buildPriceRangeChart()` ahora retorna `{html, uid, entry, isShort, rangeMin, rangeSpan, chartL, chartW}` (ya no emite `<script>`)
+- Nueva función global `attachChartHover(uid, ...)` que adjunta eventos mousemove/mouseleave directamente al elemento SVG del DOM
+- Callers (`showPositionDetailModal`, `showFuturesDetailModal`) ahora llaman `attachChartHover()` tras setear `innerHTML`
+
+### B2 — SOLUSDT mostraba entry_price = exit_price ($68.02 = $68.02)
+- **Causa raíz confirmada**: SOL cerró en $68.02 y reabrió un nuevo SHORT en $68.02. El lookup de `_open_positions` encontraba el SHORT activo nuevo (entry=$68.02) y lo usaba como entry del trade cerrado
+- **Fix**: `get_recent_trades()` ahora SIEMPRE calcula `entry_price` matemáticamente (`exit + pnl/qty` para SHORT) — nunca usa `_open_positions` para `entry_price`
+- `sl_price`/`tp_price` siguen viniendo de memoria (solo referencia, no crítico)
+- Verificado: SOLUSDT ahora muestra `entry_price: $72.26` → `exit_price: $68.02` ✅
+
+### B3 — Balance Portfolio mostraba ~$677 USDT menos del real
+- **Causa raíz**: `get_available_usdt()` retorna solo USDT libre en futuros (~$523). No incluye margin comprometido en posiciones abiertas (~$662)
+- **Fix**: Nuevo método `get_total_wallet_usdt()` en `FuturesClient` usa `walletBalance` (margin + libre) en vez de `availableBalance`
+- `/dashboard-data` ahora usa `get_total_wallet_usdt()` para el grand total
+- Verificado: `total_mxn: 50,973 MXN` (vs esperado ~50,577 MXN ✅)
+
+### Archivos modificados (19 jun, sesión 2)
+- `futures_client.py` — B2: entry_price siempre math; B3: nuevo `get_total_wallet_usdt()`
+- `app.py` — B3: usa `get_total_wallet_usdt()` en `/dashboard-data`
+- `frontend/dashboard.js` — B1: `buildPriceRangeChart` retorna objeto; `attachChartHover()` global; callers actualizados
+- `tests/test_system_health.py` — HEALTH_VERSION bump → "2026-06-19-v2"
+
+---
+
+## 19 Jun 2026 — SL Smart Enhancement & Tooltip PnL Fix (sesión 3)
+
+### SL Smart — Trailing Stop mejorado para proteger ganancias adicionales
+- **Problema identificado**: Trailing solo se activaba con nuevos mínimos, pero no inicializaba `trail_best_price` al alcanzar umbral de activación
+- **Síntoma**: ETHUSDT con 2.96% ganancia tenía SL en entry ($1753.79) pero no podía moverse por encima para proteger ganancias
+- **Fix implementado**: En `futures_client.py check_positions()`:
+  - Inicializar `trail_best_price` cuando `pnl_pct >= activation_pct` por primera vez
+  - Logs ahora muestran: `Trailing activated at 1702.0800 (PnL=2.95%)`
+  - Una vez activado, trailing espera nuevos mínimos para mover SL > entry price
+- **Comportamiento esperado**: Si ETHUSDT baja a $1690, SL se moverá a ~$1707 (protegiendo ~$46 de ganancia)
+
+### Tooltip Hover — PnL real en USD corregido
+- **Problema**: Tooltip mostraba solo diferencia de precios por unidad, no PnL real considerando cantidad
+- **Ejemplo**: ETHUSDT mostraba +$52.61 (diferencia unitaria) en lugar de +$7.79 (0.148 × $52.61)
+- **Fix implementado**:
+  - `attachChartHover()` ahora recibe parámetro `qty`
+  - Cálculo corregido: `pnlEst = pnlEstUnit * qty` (PnL real en USD)
+  - Actualizados callers: spot positions pasa `position.quantity`, futures pasa `pos.qty`
+  - Debugging agregado: console.log muestra qty para verificar
+- **Resultado**: Tooltip ahora coincide con "PnL No Real" del dashboard
+
+### Estado actual del sistema
+- **ETHUSDT**: 2.95% ganancia, trailing activado, SL en $1753.79 (entry)
+- **BTCUSDT**: 2.22% ganancia, trailing activado, SL en $64546.2 (entry)
+- **App**: Corriendo con mejoras aplicadas, tooltip funcional con PnL real
+
+### Archivos modificados (19 jun, sesión 3)
+- `futures_client.py` — Trailing: inicialización de trail_best_price en activation
+- `frontend/dashboard.js` — Tooltip: attachChartHover() recibe qty, cálculo PnL real actualizado
 
 ---
 
