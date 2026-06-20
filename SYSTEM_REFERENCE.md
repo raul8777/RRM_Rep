@@ -368,7 +368,17 @@ Todos los `Field(default=...)` en `config.py` ahora reflejan los valores activos
 
 ### Activos (no resueltos)
 
-**Sin bugs activos conocidos** — todos verificados y resueltos al jun 20 2026 15:47 UTC-6.
+**Sin bugs activos conocidos** — todos verificados y resueltos al jun 20 2026 16:05 UTC-6.
+
+### Bugs corregidos sesión 5 jun 20 2026 (commit d454044):
+| Bug | Archivo | Fix |
+|-----|---------|-----|
+| BUG-E1+E7 | `run_trades.py:1487,2942` | `_buy_top_symbols()` acepta `regime_obj`/`regime_mode_override` — elimina re-detección redundante de `get_regime()` (ahorra 3 API calls/ciclo) |
+| BUG-E5 | `run_trades.py:1621,2250` | `get_account_balance()` movido fuera del loop de símbolos; actualización local post-compra — ahorra N-1 API calls/ciclo |
+| BUG-E6 | `run_trades.py:2875-2888` | `get_screened_pairs()` cacheado una vez por `execute_once()`; cache pasado a `_buy_top_symbols()` — ahorra 3-4 HTTP calls/ciclo |
+| BUG-E8 | `run_trades.py:1777,1816,2235` | Caracteres no-ASCII en `decision_reason` → `LIM_SIMBOLO`, `QTY_INVALIDA` (previene encoding errors en DB) |
+| BUG-E10 | `autonomous_signals.py:459-488` | `get_top_buy_signals()` en FUTURES_SHORT incluye señales SELL/HOLD como candidatos a short; SELL bonus RSI +15 en ranking |
+| MEJORA-A1 | `run_trades.py:2942-2950` | Re-sort candidatos por EV predicho antes de `_buy_top_symbols()` — slots ocupados por mayor rentabilidad esperada |
 
 ### Bugs corregidos sesión 4 jun 20 2026 (commit e9d8877):
 | Bug | Archivo | Fix |
