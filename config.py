@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     max_total_exposure_spot_bull_fear_fng_threshold: int = Field(default=40, env="MAX_TOTAL_EXPOSURE_SPOT_BULL_FEAR_FNG_THRESHOLD")
     # Futures: no short when BTC 4h candle just moved up strongly (avoid shorting into momentum)
     futures_no_short_btc_4h_threshold: float = Field(default=2.0, env="FUTURES_NO_SHORT_BTC_4H_THRESHOLD")  # %
+    # Futures: max large-cap SHORTs (BTC/ETH/BNB/SOL) — slots above this must be MIDs/NARRATIVE for diversification
+    futures_max_largecap_shorts: int = Field(default=5, env="FUTURES_MAX_LARGECAP_SHORTS")
+    futures_largecap_symbols: list = Field(default=['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT'], env="FUTURES_LARGECAP_SYMBOLS")
     # Scale-out on take-profit
     scale_out_enabled: bool = Field(default=True, env="SCALE_OUT_ENABLED")
     scale_out_first_close_pct: float = Field(default=0.5, env="SCALE_OUT_FIRST_CLOSE_PCT")  # close 50% at TP

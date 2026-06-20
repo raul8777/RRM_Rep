@@ -1637,6 +1637,17 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 _fc = _get_futures_client(settings)
                 _max_shorts = getattr(settings, 'futures_max_shorts', 2)
                 _open_shorts = len([p for p in _fc._open_positions.values() if not p.closed and p.side == "SHORT"])
+                # LARGECAP guard: limit large-cap SHORTs to force MID diversification (slots 6-7)
+                _FUTURES_LARGE_CAPS = set(getattr(settings, 'futures_largecap_symbols',
+                                                  ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT']))
+                _max_largecap = getattr(settings, 'futures_max_largecap_shorts', 5)
+                if symbol in _FUTURES_LARGE_CAPS:
+                    _open_largecap = sum(1 for p in _fc._open_positions.values()
+                                         if not p.closed and p.side == 'SHORT' and p.symbol in _FUTURES_LARGE_CAPS)
+                    if _open_largecap >= _max_largecap:
+                        print(f"[Futures] {symbol} SKIPPED: large-cap slots {_open_largecap}/{_max_largecap} full — prioritizing MIDs")
+                        update_signal_decision(symbol, "rejected", "LARGECAP_CAP")
+                        continue
                 if _open_shorts >= _max_shorts:
                     # Try overflow: open extra slot only if signal is exceptional
                     _ovfl_meta     = signal_meta.get(symbol, {})
@@ -1666,7 +1677,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         print(f"[Futures] Could not close residual LONG {symbol}: {_cl_err}")
 
                 _f_sl    = getattr(settings, 'futures_sl_pct', 3.0)
-                _f_tp    = getattr(settings, 'futures_tp_pct', 5.0)
+                _f_tp    = getattr(settings, 'futures_tp_pct', 7.0)
                 _f_lev   = getattr(settings, 'futures_leverage', 2)
                 # F4: Use real signal probability instead of hardcoded 0.45
                 _f_sig_meta = signal_meta.get(symbol, {})

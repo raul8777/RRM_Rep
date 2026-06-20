@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 20 2026 13:55 UTC-6 | Sesión: Reánalisis completo — Marcado 133 trades obsoletos, validación 7 futuros SHORT activos, backtest_90d_v2.py con 4 escenarios, POST /predictor/reset-corrupted OK (133 trades), POST /learning/run en progreso
+> Última actualización: jun 20 2026 15:30 UTC-6 | Sesión 3: Análisis exhaustivo — 3 bugs corregidos (BUG-C1, BUG-C3, BUG-NUEVO-1/2/3), LARGECAP guard implementado, SYSTEM_REFERENCE sincronizado
 
 ---
 
@@ -52,10 +52,10 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 20 2026 13:30 UTC-6 |
+| Fecha última actualización | jun 20 2026 15:30 UTC-6 |
 | Capital total | ~$2,910 USDT |
-| Capital spot líquido | ~$1,642 USDT |
-| Capital invertido spot | ~$53 USDT (UUSDT stablecoin) |
+| Capital spot líquido | ~$1,650 USDT |
+| Capital invertido spot | $0 (sin posiciones spot) |
 | Capital futuros total | ~$1,198 USDT ($662 margin + $523 libre + $27 unrealized PnL) |
 | Régimen activo | **FUTURES_SHORT** (confirmado — BTC 30d=-19.0%) |
 | Fear & Greed | **15 — Capitulación** |
@@ -72,9 +72,9 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 | Dashboard Bugs B1-B3 | ✅ jun 19 2026 (sesión 2) — tooltip script fix, SOL entry_price math, balance walletBalance |
 | Futuros monitoring | ✅ check_positions() corre cada ciclo independiente de régimen |
 | Shorts protección ganancia | ✅ futures_protect_profit_usdt=1.0 — solo cierra shorts en pérdida al cambiar régimen |
-| Futuros SHORTs activos | **5/7** — ETH(+$8.03), BTC(+$5.86), XRP(+$3.50), BNB(+$2.01), SOL(-$4.09 nuevo) — 2 slots libres para MIDs |
+| Futuros SHORTs activos | **7/7** — ETH, SUI, XRP, NEAR, BTC, BNB, ADA — slots llenos |
 | FUTURES_MAX_SHORTS | **7** (subido de 5 jun 19 2026 — 1 TP confirmado: SOL +$15.22) |
-| FUTURES_MAX_LARGECAP_SHORTS | **5** (guard activo — slots 6-7 forzados a MIDs: NEAR/SUI/AVAX/LINK/DOT) |
+| FUTURES_MAX_LARGECAP_SHORTS | **5** (guard IMPLEMENTADO en código jun 20 sesión 3 — slots 6-7 forzados a MIDs/NARRATIVE) |
 | CapBridge | ✅ ACTIVO — transferencia autónoma bidireccional spot↔futuros (jun 18 2026) |
 | B2 auto-close spots bear | ✅ ACTIVO — cierra spot LONGs +0.3% PnL en FUTURES_SHORT regime |
 | Docker | live, sin errores |
@@ -157,7 +157,7 @@ crypto-agent/
 | **SPOT_BULL** | BTC EMA9>EMA21 4h, vol_ratio>0.5 | 1.0× | por categoría | por categoría | mínimo — spot compras normales |
 | **RANGE_SCALP** | BB bandwidth < 4%, lateral | 0.7× | 1.2% | 1.5% | solo RSI<40 + BB lower touch |
 | **PRESERVATION** | BTC 7d<-7% OR 30d<-15% | 0.5× | 1.5% | 3.0% | solo NARRATIVE tokens |
-| **FUTURES_SHORT** | BTC 30d<-15% + vol evidencia bear | 0.3× | 2.5% | 6.0% | futuros short only |
+| **FUTURES_SHORT** | BTC 30d<-15% + vol evidencia bear | 0.3× | **3.0%** | **7.0%** | futuros short only |
 
 ### Condiciones especiales activas (jun 15)
 - **SPOT_BULL + F&G Extreme Fear** → `spot_bull_pnl_boost` activo (relaja umbrales predictor)
@@ -368,7 +368,21 @@ Todos los `Field(default=...)` en `config.py` ahora reflejan los valores activos
 
 ### Activos (no resueltos)
 
-**Sin bugs activos conocidos** — todos verificados y resueltos al jun 20 2026 13:30 UTC-6.
+**Sin bugs activos conocidos** — todos verificados y resueltos al jun 20 2026 15:30 UTC-6.
+
+### Bugs corregidos sesión 3 jun 20 2026 (commit pendiente):
+| Bug | Archivo | Fix |
+|-----|---------|-----|
+| BUG-C1 | `run_trades.py:1669` | `_f_tp` fallback `5.0`→`7.0` (evita TP incorrecto si settings falla) |
+| BUG-C3 | `run_trades.py:1640-1650` + `config.py:80-81` | LARGECAP guard implementado en código (ya estaba en docker-compose pero no en lógica) |
+| BUG-NUEVO-1 | `run_trades.py:2878` | `TechnicalIndicators` → `AutonomousSignalGenerator` en inject futures |
+| BUG-NUEVO-2 | Binance API | TP BTCUSDT SHORT 5%→7% vía algoOrder cancel+recreate |
+| BUG-NUEVO-3 | `autonomous_signals.py:235-241` | `vol_spike` siempre presente en señales |
+
+### Diagnósticos descartados (falsos positivos sesión 3):
+- ~~BUG-S1~~: `signal_meta` SÍ incluye futures inyectados (inject ocurre antes de `_buy_top_symbols`)
+- ~~BUG-S3~~: F&G boost futuros (×1.30) NO es duplicado (`_kelly_position_size` no aplica F&G)
+- ~~Corruptas DB~~: Los datos de futuros cerrados vienen de Binance userTrades API, no PostgreSQL
 
 ---
 
@@ -445,7 +459,7 @@ if FUTURES_SHORT and confirmed:
 ### Pendientes N33-N35:
 - N33: Verificar que `check_positions()` detecta SL/TP triggers de los algo orders correctamente
 - N34: ✅ DONE jun20 — `FUTURES_SL_PCT=3.0` y `FUTURES_TP_PCT=7.0` en `.env` activos
-- N35: Añadir análisis técnico real (`analyze_symbol()`) a los `futures_symbols` inyectados para priorizar el par con mejor setup bajista
+- N35: ✅ DONE jun 20 sesión 2 — `analyze_symbol()` integrado en inject futures (commit 80ecb70)
 
 ---
 
