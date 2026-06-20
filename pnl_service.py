@@ -38,21 +38,30 @@ def predict_for_symbol(
     settings,
     position_size_usdt: float,
     interval: str = "1h",
+    precomputed_signal: Optional[Dict] = None,
 ) -> Tuple[Optional[Dict], Optional[Dict]]:
     """
     Fetch indicators + run the PnL predictor for *symbol*.
+
+    Args:
+        precomputed_signal: If provided (from signal_meta in Step 1), skip
+            analyze_symbol() and use these indicators directly. Avoids
+            redundant API + analysis calls (BUG-E4 fix).
 
     Returns:
         (prediction, formatted_indicators) – both None on failure.
     """
     predictor = get_predictor()
     try:
-        from autonomous_signals import AutonomousSignalGenerator
         price = client.get_symbol_price(symbol)
 
-        signal_gen = AutonomousSignalGenerator(client)
-        signal_data = signal_gen.analyze_symbol(symbol, interval=interval)
-        indicators_raw = signal_data.get("indicators", {})
+        if precomputed_signal and precomputed_signal.get("indicators"):
+            indicators_raw = precomputed_signal["indicators"]
+        else:
+            from autonomous_signals import AutonomousSignalGenerator
+            signal_gen = AutonomousSignalGenerator(client)
+            signal_data = signal_gen.analyze_symbol(symbol, interval=interval)
+            indicators_raw = signal_data.get("indicators", {})
         formatted = format_indicators_for_predictor(indicators_raw, price)
 
         # Use realistic trade horizon (240 min = 4h) for PnL estimation.

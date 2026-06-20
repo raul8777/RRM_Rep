@@ -30,6 +30,12 @@ _OVERRIDE_PERFORMANCE: list = []            # Lista de resultados para análisis
 # Futures client singleton (lazy-initialized)
 _futures_client: FuturesClient = None
 
+# BUG-E2: Cycle-scoped ASG instance — reset each execute_once() call so all
+# consumers (BTC trend check, futures inject, pnl_service) share one instance
+# and benefit from the per-symbol signal cache without redundant re-instantiation.
+_asg_cycle_instance: "AutonomousSignalGenerator" = None
+_asg_cycle_id: int = 0  # incremented each cycle to know when to reset
+
 # Whipsaw protection: count consecutive cycles where regime is NOT a short-friendly mode.
 # Shorts are only closed when this counter reaches min_cycles_before_close_shorts (config).
 _non_short_regime_cycles: int = 0
@@ -54,6 +60,16 @@ def _get_futures_client(settings) -> FuturesClient:
     _lc_raw = getattr(settings, 'futures_largecap_symbols', ['BTCUSDT','ETHUSDT','BNBUSDT','XRPUSDT','SOLUSDT'])
     _futures_client.largecap_symbols = set(_lc_raw)
     return _futures_client
+
+
+def _get_cycle_asg(client: "BinanceClient") -> "AutonomousSignalGenerator":
+    """Return the cycle-scoped ASG instance, creating it if needed.
+    Shared across _buy_top_symbols() and execute_once() futures inject to avoid
+    redundant instantiation (BUG-E2 fix). Reset at the start of each execute_once()."""
+    global _asg_cycle_instance
+    if _asg_cycle_instance is None:
+        _asg_cycle_instance = AutonomousSignalGenerator(client)
+    return _asg_cycle_instance
 
 
 def _wire_futures_client(fc: FuturesClient, client, settings) -> None:
@@ -1501,7 +1517,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     btc_trend = 'FLAT'
     btc_4h_chg_pct = 0.0  # last closed 4h candle change %
     try:
-        sig_gen = AutonomousSignalGenerator(client, ['BTCUSDT'])
+        sig_gen = _get_cycle_asg(client)  # BUG-E2: reuse cycle-scoped instance
         btc_trend = sig_gen.get_btc_market_trend(interval='4h')
         _btc_kl = client.client.get_klines(symbol='BTCUSDT', interval='4h', limit=3)
         if _btc_kl and len(_btc_kl) >= 2:
@@ -2363,8 +2379,10 @@ def _select_symbols(settings, news_client: NewsClient, client: BinanceClient, po
     return top_signals
 
 
-def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, portfolio_manager) -> Dict:
-    """Step 2: Generate PnL predictions once for all top symbols (reused in buy step)."""
+def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, portfolio_manager, signal_meta: Dict = None) -> Dict:
+    """Step 2: Generate PnL predictions once for all top symbols (reused in buy step).
+    BUG-E4: accepts signal_meta to reuse pre-computed indicators from Step 1,
+    avoiding redundant analyze_symbol() calls inside pnl_service."""
     predictions = {}
     if not portfolio_manager or not top_symbols:
         return predictions
@@ -2372,7 +2390,8 @@ def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, 
         usdt_liquid = float(portfolio_manager.get_total_balance().get("usdt_available", 0))
         alloc_per = min(settings.max_per_trade_usdt, usdt_liquid / len(top_symbols))
         for symbol in top_symbols:
-            pred, _ = pnl_service.predict_for_symbol(symbol, client, settings, alloc_per)
+            _pre_sig = (signal_meta or {}).get(symbol)
+            pred, _ = pnl_service.predict_for_symbol(symbol, client, settings, alloc_per, precomputed_signal=_pre_sig)
             if pred:
                 predictions[symbol] = pred
                 print(f"Prediction for {symbol}: {pred['expected_pnl']:.2f} USDT")
@@ -2605,6 +2624,10 @@ def execute_once(monitor_only: bool = False):
         return {"top_symbols": [], "sell_orders": [], "buy_orders": [], "sl_tp_closes": _mon_closes}
 
     print(f"DRY_RUN={settings.dry_run}  ALLOW_REAL_TRADING={settings.allow_real_trading}  MAX_PER_TRADE_USDT={settings.max_per_trade_usdt}")
+
+    # BUG-E2: Reset cycle-scoped ASG so all consumers share a fresh instance this cycle
+    global _asg_cycle_instance
+    _asg_cycle_instance = None
 
     # ── BUG-6: Cleanup expired cooldown entries (memory hygiene for 24/7 operation) ──
     try:
@@ -2893,7 +2916,7 @@ def execute_once(monitor_only: bool = False):
             _f_syms = list(dict.fromkeys(_f_syms + _cached_screened_pairs.get("futures", [])))
         # Build set of symbols already in top_signals to avoid duplicates
         _existing_syms = {s['symbol'] if isinstance(s, dict) else s for s in top_signals}
-        _asg = AutonomousSignalGenerator(client)  # shared instance for futures symbol enrichment
+        _asg = _get_cycle_asg(client)  # BUG-E2: reuse cycle-scoped instance
         _new_futures = []
         for _fsym in _f_syms:
             if _fsym in _existing_syms:
@@ -2937,7 +2960,9 @@ def execute_once(monitor_only: bool = False):
         top_symbols = list(top_signals)
 
     # ── Step 2: Generate predictions once (reused by step 3 and step 5) ───────
-    predictions = _build_predictions(top_symbols, client, settings, portfolio_manager)
+    # BUG-E4: pass signal_meta so pnl_service reuses pre-computed indicators from Step 1
+    _step2_signal_meta = {s['symbol']: s for s in top_signals if isinstance(s, dict)}
+    predictions = _build_predictions(top_symbols, client, settings, portfolio_manager, signal_meta=_step2_signal_meta)
 
     # ── MEJORA-A1: Re-sort by predicted EV so highest-EV candidates fill slots first ──
     if predictions and _regime_mode != "FUTURES_SHORT" and isinstance(top_signals[0], dict) if top_signals else False:
