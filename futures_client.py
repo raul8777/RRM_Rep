@@ -823,7 +823,7 @@ class FuturesClient:
         symbol: str,
         usdt_amount: float,
         sl_pct: float = 3.0,   # % above entry — stop loss
-        tp_pct: float = 5.0,   # % below entry — take profit
+        tp_pct: float = 7.0,   # % below entry — take profit
         leverage: int = LEVERAGE_MAX,
     ) -> Optional[FuturesPosition]:
         """
@@ -832,7 +832,7 @@ class FuturesClient:
 
         Risk math at 2x leverage:
           SL 3% move → 6% loss on margin
-          TP 5% move → 10% gain on margin
+          TP 7% move → 14% gain on margin
         """
         ok, reason = self._pre_entry_checks(symbol, usdt_amount, side="SHORT")
         if not ok:

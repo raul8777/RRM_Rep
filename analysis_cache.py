@@ -30,16 +30,17 @@ class AnalysisCache:
         
         if self._db_client:
             try:
-                query = """
-                    INSERT INTO market_data (symbol, data_type, data, timestamp)
-                    VALUES (%s, 'technical', %s, %s)
-                    ON CONFLICT (symbol, data_type) 
-                    DO UPDATE SET data = EXCLUDED.data, timestamp = EXCLUDED.timestamp
-                """
-                self._db_client.execute_update(
-                    query,
-                    (symbol, data, data['timestamp'])
+                updated = self._db_client.execute_update(
+                    """UPDATE market_data SET data = %s, timestamp = %s
+                       WHERE symbol = %s AND data_type = 'technical'""",
+                    (data, data['timestamp'], symbol),
                 )
+                if not updated:
+                    self._db_client.execute_update(
+                        """INSERT INTO market_data (symbol, data_type, data, timestamp)
+                           VALUES (%s, 'technical', %s, %s)""",
+                        (symbol, data, data['timestamp']),
+                    )
                 logger.debug(f"Technical analysis saved to database: {symbol}")
             except Exception as e:
                 logger.error(f"Failed to save analysis to database, using in-memory fallback: {e}")

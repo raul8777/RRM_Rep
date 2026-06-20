@@ -50,7 +50,7 @@ def _get_futures_client(settings) -> FuturesClient:
             _futures_client.enable_hedge_mode()
         print("[Futures] FuturesClient initialized")
     # Always sync category cap from settings (survives hot-config changes)
-    _futures_client.max_largecap_shorts = getattr(settings, 'futures_max_largecap_shorts', 3)
+    _futures_client.max_largecap_shorts = getattr(settings, 'futures_max_largecap_shorts', 5)
     _lc_raw = getattr(settings, 'futures_largecap_symbols', ['BTCUSDT','ETHUSDT','BNBUSDT','XRPUSDT','SOLUSDT'])
     _futures_client.largecap_symbols = set(_lc_raw)
     return _futures_client
@@ -1692,7 +1692,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 _futures_kelly_cap = getattr(settings, 'futures_kelly_cap_pct', 0.15)
                 _futures_margin_avail = _fc.get_available_usdt() if not _fc.dry_run else usdt_liquid * 0.3
                 _f_usdt_cap = max(
-                    getattr(settings, 'futures_usdt_per_trade', 100.0),
+                    getattr(settings, 'futures_usdt_per_trade', 20.0),
                     _futures_margin_avail * _futures_kelly_cap
                 )
                 _f_usdt = min(_f_usdt, _f_usdt_cap)
@@ -2709,7 +2709,7 @@ def execute_once(monitor_only: bool = False):
                     _cb_max_shorts  = getattr(settings, 'futures_max_shorts', 5)
                     _cb_open_spots  = len(position_manager.get_all_positions()) if position_manager else 0
                     _cb_kelly_margin = max(
-                        getattr(settings, 'futures_usdt_per_trade', 100.0),
+                        getattr(settings, 'futures_usdt_per_trade', 20.0),
                         _fc.get_available_usdt() * getattr(settings, 'futures_kelly_cap_pct', 0.15)
                     )
                     _cb_kelly_spot  = getattr(settings, 'kelly_base_usdt', 60.0)
