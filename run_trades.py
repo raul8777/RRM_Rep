@@ -1484,7 +1484,7 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
     return final
 
 
-def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: List, portfolio_manager=None, position_manager=None, precomputed_predictions: Dict = None, news_client=None) -> List[Dict]:
+def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: List, portfolio_manager=None, position_manager=None, precomputed_predictions: Dict = None, news_client=None, regime_obj: "MarketRegime" = None, regime_mode_override: str = None, screened_pairs_cache: dict = None) -> List[Dict]:
     # Accept either plain symbol strings or dicts with metadata (for aggressive mode)
     if top_signals_with_meta and isinstance(top_signals_with_meta[0], dict):
         top_symbols = [s['symbol'] for s in top_signals_with_meta]
@@ -1511,16 +1511,18 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     except Exception as e:
         print(f"BTC trend check failed: {e}")
 
-    # ── Market Regime Detection — adaptive mode router ─────────────────────────
-    _regime: MarketRegime = None
-    _regime_mode = "SPOT_BULL"
-    if getattr(settings, 'market_regime_enabled', True):
+    # ── Market Regime — use pre-detected from execute_once(); fallback to own detection ──
+    _regime: MarketRegime = regime_obj
+    _regime_mode = regime_mode_override or "SPOT_BULL"
+    if _regime is None and getattr(settings, 'market_regime_enabled', True):
         try:
             _regime = get_regime(client, settings=settings)
             _regime_mode = _regime.mode
-            print(f"[Regime] {_regime_mode} | {_regime.regime} | {_regime.reason} | confirmed={_regime.confirmed}")
+            print(f"[Regime/fallback] {_regime_mode} | {_regime.regime} | confirmed={_regime.confirmed}")
         except Exception as _re:
             print(f"[Regime] detection failed: {_re}")
+    elif _regime is not None:
+        print(f"[Regime/cached] {_regime_mode} | {_regime.regime} | confirmed={_regime.confirmed}")
 
     balances = client.get_account_balance()
     usdt = float(balances.get("USDT", 0.0))
@@ -1615,6 +1617,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         print(f"USDT after selling non-top assets: {usdt}")
 
     _regime_max = _get_max_positions_for_regime(settings, _regime_mode)
+    # BUG-E5 fix: fetch balance once before the loop; refresh only after a successful buy
+    usdt_liquid_now = float(client.get_account_balance().get("USDT", usdt_liquid))
     for symbol in top_symbols:
         # ── FUTURES_SHORT mode — evaluated BEFORE spot position limits ────────
         # Futures positions are in a separate wallet — they must NOT be blocked
@@ -1622,11 +1626,12 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         if _regime and _regime.confirmed and _regime_mode == "FUTURES_SHORT":
             if getattr(settings, 'futures_enabled', False):
                 _futures_symbols = list(getattr(settings, 'futures_symbols', ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']))
-                if getattr(settings, 'screener_enabled', True):
+                if screened_pairs_cache:
+                    _futures_symbols = list(dict.fromkeys(_futures_symbols + screened_pairs_cache.get("futures", [])))
+                elif getattr(settings, 'screener_enabled', True):
                     try:
                         from pair_screener import get_screened_pairs
-                        _sf = get_screened_pairs(settings=settings)["futures"]
-                        _futures_symbols = list(dict.fromkeys(_futures_symbols + _sf))
+                        _futures_symbols = list(dict.fromkeys(_futures_symbols + get_screened_pairs(settings=settings).get("futures", [])))
                     except Exception:
                         pass
                 if symbol not in _futures_symbols:
@@ -1769,7 +1774,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             max_per = getattr(settings, 'max_positions_per_symbol', 3)
             if count >= max_per:
                 print(f"Skipping buy {symbol}: per-symbol limit ({count}/{max_per}) reached")
-                update_signal_decision(symbol, "rejected", "LÍM_SÍMBOLO")
+                update_signal_decision(symbol, "rejected", "LIM_SIMBOLO")
                 continue
             if count >= 1 and count < 2:
                 _allow_add = getattr(settings, 'allow_prediction_based_add', True)
@@ -1808,7 +1813,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         continue
                 else:
                     print(f"Skipping buy {symbol}: {count} open position(s), prediction_add disabled")
-                    update_signal_decision(symbol, "rejected", "LÍM_SÍMBOLO")
+                    update_signal_decision(symbol, "rejected", "LIM_SIMBOLO")
                     continue
 
         # ── R4: Correlaciones — límite por categoría ─────────────────────────
@@ -1900,10 +1905,12 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         and getattr(settings, 'futures_long_in_range_scalp', True)
                         and signal_meta.get(symbol, {}).get('bb_lower_touch', False)):
                     _f_sym_list = list(getattr(settings, 'futures_symbols', []))
-                    if getattr(settings, 'screener_enabled', True):
+                    if screened_pairs_cache:
+                        _f_sym_list = list(dict.fromkeys(_f_sym_list + screened_pairs_cache.get("futures", [])))
+                    elif getattr(settings, 'screener_enabled', True):
                         try:
                             from pair_screener import get_screened_pairs
-                            _f_sym_list = list(dict.fromkeys(_f_sym_list + get_screened_pairs(settings=settings)["futures"]))
+                            _f_sym_list = list(dict.fromkeys(_f_sym_list + get_screened_pairs(settings=settings).get("futures", [])))
                         except Exception:
                             pass
                     if symbol in _f_sym_list:
@@ -1930,10 +1937,12 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             _l_rsi_val    = float(signal_meta.get(symbol, {}).get('rsi', 50))
             if _l_rsi_val < _l_rsi_thresh and btc_trend == 'UP':
                 _l_sym_list = list(getattr(settings, 'futures_symbols', []))
-                if getattr(settings, 'screener_enabled', True):
+                if screened_pairs_cache:
+                    _l_sym_list = list(dict.fromkeys(_l_sym_list + screened_pairs_cache.get("futures", [])))
+                elif getattr(settings, 'screener_enabled', True):
                     try:
                         from pair_screener import get_screened_pairs
-                        _l_sym_list = list(dict.fromkeys(_l_sym_list + get_screened_pairs(settings=settings)["futures"]))
+                        _l_sym_list = list(dict.fromkeys(_l_sym_list + get_screened_pairs(settings=settings).get("futures", [])))
                     except Exception:
                         pass
                 if symbol in _l_sym_list:
@@ -2175,7 +2184,6 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             else:
                 print(f"[Kelly] {symbol} ({_sym_cat_e}): SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}%")
 
-        usdt_liquid_now = float(client.get_account_balance().get("USDT", usdt_liquid))
         trade_allocation = _kelly_position_size(
             settings, strength, prediction, usdt_liquid_now, sl_pct, tp_pct
         )
@@ -2224,7 +2232,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         valid, reason = is_quantity_valid(qty, price, filters)
         if not valid:
             print(f"Skipping buy {symbol}: {reason}")
-            update_signal_decision(symbol, "rejected", "QTY_INVÁLIDA")
+            update_signal_decision(symbol, "rejected", "QTY_INVALIDA")
             continue
 
         # Guard: verify liquid USDT is sufficient before placing order
@@ -2244,6 +2252,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             order = client.create_market_order(symbol=symbol, side="BUY", quantity=qty)
             _record_order_success()  # R5: reset circuit breaker on success
             orders.append({"symbol": symbol, "side": "BUY", "quantity": qty, "order": order})
+            usdt_liquid_now = max(0.0, usdt_liquid_now - qty * price)  # BUG-E5: local deduction, avoids re-fetch
             print(f"Bought {qty} {symbol}")
             ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_INFO, f"Bought {qty} {symbol} @ ~{price:.4f} USDT")
             update_signal_decision(symbol, "executed", "EJECUTADO")
@@ -2868,15 +2877,20 @@ def execute_once(monitor_only: bool = False):
     # FUTURES_SHORT mode: always ensure futures_symbols are in the pool.
     # The long-signal generator only produces spot candidates — futures symbols
     # (BTC/ETH/SOL/BNB etc.) must be explicitly injected so open_short() can run.
+    # BUG-E6: cache screened_pairs result for re-use within the same cycle
+    _cached_screened_pairs: dict = {}
+    if getattr(settings, 'screener_enabled', True):
+        try:
+            from pair_screener import get_screened_pairs as _gsp
+            _cached_screened_pairs = _gsp(settings=settings)
+        except Exception:
+            pass
+
     if (_regime_mode == "FUTURES_SHORT" and _regime_exe is not None
             and _regime_exe.confirmed and getattr(settings, 'futures_enabled', False)):
         _f_syms = list(getattr(settings, 'futures_symbols', ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']))
-        if getattr(settings, 'screener_enabled', True):
-            try:
-                from pair_screener import get_screened_pairs
-                _f_syms = list(dict.fromkeys(_f_syms + get_screened_pairs(settings=settings)["futures"]))
-            except Exception:
-                pass
+        if _cached_screened_pairs:
+            _f_syms = list(dict.fromkeys(_f_syms + _cached_screened_pairs.get("futures", [])))
         # Build set of symbols already in top_signals to avoid duplicates
         _existing_syms = {s['symbol'] if isinstance(s, dict) else s for s in top_signals}
         _asg = AutonomousSignalGenerator(client)  # shared instance for futures symbol enrichment
@@ -2925,6 +2939,16 @@ def execute_once(monitor_only: bool = False):
     # ── Step 2: Generate predictions once (reused by step 3 and step 5) ───────
     predictions = _build_predictions(top_symbols, client, settings, portfolio_manager)
 
+    # ── MEJORA-A1: Re-sort by predicted EV so highest-EV candidates fill slots first ──
+    if predictions and _regime_mode != "FUTURES_SHORT" and isinstance(top_signals[0], dict) if top_signals else False:
+        def _ev_sort_key(s):
+            sym = s['symbol'] if isinstance(s, dict) else s
+            pred = predictions.get(sym)
+            return float(pred.get('expected_pnl', 0)) if pred else 0.0
+        top_signals = sorted(top_signals, key=_ev_sort_key, reverse=True)
+        top_symbols = [s['symbol'] if isinstance(s, dict) else s for s in top_signals]
+        print(f"[EV-sort] Re-ranked {len(top_symbols)} candidates by predicted EV: {[(s, round(predictions.get(s, {}).get('expected_pnl', 0), 2)) for s in top_symbols[:5]]}")
+
     # ── Step 3: Slot-pressure reallocation (only when MAX_POSITIONS reached) ──────
     _close_prediction_based(top_symbols, client, settings, portfolio_manager, position_manager, predictions, regime_mode=_regime_mode)
 
@@ -2937,7 +2961,7 @@ def execute_once(monitor_only: bool = False):
         print("Balances after sells:", balances)
 
     # ── Step 5: Buy top symbols — pass full signal dicts for aggressive mode ───
-    buy_orders = _buy_top_symbols(client, settings, top_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client)
+    buy_orders = _buy_top_symbols(client, settings, top_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client, regime_obj=_regime_exe, regime_mode_override=_regime_mode, screened_pairs_cache=_cached_screened_pairs)
 
     # ── Dynamic cycle scheduling — return next interval based on active regime ──
     _cycle_by_regime = {

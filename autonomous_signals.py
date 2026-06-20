@@ -456,22 +456,36 @@ class AutonomousSignalGenerator:
             f"{[(s['symbol'], s['signal'], round(s['strength'],2), s.get('higher_tf_trend','?')) for s in all_signals]}"
         )
 
-        buy_signals = [
-            s for s in all_signals
-            if s['signal'] == 'BUY' and s['strength'] >= min_strength
-        ]
+        # BUG-E10: In FUTURES_SHORT mode, include SELL/HOLD signals as short candidates
+        # (overbought symbols generating SELL/HOLD are better shorts than BUY signals)
+        if regime_mode == 'FUTURES_SHORT':
+            _short_min_strength = min(min_strength, 0.4)
+            buy_signals = [
+                s for s in all_signals
+                if s['strength'] >= (min_strength if s['signal'] == 'BUY' else _short_min_strength)
+            ]
+            logger.info(
+                f"[FUTURES_SHORT] Short candidates: {len(buy_signals)} "
+                f"(BUY+SELL+HOLD with strength>={_short_min_strength})"
+            )
+        else:
+            buy_signals = [
+                s for s in all_signals
+                if s['signal'] == 'BUY' and s['strength'] >= min_strength
+            ]
         logger.info(f"Buy signals above threshold {min_strength}: {len(buy_signals)}")
 
         # ── Regime-aware ranking ─────────────────────────────────────────────
         if regime_mode == 'FUTURES_SHORT':
-            # Rank by RSI (descending: overbought candidates first for short entry)
-            # + vol spike (confirms momentum exhaustion)
+            # Rank by RSI descending (overbought = best short candidate)
+            # SELL signals get RSI bonus (+15) to rank above neutral BUY signals
             def _short_score(s):
                 rsi = float(s.get('rsi', 50) or 50)
                 vol_spike = float(s.get('vol_spike', 1.0) or 1.0)
-                return rsi * 0.7 + min(vol_spike, 3.0) * 10 * 0.3
+                sell_bonus = 15.0 if s.get('signal') == 'SELL' else 0.0
+                return (rsi + sell_bonus) * 0.7 + min(vol_spike, 3.0) * 10 * 0.3
             buy_signals.sort(key=_short_score, reverse=True)
-            logger.info(f"[Regime] FUTURES_SHORT ranking applied (RSI-weighted)")
+            logger.info(f"[Regime] FUTURES_SHORT ranking applied (RSI+SELL-weighted)")
         elif regime_mode == 'RANGE_SCALP':
             # Rank by bb_lower_touch first, then by RSI ascending (most oversold)
             def _scalp_score(s):
