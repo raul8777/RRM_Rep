@@ -379,6 +379,8 @@ Todos los `Field(default=...)` en `config.py` ahora reflejan los valores activos
 | BUG-E8 | `run_trades.py:1777,1816,2235` | Caracteres no-ASCII en `decision_reason` → `LIM_SIMBOLO`, `QTY_INVALIDA` (previene encoding errors en DB) |
 | BUG-E10 | `autonomous_signals.py:459-488` | `get_top_buy_signals()` en FUTURES_SHORT incluye señales SELL/HOLD como candidatos a short; SELL bonus RSI +15 en ranking |
 | MEJORA-A1 | `run_trades.py:2942-2950` | Re-sort candidatos por EV predicho antes de `_buy_top_symbols()` — slots ocupados por mayor rentabilidad esperada |
+| BUG-E2 | `run_trades.py:33-72` | `_get_cycle_asg()` — instancia ASG compartida por ciclo; reset al inicio de `execute_once()` — elimina 2-3 instanciaciones redundantes/ciclo |
+| BUG-E4 | `pnl_service.py:41` + `run_trades.py:2378` | `predict_for_symbol(precomputed_signal=...)` reutiliza indicadores de Step 1 — elimina N llamadas `analyze_symbol()` redundantes en Step 2 |
 
 ### Bugs corregidos sesión 4 jun 20 2026 (commit e9d8877):
 | Bug | Archivo | Fix |
