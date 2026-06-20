@@ -94,7 +94,7 @@ class Settings(BaseSettings):
     futures_smart_tp_extension_pct: float = Field(default=2.0, env="FUTURES_SMART_TP_EXTENSION_PCT")  # extend TP by 2% of current price
     # Futures trailing stop: protect unrealized gains during position lifecycle
     futures_trailing_enabled: bool = Field(default=True, env="FUTURES_TRAILING_ENABLED")
-    futures_trailing_activation_pct: float = Field(default=2.0, env="FUTURES_TRAILING_ACTIVATION_PCT")  # activate when unrealized PnL >= 2%
+    futures_trailing_activation_pct: float = Field(default=3.0, env="FUTURES_TRAILING_ACTIVATION_PCT")  # v4 OPT: 2.0→3.0 (evita trailing prematuro en rebotes)
     futures_trailing_distance_pct: float = Field(default=1.0, env="FUTURES_TRAILING_DISTANCE_PCT")      # trail SL/TP 1% from best price
     futures_breakeven_activation_pct: float = Field(default=1.2, env="FUTURES_BREAKEVEN_ACTIVATION_PCT")  # move SL to breakeven at 1.2% gain
     # WR Screener: block buys on pairs with N consecutive stop_loss closes

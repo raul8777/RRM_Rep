@@ -758,17 +758,29 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                     }
                     
                     # Add technical indicators if available (needed for VolSpike Override)
+                    # NOTE: TechnicalIndicators.analyze_signal() uses different key names:
+                    #   volume_spike (bool) → we use the float vol_spike from signal root (set by autonomous_signals)
+                    #   stoch_rsi_k → stoch_k
+                    #   no bb_position → computed from lower/upper/price
+                    #   atr (absolute) → atr_pct computed as atr/price*100
                     if 'indicators' in signal:
                         indicators = signal['indicators']
+                        _price = indicators.get('price', signal.get('current_price', 1) or 1)
+                        _lower = indicators.get('lower_band', _price)
+                        _upper = indicators.get('upper_band', _price)
+                        _bb_range = (_upper - _lower) if (_upper - _lower) > 0 else 1
+                        _bb_pos = round((_price - _lower) / _bb_range, 4) if _bb_range > 0 else 0.5
+                        _atr = indicators.get('atr', 0)
+                        _atr_pct = round(_atr / _price * 100, 4) if _price > 0 and _atr else 0
                         signal_data.update({
-                            "vol_spike": indicators.get('vol_spike', 0),
+                            "vol_spike": signal.get('vol_spike', 0),  # float ratio from autonomous_signals root
                             "rsi": indicators.get('rsi', 50),
                             "trend_4h": indicators.get('trend_4h', 0),
-                            "atr_pct": indicators.get('atr_pct', 0),
-                            "bb_position": indicators.get('bb_position', 0.5),
+                            "atr_pct": _atr_pct,
+                            "bb_position": _bb_pos,
                             "ema_cross": indicators.get('ema_cross', 0),
                             "macd": indicators.get('macd', 0),
-                            "stoch_k": indicators.get('stoch_k', 0.5)
+                            "stoch_k": indicators.get('stoch_rsi_k', indicators.get('stoch_k', 0.5))
                         })
                     
                     add_signal(signal_data)
@@ -2741,7 +2753,7 @@ def execute_once(monitor_only: bool = False):
 
             # B2: Auto-close residual spot LONGs in FUTURES_SHORT regime — directionally wrong in bear
             # Only close positions with positive PnL (protect from crystallising losses on healthy spots)
-            # Exception: UUSDT/stablecoins skip (near-zero volatility, not hurting)
+            # Exception: stablecoins skip — detected by symbol prefix OR by price (0.98-1.02)
             if _regime_mode == "FUTURES_SHORT" and _regime_exe and _regime_exe.confirmed:
                 try:
                     _spot_positions = position_manager.get_all_positions() if position_manager else {}
@@ -2749,14 +2761,18 @@ def execute_once(monitor_only: bool = False):
                     for _b2_sym, _b2_pos_list in _spot_positions.items():
                         if not _b2_pos_list:
                             continue
-                        # Skip stablecoins (ends with USDT but price ~1.0)
+                        # Skip true stablecoins by symbol prefix (USDC, BUSD, TUSD, DAI, etc.)
+                        _STABLECOIN_PREFIXES = {'USDC', 'BUSD', 'TUSD', 'FDUSD', 'DAI', 'USD1', 'RLUS', 'PAXG', 'XAUT'}
+                        _b2_asset_check = _b2_sym.replace('USDT', '')
+                        if any(_b2_asset_check.startswith(p) for p in _STABLECOIN_PREFIXES):
+                            continue  # known stablecoin asset — skip
                         _b2_price = None
                         try:
                             _b2_price = client.get_symbol_price(_b2_sym)
                         except Exception:
                             continue
                         if _b2_price and 0.98 <= _b2_price <= 1.02:
-                            continue  # stablecoin — skip
+                            continue  # stablecoin by price — skip
                         for _b2_pos in _b2_pos_list:
                             if getattr(_b2_pos, 'closed', False):
                                 continue

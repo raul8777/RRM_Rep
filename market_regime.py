@@ -229,7 +229,7 @@ def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
     elif mode == "FUTURES_SHORT":
         # Active bear market shorting via futures (2x leverage)
         sl_pct         = 3.0    # 3% above entry → 6% loss on margin at 2x
-        tp_pct         = 5.0    # 5% below entry → 10% gain on margin at 2x
+        tp_pct         = 7.0    # 7% below entry → 14% gain on margin at 2x (v4 OPT jun20)
         kelly_mult     = 0.3    # conservative: use only 30% of normal Kelly for futures margin
         max_rsi        = 70.0   # enter shorts when RSI not yet extremely oversold
 

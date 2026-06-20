@@ -1405,7 +1405,7 @@ class FuturesClient:
 
                     if _can_extend:
                         try:
-                            _pos_size_real = float(pos.quantity) * float(pos.entry_price)
+                            _pos_size_real = float(pos.qty) * float(pos.entry_price)
                             _score, _details = self._evaluate_short_momentum(symbol, settings, position_size_usdt=_pos_size_real)
                         except Exception as _me:
                             print(f"[Futures/SmartTP] {symbol}: momentum eval failed: {_me} — closing")
