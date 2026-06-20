@@ -1,0 +1,73 @@
+{
+  "captured_at": "2026-06-20T22:18:07.211627+00:00",
+  "captured_at_local": "jun 20 2026 16:13 UTC-6",
+  "label": "baseline_post_session5",
+  "commits": [
+    "d454044",
+    "ce6dc9b",
+    "b6dc0e0",
+    "5513feb"
+  ],
+  "fixes_active": [
+    "BUG-E1+E7: regime pre-passed to _buy_top_symbols",
+    "BUG-E2: cycle-scoped ASG singleton",
+    "BUG-E4: pnl_service reuses Step-1 indicators",
+    "BUG-E5: get_account_balance outside loop",
+    "BUG-E6: get_screened_pairs cached per cycle",
+    "BUG-E8: ASCII reason strings",
+    "BUG-E10: SELL/HOLD in FUTURES_SHORT signal pool",
+    "MEJORA-A1: re-sort by predicted EV before buy loop"
+  ],
+  "capital": {
+    "total_usdt": null,
+    "total_mxn": null,
+    "liquid_usdt": null
+  },
+  "pnl": {
+    "day": null,
+    "week": null,
+    "year": null
+  },
+  "performance": {
+    "win_rate": null,
+    "profit_factor": null,
+    "max_drawdown": null,
+    "total_trades": null
+  },
+  "spot": {
+    "open_positions": 0,
+    "closed_positions": 0,
+    "spot_win_rate": null,
+    "spot_pnl_total": 0
+  },
+  "futures": {
+    "open_shorts": 0,
+    "closed_total": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_rate": null,
+    "total_pnl": 0
+  },
+  "market": {
+    "regime": null,
+    "btc_trend": null,
+    "day_change": null,
+    "fng_value": null,
+    "fng_label": null
+  },
+  "volspike_override": {
+    "summary": {
+      "total_trades": 0,
+      "win_rate": 0.0,
+      "avg_accuracy": 0.0,
+      "total_pnl": 0.0,
+      "active_positions": 0,
+      "todays_count": 0
+    },
+    "by_symbol": {},
+    "recent_trades": [],
+    "recommendations": [
+      "No hay datos de override todavía"
+    ]
+  }
+}

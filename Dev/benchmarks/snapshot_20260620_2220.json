@@ -1,0 +1,41 @@
+{
+  "captured_at": "2026-06-20T22:20:15.606696+00:00",
+  "captured_at_local": "jun 20 2026 16:13 UTC-6",
+  "label": "baseline_post_session5",
+  "commits": [
+    "d454044",
+    "ce6dc9b",
+    "b6dc0e0",
+    "5513feb"
+  ],
+  "fixes_active": [
+    "BUG-E1+E7",
+    "BUG-E2",
+    "BUG-E4",
+    "BUG-E5",
+    "BUG-E6",
+    "BUG-E8",
+    "BUG-E10",
+    "MEJORA-A1"
+  ],
+  "capital": {
+    "total_usdt": 1694.9987571,
+    "liquid_usdt": 1694.9987571
+  },
+  "futures": {
+    "open_shorts": 7,
+    "closed_binance_orders": 139,
+    "wins_by_symbol": 2,
+    "total_pnl_binance": -6.6288,
+    "cached_closed": 0,
+    "cached_wins": 0,
+    "cached_pnl": 0
+  },
+  "spot": {
+    "closed_positions": 156,
+    "wins": 36,
+    "losses": 120,
+    "win_rate": 0.2308,
+    "total_pnl": -194.511
+  }
+}
