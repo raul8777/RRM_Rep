@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 20 2026 15:47 UTC-6 | Sesión 4: Auditoría config/DB/módulos — 4 bugs corregidos (BUG-D1/D2/D3/D4), commit e9d8877, restart OK
+> Última actualización: jun 20 2026 16:10 UTC-6 | Sesión 5: Auditoría flujos E-series — 8 bugs corregidos + 1 mejora (BUG-E1/E2/E4/E5/E6/E7/E8/E10 + MEJORA-A1), commits d454044 + ce6dc9b, restart OK
 
 ---
 
