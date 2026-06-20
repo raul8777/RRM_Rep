@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 20 2026 15:30 UTC-6 | Sesión 3: Análisis exhaustivo — 3 bugs corregidos (BUG-C1, BUG-C3, BUG-NUEVO-1/2/3), LARGECAP guard implementado, SYSTEM_REFERENCE sincronizado
+> Última actualización: jun 20 2026 15:47 UTC-6 | Sesión 4: Auditoría config/DB/módulos — 4 bugs corregidos (BUG-D1/D2/D3/D4), commit e9d8877, restart OK
 
 ---
 
@@ -368,9 +368,18 @@ Todos los `Field(default=...)` en `config.py` ahora reflejan los valores activos
 
 ### Activos (no resueltos)
 
-**Sin bugs activos conocidos** — todos verificados y resueltos al jun 20 2026 15:30 UTC-6.
+**Sin bugs activos conocidos** — todos verificados y resueltos al jun 20 2026 15:47 UTC-6.
 
-### Bugs corregidos sesión 3 jun 20 2026 (commit pendiente):
+### Bugs corregidos sesión 4 jun 20 2026 (commit e9d8877):
+| Bug | Archivo | Fix |
+|-----|---------|-----|
+| BUG-D1 | `futures_client.py:826` | `tp_pct` default `5.0`→`7.0` en `open_short()` — evita TP incorrecto si caller no pasa parámetro |
+| BUG-D2 | `analysis_cache.py:33-43` | `ON CONFLICT` reemplazado por upsert manual `UPDATE`→`INSERT` — cache técnico ahora persiste en DB correctamente |
+| BUG-D2+ | `migrations/010_market_data_unique.sql` | Índice UNIQUE parcial `WHERE data_type='technical'` aplicado en producción |
+| BUG-D3 | `run_trades.py:1695,2712` | Fallback `futures_usdt_per_trade` `100.0`→`20.0` en paths SHORT (consistente con config.py default) |
+| BUG-D4 | `run_trades.py:53` | Fallback `max_largecap_shorts` `3`→`5` en `_get_futures_client()` (consistente con guard en línea 1643) |
+
+### Bugs corregidos sesión 3 jun 20 2026 (commit 818fd3f):
 | Bug | Archivo | Fix |
 |-----|---------|-----|
 | BUG-C1 | `run_trades.py:1669` | `_f_tp` fallback `5.0`→`7.0` (evita TP incorrecto si settings falla) |
