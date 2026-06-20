@@ -2868,6 +2868,7 @@ def execute_once(monitor_only: bool = False):
                 pass
         # Build set of symbols already in top_signals to avoid duplicates
         _existing_syms = {s['symbol'] if isinstance(s, dict) else s for s in top_signals}
+        _asg = AutonomousSignalGenerator(client)  # shared instance for futures symbol enrichment
         _new_futures = []
         for _fsym in _f_syms:
             if _fsym in _existing_syms:
@@ -2875,17 +2876,26 @@ def execute_once(monitor_only: bool = False):
             # Enrich with real technical data so overflow eligibility check has real values
             _fsig = {"symbol": _fsym, "score": 50, "strength": 0.5, "reason": "FUTURES_SHORT_AUTO"}
             try:
-                from technical_indicators import TechnicalIndicators
-                _ti = TechnicalIndicators(client)
-                _ta = _ti.analyze_signal(_fsym)
-                if _ta and isinstance(_ta, dict):
-                    _fsig["strength"]      = float(_ta.get("strength", 0.5))
-                    _fsig["vol_spike"]     = float(_ta.get("vol_spike", 0.0))
-                    _fsig["rsi"]           = float(_ta.get("rsi", 50.0))
+                # Use AutonomousSignalGenerator which correctly fetches klines and runs analysis
+                _ta = _asg.analyze_symbol(_fsym, interval=getattr(settings, 'interval', '1h'))
+                if _ta and isinstance(_ta, dict) and _ta.get('signal') != 'HOLD':
+                    _ta_strength = float(_ta.get("strength", 0.5))
+                    _ta_ind      = _ta.get("indicators", {})
+                    _fsig["strength"]       = _ta_strength
+                    _fsig["vol_spike"]      = float(_ta.get("vol_spike", _ta_ind.get("volume_spike", 0.0)))
+                    _fsig["rsi"]            = float(_ta_ind.get("rsi", 50.0))
                     _fsig["change_24h_pct"] = float(_ta.get("change_24h_pct", 0.0))
-                    _fsig["score"]         = int(float(_ta.get("strength", 0.5)) * 100)
+                    _fsig["score"]          = int(_ta_strength * 100)
+                    _fsig["reason"]         = _ta.get("reason", "FUTURES_SHORT_AUTO")
+                    print(f"[Futures/Inject] {_fsym}: strength={_ta_strength:.2f} rsi={_fsig['rsi']:.1f} signal={_ta.get('signal')}")
+                elif _ta and _ta.get('signal') == 'HOLD':
+                    _ta_strength = float(_ta.get("strength", 0.3))
+                    _fsig["strength"] = _ta_strength
+                    _fsig["score"]    = int(_ta_strength * 100)
+                    _fsig["rsi"]      = float(_ta.get("indicators", {}).get("rsi", 50.0))
+                    print(f"[Futures/Inject] {_fsym}: HOLD (strength={_ta_strength:.2f}) — kept at low strength")
             except Exception as _te:
-                pass  # keep defaults on any error
+                print(f"[Futures/Inject] {_fsym}: analysis failed ({_te}) — using default strength=0.50")
             _new_futures.append(_fsig)
         if _new_futures:
             print(f"[Futures] FUTURES_SHORT: injecting {[s['symbol'] for s in _new_futures]} into signal pool")

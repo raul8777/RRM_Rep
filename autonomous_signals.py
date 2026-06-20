@@ -232,6 +232,14 @@ class AutonomousSignalGenerator:
             analysis['higher_tf_trend']  = higher_trend
             analysis['volume_confirmed'] = volume_confirmed
 
+            # Always compute vol_spike ratio so signal payload always has a real value
+            # (M4 breakout block may overwrite with its own ratio if breakout detected)
+            try:
+                _vs_avg = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else None
+                analysis['vol_spike'] = round(volumes[-1] / _vs_avg, 4) if _vs_avg and _vs_avg > 0 else 0.0
+            except Exception:
+                analysis.setdefault('vol_spike', 0.0)
+
             # ── Enrich with EMA200 trend from analysis_cache (Mejora E) ──────
             try:
                 from analysis_cache import analysis_cache
