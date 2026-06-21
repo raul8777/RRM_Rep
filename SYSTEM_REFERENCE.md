@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 20 2026 16:10 UTC-6 | Sesión 5: Auditoría flujos E-series — 8 bugs corregidos + 1 mejora (BUG-E1/E2/E4/E5/E6/E7/E8/E10 + MEJORA-A1), commits d454044 + ce6dc9b, restart OK
+> Última actualización: jun 20 2026 23:11 UTC-6 | Sesión 10: Dashboard unificado + datos en vivo — 9 fixes implementados, commit 01911d0, restart OK
 
 ---
 
@@ -52,7 +52,7 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 20 2026 15:30 UTC-6 |
+| Fecha última actualización | jun 20 2026 23:11 UTC-6 |
 | Capital total | ~$2,910 USDT |
 | Capital spot líquido | ~$1,650 USDT |
 | Capital invertido spot | $0 (sin posiciones spot) |
@@ -69,18 +69,20 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 | VolSpike Override V2 | ✅ IMPLEMENTADO — strength ≥0.65, máx 2 pos, máx 3/día + RSI_1h validado |
 | Dashboard Auditoría PnL | ✅ COMPLETADO — métricas de expectativa vs realidad |
 | Dashboard UX D1-D4 | ✅ jun 19 2026 — entry_price fix, tooltip SVG hover, contador multimodal, señales fix |
+| Dashboard Sesión 9 (FIX-P1/P2/P3) | ✅ jun 21 2026 — predictor real futuros, pnl_prediction persistido en DB, prediction_accuracy futuros |
+| Dashboard Sesión 10 (FIX-L1/L2/L3/D1/L6/D3/D4/D5) | ✅ jun 20 2026 23h — dashboard unificado 2 cards, sub-tabs SPOT\|FUT, conteos reales, datos en vivo |
 | Dashboard Bugs B1-B3 | ✅ jun 19 2026 (sesión 2) — tooltip script fix, SOL entry_price math, balance walletBalance |
 | Futuros monitoring | ✅ check_positions() corre cada ciclo independiente de régimen |
 | Shorts protección ganancia | ✅ futures_protect_profit_usdt=1.0 — solo cierra shorts en pérdida al cambiar régimen |
-| Futuros SHORTs activos | **7/7** — ETH, SUI, XRP, NEAR, BTC, BNB, ADA — slots llenos |
-| FUTURES_MAX_SHORTS | **7** (subido de 5 jun 19 2026 — 1 TP confirmado: SOL +$15.22) |
+| Futuros SHORTs activos | **9/9** — NEAR, ADA, SUI, XRP, BNB, BTC, ETH, UNI, AAVE — slots llenos |
+| FUTURES_MAX_SHORTS | **9** (H-FIX A1 sesión 8 — subido de 7) |
 | FUTURES_MAX_LARGECAP_SHORTS | **5** (guard IMPLEMENTADO en código jun 20 sesión 3 — slots 6-7 forzados a MIDs/NARRATIVE) |
 | CapBridge | ✅ ACTIVO — transferencia autónoma bidireccional spot↔futuros (jun 18 2026) |
 | B2 auto-close spots bear | ✅ ACTIVO — cierra spot LONGs +0.3% PnL en FUTURES_SHORT regime |
 | Docker | live, sin errores |
 | dry_run | False |
 | allow_real_trading | True |
-| Ciclo activo | **6 min** (FUTURES_SHORT) |
+| Ciclo activo | **4 min** (FUTURES_SHORT — H-FIX A3 sesión 8) |
 | Pares con datos históricos | **41 símbolos** — 1095 días 1h klines en `/app/historical_data/` |
 | **Predictor** | **34,309 trades calibrados — 45 símbolos con pesos en DB** |
 | **Learning Engine** | **Señales reales TechnicalIndicators.analyze_signal() — jun 17 2026** |
@@ -133,8 +135,10 @@ crypto-agent/
 ├── trade_utils.py         [ACTUALIZADO jun16] format_indicators_for_predictor pasa 4 features nuevas
 ├── strategy.py            Pesos ranking por régimen (TV/News/Tech)
 ├── position_manager.py    Gestión posiciones abiertas, DB, trailing stop, cierre
-├── app.py                 FastAPI: /predictor/reset-corrupted (NUEVO), /predictor/bootstrap hasta 1000d
-├── dashboard.js           Frontend: cards, tablas, Monte Carlo 3 escenarios, barras comparativas, badge ahorro
+├── app.py                 FastAPI: /predictor/reset-corrupted, /predictor/bootstrap hasta 1000d; FIX-L2/L3/D1/L6a (sesión 10)
+├── futures_client.py      FuturesClient: FIX-L1 get_open_positions_summary() enriquece desde DB (sesión 10)
+├── dashboard.js           Frontend: cards, tablas, Monte Carlo, sub-tabs inner SPOT|FUT, conteos dinámicos (sesión 10)
+├── styles.css             .inner-tab-bar/.inner-tab-btn/.pos-count-badge (sesión 10)
 ├── SYSTEM_REFERENCE.md    ← ESTE ARCHIVO
 └── .env                   Variables de entorno (gitignored)
 ```
@@ -1419,6 +1423,52 @@ auto_close_excluded_on_startup = True
 - N39: Monitorear primer cierre por C1 en logs `prediction_exit_deteriorated` — verificar que EV/prob/trend se logean correctamente
 - N40: Con 50+ trades reales → POST /learning/run para recalibrar bias_correction con datos reales (actualmente cap 1.5 sintéticos)
 - N41: Cuando PRESERVATION confirme (BTC 30d < -15% en 2 ciclos) → verificar que solo NARRATIVE recibe nuevas entradas
+
+---
+
+---
+
+## SESIÓN JUN 20 2026 23:11 UTC-6 — Dashboard Unificado + Datos en Vivo (Sesión 10)
+
+### Objetivo
+Corregir datos stale en dashboard de posiciones abiertas/cerradas y hacer conteos de posiciones precisos en tiempo real. Unificar las 4 cards separadas en 2 cards homologadas con sub-tabs SPOT|FUTUROS.
+
+### Bugs corregidos
+
+| ID | Bug | Archivo | Fix |
+|----|-----|---------|-----|
+| **FIX-L1** | `get_open_positions_summary()` retornaba `pnl_prediction=None` y `hours_held=0` tras restart (memoria sin DB) | `futures_client.py` | Consulta `trades_open WHERE trade_type='futures'` para enriquecer datos en memoria |
+| **FIX-L2** | `/futures/closed` solo usaba Binance API — sin `close_reason`, `pnl_prediction`, `prediction_accuracy` | `app.py:2019+` | Complementa con query a `trades_closed WHERE trade_type='futures'` + merge por símbolo |
+| **FIX-L3** | `trade_type` hardcodeado como `"spot"` para todos los trades cerrados | `app.py:1469` | Lee `metadata->>'trade_type'` desde DB |
+| **FIX-D1** | `hours_held=0.0` y `pnl_prediction=None` hardcodeados para futuros en `open_list` | `app.py:1391-1429` | Calcula `hours_held` real desde `opened_at`; inyecta `pnl_prediction` desde `get_open_positions_summary()` |
+| **FIX-L6a** | `open_positions` no desglosaba spot vs futures count | `app.py:1434-1441` | Agrega `spot_count` y `futures_count` al response de `open_positions` y `closed_positions` |
+| **FIX-L6b** | `renderKPIRow` usaba `_cachedFuturesPositions.length` (cache async desincronizado) | `dashboard.js:362-370` | Deriva `spotCount`/`futCount` desde array unificado `open_positions.positions` |
+| **FIX-L6c** | Headers de cards no mostraban conteos reales | `dashboard.js` | `renderOpenPositions` y `renderClosedPositions` actualizan `<h2>` con badges dinámicos |
+| **FIX-D3** | 4 cards separadas (openPosCard + futuresCard + closedPositionsData + futuresClosedCard) | `index.html` | 2 cards unificadas con inner sub-tabs `[Todas \| SPOT \| FUTUROS]` |
+| **FIX-D4** | `renderFuturesPositions` y `renderFuturesClosed` renderizaban cards independientes | `dashboard.js` | `switchInnerTab()` filtra el array unificado por `trade_type`; `_syncFuturesUnrealPnl()` mantiene KPI fresco |
+| **FIX-D5** | Sin estilos para sub-tabs internos | `styles.css` | `.inner-tab-bar`, `.inner-tab-btn`, `.pos-count-badge` |
+
+### Archivos modificados
+- `futures_client.py` — FIX-L1: enriquecimiento DB en `get_open_positions_summary()`
+- `app.py` — FIX-L2/L3/D1/L6a: `/futures/closed` DB merge, trade_type real, hours_held real, spot/fut counts
+- `frontend/index.html` — FIX-D3: 4 cards → 2 unificadas con inner sub-tabs
+- `frontend/dashboard.js` — FIX-L6b/L6c/D4: conteos desde array unificado, headers dinámicos, `switchInnerTab()`, `_syncFuturesUnrealPnl()`
+- `frontend/styles.css` — FIX-D5: estilos inner tabs
+
+### Commit
+`01911d0` — FIX-L1/L2/L3/L6/D1/D3/D4/D5: Dashboard unificado datos en vivo reales
+
+### Estado post-sesión
+- Dashboard muestra conteos exactos: `Spot: N | Fut: M` en header de cada card
+- Sub-tab [Todas | SPOT | FUTUROS] filtra el array unificado sin fetch adicional
+- Futuros abiertos: `pnl_prediction` y `hours_held` correctos incluso post-restart
+- Futuros cerrados: `close_reason`, `pnl_prediction`, `prediction_accuracy` desde DB
+- `trade_type` correcto para todos los registros cerrados (no hardcoded 'spot')
+
+### ⏳ Pendientes
+- BUG-E3: `analysis_cycle.execute_once()` usa `get_indicators()` redundante
+- FIX-F6: Filtro RSI 4h para confirmar SHORT antes de abrir (RSI 4h < 50)
+- Learning Engine: con 50+ trades reales → POST /learning/run
 
 ---
 
