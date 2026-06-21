@@ -1203,8 +1203,8 @@ function showPositionDetailModal(symbol, positionId, status) {
                     <div class="modal-section">
                         <h4>🛡️ TARGETS CALCULADOS</h4>
                         <div class="detail-grid">
-                            <div><label>Stop Loss Final:</label><span class="negative">$${fmt(position.stop_loss)} (${((position.stop_loss - position.entry_price) / position.entry_price * 100).toFixed(1)}%)</span></div>
-                            <div><label>Take Profit Final:</label><span class="positive">$${fmt(position.take_profit)} (+${((position.take_profit - position.entry_price) / position.entry_price * 100).toFixed(1)}%)</span></div>
+                            <div><label>Stop Loss Final:</label><span class="negative">$${fmt(position.stop_loss)} (${(position.side === 'SELL' || position.side === 'SHORT' ? ((position.entry_price - position.stop_loss) / position.entry_price * 100) : ((position.stop_loss - position.entry_price) / position.entry_price * 100)).toFixed(1)}%)</span></div>
+                            <div><label>Take Profit Final:</label><span class="positive">$${fmt(position.take_profit)} (+${(position.side === 'SELL' || position.side === 'SHORT' ? ((position.entry_price - position.take_profit) / position.entry_price * 100) : ((position.take_profit - position.entry_price) / position.entry_price * 100)).toFixed(1)}%)</span></div>
                             ${pred.stop_loss_initial ? `<div><label>Stop Loss Inicial:</label><span class="negative">$${fmt(pred.stop_loss_initial)}</span></div>` : ''}
                             ${pred.take_profit_initial ? `<div><label>Take Profit Inicial:</label><span class="positive">$${fmt(pred.take_profit_initial)}</span></div>` : ''}
                         </div>
@@ -1260,7 +1260,7 @@ function showPositionDetailModal(symbol, positionId, status) {
                 const _sc = buildPriceRangeChart(
                     position.entry_price,
                     position.exit_price,
-                    position.stop_loss, position.take_profit, 'LONG');
+                    position.stop_loss, position.take_profit, position.side || 'LONG');
                 chartWrap.innerHTML = _sc.html;
                 attachChartHover(_sc.uid, _sc.entry, _sc.isShort, _sc.rangeMin, _sc.rangeSpan, _sc.chartL, _sc.chartW, position.quantity);
             }
@@ -1270,7 +1270,7 @@ function showPositionDetailModal(symbol, positionId, status) {
         const _sc = buildPriceRangeChart(
             position.entry_price,
             status === 'open' ? position.current_price : position.exit_price,
-            position.stop_loss, position.take_profit, 'LONG');
+            position.stop_loss, position.take_profit, position.side || 'LONG');
         if (chartWrap && _sc.html) {
             chartWrap.innerHTML = _sc.html;
             attachChartHover(_sc.uid, _sc.entry, _sc.isShort, _sc.rangeMin, _sc.rangeSpan, _sc.chartL, _sc.chartW, position.quantity);
