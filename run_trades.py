@@ -1724,11 +1724,22 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 _f_sl    = getattr(settings, 'futures_sl_pct', 3.0)
                 _f_tp    = getattr(settings, 'futures_tp_pct', 7.0)
                 _f_lev   = getattr(settings, 'futures_leverage', 2)
-                # F4: Use real signal probability instead of hardcoded 0.45
+                # FIX-P1: Call real predictor for futures SHORT (was hardcoded expected_pnl=1.0)
                 _f_sig_meta = signal_meta.get(symbol, {})
+                _f_prediction, _f_indicators = None, None
+                try:
+                    _f_prediction, _f_indicators = pnl_service.predict_for_symbol(
+                        symbol, client, settings,
+                        position_size_usdt=getattr(settings, 'futures_usdt_per_trade', 100.0)
+                    )
+                    if _f_prediction:
+                        print(f"[Futures/Pred] {symbol}: EV={_f_prediction.get('expected_pnl', 0):.2f} USDT "
+                              f"prob={_f_prediction.get('success_probability', 0):.2f}")
+                except Exception as _fp_err:
+                    print(f"[Futures/Pred] {symbol}: predictor failed ({_fp_err}) — using signal fallback")
                 _f_real_prob = float(_f_sig_meta.get('success_probability', float(_f_sig_meta.get('strength', 0.45))))
                 _f_real_prob = max(0.45, min(0.75, _f_real_prob))
-                _f_pred  = {'success_probability': _f_real_prob, 'expected_pnl': 1.0}
+                _f_pred = _f_prediction or {'success_probability': _f_real_prob, 'expected_pnl': 1.0}
                 _f_usdt  = _kelly_position_size(
                     settings, strength=float(_f_sig_meta.get('strength', 0.5)),
                     prediction=_f_pred, usdt_liquid=usdt_liquid,
@@ -1783,7 +1794,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     pass
                 print(f"[Futures] FUTURES_SHORT mode: opening short {symbol} margin=${_f_usdt}")
                 _pos = _fc.open_short(symbol, usdt_amount=_f_usdt,
-                                      sl_pct=_f_sl, tp_pct=_f_tp, leverage=_f_lev)
+                                      sl_pct=_f_sl, tp_pct=_f_tp, leverage=_f_lev,
+                                      pnl_prediction=_f_prediction, indicators_at_entry=_f_indicators)
                 if _pos:
                     orders.append({"symbol": symbol, "side": "SHORT_FUTURES",
                                     "qty": _pos.qty, "entry_price": _pos.entry_price,

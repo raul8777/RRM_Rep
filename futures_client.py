@@ -52,6 +52,8 @@ class FuturesPosition:
     closed_at: Optional[datetime] = None
     exit_price: Optional[float] = None
     pnl: Optional[float] = None
+    pnl_prediction: Optional[Dict] = field(default=None, repr=False, compare=False)       # FIX-P2: predictor output at entry
+    indicators_at_entry: Optional[Dict] = field(default=None, repr=False, compare=False)  # FIX-P2: technical indicators at entry
     _smart_meta: Dict = field(default_factory=dict, repr=False, compare=False)
 
     def unrealized_pnl(self, current_price: float) -> float:
@@ -104,11 +106,14 @@ class FuturesClient:
                 'sl_order_id': pos.sl_order_id,
                 'tp_order_id': pos.tp_order_id,
             })
+            _pnl_pred_json = json.dumps(pos.pnl_prediction) if pos.pnl_prediction else None
+            _ind_json      = json.dumps(pos.indicators_at_entry) if pos.indicators_at_entry else None
             self.db_client.execute_update(
                 """
                 INSERT INTO trades_open
-                    (symbol, side, quantity, price, entry_time, stop_loss, take_profit, metadata)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    (symbol, side, quantity, price, entry_time, stop_loss, take_profit,
+                     metadata, pnl_prediction, indicators_at_entry)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     pos.symbol,
@@ -119,9 +124,12 @@ class FuturesClient:
                     pos.sl_price,
                     pos.tp_price,
                     meta,
+                    _pnl_pred_json,
+                    _ind_json,
                 )
             )
-            print(f'[Futures/DB] {pos.symbol} {pos.side} OPEN saved to trades_open')
+            print(f'[Futures/DB] {pos.symbol} {pos.side} OPEN saved to trades_open '
+                  f'(pred={pos.pnl_prediction is not None})')
         except Exception as e:
             print(f'[Futures/DB] save_open {pos.symbol} failed: {e}')
 
@@ -145,12 +153,21 @@ class FuturesClient:
                 'tp_order_id': pos.tp_order_id,
                 'smart_meta': pos._smart_meta,
             })
+            _pnl_pred_json = json.dumps(pos.pnl_prediction) if pos.pnl_prediction else None
+            _ind_json      = json.dumps(pos.indicators_at_entry) if pos.indicators_at_entry else None
+            # FIX-P3: prediction_accuracy = (real_pnl - predicted_pnl) / |predicted_pnl|
+            _pred_accuracy = None
+            if pos.pnl_prediction:
+                _pred_pnl = float(pos.pnl_prediction.get('expected_pnl', 0) or 0)
+                if _pred_pnl != 0:
+                    _pred_accuracy = round((pnl - _pred_pnl) / abs(_pred_pnl), 4)
             self.db_client.execute_update(
                 """
                 INSERT INTO trades_closed
                     (symbol, side, quantity, entry_price, exit_price, pnl, pnl_percentage,
-                     close_reason, entry_time, exit_time, metadata, data_version)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     close_reason, entry_time, exit_time, metadata, data_version,
+                     pnl_prediction, indicators_at_entry, prediction_accuracy, learning_eligible)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     pos.symbol,
@@ -165,6 +182,10 @@ class FuturesClient:
                     (pos.closed_at or datetime.now(timezone.utc)).isoformat(),
                     meta,
                     'futures_v2',
+                    _pnl_pred_json,
+                    _ind_json,
+                    _pred_accuracy,
+                    True,
                 )
             )
             # Remove from trades_open by symbol+entry_time
@@ -912,6 +933,8 @@ class FuturesClient:
         sl_pct: float = 3.0,   # % above entry — stop loss
         tp_pct: float = 7.0,   # % below entry — take profit
         leverage: int = LEVERAGE_MAX,
+        pnl_prediction: Optional[Dict] = None,      # FIX-P2: predictor output at entry
+        indicators_at_entry: Optional[Dict] = None, # FIX-P2: technical indicators at entry
     ) -> Optional[FuturesPosition]:
         """
         Open a SHORT position with mandatory SL and TP orders.
@@ -1021,9 +1044,11 @@ class FuturesClient:
                 symbol=symbol, side="SHORT", qty=qty,
                 entry_price=filled_price, sl_price=sl_price, tp_price=tp_price,
                 order_id=order_id, sl_order_id=sl_order_id, tp_order_id=tp_order_id,
+                pnl_prediction=pnl_prediction,
+                indicators_at_entry=indicators_at_entry,
             )
             self._open_positions[self._pos_key(symbol, "SHORT")] = pos
-            self._save_futures_open(pos)  # FIX-G: persist to DB
+            self._save_futures_open(pos)  # FIX-G+P2: persist to DB with prediction
             print(f"[Futures] SHORT {symbol} OPEN: entry={filled_price:.4f}, "
                   f"SL={sl_price:.4f}, TP={tp_price:.4f}")
             return pos
