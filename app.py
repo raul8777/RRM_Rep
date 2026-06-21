@@ -2246,8 +2246,15 @@ async def get_health_status() -> Dict:
         all_pos = position_manager.get_all_positions()
         db_count = sum(len(v) for v in all_pos.values())
         balances = binance_client.get_account_balance()
-        # Only check symbols the system is actively tracking (e.g. BNBUSDT -> BNB)
-        tracked_symbols = set(all_pos.keys())
+        # Only check SPOT positions — futures positions (trade_type='futures') have no spot balance
+        def _is_futures_pos(pos_list):
+            return any(
+                (p.metadata or {}).get('trade_type') == 'futures'
+                for p in pos_list
+            )
+        spot_pos = {sym: ps for sym, ps in all_pos.items() if not _is_futures_pos(ps)}
+        futures_pos = {sym: ps for sym, ps in all_pos.items() if _is_futures_pos(ps)}
+        tracked_symbols = set(spot_pos.keys())
 
         def _sym_to_asset(sym: str) -> str:
             for quote in ("USDT", "BUSD", "BTC", "ETH"):
@@ -2259,7 +2266,7 @@ async def get_health_status() -> Dict:
             1 for sym in tracked_symbols
             if float(balances.get(_sym_to_asset(sym), 0)) > 0
         )
-        # mismatch: DB has entries for symbols with no Binance balance
+        # mismatch: DB has SPOT entries for symbols with no Binance spot balance
         symbols_missing_in_binance = [
             sym for sym in tracked_symbols
             if float(balances.get(_sym_to_asset(sym), 0)) == 0
@@ -2269,7 +2276,8 @@ async def get_health_status() -> Dict:
         checks["position_sync"] = {
             "status": sync_status,
             "db_open_positions": db_count,
-            "tracked_symbols": len(tracked_symbols),
+            "spot_tracked": len(tracked_symbols),
+            "futures_tracked": len(futures_pos),
             "binance_confirmed": binance_holding_count,
             "symbols_missing_in_binance": symbols_missing_in_binance,
             "mismatch": mismatch,
