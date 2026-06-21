@@ -41,7 +41,7 @@ _asg_cycle_id: int = 0  # incremented each cycle to know when to reset
 _non_short_regime_cycles: int = 0
 
 
-def _get_futures_client(settings) -> FuturesClient:
+def _get_futures_client(settings, db_client=None) -> FuturesClient:
     """Lazy singleton for FuturesClient. Reuses instance across cycles."""
     global _futures_client
     if _futures_client is None:
@@ -51,10 +51,14 @@ def _get_futures_client(settings) -> FuturesClient:
             dry_run    = settings.dry_run,
             max_shorts = getattr(settings, 'futures_max_shorts', 2),
             max_longs  = getattr(settings, 'futures_max_longs', 3),
+            db_client  = db_client,  # FIX-G: DB persistence
         )
         if getattr(settings, 'futures_hedge_mode_enabled', True):
             _futures_client.enable_hedge_mode()
         print("[Futures] FuturesClient initialized")
+    # FIX-G: Attach db_client if it became available after first init (e.g. DB reconnect)
+    if db_client and not _futures_client.db_client:
+        _futures_client.db_client = db_client
     # Always sync category cap from settings (survives hot-config changes)
     _futures_client.max_largecap_shorts = getattr(settings, 'futures_max_largecap_shorts', 5)
     _lc_raw = getattr(settings, 'futures_largecap_symbols', ['BTCUSDT','ETHUSDT','BNBUSDT','XRPUSDT','SOLUSDT'])
@@ -2774,7 +2778,7 @@ def execute_once(monitor_only: bool = False):
     futures_closes = []
     if getattr(settings, 'futures_enabled', False):
         try:
-            _fc = _get_futures_client(settings)
+            _fc = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None))
 
             # CapBridge: bidirectional autonomous spot↔futures capital rebalancing
             if getattr(settings, 'futures_capital_bridge_enabled', True):

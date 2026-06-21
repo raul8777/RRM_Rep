@@ -72,7 +72,8 @@ class FuturesPosition:
 
 class FuturesClient:
     def __init__(self, api_key: str, api_secret: str, dry_run: bool = False,
-                 max_shorts: int = MAX_SHORTS, max_longs: int = 3):
+                 max_shorts: int = MAX_SHORTS, max_longs: int = 3,
+                 db_client=None):
         self.api_key    = api_key
         self.api_secret = api_secret
         self.dry_run    = dry_run
@@ -86,8 +87,94 @@ class FuturesClient:
         self._leverage_set: set = set()   # symbols with leverage already configured
         self._hedge_mode: Optional[bool] = None  # None = unknown until checked
         self._binance_client_ref = None  # set by _get_futures_client() for momentum eval
+        self.db_client = db_client        # FIX-G: DB persistence for futures trades
         if not dry_run:
             self._sync_open_positions()
+
+    # ── DB persistence helpers (FIX-G) ──────────────────────────────────────
+
+    def _save_futures_open(self, pos: 'FuturesPosition') -> None:
+        """Persist a newly opened futures position to trades_open."""
+        if not self.db_client:
+            return
+        try:
+            meta = json.dumps({
+                'trade_type': 'futures',
+                'order_id': pos.order_id,
+                'sl_order_id': pos.sl_order_id,
+                'tp_order_id': pos.tp_order_id,
+            })
+            self.db_client.execute_update(
+                """
+                INSERT INTO trades_open
+                    (symbol, side, quantity, price, entry_time, stop_loss, take_profit, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    pos.symbol,
+                    'SELL' if pos.side == 'SHORT' else 'BUY',
+                    pos.qty,
+                    pos.entry_price,
+                    pos.opened_at.isoformat(),
+                    pos.sl_price,
+                    pos.tp_price,
+                    meta,
+                )
+            )
+            print(f'[Futures/DB] {pos.symbol} {pos.side} OPEN saved to trades_open')
+        except Exception as e:
+            print(f'[Futures/DB] save_open {pos.symbol} failed: {e}')
+
+    def _save_futures_closed(self, pos: 'FuturesPosition', reason: str) -> None:
+        """Persist a closed futures position to trades_closed and remove from trades_open."""
+        if not self.db_client:
+            return
+        try:
+            exit_price = pos.exit_price or pos.entry_price
+            if pos.side == 'SHORT':
+                gross_pnl = (pos.entry_price - exit_price) * pos.qty
+                pnl_pct   = round((pos.entry_price - exit_price) / pos.entry_price * 100, 4)
+            else:
+                gross_pnl = (exit_price - pos.entry_price) * pos.qty
+                pnl_pct   = round((exit_price - pos.entry_price) / pos.entry_price * 100, 4)
+            pnl = pos.pnl if pos.pnl is not None else gross_pnl
+            meta = json.dumps({
+                'trade_type': 'futures',
+                'order_id': pos.order_id,
+                'sl_order_id': pos.sl_order_id,
+                'tp_order_id': pos.tp_order_id,
+                'smart_meta': pos._smart_meta,
+            })
+            self.db_client.execute_update(
+                """
+                INSERT INTO trades_closed
+                    (symbol, side, quantity, entry_price, exit_price, pnl, pnl_percentage,
+                     close_reason, entry_time, exit_time, metadata, data_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    pos.symbol,
+                    'SELL' if pos.side == 'SHORT' else 'BUY',
+                    pos.qty,
+                    pos.entry_price,
+                    exit_price,
+                    round(pnl, 6),
+                    pnl_pct,
+                    reason,
+                    pos.opened_at.isoformat(),
+                    (pos.closed_at or datetime.now(timezone.utc)).isoformat(),
+                    meta,
+                    'futures_v2',
+                )
+            )
+            # Remove from trades_open by symbol+entry_time
+            self.db_client.execute_update(
+                "DELETE FROM trades_open WHERE symbol = %s AND price = %s AND metadata->>'trade_type' = 'futures'",
+                (pos.symbol, pos.entry_price)
+            )
+            print(f'[Futures/DB] {pos.symbol} {pos.side} CLOSED ({reason}) pnl=${pnl:.2f} saved to trades_closed')
+        except Exception as e:
+            print(f'[Futures/DB] save_closed {pos.symbol} failed: {e}')
 
     # ── Position key helpers ──────────────────────────────────────────────────
 
@@ -936,6 +1023,7 @@ class FuturesClient:
                 order_id=order_id, sl_order_id=sl_order_id, tp_order_id=tp_order_id,
             )
             self._open_positions[self._pos_key(symbol, "SHORT")] = pos
+            self._save_futures_open(pos)  # FIX-G: persist to DB
             print(f"[Futures] SHORT {symbol} OPEN: entry={filled_price:.4f}, "
                   f"SL={sl_price:.4f}, TP={tp_price:.4f}")
             return pos
@@ -1051,6 +1139,7 @@ class FuturesClient:
                 order_id=order_id, sl_order_id=sl_order_id, tp_order_id=tp_order_id,
             )
             self._open_positions[self._pos_key(symbol, "LONG")] = pos
+            self._save_futures_open(pos)  # FIX-G: persist to DB
             print(f"[Futures] LONG {symbol} OPEN: entry={filled_price:.4f}, "
                   f"SL={sl_price:.4f}, TP={tp_price:.4f}")
             return pos
@@ -1090,6 +1179,7 @@ class FuturesClient:
             })
             if pos:
                 pos.closed = True; pos.closed_at = datetime.now(timezone.utc); pos.exit_price = current_price; pos.pnl = pnl
+                self._save_futures_closed(pos, reason)  # FIX-G: persist to DB
             print(f"[Futures] LONG {symbol} CLOSED: PnL~${pnl:.2f}")
             return result
         except Exception as e:
@@ -1147,6 +1237,7 @@ class FuturesClient:
                 pos.closed_at  = datetime.now(timezone.utc)
                 pos.exit_price = current_price
                 pos.pnl        = pnl
+                self._save_futures_closed(pos, reason)  # FIX-G: persist to DB
             print(f"[Futures] SHORT {symbol} CLOSED: PnL~${pnl:.2f}")
             return result
         except Exception as e:
