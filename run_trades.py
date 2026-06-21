@@ -91,6 +91,10 @@ _overflow_positions: set = set()
 # Futures overflow: SHORTs opened beyond futures_max_shorts when signal is exceptional.
 _futures_overflow_positions: set = set()
 
+# FIX-F1: Futures SHORT SL cooldown — prevent re-entering same symbol for N minutes after SL hit.
+# {symbol: datetime_of_sl_hit}  (UTC)
+_FUTURES_SL_COOLDOWN: Dict[str, datetime] = {}
+
 # ── Circuit breaker: consecutive order failures (technical errors only) ──────
 _consecutive_failures: int = 0
 _circuit_breaker_until: datetime = None  # UTC — None = not paused
@@ -172,6 +176,8 @@ def _load_cooldowns_from_db() -> None:
                 _VOLSPIKE_COOLDOWN[_sym] = _act
             elif _type == 'narrative':
                 _NARRATIVE_BUY_COOLDOWN[_sym] = _act
+            elif _type == 'futures_sl':
+                _FUTURES_SL_COOLDOWN[_sym] = _act
             loaded += 1
         if loaded:
             print(f"[Cooldowns] Loaded {loaded} active cooldowns from DB")
@@ -1654,6 +1660,20 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     print(f"[Futures] {symbol} not in futures_symbols — skipping short, no spot entry in FUTURES_SHORT mode")
                     update_signal_decision(symbol, "rejected", "NOT_FUTURES_SYM")
                     continue
+                # FIX-F1: Skip if symbol is in SL cooldown
+                _sl_cd_hours = getattr(settings, 'futures_sl_cooldown_hours', 1.0)
+                _sl_cd_hit = _FUTURES_SL_COOLDOWN.get(symbol)
+                if _sl_cd_hit is None:
+                    _sl_cd_hit_db = _check_cooldown_db(symbol, 'futures_sl')
+                    if _sl_cd_hit_db:
+                        print(f'[Futures/SL-CD] {symbol}: SL cooldown active (from DB) — skip re-entry')
+                        update_signal_decision(symbol, 'rejected', 'SL_COOLDOWN')
+                        continue
+                elif (datetime.now(timezone.utc) - _sl_cd_hit).total_seconds() < _sl_cd_hours * 3600:
+                    _cd_remaining = _sl_cd_hours - (datetime.now(timezone.utc) - _sl_cd_hit).total_seconds() / 3600
+                    print(f'[Futures/SL-CD] {symbol}: SL cooldown active ({_cd_remaining:.1f}h remaining) — skip re-entry')
+                    update_signal_decision(symbol, 'rejected', 'SL_COOLDOWN')
+                    continue
                 # Enforce futures-specific max shorts (separate from spot limit)
                 _fc = _get_futures_client(settings)
                 _max_shorts = getattr(settings, 'futures_max_shorts', 2)
@@ -1729,11 +1749,27 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                             print(f"[Futures] F&G Extreme Greed ({_fng_val}) → reduced short margin ${_f_usdt}")
                 except Exception:
                     pass
+                # FIX-F3: Hard cap to available futures margin to prevent 'Insufficient margin' loops
+                _avail_for_cap = _fc.get_available_usdt() if not _fc.dry_run else usdt_liquid * 0.3
+                if _avail_for_cap > 0 and _f_usdt > _avail_for_cap:
+                    print(f'[Futures] FIX-F3: margin cap ${_f_usdt:.2f} → ${_avail_for_cap:.2f} (available balance)')
+                    _f_usdt = round(_avail_for_cap, 2)
                 _no_short_threshold = getattr(settings, 'futures_no_short_btc_4h_threshold', 2.0)
                 if btc_4h_chg_pct >= _no_short_threshold:
                     print(f"[Futures] SHORT {symbol} SKIPPED: BTC 4h candle={btc_4h_chg_pct:+.2f}% >= {_no_short_threshold}% — no shorting into BTC momentum")
                     update_signal_decision(symbol, "rejected", "BTC_MOMENTUM")
                     continue
+                # FIX-F2: Block new SHORTs if BTC is in an intraday bounce (1h candle)
+                _no_short_btc_1h_threshold = getattr(settings, 'futures_no_short_btc_1h_threshold', 0.8)
+                try:
+                    _btc_1h_klines = client.get_klines('BTCUSDT', '1h', limit=2)
+                    _btc_1h_chg = (float(_btc_1h_klines[-1][4]) - float(_btc_1h_klines[-1][1])) / float(_btc_1h_klines[-1][1]) * 100 if _btc_1h_klines else 0.0
+                    if _btc_1h_chg >= _no_short_btc_1h_threshold:
+                        print(f'[Futures] SHORT {symbol} SKIPPED: BTC 1h bounce={_btc_1h_chg:+.2f}% >= {_no_short_btc_1h_threshold}% — no new SHORTs in rally')
+                        update_signal_decision(symbol, 'rejected', 'BTC_1H_BOUNCE')
+                        continue
+                except Exception:
+                    pass
                 print(f"[Futures] FUTURES_SHORT mode: opening short {symbol} margin=${_f_usdt}")
                 _pos = _fc.open_short(symbol, usdt_amount=_f_usdt,
                                       sl_pct=_f_sl, tp_pct=_f_tp, leverage=_f_lev)
@@ -2891,6 +2927,12 @@ def execute_once(monitor_only: bool = False):
                     _cc_sym = _cc.get('symbol') if isinstance(_cc, dict) else getattr(_cc, 'symbol', None)
                     if _cc_sym:
                         _futures_overflow_positions.discard(_cc_sym)
+                        # FIX-F1: Register SL cooldown to prevent immediate re-entry on the same symbol
+                        if _cc.get('reason') == 'stop_loss':
+                            _sl_cd_hours = getattr(settings, 'futures_sl_cooldown_hours', 1.0)
+                            _FUTURES_SL_COOLDOWN[_cc_sym] = datetime.now(timezone.utc)
+                            _set_cooldown(_cc_sym, 'futures_sl', _sl_cd_hours, {'reason': 'sl_hit'})
+                            print(f'[Futures/SL-CD] {_cc_sym}: cooldown {_sl_cd_hours}h — no re-entry until next window')
         except Exception as _fce:
             print(f"[Futures] check_positions error: {_fce}")
 
