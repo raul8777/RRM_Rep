@@ -1358,6 +1358,24 @@ async def get_dashboard_summary() -> Dict:
                 current_value_usdt = round(cp * qty_f, 4)
                 _cat_map = getattr(settings, "token_categories", {})
                 _sym_cat = _cat_map.get(symbol, {})
+                # FIX-PR1: backfill pnl_prediction on-demand if missing in DB
+                _pred_for_pos = position.pnl_prediction
+                if _pred_for_pos is None:
+                    try:
+                        import pnl_service as _pnl_svc
+                        _pred_for_pos, _ = _pnl_svc.predict_for_symbol(
+                            symbol=symbol, client=binance_client, settings=settings,
+                            position_size_usdt=invested_usdt or 50.0
+                        )
+                        if _pred_for_pos and position.db_id:
+                            import json as _json
+                            db_client.execute_update(
+                                "UPDATE trades_open SET pnl_prediction = %s::jsonb WHERE id = %s",
+                                (_json.dumps(_pred_for_pos), position.db_id)
+                            )
+                    except Exception:
+                        _pred_for_pos = None
+
                 open_list.append({
                     "symbol": symbol,
                     "position_id": position.position_id,
@@ -1378,7 +1396,7 @@ async def get_dashboard_summary() -> Dict:
                     "entry_commission": float(position.entry_commission) if position.entry_commission else 0.0,
                     "stop_loss": float(position.stop_loss) if position.stop_loss else None,
                     "take_profit": float(position.take_profit) if position.take_profit else None,
-                    "pnl_prediction": position.pnl_prediction,
+                    "pnl_prediction": _pred_for_pos,
                     "is_overflow": symbol in _ov_positions,
                     "trade_type": "spot",
                 })
@@ -1402,6 +1420,31 @@ async def get_dashboard_summary() -> Dict:
                     _fp_hours = 0.0
                 # FIX-D1: use entry_time in Mexico timezone for display
                 _fp_entry_time_str = to_mexico_time_str(_fp_opened) if _fp_opened else ""
+
+                # FIX-PR2: backfill pnl_prediction for futures huérfanos (no prediction in DB)
+                _fp_pred = fp.get("pnl_prediction")
+                if _fp_pred is None:
+                    try:
+                        import pnl_service as _pnl_svc
+                        _fp_invested = round(fp["entry_price"] * fp["qty"], 2)
+                        _fp_pred, _ = _pnl_svc.predict_for_symbol(
+                            symbol=fp["symbol"], client=binance_client, settings=settings,
+                            position_size_usdt=_fp_invested or 100.0
+                        )
+                        if _fp_pred and db_client:
+                            import json as _json
+                            _fp_side_db = 'SELL' if fp["side"] == 'SHORT' else 'BUY'
+                            db_client.execute_update(
+                                """UPDATE trades_open SET pnl_prediction = %s::jsonb
+                                   WHERE symbol = %s AND side = %s
+                                   AND metadata->>'trade_type' = 'futures'
+                                   AND pnl_prediction IS NULL""",
+                                (_json.dumps(_fp_pred), fp["symbol"], _fp_side_db)
+                            )
+                    except Exception as _fpe:
+                        print(f"[FIX-PR2] backfill failed for {fp['symbol']}: {_fpe}")
+                        _fp_pred = None
+
                 open_list.append({
                     "symbol": fp["symbol"],
                     "position_id": f"futures_{fp['symbol']}_{fp['side']}",
@@ -1423,7 +1466,7 @@ async def get_dashboard_summary() -> Dict:
                     "entry_commission": 0.0,
                     "stop_loss": fp["sl_price"],
                     "take_profit": fp["tp_price"],
-                    "pnl_prediction": fp.get("pnl_prediction"),
+                    "pnl_prediction": _fp_pred,
                     "is_overflow": False,
                     "trade_type": "futures",
                 })
