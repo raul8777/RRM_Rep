@@ -1749,11 +1749,18 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                             print(f"[Futures] F&G Extreme Greed ({_fng_val}) → reduced short margin ${_f_usdt}")
                 except Exception:
                     pass
-                # FIX-F3: Hard cap to available futures margin to prevent 'Insufficient margin' loops
+                # FIX-F3: Hard cap to available futures margin to prevent 'Insufficient margin' loops.
+                # Keep a 2% reserve (min $2) so Binance doesn't reject with exact-balance orders.
                 _avail_for_cap = _fc.get_available_usdt() if not _fc.dry_run else usdt_liquid * 0.3
-                if _avail_for_cap > 0 and _f_usdt > _avail_for_cap:
-                    print(f'[Futures] FIX-F3: margin cap ${_f_usdt:.2f} → ${_avail_for_cap:.2f} (available balance)')
-                    _f_usdt = round(_avail_for_cap, 2)
+                _avail_reserve = max(2.0, round(_avail_for_cap * 0.02, 2))
+                _avail_net = _avail_for_cap - _avail_reserve
+                if _avail_net < 10.0:
+                    print(f'[Futures] FIX-F3: insufficient free margin ${_avail_net:.2f} (avail=${_avail_for_cap:.2f} - reserve=${_avail_reserve:.2f}) — skip')
+                    update_signal_decision(symbol, 'rejected', 'INSUF_MARGIN')
+                    continue
+                if _f_usdt > _avail_net:
+                    print(f'[Futures] FIX-F3: margin cap ${_f_usdt:.2f} → ${_avail_net:.2f} (available-reserve)')
+                    _f_usdt = round(_avail_net, 2)
                 _no_short_threshold = getattr(settings, 'futures_no_short_btc_4h_threshold', 2.0)
                 if btc_4h_chg_pct >= _no_short_threshold:
                     print(f"[Futures] SHORT {symbol} SKIPPED: BTC 4h candle={btc_4h_chg_pct:+.2f}% >= {_no_short_threshold}% — no shorting into BTC momentum")
