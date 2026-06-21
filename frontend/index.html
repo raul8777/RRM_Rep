@@ -124,10 +124,10 @@
         <!-- LEFT COLUMN -->
         <div class="ops-main">
 
-            <!-- Posiciones Abiertas — Spot + Futures unificadas -->
+            <!-- Posiciones Abiertas — Unificadas SPOT + FUTUROS con sub-tabs -->
             <div class="card" id="openPosCard">
                 <div class="card-header">
-                    <h2>📂 Posiciones Abiertas</h2>
+                    <h2 id="openPosCardTitle">📂 Posiciones Abiertas</h2>
                     <div class="card-actions">
                         <label class="toggle-label">
                             <input type="checkbox" id="toggleMxn"> MXN
@@ -135,31 +135,25 @@
                         <button class="btn btn-primary btn-xs" id="syncBalanceBtn" title="Sincronizar con Binance">⇄ Sync</button>
                     </div>
                 </div>
+                <div class="inner-tab-bar">
+                    <button class="inner-tab-btn active" data-inner-tab="open-all" onclick="switchInnerTab('open','all')">Todas</button>
+                    <button class="inner-tab-btn" data-inner-tab="open-spot" onclick="switchInnerTab('open','spot')">SPOT</button>
+                    <button class="inner-tab-btn" data-inner-tab="open-fut" onclick="switchInnerTab('open','fut')">FUTUROS</button>
+                </div>
                 <div id="openPositionsData"><p class="loading">Cargando posiciones...</p></div>
             </div>
 
-            <!-- Futuros Abiertos (visible solo en FUTURES_SHORT) -->
-            <div class="card" id="futuresCard">
+            <!-- Trades Cerrados — Unificados SPOT + FUTUROS con sub-tabs -->
+            <div class="card" id="closedPosCard">
                 <div class="card-header">
-                    <h2>📉 Futuros SHORT Abiertos <span class="badge-lev">2×</span></h2>
+                    <h2 id="closedPosCardTitle">✅ Trades Cerrados <span class="card-sub">últimos 3 días</span></h2>
                 </div>
-                <div id="futuresPositionsData"><p class="loading">Cargando futuros...</p></div>
-            </div>
-
-            <!-- Posiciones Cerradas -->
-            <div class="card">
-                <div class="card-header">
-                    <h2>✅ Trades Cerrados <span class="card-sub">últimos 3 días</span></h2>
+                <div class="inner-tab-bar">
+                    <button class="inner-tab-btn active" data-inner-tab="closed-all" onclick="switchInnerTab('closed','all')">Todos</button>
+                    <button class="inner-tab-btn" data-inner-tab="closed-spot" onclick="switchInnerTab('closed','spot')">SPOT</button>
+                    <button class="inner-tab-btn" data-inner-tab="closed-fut" onclick="switchInnerTab('closed','fut')">FUTUROS</button>
                 </div>
                 <div id="closedPositionsData"><p class="loading">Cargando...</p></div>
-            </div>
-
-            <!-- Futuros Cerrados -->
-            <div class="card" id="futuresClosedCard">
-                <div class="card-header">
-                    <h2>📦 Futuros Cerrados <span class="card-sub">últimos 3 días</span></h2>
-                </div>
-                <div id="futuresClosedData"><p class="loading">Cargando...</p></div>
             </div>
 
         </div>

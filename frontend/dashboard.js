@@ -359,11 +359,14 @@ function renderKPIRow(data) {
     const cycleMins  = cycle.interval_minutes || '—';
     const secsLeft   = cycle.seconds_until_next;
     const mode       = regime.trading_mode || 'SPOT_BULL';
-    // Dynamic position limits per regime
+    // FIX-L6b: derive counts from unified open_positions array (not stale cache)
     const isFutShort = mode === 'FUTURES_SHORT';
     const maxSpot    = openPos.max_positions || 12;
-    const futCount   = _cachedFuturesPositions.length;
-    const futMax     = isFutShort ? (_cachedFuturesPositions.length > 0 ? Math.max(futCount, 5) : 7) : 0;
+    const spotPositions = positions.filter(p => p.trade_type !== 'futures');
+    const futPositions  = positions.filter(p => p.trade_type === 'futures');
+    const spotCount  = openPos.spot_count    ?? spotPositions.length;
+    const futCount   = openPos.futures_count ?? futPositions.length;
+    const futMax     = isFutShort ? (futCount > 0 ? Math.max(futCount, 5) : 7) : 0;
     const maxPos     = maxSpot;  // kept for legacy KPI tiles
     const ctx        = data.market_context || {};
     const fng        = ctx.fear_greed_value ?? 50;
@@ -404,15 +407,15 @@ function renderKPIRow(data) {
     setText('sbUnreal',    `${unrealPnl >= 0 ? '+' : ''}$${fmt(unrealPnl)} USDT`, unrealCls);
     setText('sbWr',        `${fmt(wr,1)}%`, wrCls);
     setText('sbPf',        fmt(pf), pfCls);
-    // Multimodal position counter
-    const spotOverflow = positions.length > maxSpot;
+    // FIX-L6b: Multimodal position counter using unified counts
+    const spotOverflow = spotCount > maxSpot;
     const futOverflow  = isFutShort && futCount > futMax;
     let posStr, posCls;
     if (isFutShort) {
-        posStr = `Spot: ${positions.length}/${maxSpot} | Fut: ${futCount}/${futMax}`;
+        posStr = `Spot: ${spotCount}/${maxSpot} | Fut: ${futCount}/${futMax}`;
         posCls = (spotOverflow || futOverflow) ? 'negative' : 'positive';
     } else {
-        posStr = `Spot: ${positions.length}/${maxSpot}`;
+        posStr = `Spot: ${spotCount}/${maxSpot}`;
         posCls = spotOverflow ? 'negative' : 'positive';
     }
     setText('sbPositions', posStr, posCls);
@@ -472,10 +475,32 @@ function renderKPIRow(data) {
     if (kpiPnlHoy)  { kpiPnlHoy.textContent = `Hoy: ${pnlToday >= 0 ? '+' : ''}$${fmt(pnlToday)}`; kpiPnlHoy.className = `kpi-sub ${pnlHCls}`; }
     if (kpiWr)      { kpiWr.textContent = `${fmt(wr, 1)}%`; kpiWr.className = `kpi-value ${wrCls}`; }
     if (kpiPf)      { kpiPf.textContent = `PF: ${fmt(pf)}`; kpiPf.className = `kpi-sub ${pfCls}`; }
-    if (kpiPos)     { kpiPos.textContent = isFutShort ? `${positions.length}s+${futCount}f` : `${positions.length}/${maxPos}`; kpiPos.className = `kpi-value ${(spotOverflow || futOverflow) ? 'negative' : 'positive'}`; }
-    if (kpiPosSub)  kpiPosSub.textContent  = isFutShort ? `Spot: ${positions.length}/${maxSpot} | Fut: ${futCount}/${futMax}` : `Abiertas (max ${maxPos})`;
+    if (kpiPos)     { kpiPos.textContent = isFutShort ? `${spotCount}s+${futCount}f` : `${spotCount}/${maxPos}`; kpiPos.className = `kpi-value ${(spotOverflow || futOverflow) ? 'negative' : 'positive'}`; }
+    if (kpiPosSub)  kpiPosSub.textContent  = isFutShort ? `Spot: ${spotCount}/${maxSpot} | Fut: ${futCount}/${futMax}` : `Abiertas (max ${maxPos})`;
     if (kpiCd)      kpiCd.textContent      = countdownStr;
     if (kpiCycleSub)kpiCycleSub.textContent = `${mode} · ${cycleMins}min`;
+}
+
+// ── Inner tab state & switcher ────────────────────────────────────────────────
+let _currentOpenFilter   = 'all';
+let _currentClosedFilter = 'all';
+let _lastOpenData   = null;
+let _lastClosedData = null;
+
+function switchInnerTab(card, filter) {
+    if (card === 'open') {
+        _currentOpenFilter = filter;
+        document.querySelectorAll('[data-inner-tab^="open-"]').forEach(b => {
+            b.classList.toggle('active', b.dataset.innerTab === `open-${filter}`);
+        });
+        if (_lastOpenData) renderOpenPositions(_lastOpenData);
+    } else {
+        _currentClosedFilter = filter;
+        document.querySelectorAll('[data-inner-tab^="closed-"]').forEach(b => {
+            b.classList.toggle('active', b.dataset.innerTab === `closed-${filter}`);
+        });
+        if (_lastClosedData) renderClosedPositions(_lastClosedData);
+    }
 }
 
 // ── Render functions (pure – no fetch) ───────────────────────────────────────
@@ -752,17 +777,37 @@ function renderPnlHistory(d) {
 
 function renderOpenPositions(d) {
     if (!d) return;
+    _lastOpenData = d;  // FIX-L6c: cache for sub-tab re-render
     const el = document.getElementById('openPositionsData');
-    if (!d.positions || d.positions.length === 0) {
-        el.innerHTML = '<p class="loading">Sin posiciones abiertas</p>';
+
+    // FIX-L6c: update card header with live counts
+    const _allPos = d.positions || [];
+    const _spotC = d.spot_count    ?? _allPos.filter(p => p.trade_type !== 'futures').length;
+    const _futC  = d.futures_count ?? _allPos.filter(p => p.trade_type === 'futures').length;
+    const _titleEl = document.getElementById('openPosCardTitle');
+    if (_titleEl) {
+        _titleEl.innerHTML = `📂 Posiciones Abiertas <span class="pos-count-badge">Spot: ${_spotC} | Fut: ${_futC}</span>`;
+    }
+
+    // FIX-D4: filter by active inner sub-tab
+    const _filter = _currentOpenFilter;
+    let visiblePositions = _allPos;
+    if (_filter === 'spot') visiblePositions = _allPos.filter(p => p.trade_type !== 'futures');
+    else if (_filter === 'fut') visiblePositions = _allPos.filter(p => p.trade_type === 'futures');
+
+    if (visiblePositions.length === 0) {
+        el.innerHTML = _allPos.length === 0
+            ? '<p class="loading">Sin posiciones abiertas</p>'
+            : `<p class="loading">Sin posiciones ${_filter === 'spot' ? 'SPOT' : 'FUTUROS'} abiertas</p>`;
         return;
     }
+
     const showMxn = document.getElementById('toggleMxn') && document.getElementById('toggleMxn').checked;
-    const totalUnreal = d.positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
-    const totalInvested = d.positions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
+    const totalUnreal = visiblePositions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
+    const totalInvested = visiblePositions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
     
-    // Calcular accuracy global del predictor en posiciones abiertas
-    const predPositions = d.positions.filter(p => p.pnl_prediction && p.pnl_prediction.expected_pnl);
+    // Calcular accuracy global del predictor en posiciones visibles
+    const predPositions = visiblePositions.filter(p => p.pnl_prediction && p.pnl_prediction.expected_pnl);
     const avgAccuracy = predPositions.length > 0 
         ? predPositions.reduce((s, p) => s + (parseFloat(p.unrealized_pnl || 0) / parseFloat(p.pnl_prediction.expected_pnl || 1)), 0) / predPositions.length 
         : 0;
@@ -785,7 +830,7 @@ function renderOpenPositions(d) {
                 </tr>
             </thead>
             <tbody>
-                ${d.positions.map(p => {
+                ${visiblePositions.map(p => {
                     const rowCls = parseFloat(p.unrealized_pnl||0) > 0 ? 'row-pnl-pos' : parseFloat(p.unrealized_pnl||0) < -0.01 ? 'row-pnl-neg' : '';
                     const curP = parseFloat(p.current_price || 0);
                     const entryP = parseFloat(p.entry_price || 0);
@@ -824,7 +869,7 @@ function renderOpenPositions(d) {
         </table>
         </div>
         <div class="positions-summary">
-            ${d.positions.length} posiciones &nbsp;|&nbsp;
+            ${visiblePositions.length} posiciones${_allPos.length !== visiblePositions.length ? ` (de ${_allPos.length} total)` : ''} &nbsp;|&nbsp;
             Invertido: <strong>$${fmt(totalInvested)} USDT</strong>
             &nbsp;|&nbsp;
             PnL No Realizado:
@@ -838,15 +883,34 @@ function renderOpenPositions(d) {
 
 function renderClosedPositions(d) {
     if (!d) return;
+    _lastClosedData = d;  // FIX-L6c: cache for sub-tab re-render
     const el = document.getElementById('closedPositionsData');
     const periodDays = d.period_days || 3;
-    if (!d.positions || d.positions.length === 0) {
-        el.innerHTML = `<p class="loading">Sin posiciones cerradas recientes (últimos ${periodDays} días)</p>`;
+
+    // FIX-L6c: update card header with live counts
+    const _allClosed = d.positions || [];
+    const _clSpotC = d.spot_count    ?? _allClosed.filter(p => p.trade_type !== 'futures').length;
+    const _clFutC  = d.futures_count ?? _allClosed.filter(p => p.trade_type === 'futures').length;
+    const _clTitleEl = document.getElementById('closedPosCardTitle');
+    if (_clTitleEl) {
+        _clTitleEl.innerHTML = `✅ Trades Cerrados <span class="card-sub">últimos ${periodDays} días</span> <span class="pos-count-badge">${_allClosed.length} total · Spot: ${_clSpotC} | Fut: ${_clFutC}</span>`;
+    }
+
+    // FIX-D4: filter by active inner sub-tab
+    const _clFilter = _currentClosedFilter;
+    let filteredClosed = _allClosed;
+    if (_clFilter === 'spot') filteredClosed = _allClosed.filter(p => p.trade_type !== 'futures');
+    else if (_clFilter === 'fut') filteredClosed = _allClosed.filter(p => p.trade_type === 'futures');
+
+    if (filteredClosed.length === 0) {
+        el.innerHTML = _allClosed.length === 0
+            ? `<p class="loading">Sin posiciones cerradas recientes (últimos ${periodDays} días)</p>`
+            : `<p class="loading">Sin trades ${_clFilter === 'spot' ? 'SPOT' : 'FUTUROS'} cerrados recientemente</p>`;
         return;
     }
 
     // Ordenar por exit_time descendente (más reciente primero)
-    const sortedPositions = [...d.positions].sort((a, b) => {
+    const sortedPositions = [...filteredClosed].sort((a, b) => {
         const dateA = new Date(b.exit_time || 0);
         const dateB = new Date(a.exit_time || 0);
         return dateA - dateB;
@@ -930,7 +994,7 @@ function renderClosedPositions(d) {
         </table>
         </div>
         <div class="positions-summary">
-            ${sortedPositions.length} trades cerrados (últimos ${periodDays} días) &nbsp;|&nbsp;
+            ${sortedPositions.length} trades${_allClosed.length !== filteredClosed.length ? ` (de ${_allClosed.length} total)` : ''} cerrados (últimos ${periodDays} días) &nbsp;|&nbsp;
             PnL Total: <strong class="${pnlClass(sortedPositions.reduce((s,p) => s + parseFloat(p.pnl||0), 0))}">${sortedPositions.reduce((s,p) => s + parseFloat(p.pnl||0), 0) >= 0 ? '+' : ''}${fmt(sortedPositions.reduce((s,p) => s + parseFloat(p.pnl||0), 0))} USDT</strong>
             ${withPred.length > 0 ? `&nbsp;|&nbsp;Precisión Pred. Promedio: ${fmtAccuracyFromField(avgAccuracy)}` : ''}
         </div>
@@ -2518,7 +2582,19 @@ function renderMonteCarlo(mc) {
     `;
 }
 
-// ── Futures Positions Card (C1) ───────────────────────────────────────────────
+// ── Futures Positions sync (keeps _futuresUnrealPnl updated, no separate card) ─
+async function _syncFuturesUnrealPnl() {
+    try {
+        const res = await fetch(`${API_BASE}/futures/positions`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data.enabled) return;
+        _futuresUnrealPnl = (data.positions || []).reduce((s, p) => s + (p.unrealized_pnl || 0), 0);
+        _cachedFuturesPositions = data.positions || [];
+    } catch (e) { /* silent */ }
+}
+
+// ── Futures Positions Card (C1) — kept for backwards compatibility ─────────────
 async function renderFuturesPositions() {
     const el = document.getElementById('futuresPositionsData');
     const card = document.getElementById('futuresCard');
@@ -2884,8 +2960,7 @@ async function updateDashboard() {
     renderOpenPositions(data.open_positions);
     renderExpectativaVsRealidad(data);
     renderVolSpikeAudit();  // Auditoría VolSpike Override
-    renderFuturesPositions();  // C1: async, fetches /futures/positions independently
-    renderFuturesClosed();     // C2: async, fetches /futures/closed independently
+    _syncFuturesUnrealPnl();  // Keep _futuresUnrealPnl fresh for KPI (no separate card)
     renderClosedPositions(data.closed_positions);
     renderNextCycle(data.next_cycle);
     renderAnalysisSummary(data.performance, data.closed_positions);

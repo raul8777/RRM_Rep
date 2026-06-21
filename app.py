@@ -1389,7 +1389,19 @@ async def get_dashboard_summary() -> Dict:
             futures_positions = fc.get_open_positions_summary()
             
             for fp in futures_positions:
-                # Add futures position to the open_list
+                # FIX-D1: calculate real hours_held and inject pnl_prediction from summary
+                _fp_opened = fp.get("opened_at", "")
+                _fp_hours = 0.0
+                try:
+                    if _fp_opened:
+                        from datetime import datetime as _dt2
+                        _fp_dt = _dt2.fromisoformat(str(_fp_opened).replace('Z', '+00:00'))
+                        _fp_dt_naive = _fp_dt.replace(tzinfo=None) if _fp_dt.tzinfo else _fp_dt
+                        _fp_hours = round((_dt2.utcnow() - _fp_dt_naive).total_seconds() / 3600, 1)
+                except Exception:
+                    _fp_hours = 0.0
+                # FIX-D1: use entry_time in Mexico timezone for display
+                _fp_entry_time_str = to_mexico_time_str(_fp_opened) if _fp_opened else ""
                 open_list.append({
                     "symbol": fp["symbol"],
                     "position_id": f"futures_{fp['symbol']}_{fp['side']}",
@@ -1406,12 +1418,12 @@ async def get_dashboard_summary() -> Dict:
                     "current_value_mxn": round(fp["current_price"] * fp["qty"] * _usd_mxn, 2),
                     "unrealized_pnl": fp["unrealized_pnl"],
                     "unrealized_pnl_mxn": round(fp["unrealized_pnl"] * _usd_mxn, 2),
-                    "entry_time": fp.get("opened_at", ""),
-                    "hours_held": 0.0,  # Could calculate if needed
+                    "entry_time": _fp_entry_time_str,
+                    "hours_held": _fp_hours,
                     "entry_commission": 0.0,
                     "stop_loss": fp["sl_price"],
                     "take_profit": fp["tp_price"],
-                    "pnl_prediction": None,
+                    "pnl_prediction": fp.get("pnl_prediction"),
                     "is_overflow": False,
                     "trade_type": "futures",
                 })
@@ -1419,7 +1431,14 @@ async def get_dashboard_summary() -> Dict:
             # If futures client fails, continue with spot positions only
             print(f"Warning: Could not fetch futures positions for dashboard: {e}")
         
-        result["open_positions"] = {"positions": open_list, "count": len(open_list)}
+        _spot_count = sum(1 for p in open_list if p.get('trade_type') != 'futures')
+        _fut_count  = sum(1 for p in open_list if p.get('trade_type') == 'futures')
+        result["open_positions"] = {
+            "positions": open_list,
+            "count": len(open_list),
+            "spot_count": _spot_count,
+            "futures_count": _fut_count,
+        }
     except Exception as e:
         result["open_positions"] = {"positions": [], "count": 0, "error": str(e)}
 
@@ -1447,9 +1466,17 @@ async def get_dashboard_summary() -> Dict:
                 "exit_commission": float(pos.exit_commission) if pos.exit_commission else 0.0,
                 "pnl_prediction": pos.pnl_prediction,
                 "prediction_accuracy": float(pos.prediction_accuracy) if pos.prediction_accuracy else None,
-                "trade_type": "spot",
+                "trade_type": (pos.metadata or {}).get('trade_type', 'spot') if isinstance(pos.metadata, dict) else 'spot',
             })
-        result["closed_positions"] = {"positions": closed_list, "count": len(closed_list), "period_days": 3}
+        _cl_spot = sum(1 for p in closed_list if p.get('trade_type') != 'futures')
+        _cl_fut  = sum(1 for p in closed_list if p.get('trade_type') == 'futures')
+        result["closed_positions"] = {
+            "positions": closed_list,
+            "count": len(closed_list),
+            "spot_count": _cl_spot,
+            "futures_count": _cl_fut,
+            "period_days": 3,
+        }
     except Exception as e:
         result["closed_positions"] = {"positions": [], "count": 0, "error": str(e), "period_days": 3}
 
@@ -1991,36 +2018,73 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 3) -> Dict:
 
         raw = _fc.get_recent_trades(days=days, limit=limit, extra_symbols=_extra)
 
+        # FIX-L2: build DB enrichment map from trades_closed for futures
+        _db_closed_map: dict = {}
+        try:
+            from datetime import datetime as _dt3, timedelta as _td3
+            _since_str = (_dt3.utcnow() - _td3(days=days)).isoformat()
+            _db_rows = db_client.execute_query(
+                """SELECT symbol, exit_price, entry_time, exit_time,
+                          close_reason, pnl_prediction, prediction_accuracy, pnl
+                   FROM trades_closed
+                   WHERE metadata->>'trade_type' = 'futures'
+                     AND exit_time >= %s
+                   ORDER BY exit_time DESC""",
+                (_since_str,)
+            ) if db_client else []
+            for _r in _db_rows:
+                _key = _r['symbol']
+                if _key not in _db_closed_map:
+                    _db_closed_map[_key] = _r
+        except Exception as _db2e:
+            print(f"[FuturesClosed/DB] enrichment query failed: {_db2e}")
+
         closed = []
         for t in raw:
             closed_at_raw = t.get("closed_at")
-            # Try to get opened_at from trade timestamp or estimate from closed_at
             opened_at_raw = t.get("time") or t.get("timestamp")
             if not opened_at_raw and closed_at_raw:
-                # Estimate opened_at as 1-24 hours before closed_at for typical futures trades
-                from datetime import datetime, timedelta
+                from datetime import datetime as _dt4, timedelta as _td4
                 if isinstance(closed_at_raw, str):
                     try:
-                        closed_dt = datetime.fromisoformat(closed_at_raw.replace('Z', '+00:00'))
-                        opened_dt = closed_dt - timedelta(hours=6)  # Estimate 6 hours duration
+                        closed_dt = _dt4.fromisoformat(closed_at_raw.replace('Z', '+00:00'))
+                        opened_dt = closed_dt - _td4(hours=6)
                         opened_at_raw = opened_dt.isoformat()
-                    except:
+                    except Exception:
                         opened_at_raw = None
                 else:
                     opened_at_raw = None
-            
+
+            # FIX-L2: enrich with DB data
+            _sym = t["symbol"]
+            _db_e = _db_closed_map.get(_sym, {})
+            _pnl_pred = _db_e.get('pnl_prediction') if _db_e else None
+            if isinstance(_pnl_pred, str):
+                try:
+                    import json as _j2
+                    _pnl_pred = _j2.loads(_pnl_pred)
+                except Exception:
+                    _pnl_pred = None
+            _pred_acc = float(_db_e['prediction_accuracy']) if _db_e and _db_e.get('prediction_accuracy') else None
+            _close_reason = _db_e.get('close_reason') or t.get('close_reason') or ''
+            _entry_time_raw = _db_e.get('entry_time') or opened_at_raw
+            _exit_time_raw  = _db_e.get('exit_time') or closed_at_raw
+
             closed.append({
-                "symbol":      t["symbol"],
-                "side":        t["side"],
-                "qty":         t["qty"],
-                "entry_price": t.get("entry_price"),
-                "exit_price":  t.get("exit_price"),
-                "sl_price":    t.get("sl_price"),
-                "tp_price":    t.get("tp_price"),
-                "pnl":         t.get("pnl"),
-                "opened_at":   to_mexico_time_str(opened_at_raw) if opened_at_raw else None,
-                "closed_at":   to_mexico_time_str(closed_at_raw) if closed_at_raw else None,
-                "trade_type":  "futures",
+                "symbol":              _sym,
+                "side":                t["side"],
+                "qty":                 t["qty"],
+                "entry_price":         t.get("entry_price"),
+                "exit_price":          t.get("exit_price") or (_db_e.get('exit_price') if _db_e else None),
+                "sl_price":            t.get("sl_price"),
+                "tp_price":            t.get("tp_price"),
+                "pnl":                 t.get("pnl") or (_db_e.get('pnl') if _db_e else None),
+                "opened_at":           to_mexico_time_str(_entry_time_raw) if _entry_time_raw else None,
+                "closed_at":           to_mexico_time_str(_exit_time_raw) if _exit_time_raw else None,
+                "close_reason":        _close_reason,
+                "pnl_prediction":      _pnl_pred,
+                "prediction_accuracy": _pred_acc,
+                "trade_type":          "futures",
             })
 
         return {

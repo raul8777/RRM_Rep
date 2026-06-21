@@ -1638,7 +1638,25 @@ class FuturesClient:
             return -1, details
 
     def get_open_positions_summary(self) -> List[dict]:
-        """Summary of all tracked open positions (LONG and SHORT) for dashboard."""
+        """Summary of all tracked open positions (LONG and SHORT) for dashboard.
+        FIX-L1: enriches pnl_prediction and opened_at from trades_open DB when fields
+        are missing in memory (e.g. after container restart where _sync_open_positions
+        rebuilds from Binance without prediction data).
+        """
+        # FIX-L1: build a DB lookup map {(symbol, 'SELL'|'BUY'): row} for enrichment
+        _db_map: dict = {}
+        if self.db_client:
+            try:
+                rows = self.db_client.execute_query(
+                    """SELECT symbol, side, pnl_prediction, indicators_at_entry, entry_time
+                       FROM trades_open
+                       WHERE metadata->>'trade_type' = 'futures'"""
+                )
+                for r in rows:
+                    _db_map[(r['symbol'], r['side'])] = r
+            except Exception as _dbe:
+                print(f'[Futures/DB] get_open_positions_summary enrichment failed: {_dbe}')
+
         result = []
         for key, pos in self._open_positions.items():
             if pos.closed:
@@ -1649,15 +1667,38 @@ class FuturesClient:
             except Exception:
                 price = pos.entry_price
                 unr   = 0.0
+
+            # FIX-L1: enrich from DB when in-memory fields are missing
+            _pnl_pred = pos.pnl_prediction
+            _opened_at = pos.opened_at.isoformat()
+            _db_side = 'SELL' if pos.side == 'SHORT' else 'BUY'
+            _db_row = _db_map.get((pos.symbol, _db_side))
+            if _db_row:
+                if _pnl_pred is None and _db_row.get('pnl_prediction'):
+                    _pnl_pred = _db_row['pnl_prediction']
+                    if isinstance(_pnl_pred, str):
+                        try:
+                            import json as _json
+                            _pnl_pred = _json.loads(_pnl_pred)
+                        except Exception:
+                            _pnl_pred = None
+                if _db_row.get('entry_time'):
+                    try:
+                        _et = str(_db_row['entry_time'])
+                        _opened_at = _et if _et else _opened_at
+                    except Exception:
+                        pass
+
             result.append({
-                "symbol":         pos.symbol,
-                "side":           pos.side,
-                "qty":            pos.qty,
-                "entry_price":    pos.entry_price,
-                "current_price":  price,
-                "sl_price":       pos.sl_price,
-                "tp_price":       pos.tp_price,
-                "unrealized_pnl": round(unr, 4),
-                "opened_at":      pos.opened_at.isoformat(),
+                "symbol":           pos.symbol,
+                "side":             pos.side,
+                "qty":              pos.qty,
+                "entry_price":      pos.entry_price,
+                "current_price":    price,
+                "sl_price":         pos.sl_price,
+                "tp_price":         pos.tp_price,
+                "unrealized_pnl":   round(unr, 4),
+                "opened_at":        _opened_at,
+                "pnl_prediction":   _pnl_pred,
             })
         return result
