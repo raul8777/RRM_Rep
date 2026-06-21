@@ -99,6 +99,7 @@ class PositionManager:
                        strategy_id, entry_time, stop_loss, take_profit, metadata,
                        entry_commission, pnl_prediction, indicators_at_entry
                 FROM trades_open
+                WHERE COALESCE(metadata->>'trade_type', 'spot') != 'futures'
                 ORDER BY symbol, entry_time ASC
             """
             results = self.db_client.execute_query(query)
@@ -245,6 +246,7 @@ class PositionManager:
                            strategy_id, entry_time, stop_loss, take_profit, metadata,
                            entry_commission, pnl_prediction, indicators_at_entry
                     FROM trades_open
+                    WHERE COALESCE(metadata->>'trade_type', 'spot') != 'futures'
                     ORDER BY symbol, entry_time ASC
                 """
                 results = self.db_client.execute_query(query)
@@ -364,6 +366,16 @@ class PositionManager:
         for pos_list in self._open_positions.values():
             for pos in pos_list:
                 if str(pos.position_id) == str(position_id):
+                    # FIX-T3: REGLA DE ORO — SL nunca empeora
+                    _old_sl = float(pos.stop_loss or 0)
+                    if _old_sl > 0:
+                        _is_buy = pos.side.upper() in ("BUY", "LONG")
+                        if _is_buy and new_sl_price < _old_sl:
+                            logger.info(f"[Guard] SL WORSEN blocked {pos.symbol}: {_old_sl:.6f} → {new_sl_price:.6f}")
+                            return
+                        if not _is_buy and new_sl_price > _old_sl:
+                            logger.info(f"[Guard] SL WORSEN blocked {pos.symbol}: {_old_sl:.6f} → {new_sl_price:.6f}")
+                            return
                     pos.stop_loss = new_sl_price
                     if self.db_client and pos.db_id:
                         try:

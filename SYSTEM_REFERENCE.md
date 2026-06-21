@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 20 2026 23:11 UTC-6 | Sesión 10: Dashboard unificado + datos en vivo — 9 fixes implementados, commit 01911d0, restart OK
+> Última actualización: jun 21 2026 17:00 UTC-6 | Sesión 12: Dashboard SL/TP Visibility — visibilidad total del ciclo de vida SL/TP en posiciones abiertas y cerradas
 
 ---
 
@@ -1469,6 +1469,57 @@ Corregir datos stale en dashboard de posiciones abiertas/cerradas y hacer conteo
 - BUG-E3: `analysis_cycle.execute_once()` usa `get_indicators()` redundante
 - FIX-F6: Filtro RSI 4h para confirmar SHORT antes de abrir (RSI 4h < 50)
 - Learning Engine: con 50+ trades reales → POST /learning/run
+
+---
+
+## Sesión 12 — Dashboard SL/TP Visibility (jun 21 2026)
+
+<!-- MARKER:SL_TP_VISIBILITY:2026-06-21 -->
+<!-- A partir de este punto, todas las posiciones tienen visibilidad completa de SL/TP en el dashboard -->
+
+### Objetivo
+Visibilidad total del ciclo de vida de SL y TP durante la vida de cada posición (abierta y cerrada), tanto SPOT como FUTURES. Optimizar la capacidad de análisis para maximizar ganancias en el menor tiempo posible.
+
+### Fixes implementados
+
+| Fix | Archivo | Descripción |
+|-----|---------|-------------|
+| VIS-1 | `futures_client.py` | `get_open_positions_summary()` expone `_smart_meta`: breakeven_done, trail_best_price, trailing_active, tp_extensions, dynamic_trail_dist_pct |
+| VIS-2a | `app.py` | Open SPOT positions enriquecidas con: sl_dist_pct, tp_dist_pct, trailing_peak, trailing_active, breakeven_done, tp_extensions, tp_decisions, scale_out_done |
+| VIS-2b | `app.py` | Open FUTURES positions enriquecidas con mismos campos lifecycle desde `get_open_positions_summary()` |
+| VIS-2c | `app.py` | Closed positions enriquecidas con: trailing_peak, tp_decisions, scale_out_done, tp_extensions desde metadata |
+| VIS-3 | `dashboard.js` | Helpers `fmtSlTpCell()` y `fmtSlTpBadges()` + close_reason map ampliado (smart_tp_close, prediction_exit_deteriorated, binance_safety_close) |
+| VIS-3a | `dashboard.js` | Tabla open positions: columnas SL/TP con precios + distancia %, badges estado (🛡BE, 📈T, 🔄ext, ✂️scale) |
+| VIS-3b | `dashboard.js` | Tabla closed positions: columna SL/TP Lifecycle con badges de lo que se activó durante el trade |
+| VIS-4a | `dashboard.js` | Modal spot detail: sección "SL/TP LIFECYCLE" con SL/TP actual vs inicial, trailing state, breakeven, SmartTP decisions, scale-out |
+| VIS-4b | `dashboard.js` + `app.py` | Modal futures detail: sección "SL/TP LIFECYCLE" con breakeven, trailing (best price + dist dinámica), SmartTP ext., REGLA DE ORO indicator. `/futures/positions` endpoint enriquecido con `_smart_meta` |
+| VIS-4c | `dashboard.js` | Modal futures closed detail: sección "SL/TP LIFECYCLE" con SL/TP final + close_reason formateado |
+| VIS-5 | `styles.css` | Estilos: `.sl-tp-cell`, `.sl-val`, `.tp-val`, `.sl-badge` (be/trail/ext/scale/none), `.sl-tp-lifecycle`, `.sl-regla-oro`, `.tp-decisions-list` |
+
+### Campos SL/TP lifecycle expuestos en API
+
+**Open positions** (`/dashboard/summary` → `open_positions`):
+- `stop_loss`, `take_profit` — valores actuales
+- `sl_dist_pct`, `tp_dist_pct` — distancia % desde entry
+- `trailing_peak` / `trail_best_price` — mejor precio visto durante trailing
+- `trailing_active` — boolean, trailing stop activo
+- `breakeven_done` — boolean, SL movido a entry
+- `tp_extensions` — int, extensiones SmartTP ejecutadas
+- `tp_decisions` — array, historial de decisiones TP (extend/scale_out/close)
+- `scale_out_done` — boolean, scale-out parcial ejecutado
+- `dynamic_trail_dist_pct` — float, distancia dinámica actual (0.7%/1.0%/1.5%)
+
+**Closed positions** (`/dashboard/summary` → `closed_positions`):
+- `trailing_peak`, `tp_decisions`, `scale_out_done`, `tp_extensions` — desde metadata
+
+### Diseño de badges en tablas
+- 🛡BE = Breakeven activado (SL = entry price)
+- 📈T = Trailing stop activo (SL sigue al precio)
+- 🔄N = SmartTP extendido N veces
+- ✂️ = Scale-out parcial ejecutado
+
+### REGLA DE ORO visible
+El modal futures muestra: "⚖️ REGLA DE ORO: SL nunca retrocede — solo baja/sube" como recordatorio constante del principio de protección.
 
 ---
 

@@ -1,0 +1,40 @@
+{
+  "captured_at": "2026-06-21T03:48:49.936188+00:00",
+  "label": "snapshot",
+  "commits": [
+    "d454044",
+    "ce6dc9b",
+    "b6dc0e0",
+    "5513feb"
+  ],
+  "fixes_active": [
+    "BUG-E1+E7",
+    "BUG-E2",
+    "BUG-E4",
+    "BUG-E5",
+    "BUG-E6",
+    "BUG-E8",
+    "BUG-E10",
+    "MEJORA-A1"
+  ],
+  "capital": {
+    "liquid_usdt": 1994.4188
+  },
+  "spot": {
+    "closed_total": 165,
+    "wins": 36,
+    "losses": 129,
+    "win_rate": 0.2182,
+    "total_pnl": -217.6924
+  },
+  "futures": {
+    "open_shorts": 7,
+    "symbols_traded": 9,
+    "wins": 2,
+    "total_pnl": -30.1502
+  },
+  "market": {
+    "fng_value": 23,
+    "fng_label": "Extreme Fear"
+  }
+}

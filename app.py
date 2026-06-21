@@ -1376,6 +1376,14 @@ async def get_dashboard_summary() -> Dict:
                     except Exception:
                         _pred_for_pos = None
 
+                # VIS-2a: SL/TP lifecycle metadata from position.metadata
+                _meta_vis = getattr(position, 'metadata', {}) or {}
+                _sl_f = float(position.stop_loss) if position.stop_loss else None
+                _tp_f = float(position.take_profit) if position.take_profit else None
+                _sl_dist = round((_sl_f - entry_p) / entry_p * 100, 2) if _sl_f and entry_p > 0 else None
+                _tp_dist = round((_tp_f - entry_p) / entry_p * 100, 2) if _tp_f and entry_p > 0 else None
+                _trail_peak = float(_meta_vis.get('trailing_peak', 0)) if _meta_vis.get('trailing_peak') else None
+
                 open_list.append({
                     "symbol": symbol,
                     "position_id": position.position_id,
@@ -1394,11 +1402,19 @@ async def get_dashboard_summary() -> Dict:
                     "entry_time": entry_time_str,
                     "hours_held": round(hours_held, 1),
                     "entry_commission": float(position.entry_commission) if position.entry_commission else 0.0,
-                    "stop_loss": float(position.stop_loss) if position.stop_loss else None,
-                    "take_profit": float(position.take_profit) if position.take_profit else None,
+                    "stop_loss": _sl_f,
+                    "take_profit": _tp_f,
                     "pnl_prediction": _pred_for_pos,
                     "is_overflow": symbol in _ov_positions,
                     "trade_type": "spot",
+                    "sl_dist_pct": _sl_dist,
+                    "tp_dist_pct": _tp_dist,
+                    "trailing_peak": _trail_peak,
+                    "trailing_active": _trail_peak is not None and _trail_peak > 0,
+                    "breakeven_done": False,
+                    "tp_extensions": int(_meta_vis.get('tp_extensions_count', 0)),
+                    "tp_decisions": _meta_vis.get('tp_decisions', []),
+                    "scale_out_done": bool(_meta_vis.get('scale_out_done', False)),
                 })
         # Add futures positions to the dashboard
         try:
@@ -1445,6 +1461,13 @@ async def get_dashboard_summary() -> Dict:
                         print(f"[FIX-PR2] backfill failed for {fp['symbol']}: {_fpe}")
                         _fp_pred = None
 
+                # VIS-2b: SL/TP lifecycle fields for futures
+                _fp_entry = fp["entry_price"]
+                _fp_sl = fp["sl_price"]
+                _fp_tp = fp["tp_price"]
+                _fp_sl_dist = round((_fp_sl - _fp_entry) / _fp_entry * 100, 2) if _fp_entry > 0 else None
+                _fp_tp_dist = round((_fp_tp - _fp_entry) / _fp_entry * 100, 2) if _fp_entry > 0 else None
+
                 open_list.append({
                     "symbol": fp["symbol"],
                     "position_id": f"futures_{fp['symbol']}_{fp['side']}",
@@ -1453,10 +1476,10 @@ async def get_dashboard_summary() -> Dict:
                     "category": "FUTURES",
                     "origin": "",
                     "quantity": fp["qty"],
-                    "entry_price": fp["entry_price"],
+                    "entry_price": _fp_entry,
                     "current_price": fp["current_price"],
-                    "invested_usdt": round(fp["entry_price"] * fp["qty"], 4),
-                    "invested_mxn": round(fp["entry_price"] * fp["qty"] * _usd_mxn, 2),
+                    "invested_usdt": round(_fp_entry * fp["qty"], 4),
+                    "invested_mxn": round(_fp_entry * fp["qty"] * _usd_mxn, 2),
                     "current_value_usdt": round(fp["current_price"] * fp["qty"], 4),
                     "current_value_mxn": round(fp["current_price"] * fp["qty"] * _usd_mxn, 2),
                     "unrealized_pnl": fp["unrealized_pnl"],
@@ -1464,11 +1487,20 @@ async def get_dashboard_summary() -> Dict:
                     "entry_time": _fp_entry_time_str,
                     "hours_held": _fp_hours,
                     "entry_commission": 0.0,
-                    "stop_loss": fp["sl_price"],
-                    "take_profit": fp["tp_price"],
+                    "stop_loss": _fp_sl,
+                    "take_profit": _fp_tp,
                     "pnl_prediction": _fp_pred,
                     "is_overflow": False,
                     "trade_type": "futures",
+                    "sl_dist_pct": _fp_sl_dist,
+                    "tp_dist_pct": _fp_tp_dist,
+                    "trailing_peak": fp.get("trail_best_price"),
+                    "trailing_active": fp.get("trailing_active", False),
+                    "breakeven_done": fp.get("breakeven_done", False),
+                    "tp_extensions": fp.get("tp_extensions", 0),
+                    "tp_decisions": [],
+                    "scale_out_done": False,
+                    "dynamic_trail_dist_pct": fp.get("dynamic_trail_dist_pct"),
                 })
         except Exception as e:
             # If futures client fails, continue with spot positions only
@@ -1493,6 +1525,8 @@ async def get_dashboard_summary() -> Dict:
         _cat_map_cl = getattr(settings, "token_categories", {})
         for pos in closed_positions:
             _cl_cat = _cat_map_cl.get(pos.symbol, {})
+            # VIS-2c: extract SL/TP lifecycle from metadata
+            _cl_meta = pos.metadata if isinstance(pos.metadata, dict) else {}
             closed_list.append({
                 "symbol": pos.symbol,
                 "side": pos.side,
@@ -1509,7 +1543,11 @@ async def get_dashboard_summary() -> Dict:
                 "exit_commission": float(pos.exit_commission) if pos.exit_commission else 0.0,
                 "pnl_prediction": pos.pnl_prediction,
                 "prediction_accuracy": float(pos.prediction_accuracy) if pos.prediction_accuracy else None,
-                "trade_type": (pos.metadata or {}).get('trade_type', 'spot') if isinstance(pos.metadata, dict) else 'spot',
+                "trade_type": _cl_meta.get('trade_type', 'spot'),
+                "trailing_peak": _cl_meta.get('trailing_peak'),
+                "tp_decisions": _cl_meta.get('tp_decisions', []),
+                "scale_out_done": bool(_cl_meta.get('scale_out_done', False)),
+                "tp_extensions": int(_cl_meta.get('tp_extensions_count', 0)),
             })
         _cl_spot = sum(1 for p in closed_list if p.get('trade_type') != 'futures')
         _cl_fut  = sum(1 for p in closed_list if p.get('trade_type') == 'futures')
@@ -1945,6 +1983,35 @@ async def get_futures_positions() -> Dict:
                 sl_dist   = ((sl_price - cur_price) / cur_price * 100) if cur_price > 0 else 0
                 tp_dist   = ((cur_price - tp_price) / cur_price * 100) if cur_price > 0 else 0
 
+            # VIS-4b: SL/TP lifecycle from _smart_meta (FIX-S3: infer from SL when meta missing)
+            _vis_be = False
+            _vis_trail_active = False
+            _vis_trail_best = None
+            _vis_tp_ext = 0
+            _vis_dyn_trail = None
+            _pnl_pct_vis = upnl / (entry * qty) if entry > 0 and qty > 0 else 0.0
+            if _tpos and not _tpos.closed:
+                _vis_be = _tpos._smart_meta.get('breakeven_done', False)
+                _vis_trail_active = 'trail_best_price' in _tpos._smart_meta
+                _vis_trail_best = _tpos._smart_meta.get('trail_best_price')
+                _vis_tp_ext = _tpos._smart_meta.get('tp_extensions_count', 0)
+                # FIX-S3: Infer trailing/breakeven from SL position when _smart_meta is empty
+                if not _vis_be:
+                    if side == "SHORT" and sl_price <= entry:
+                        _vis_be = True
+                    elif side == "LONG" and sl_price >= entry:
+                        _vis_be = True
+                if not _vis_trail_active and _pnl_pct_vis >= 0.015:
+                    _vis_trail_active = True
+                    if not _vis_trail_best:
+                        _vis_trail_best = cur_price  # approximate current as best
+                if _pnl_pct_vis >= 0.05:
+                    _vis_dyn_trail = 0.7
+                elif _pnl_pct_vis >= 0.03:
+                    _vis_dyn_trail = 1.0
+                else:
+                    _vis_dyn_trail = 1.5
+
             positions.append({
                 "symbol":        sym,
                 "side":          side,
@@ -1957,6 +2024,11 @@ async def get_futures_positions() -> Dict:
                 "tp_dist_pct":   round(tp_dist, 2),
                 "unrealized_pnl": round(upnl, 4),
                 "opened_at":     opened_at,
+                "breakeven_done":  _vis_be,
+                "trailing_active": _vis_trail_active,
+                "trail_best_price": _vis_trail_best,
+                "tp_extensions":   _vis_tp_ext,
+                "dynamic_trail_dist_pct": _vis_dyn_trail,
             })
 
         return {"enabled": True, "positions": positions, "count": len(positions),

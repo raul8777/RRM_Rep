@@ -1137,6 +1137,12 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
 
                 # ── Trailing Stop ──────────────────────────────────────────
                 if close_reason is None and trailing_enabled and pnl_pct >= trail_activate:
+                    # FIX-T2B: Dynamic trail distance — tighter as profit grows
+                    if pnl_pct >= 0.05:
+                        trail_dist = 0.007   # 0.7% — very tight for big gains
+                    elif pnl_pct >= 0.03:
+                        trail_dist = 0.010   # 1.0% — tight
+                    # else: keep category default
                     # Peak is stored in position metadata; update if new high
                     metadata = getattr(pos, 'metadata', {}) or {}
                     peak_price = float(metadata.get('trailing_peak', entry_price))
@@ -1160,6 +1166,13 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         except Exception:
                             pass
                     trail_stop_price = peak_price * (1.0 - trail_dist)
+                    # FIX-H2: Persist trailing SL to PositionManager so it survives restarts
+                    try:
+                        _cur_pos_sl = float(pos.stop_loss or 0)
+                        if trail_stop_price > _cur_pos_sl:
+                            position_manager.update_position_sl(pos.position_id, round(trail_stop_price, 8))
+                    except Exception:
+                        pass
                     if current_price <= trail_stop_price:
                         close_reason = f"trailing_stop (peak={peak_price:.4f}, trail={trail_stop_price:.4f})"
 
@@ -1216,7 +1229,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 _ext_pct = _cat_th.get('tp_extension_pct', 2.0) / 100.0
                                 _new_tp = round(current_price * (1.0 + _ext_pct), 8)
                                 # New SL = current TP price (locks in the gain reached)
-                                _new_sl = round(current_price * (1.0 - 0.005), 8)  # 0.5% below current price to avoid immediate trigger
+                                _smart_sl_buffer = sl_pct * 0.40  # FIX-H1: 40% of category SL (not hardcoded 0.5%)
+                                _new_sl = round(current_price * (1.0 - _smart_sl_buffer), 8)
                                 # But if we already have a profitable SL, keep the higher one
                                 _cur_sl = float(pos.stop_loss or entry_price)
                                 _new_sl = max(_new_sl, _cur_sl)
@@ -1717,7 +1731,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 if _residual_long_key in _fc._open_positions and not _fc._open_positions[_residual_long_key].closed:
                     print(f"[Futures] Closing residual LONG on {symbol} before opening SHORT (regime change)")
                     try:
-                        _fc.close_position(symbol, side="LONG", reason="regime_change_to_short")
+                        _fc.close_long(symbol, reason="regime_change_to_short")
                     except Exception as _cl_err:
                         print(f"[Futures] Could not close residual LONG {symbol}: {_cl_err}")
 

@@ -436,6 +436,23 @@ body {
 .reason-pred  { background:rgba(155,89,182,0.15); color:#9b59b6; }
 .reason-neutral { background:rgba(149,165,166,0.15); color:#95a5a6; }
 
+/* VIS-5: SL/TP lifecycle badges and cells */
+.sl-tp-cell { font-size:11px; line-height:1.5; white-space:nowrap; }
+.sl-val { color:#e74c3c; }
+.tp-val { color:#4ecca3; }
+.sl-tp-badges { white-space:nowrap; }
+.sl-badge { display:inline-block; font-size:10px; padding:1px 5px; border-radius:6px; margin-right:2px; cursor:help; }
+.sl-badge.be    { background:rgba(33,150,243,0.15); color:#2196f3; }
+.sl-badge.trail { background:rgba(76,175,80,0.15); color:#4caf50; }
+.sl-badge.ext   { background:rgba(255,152,0,0.15); color:#ff9800; }
+.sl-badge.scale { background:rgba(156,39,176,0.15); color:#9c27b0; }
+.sl-badge.none  { color:#555; }
+.sl-tp-lifecycle { display:block; }
+.sl-tp-lifecycle div label { min-width:140px; }
+.sl-regla-oro { color:#ffc107; }
+.tp-decisions-list { margin-top:4px; }
+.tp-decision-item { font-size:11px; color:#aaa; padding:2px 0; border-bottom:1px solid #222; }
+
 .decision-badge   { display:inline-block; padding:2px 7px; border-radius:4px; font-size:11px; font-weight:700; letter-spacing:0.3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:110px; }
 .decision-executed{ background:rgba(78,204,163,0.15); color:#4ecca3; border:1px solid rgba(78,204,163,0.4); }
 .decision-rejected{ background:rgba(231,76,60,0.13); color:#e74c3c; border:1px solid rgba(231,76,60,0.35); }

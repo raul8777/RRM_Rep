@@ -1,6 +1,6 @@
 {
-  "captured_at": "2026-06-20T22:22:55.515582+00:00",
-  "label": "baseline_post_session5",
+  "captured_at": "2026-06-21T03:59:13.823033+00:00",
+  "label": "snapshot",
   "commits": [
     "d454044",
     "ce6dc9b",
@@ -18,20 +18,20 @@
     "MEJORA-A1"
   ],
   "capital": {
-    "liquid_usdt": 1694.9988
+    "liquid_usdt": 1994.4188
   },
   "spot": {
-    "closed_total": 156,
+    "closed_total": 165,
     "wins": 36,
-    "losses": 120,
-    "win_rate": 0.2308,
-    "total_pnl": -194.511
+    "losses": 129,
+    "win_rate": 0.2182,
+    "total_pnl": -217.6924
   },
   "futures": {
     "open_shorts": 7,
     "symbols_traded": 9,
     "wins": 2,
-    "total_pnl": -6.6288
+    "total_pnl": -30.1502
   },
   "market": {
     "fng_value": 23,

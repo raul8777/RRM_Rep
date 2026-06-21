@@ -139,6 +139,10 @@ const _CLOSE_REASON_MAP = {
     'stop_loss':                   ['🔴 Stop Loss',             'reason-sl'],
     'take_profit':                 ['🟢 Take Profit',           'reason-tp'],
     'trailing_stop':               ['🟢 Trailing Stop',         'reason-tp'],
+    'smart_tp_close':              ['🟢 SmartTP Close',         'reason-tp'],
+    'smart_tp_reversal':           ['🟡 SmartTP Reversal',      'reason-neutral'],
+    'prediction_exit_deteriorated':['🤖 PredExit',              'reason-sl'],
+    'binance_safety_close':        ['⚡ Binance Safety',        'reason-sl'],
     'scale_out':                   ['🟡 Scale-Out parcial',     'reason-neutral'],
     'portfolio_rebalancing':       ['🔄 Rebalanceo técnico',    'reason-rebal'],
     'prediction_reallocation':     ['🔄 Reemplazo por EV',      'reason-rebal'],
@@ -150,6 +154,28 @@ const _CLOSE_REASON_MAP = {
     'regime_change':               ['⚡ Cambio de régimen',     'reason-neutral'],
     'manual':                      ['✋ Manual',                 'reason-neutral'],
 };
+
+// VIS-3: SL/TP lifecycle helpers
+function fmtSlTpCell(p) {
+    const sl = parseFloat(p.stop_loss || 0);
+    const tp = parseFloat(p.take_profit || 0);
+    const slDist = p.sl_dist_pct;
+    const tpDist = p.tp_dist_pct;
+    if (!sl && !tp) return '—';
+    let html = '';
+    if (sl) html += `<span class="sl-val">SL $${fmt(sl)} <small>(${slDist != null ? (slDist >= 0 ? '+' : '') + slDist.toFixed(1) + '%' : '—'})</small></span>`;
+    if (tp) html += `<br><span class="tp-val">TP $${fmt(tp)} <small>(${tpDist != null ? (tpDist >= 0 ? '+' : '') + tpDist.toFixed(1) + '%' : '—'})</small></span>`;
+    return html;
+}
+
+function fmtSlTpBadges(p) {
+    let badges = '';
+    if (p.breakeven_done)  badges += '<span class="sl-badge be" title="Breakeven activado">🛡BE</span>';
+    if (p.trailing_active) badges += '<span class="sl-badge trail" title="Trailing activo">📈T</span>';
+    if (p.tp_extensions > 0) badges += `<span class="sl-badge ext" title="SmartTP extendido ${p.tp_extensions}×">🔄${p.tp_extensions}</span>`;
+    if (p.scale_out_done)  badges += '<span class="sl-badge scale" title="Scale-out ejecutado">✂️</span>';
+    return badges || '<span class="sl-badge none">—</span>';
+}
 function fmtCloseReason(r) {
     if (!r) return '—';
     const entry = _CLOSE_REASON_MAP[r];
@@ -818,13 +844,10 @@ function renderOpenPositions(d) {
             <thead>
                 <tr>
                     <th>Símbolo</th>
-                    <th>Cat</th>
-                    <th>Qty</th>
                     <th>Entrada</th>
-                    <th>Invertido</th>
-                    <th>Esperado al Entrar</th>
+                    <th>SL / TP</th>
+                    <th>Estado SL/TP</th>
                     <th>Progreso</th>
-                    <th>Actual vs Esperado</th>
                     <th>PnL No Real.</th>
                     <th>Edad</th>
                 </tr>
@@ -836,14 +859,9 @@ function renderOpenPositions(d) {
                     const entryP = parseFloat(p.entry_price || 0);
                     const hrs = parseFloat(p.hours_held || 0);
                     const ageCls = hrs < 2 ? 'age-fresh' : hrs < 8 ? 'age-mid' : 'age-old';
-                    const investedDisplay = showMxn
-                        ? `$${fmt(p.invested_mxn ?? (p.invested_usdt * 17.5), 0)} MXN`
-                        : `$${fmt(p.invested_usdt || 0)}`;
                     const overflowBadge = p.is_overflow ? ' <span class="badge-overflow" title="Posición extra por señal excepcional">⚡OVF</span>' : '';
-                    const predBadge = p.pnl_prediction ? ' <span class="badge-pred" title="Tiene predicción">🎯</span>' : '';
                     const typeBadge = p.trade_type === 'futures' ? '<span class="badge-futures">FUT</span>' : '<span class="badge-spot">SPOT</span>';
 
-                    // Calcular progreso hacia TP o SL
                     const tp = parseFloat(p.take_profit || 0);
                     const sl = parseFloat(p.stop_loss || 0);
                     let progressHtml = '—';
@@ -853,15 +871,12 @@ function renderOpenPositions(d) {
 
                     return `
                     <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id}', 'open')" style="cursor:pointer">
-                        <td>${typeBadge} <strong>${p.symbol}</strong>${overflowBadge}${predBadge}</td>
-                        <td>${catIcon(p.category || 'MIDCAP_ALT')}</td>
-                        <td>${fmt(p.quantity, 4)}</td>
+                        <td>${typeBadge} <strong>${p.symbol}</strong>${overflowBadge}</td>
                         <td>$${fmt(entryP)}<br><small class="entry-time">${p.entry_time ? p.entry_time.split(' ')[1]?.substring(0,5) : ''}</small></td>
-                        <td>${investedDisplay}</td>
-                        <td>${fmtPrediction(p.pnl_prediction)}</td>
+                        <td class="sl-tp-cell">${fmtSlTpCell(p)}</td>
+                        <td class="sl-tp-badges">${fmtSlTpBadges(p)}</td>
                         <td>${progressHtml}</td>
-                        <td>${fmtExpectedVsActual(p.unrealized_pnl, p.pnl_prediction?.expected_pnl)}</td>
-                        <td class="${pnlClass(p.unrealized_pnl)}">${showMxn ? fmt(p.unrealized_pnl) + ' USDT<br><small>' + fmt(p.unrealized_pnl_mxn ?? 0, 1) + ' MXN</small>' : fmt(p.unrealized_pnl) + ' USDT'}</td>
+                        <td class="${pnlClass(p.unrealized_pnl)}">${fmt(p.unrealized_pnl)} USDT</td>
                         <td class="${ageCls}">${hrs < 1 ? '<1h' : hrs.toFixed(0) + 'h'}</td>
                     </tr>`;
                 }).join('')}
@@ -951,42 +966,33 @@ function renderClosedPositions(d) {
                 <tr>
                     <th>Símbolo</th>
                     <th>Entrada → Salida</th>
-                    <th>Esperado</th>
                     <th>Resultado</th>
-                    <th>Accuracy</th>
-                    <th>Desvío</th>
                     <th>Razón</th>
+                    <th>SL/TP Lifecycle</th>
                     <th>Cerrado</th>
                 </tr>
             </thead>
             <tbody>
                 ${sortedPositions.map(p => {
-                    const expectedPnl = p.pnl_prediction?.expected_pnl || null;
                     const actualPnl = parseFloat(p.pnl || 0);
-                    const acc = fmtAccuracyFromField(p.prediction_accuracy);
                     const rowCls = actualPnl > 0 ? 'row-pnl-pos' : actualPnl < -0.01 ? 'row-pnl-neg' : '';
                     const typeBadge = tradeTypeBadge(p.trade_type);
                     const exitTimeFmt = fmtDateLocal(p.exit_time);
 
-                    // Calcular desviación
-                    let desvHtml = '—';
-                    if (expectedPnl != null && expectedPnl !== 0) {
-                        const diff = actualPnl - parseFloat(expectedPnl);
-                        const diffPct = (diff / Math.abs(parseFloat(expectedPnl))) * 100;
-                        const desvClass = diff >= 0 ? 'positive' : 'negative';
-                        const arrow = diff >= 0 ? '↑' : '↓';
-                        desvHtml = `<span class="${desvClass}">${arrow} ${Math.abs(diff).toFixed(2)} (${diffPct >= 0 ? '+' : ''}${diffPct.toFixed(0)}%)</span>`;
-                    }
+                    // VIS-3b: SL/TP lifecycle badges for closed
+                    let lifecycleBadges = '';
+                    if (p.trailing_peak) lifecycleBadges += `<span class="sl-badge trail" title="Peak: $${fmt(p.trailing_peak)}">📈T</span>`;
+                    if (p.tp_extensions > 0) lifecycleBadges += `<span class="sl-badge ext" title="SmartTP ×${p.tp_extensions}">🔄${p.tp_extensions}</span>`;
+                    if (p.scale_out_done) lifecycleBadges += '<span class="sl-badge scale" title="Scale-out">✂️</span>';
+                    if (!lifecycleBadges) lifecycleBadges = '<span class="sl-badge none">—</span>';
 
                     return `
                     <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'closed')" style="cursor:pointer">
                         <td>${typeBadge} ${catIcon(p.category || 'MIDCAP_ALT')} <strong>${p.symbol}</strong></td>
                         <td>$${fmt(p.entry_price)} → $${fmt(p.exit_price)}</td>
-                        <td>${expectedPnl != null ? (expectedPnl >= 0 ? '+' : '') + fmt(expectedPnl) + ' USDT' : '—'}</td>
                         <td class="${pnlClass(actualPnl)}">${actualPnl >= 0 ? '+' : ''}${fmt(actualPnl)} USDT<br><small>${fmt(p.pnl_percentage)}%</small></td>
-                        <td>${acc}</td>
-                        <td>${desvHtml}</td>
                         <td>${fmtCloseReason(p.close_reason)}</td>
+                        <td class="sl-tp-badges">${lifecycleBadges}</td>
                         <td>${exitTimeFmt}</td>
                     </tr>`;
                 }).join('')}
@@ -1265,13 +1271,27 @@ function showPositionDetailModal(symbol, positionId, status) {
                     </div>
 
                     <div class="modal-section">
-                        <h4>🛡️ TARGETS CALCULADOS</h4>
-                        <div class="detail-grid">
-                            <div><label>Stop Loss Final:</label><span class="negative">$${fmt(position.stop_loss)} (${(position.side === 'SELL' || position.side === 'SHORT' ? ((position.entry_price - position.stop_loss) / position.entry_price * 100) : ((position.stop_loss - position.entry_price) / position.entry_price * 100)).toFixed(1)}%)</span></div>
-                            <div><label>Take Profit Final:</label><span class="positive">$${fmt(position.take_profit)} (+${(position.side === 'SELL' || position.side === 'SHORT' ? ((position.entry_price - position.take_profit) / position.entry_price * 100) : ((position.take_profit - position.entry_price) / position.entry_price * 100)).toFixed(1)}%)</span></div>
-                            ${pred.stop_loss_initial ? `<div><label>Stop Loss Inicial:</label><span class="negative">$${fmt(pred.stop_loss_initial)}</span></div>` : ''}
-                            ${pred.take_profit_initial ? `<div><label>Take Profit Inicial:</label><span class="positive">$${fmt(pred.take_profit_initial)}</span></div>` : ''}
+                        <h4>🛡️ SL/TP LIFECYCLE</h4>
+                        <div class="detail-grid sl-tp-lifecycle">
+                            <div><label>Stop Loss Actual:</label><span class="negative">$${fmt(position.stop_loss)} (${position.sl_dist_pct != null ? (position.sl_dist_pct >= 0 ? '+' : '') + position.sl_dist_pct.toFixed(1) + '%' : '—'})</span></div>
+                            <div><label>Take Profit Actual:</label><span class="positive">$${fmt(position.take_profit)} (${position.tp_dist_pct != null ? (position.tp_dist_pct >= 0 ? '+' : '') + position.tp_dist_pct.toFixed(1) + '%' : '—'})</span></div>
+                            ${pred.stop_loss_initial ? `<div><label>SL Inicial:</label><span class="negative">$${fmt(pred.stop_loss_initial)}${position.stop_loss && pred.stop_loss_initial ? (position.stop_loss > pred.stop_loss_initial ? ' → <span class="positive">↑ mejoró</span>' : position.stop_loss < pred.stop_loss_initial ? ' → <span class="negative">↓</span>' : ' → sin cambio') : ''}</span></div>` : ''}
+                            ${pred.take_profit_initial ? `<div><label>TP Inicial:</label><span class="positive">$${fmt(pred.take_profit_initial)}</span></div>` : ''}
                         </div>
+                        <div class="detail-grid sl-tp-lifecycle" style="margin-top:8px;border-top:1px solid #333;padding-top:8px;">
+                            <div><label>Trailing:</label><span class="${position.trailing_active ? 'positive' : ''}">${position.trailing_active ? '📈 Activo' : '⏸️ Inactivo'}${position.trailing_peak ? ' · Peak: $' + fmt(position.trailing_peak) : ''}</span></div>
+                            <div><label>Breakeven:</label><span class="${position.breakeven_done ? 'positive' : ''}">${position.breakeven_done ? '🛡️ Activado' : '—'}</span></div>
+                            <div><label>SmartTP Ext.:</label><span>${position.tp_extensions > 0 ? '🔄 ×' + position.tp_extensions : '—'}</span></div>
+                            <div><label>Scale-Out:</label><span>${position.scale_out_done ? '✂️ Ejecutado' : '—'}</span></div>
+                            ${position.dynamic_trail_dist_pct ? `<div><label>Trail Dist. Dinámica:</label><span>${position.dynamic_trail_dist_pct}%</span></div>` : ''}
+                        </div>
+                        ${(position.tp_decisions && position.tp_decisions.length > 0) ? `
+                        <div style="margin-top:8px;border-top:1px solid #333;padding-top:8px;">
+                            <label style="font-weight:600;color:#ccc;">Decisiones TP:</label>
+                            <div class="tp-decisions-list">
+                                ${position.tp_decisions.map(d => `<div class="tp-decision-item">Nivel ${d.tp_level || '?'}: ${d.action || '?'} @ $${fmt(d.price || 0)} <small>(score: ${d.momentum_score ?? '—'})</small></div>`).join('')}
+                            </div>
+                        </div>` : ''}
                     </div>
                     
                     <div class="modal-section">
@@ -1768,8 +1788,6 @@ function showFuturesDetailModal(symbol, side) {
                         <div class="detail-grid">
                             <div><label>Entrada:</label><span>$${fmt(pos.entry_price)}</span></div>
                             <div><label>Actual:</label><span class="${upnlCls}">$${fmt(pos.current_price)}</span></div>
-                            <div><label>Stop Loss:</label><span class="negative">$${fmt(pos.sl_price)} (${pos.sl_dist_pct >= 0 ? '+' : ''}${fmt(pos.sl_dist_pct)}% dist)</span></div>
-                            <div><label>Take Profit:</label><span class="positive">$${fmt(pos.tp_price)} (${pos.tp_dist_pct >= 0 ? '+' : ''}${fmt(pos.tp_dist_pct)}% dist)</span></div>
                         </div>
                     </div>
                     <div class="modal-section">
@@ -1777,10 +1795,19 @@ function showFuturesDetailModal(symbol, side) {
                         <div class="modal-price-chart" id="futChartWrap"></div>
                     </div>
                     <div class="modal-section">
-                        <h4>🛡️ TARGETS CALCULADOS</h4>
-                        <div class="detail-grid">
-                            <div><label>Stop Loss:</label><span class="negative">$${fmt(pos.sl_price)} (${((pos.sl_price - pos.entry_price) / pos.entry_price * 100).toFixed(1)}%)</span></div>
-                            <div><label>Take Profit:</label><span class="positive">$${fmt(pos.tp_price)} (+${((pos.tp_price - pos.entry_price) / pos.entry_price * 100).toFixed(1)}%)</span></div>
+                        <h4>🛡️ SL/TP LIFECYCLE</h4>
+                        <div class="detail-grid sl-tp-lifecycle">
+                            <div><label>Stop Loss:</label><span class="negative">$${fmt(pos.sl_price)} (${pos.sl_dist_pct != null ? (pos.sl_dist_pct >= 0 ? '+' : '') + parseFloat(pos.sl_dist_pct).toFixed(1) + '%' : '—'})</span></div>
+                            <div><label>Take Profit:</label><span class="positive">$${fmt(pos.tp_price)} (${pos.tp_dist_pct != null ? (pos.tp_dist_pct >= 0 ? '+' : '') + parseFloat(pos.tp_dist_pct).toFixed(1) + '%' : '—'})</span></div>
+                        </div>
+                        <div class="detail-grid sl-tp-lifecycle" style="margin-top:8px;border-top:1px solid #333;padding-top:8px;">
+                            <div><label>Breakeven:</label><span class="${pos.breakeven_done ? 'positive' : ''}">${pos.breakeven_done ? '🛡️ Activado' : '⏸️ Pendiente'}</span></div>
+                            <div><label>Trailing:</label><span class="${pos.trailing_active ? 'positive' : ''}">${pos.trailing_active ? '📈 Activo' : '⏸️ Inactivo'}${pos.trail_best_price ? ' · Best: $' + fmt(pos.trail_best_price) : ''}</span></div>
+                            <div><label>Trail Dist. Dinámica:</label><span>${pos.dynamic_trail_dist_pct ? pos.dynamic_trail_dist_pct + '%' : '—'}</span></div>
+                            <div><label>SmartTP Ext.:</label><span>${pos.tp_extensions > 0 ? '🔄 ×' + pos.tp_extensions : '—'}</span></div>
+                        </div>
+                        <div class="sl-regla-oro" style="margin-top:6px;padding:4px 8px;background:#1a2332;border-radius:4px;font-size:11px;">
+                            ⚖️ <strong>REGLA DE ORO:</strong> SL nunca retrocede — ${isShort ? 'solo baja' : 'solo sube'}
                         </div>
                     </div>
                     <div class="modal-section">
@@ -1789,13 +1816,6 @@ function showFuturesDetailModal(symbol, side) {
                             <div><label>PnL No Realizado:</label><span class="${upnlCls}" style="font-size:16px;font-weight:700">${upnl >= 0 ? '+' : ''}${fmt(upnl, 4)} USDT</span></div>
                             <div><label>Movimiento %:</label><span class="${upnlCls}">${upnl >= 0 ? '+' : ''}${fmt(upnl * 100 / (pos.entry_price * pos.qty))}%</span></div>
                             <div><label>Dirección:</label><span>${isShort ? '📉 SHORT — ganancia al bajar' : '📈 LONG — ganancia al subir'}</span></div>
-                        </div>
-                    </div>
-                    <div class="modal-section">
-                        <h4>💰 PnL NO REALIZADO</h4>
-                        <div class="detail-grid">
-                            <div><label>PnL USDT:</label><span class="${upnlCls}" style="font-size:16px;font-weight:700">${upnl >= 0 ? '+' : ''}${fmt(upnl, 4)} USDT</span></div>
-                            <div><label>Dirección objetivo:</label><span>${isShort ? '📉 Precio baja = ganancia' : '📈 Precio sube = ganancia'}</span></div>
                         </div>
                     </div>
                 </div>
@@ -2824,8 +2844,15 @@ function showFuturesClosedDetailModal(symbol, side, idx) {
                         <div class="detail-grid">
                             <div><label>Entrada:</label><span>$${fmt(entryP)}</span></div>
                             <div><label>Salida:</label><span class="${pnlCls}">$${fmt(exitP)}</span></div>
+                        </div>
+                    </div>
+                    
+                    <div class="modal-section">
+                        <h4>🛡️ SL/TP LIFECYCLE</h4>
+                        <div class="detail-grid sl-tp-lifecycle">
                             <div><label>Stop Loss Final:</label><span class="negative">${slInfo}</span></div>
                             <div><label>Take Profit Final:</label><span class="positive">${tpInfo}</span></div>
+                            <div><label>Razón de Cierre:</label><span>${fmtCloseReason(pos.close_reason)}</span></div>
                         </div>
                     </div>
                     
