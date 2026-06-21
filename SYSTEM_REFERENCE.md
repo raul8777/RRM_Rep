@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 21 2026 17:00 UTC-6 | Sesión 12: Dashboard SL/TP Visibility — visibilidad total del ciclo de vida SL/TP en posiciones abiertas y cerradas
+> Última actualización: jun 21 2026 17:39 UTC-6 | Sesión 14: Trailing SL protection, ghost cleanup, critical bug fixes — tag v0.14-trailing-protection
 
 ---
 
@@ -52,16 +52,16 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 20 2026 23:11 UTC-6 |
-| Capital total | ~$2,910 USDT |
-| Capital spot líquido | ~$1,650 USDT |
+| Fecha última actualización | jun 21 2026 17:39 UTC-6 |
+| Capital total | ~$2,810 USDT |
+| Capital spot líquido | ~$1,771 USDT |
 | Capital invertido spot | $0 (sin posiciones spot) |
-| Capital futuros total | ~$1,198 USDT ($662 margin + $523 libre + $27 unrealized PnL) |
-| Régimen activo | **FUTURES_SHORT** (confirmado — BTC 30d=-19.0%) |
-| Fear & Greed | **15 — Capitulación** |
+| Capital futuros total | ~$1,040 USDT (~$500 margin + ~$2 libre + ~$38 unrealized PnL) |
+| Régimen activo | **FUTURES_SHORT** (confirmado — BTC 30d=-17.4%) |
+| Fear & Greed | **23 — Extreme Fear** |
 | BTC 4h trend | DOWN (EMA9 < EMA21) |
-| BTC 7d | -1.2% |
-| BTC 30d | -19.0% (bear estructural activo) |
+| BTC 7d | -4.5% |
+| BTC 30d | -17.4% (bear estructural activo) |
 | Screener dinámico | ✅ ACTIVO — 41 spot / 19 futures (F2 expansión jun 18) |
 | Screener v2 Top-100 | ✅ CONFIGURADO — quality filters $10M vol, max volatility 50% |
 | Expansión activos E1 | ✅ COMPLETADA — 24→41 tokens con datos históricos reales |
@@ -74,7 +74,7 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 | Dashboard Bugs B1-B3 | ✅ jun 19 2026 (sesión 2) — tooltip script fix, SOL entry_price math, balance walletBalance |
 | Futuros monitoring | ✅ check_positions() corre cada ciclo independiente de régimen |
 | Shorts protección ganancia | ✅ futures_protect_profit_usdt=1.0 — solo cierra shorts en pérdida al cambiar régimen |
-| Futuros SHORTs activos | **9/9** — NEAR, ADA, SUI, XRP, BNB, BTC, ETH, UNI, AAVE — slots llenos |
+| Futuros SHORTs activos | **9/9** — FIL, DOT, ETH, SUI, XRP, LINK, BTC, SOL, BNB — slots llenos |
 | FUTURES_MAX_SHORTS | **9** (H-FIX A1 sesión 8 — subido de 7) |
 | FUTURES_MAX_LARGECAP_SHORTS | **5** (guard IMPLEMENTADO en código jun 20 sesión 3 — slots 6-7 forzados a MIDs/NARRATIVE) |
 | CapBridge | ✅ ACTIVO — transferencia autónoma bidireccional spot↔futuros (jun 18 2026) |
@@ -96,10 +96,44 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 - Slots 6-7 = MIDs automáticamente (LARGECAP_CAP guard activo: max 5 large-caps)
 - Próximos candidatos: NEARUSDT, SUIUSDT, AVAXUSDT, LINKUSDT, DOTUSDT
 
+### ✅ Sesiones 13-14: Trailing SL protection + ghost cleanup + critical fixes — jun 21 2026 17:39 UTC-6
+
+**Tag git: `v0.14-trailing-protection`**
+
+#### Fixes implementados
+| Fix | Archivo | Descripción |
+|-----|---------|-------------|
+| FIX-S1 | futures_client.py | `_persist_smart_meta()` — persiste breakeven/trailing/SmartTP en trades_open.metadata JSON |
+| FIX-S2 | futures_client.py | `_sync_open_positions()` restaura `_smart_meta` desde DB + infiere estado desde SL vs entry |
+| FIX-S3 | app.py + futures_client.py | Dashboard infiere `trailing_active` desde PnL% ≥1.5% y `breakeven_done` desde SL vs entry |
+| FIX-S4 | futures_client.py | Ghost reconciliation: auto-delete trades_open stale en cada sync |
+| FIX-S4b | futures_client.py | Auto-create trades_open para posiciones Binance sin record en DB |
+| FIX-S5 | futures_client.py | SL se mueve inmediatamente al activar trailing (antes esperaba nuevo low/high) |
+| FIX-S6 | position_manager.py | PM filtra `WHERE trade_type != 'futures'` — evita que spot SL/TP intente vender futuros |
+| BUG-C1 | run_trades.py | `close_position()` → `close_long()` (método no existía) |
+| BUG-C2 | futures_client.py | `pos.margin` → `qty * entry_price / LEVERAGE_MAX` (atributo no existía) |
+| BUG-H1 | run_trades.py | SPOT SmartTP EXTEND SL buffer 0.5% → `sl_pct * 40%` (dinámico por categoría) |
+| BUG-H2 | run_trades.py | Persist trailing SL para SPOT via `update_position_sl()` |
+
+#### Estado de protección actual (9 SHORTs)
+| Símbolo | PnL | Trail | BE | SL Dist |
+|---------|-----|-------|-----|--------|
+| DOTUSDT | $6.13 | ✅ | ✅ | 1.27% |
+| SUIUSDT | $6.60 | ✅ | ✅ | 1.40% |
+| XRPUSDT | $5.43 | ✅ | ✅ | 1.74% |
+| SOLUSDT | $4.84 | ✅ | ✅ | 1.53% |
+| BTCUSDT | $4.60 | ✅ | ❌ | 3.42% |
+| LINKUSDT | $3.95 | ✅ | ✅ | 1.79% |
+| ETHUSDT | $3.08 | ✅ | ❌ | 2.70% |
+| FILUSDT | $1.94 | ❌ | ❌ | 3.84% |
+| BNBUSDT | $1.52 | ❌ | ❌ | 2.03% |
+
+Total unrealized PnL: **~$38 USDT**. 7/9 posiciones con trailing activo.
+
 ### ⏱ Próxima revisión
-- Monitorear que slots 6-7 se llenen con MIDs en el próximo ciclo (6 min)
-- Si 2-3 TPs más confirman → evaluar MAX_SHORTS=9 (siguiente escala)
-- BNB SL dist = 0.65% ⚠️ — SL en breakeven, puede cerrar pronto
+- Monitorear trailing SL en todas las posiciones — verificar que SL se aprieta con cada nuevo low
+- Refactor `_evaluate_short_momentum` para usar `pnl_service.predict_for_symbol` (pendiente)
+- Evaluar si breakeven_activation_pct=2.0% es óptimo o bajar a 1.5%
 
 ### 🖼️ Dashboard UX — jun 19 2026 08:33 UTC-6
 - **D1**: `futures_client.get_recent_trades()` — `entry_price` calculado desde mem o fórmula math
