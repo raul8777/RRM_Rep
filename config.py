@@ -68,9 +68,9 @@ class Settings(BaseSettings):
     spot_bull_pnl_boost_midcap: float = Field(default=-0.10, env="SPOT_BULL_PNL_BOOST_MIDCAP")        # alts: allow -0.10
     spot_bull_btc_4h_up_required: bool = Field(default=True, env="SPOT_BULL_BTC_4H_UP_REQUIRED")      # only apply when BTC 4h=UP
     # Regime whipsaw protection — minimum consecutive PRESERVATION cycles before closing shorts
-    min_cycles_before_close_shorts: int = Field(default=3, env="MIN_CYCLES_BEFORE_CLOSE_SHORTS")
+    min_cycles_before_close_shorts: int = Field(default=5, env="MIN_CYCLES_BEFORE_CLOSE_SHORTS")  # H-FIX: 3→5 evita cierre prematuro en oscilaciones de régimen
     # Protect profitable shorts on regime change — only close if unrealized PnL < this threshold (USD)
-    futures_protect_profit_usdt: float = Field(default=1.0, env="FUTURES_PROTECT_PROFIT_USDT")
+    futures_protect_profit_usdt: float = Field(default=-5.0, env="FUTURES_PROTECT_PROFIT_USDT")  # H-FIX: 1.0→-5.0 — solo cierra en regime change si pérdida > $5
     # Aggressive exposure in SPOT_BULL + F&G Fear: use higher cap when conditions are optimal
     max_total_exposure_spot_bull_fear: float = Field(default=0.80, env="MAX_TOTAL_EXPOSURE_SPOT_BULL_FEAR")
     max_total_exposure_spot_bull_fear_fng_threshold: int = Field(default=40, env="MAX_TOTAL_EXPOSURE_SPOT_BULL_FEAR_FNG_THRESHOLD")
@@ -93,13 +93,13 @@ class Settings(BaseSettings):
     futures_smart_tp_enabled: bool = Field(default=True, env="FUTURES_SMART_TP_ENABLED")
     futures_smart_tp_max_extensions: int = Field(default=2, env="FUTURES_SMART_TP_MAX_EXTENSIONS")  # fewer extensions than spot (leverage risk)
     futures_smart_tp_max_pnl_pct: float = Field(default=12.0, env="FUTURES_SMART_TP_MAX_PNL_PCT")  # cap at 12% PnL (2x leverage)
-    futures_smart_tp_extend_score_threshold: int = Field(default=3, env="FUTURES_SMART_TP_EXTEND_SCORE_THRESHOLD")  # stricter score (3/4) for shorts
+    futures_smart_tp_extend_score_threshold: int = Field(default=2, env="FUTURES_SMART_TP_EXTEND_SCORE_THRESHOLD")  # H-FIX: 3→2 (más extensiones TP = más ganancia por trade)
     futures_smart_tp_extension_pct: float = Field(default=2.0, env="FUTURES_SMART_TP_EXTENSION_PCT")  # extend TP by 2% of current price
     # Futures trailing stop: protect unrealized gains during position lifecycle
     futures_trailing_enabled: bool = Field(default=True, env="FUTURES_TRAILING_ENABLED")
-    futures_trailing_activation_pct: float = Field(default=3.0, env="FUTURES_TRAILING_ACTIVATION_PCT")  # v4 OPT: 2.0→3.0 (evita trailing prematuro en rebotes)
+    futures_trailing_activation_pct: float = Field(default=1.5, env="FUTURES_TRAILING_ACTIVATION_PCT")  # H-FIX: 3.0→1.5 (trailing más temprano, protege ganancias acumuladas)
     futures_trailing_distance_pct: float = Field(default=1.5, env="FUTURES_TRAILING_DISTANCE_PCT")      # FIX-F4: trail SL/TP 1.5% from best price (was 1.0 — avoids premature exits on volatility)
-    futures_breakeven_activation_pct: float = Field(default=1.2, env="FUTURES_BREAKEVEN_ACTIVATION_PCT")  # move SL to breakeven at 1.2% gain
+    futures_breakeven_activation_pct: float = Field(default=2.0, env="FUTURES_BREAKEVEN_ACTIVATION_PCT")  # H-FIX: 1.2→2.0 (da más respiro antes de mover SL a breakeven)
     # FIX-F1: Cooldown after futures SL hit — prevents re-entering same symbol immediately after stop out
     futures_sl_cooldown_hours: float = Field(default=1.0, env="FUTURES_SL_COOLDOWN_HOURS")  # 1h cooldown after SL hit
     # FIX-F2: BTC 1h bounce filter — skip new SHORTs if BTC 1h candle is rising above threshold
@@ -238,7 +238,7 @@ class Settings(BaseSettings):
     cycle_spot_bull: int = Field(default=10, env="CYCLE_SPOT_BULL")            # jun17: 20→10 min (+47% throughput señales)
     cycle_range_scalp: int = Field(default=5, env="CYCLE_RANGE_SCALP")         # minutes per cycle in RANGE_SCALP
     cycle_preservation: int = Field(default=45, env="CYCLE_PRESERVATION")      # jun17: 30→45 min (menos ciclos en bajista = menos comisiones)
-    cycle_futures_short: int = Field(default=6, env="CYCLE_FUTURES_SHORT")     # jun17: 8→6 min (más monitoreo de shorts)
+    cycle_futures_short: int = Field(default=4, env="CYCLE_FUTURES_SHORT")     # H-FIX: 6→4 min (trailing más reactivo a movimientos rápidos)
 
     # Signal quality filter
     min_signal_strength: float = Field(default=0.55, env="MIN_SIGNAL_STRENGTH")  # v4 OPT: 0.35→0.55 (+$570 USDT/mes validado en sim)
@@ -355,9 +355,11 @@ class Settings(BaseSettings):
     futures_no_short_btc_4h_threshold: float = Field(default=2.0, env="FUTURES_NO_SHORT_BTC_4H_THRESHOLD")
     # Futures overflow: allow extra SHORTs beyond futures_max_shorts when signal is exceptional
     futures_overflow_max_extra: int   = Field(default=3,    env="FUTURES_OVERFLOW_MAX_EXTRA")    # max extra simultaneous overflow SHORTs (3+3=6 total) — review after 1 week
-    futures_overflow_min_strength: float = Field(default=0.75, env="FUTURES_OVERFLOW_MIN_STRENGTH")  # Kelly FUERTE+
-    futures_overflow_min_vol_spike: float = Field(default=2.5,  env="FUTURES_OVERFLOW_MIN_VOL_SPIKE") # vol spike multiplier
+    futures_overflow_min_strength: float = Field(default=0.65, env="FUTURES_OVERFLOW_MIN_STRENGTH")  # H-FIX: 0.75→0.65 (habilita overflow en condiciones de alta vol moderada)
+    futures_overflow_min_vol_spike: float = Field(default=2.0,  env="FUTURES_OVERFLOW_MIN_VOL_SPIKE")  # H-FIX: 2.5→2.0 (más accesible para overflow en pánico moderado)
     futures_overflow_min_drop_24h: float  = Field(default=-3.0, env="FUTURES_OVERFLOW_MIN_DROP_24H")  # min 24h drop %
+    # M1: Minimum strength to inject a symbol into the futures signal pool (filters weak HOLDs)
+    futures_min_inject_strength: float = Field(default=0.40, env="FUTURES_MIN_INJECT_STRENGTH")
     # Futures Kelly dynamic cap
     futures_kelly_cap_pct: float = Field(default=0.15, env="FUTURES_KELLY_CAP_PCT")  # 15% of available futures margin
     # Capital Bridge: bidirectional autonomous spot↔futures transfer

@@ -2997,6 +2997,11 @@ def execute_once(monitor_only: bool = False):
                     print(f"[Futures/Inject] {_fsym}: HOLD (strength={_ta_strength:.2f}) — kept at low strength")
             except Exception as _te:
                 print(f"[Futures/Inject] {_fsym}: analysis failed ({_te}) — using default strength=0.50")
+            # M1: Skip HOLD signals too weak to ever open a position (strength < 0.4)
+            # They can't pass overflow threshold and consume evaluation time uselessly
+            _min_inject_strength = getattr(settings, 'futures_min_inject_strength', 0.40)
+            if _fsig.get("strength", 0.0) < _min_inject_strength and _fsig.get("score", 50) < 40:
+                continue
             _new_futures.append(_fsig)
         if _new_futures:
             print(f"[Futures] FUTURES_SHORT: injecting {[s['symbol'] for s in _new_futures]} into signal pool")

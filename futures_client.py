@@ -1508,16 +1508,20 @@ class FuturesClient:
 
                         if _score >= _smart_tp_threshold:
                             tick = self._get_tick_size(symbol)
+                            # BUG-K5 fix: dynamic SL distance = 40% of configured SL (not hardcoded 0.5%)
+                            # Prevents immediate SL hit after extension on volatile candles
+                            _sl_pct_raw = getattr(settings, 'futures_sl_pct', 3.0) if settings else 3.0
+                            _smart_sl_buffer = _sl_pct_raw * 0.40 / 100.0  # 40% of configured SL %
                             if pos.side == "SHORT":
                                 # Extend: lower TP (SHORT profits on price drop)
                                 _new_tp = self._align_price(price * (1.0 - _smart_tp_ext_pct / 100.0), tick)
-                                # Raise SL to just above current price (lock in gains)
-                                _new_sl = self._align_price(price * 1.005, tick)
-                                # Only raise SL if new_sl is lower than current sl (SHORT: lower sl_price = tighter stop)
+                                # Raise SL above current price by dynamic buffer (lock in gains)
+                                _new_sl = self._align_price(price * (1.0 + _smart_sl_buffer), tick)
+                                # Only move SL if new_sl is lower than current sl (SHORT: lower sl_price = tighter stop)
                                 _update_sl = _new_sl < pos.sl_price
                             else:  # LONG
                                 _new_tp = self._align_price(price * (1.0 + _smart_tp_ext_pct / 100.0), tick)
-                                _new_sl = self._align_price(price * 0.995, tick)
+                                _new_sl = self._align_price(price * (1.0 - _smart_sl_buffer), tick)
                                 _update_sl = _new_sl > pos.sl_price
 
                             pos._smart_meta['tp_extensions_count'] = _ext_count + 1
