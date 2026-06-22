@@ -1501,7 +1501,9 @@ async def get_dashboard_summary() -> Dict:
                     "breakeven_done": fp.get("breakeven_done", False),
                     "tp_extensions": fp.get("tp_extensions", 0),
                     "tp_decisions": [],
-                    "scale_out_done": False,
+                    "scale_out_done": fp.get("scale_out_done", False),
+                    "scale_out_pnl": fp.get("scale_out_pnl", 0.0),
+                    "peak_pnl_pct": fp.get("peak_pnl_pct", 0.0),
                     "dynamic_trail_dist_pct": fp.get("dynamic_trail_dist_pct"),
                 })
         except Exception as e:
@@ -1549,6 +1551,8 @@ async def get_dashboard_summary() -> Dict:
                 "trailing_peak": _cl_meta.get('trailing_peak'),
                 "tp_decisions": _cl_meta.get('tp_decisions', []),
                 "scale_out_done": bool(_cl_meta.get('scale_out_done', False)),
+                "scale_out_pnl": round(float(_cl_meta.get('scale_out_pnl', 0) or 0), 4),
+                "peak_pnl_pct": round(float(_cl_meta.get('peak_pnl_pct', 0) or 0) * 100, 2),
                 "tp_extensions": int(_cl_meta.get('tp_extensions_count', 0)),
             })
         _cl_spot = sum(1 for p in closed_list if p.get('trade_type') != 'futures')
@@ -1562,6 +1566,70 @@ async def get_dashboard_summary() -> Dict:
         }
     except Exception as e:
         result["closed_positions"] = {"positions": [], "count": 0, "error": str(e), "period_days": 3}
+
+    # PnL by close reason (today + 7d)
+    try:
+        _now_mx = to_mexico_time(datetime.utcnow())
+        _today_start = _now_mx.replace(hour=0, minute=0, second=0, microsecond=0)
+        _week_start = _today_start - timedelta(days=7)
+        _closed_all = result.get("closed_positions", {}).get("positions", [])
+        from collections import defaultdict as _dd_cr
+        _cr_today = _dd_cr(lambda: {"count": 0, "pnl": 0.0})
+        _cr_week  = _dd_cr(lambda: {"count": 0, "pnl": 0.0})
+        _today_spot_pnl = 0.0; _today_fut_pnl = 0.0; _today_spot_c = 0; _today_fut_c = 0
+        _week_spot_pnl = 0.0; _week_fut_pnl = 0.0; _week_spot_c = 0; _week_fut_c = 0
+        for cp in _closed_all:
+            _cp_exit = cp.get("exit_time", "")
+            _cp_pnl = float(cp.get("pnl", 0))
+            _cp_reason = cp.get("close_reason", "unknown") or "unknown"
+            _cp_type = cp.get("trade_type", "spot")
+            # Also include scale_out_pnl for positions that had a scale-out (adds to the total realized)
+            _cp_so_pnl = float(cp.get("scale_out_pnl", 0))
+            _cp_total_pnl = _cp_pnl + _cp_so_pnl
+            try:
+                _cp_dt = datetime.fromisoformat(str(_cp_exit).replace('Z', '+00:00'))
+                if _cp_dt.tzinfo is None:
+                    from datetime import timezone as _tz
+                    _cp_dt = _cp_dt.replace(tzinfo=_tz.utc)
+                _cp_mx = to_mexico_time(_cp_dt)
+            except Exception:
+                continue
+            if _cp_mx >= _week_start:
+                _cr_week[_cp_reason]["count"] += 1
+                _cr_week[_cp_reason]["pnl"] += _cp_total_pnl
+                if _cp_type == "futures":
+                    _week_fut_pnl += _cp_total_pnl; _week_fut_c += 1
+                else:
+                    _week_spot_pnl += _cp_total_pnl; _week_spot_c += 1
+            if _cp_mx >= _today_start:
+                _cr_today[_cp_reason]["count"] += 1
+                _cr_today[_cp_reason]["pnl"] += _cp_total_pnl
+                if _cp_type == "futures":
+                    _today_fut_pnl += _cp_total_pnl; _today_fut_c += 1
+                else:
+                    _today_spot_pnl += _cp_total_pnl; _today_spot_c += 1
+        def _cr_to_list(d):
+            return sorted([{"reason": k, "count": v["count"], "pnl": round(v["pnl"], 4)}
+                           for k, v in d.items()], key=lambda x: x["pnl"], reverse=True)
+        result["pnl_by_close_reason"] = {
+            "today": {
+                "by_reason": _cr_to_list(_cr_today),
+                "total_pnl": round(sum(v["pnl"] for v in _cr_today.values()), 4),
+                "total_trades": sum(v["count"] for v in _cr_today.values()),
+                "spot_pnl": round(_today_spot_pnl, 4), "spot_count": _today_spot_c,
+                "futures_pnl": round(_today_fut_pnl, 4), "futures_count": _today_fut_c,
+            },
+            "week": {
+                "by_reason": _cr_to_list(_cr_week),
+                "total_pnl": round(sum(v["pnl"] for v in _cr_week.values()), 4),
+                "total_trades": sum(v["count"] for v in _cr_week.values()),
+                "spot_pnl": round(_week_spot_pnl, 4), "spot_count": _week_spot_c,
+                "futures_pnl": round(_week_fut_pnl, 4), "futures_count": _week_fut_c,
+            },
+            "daily_target": 40.0,
+        }
+    except Exception as e:
+        result["pnl_by_close_reason"] = {"error": str(e)}
 
     # Next Cycle
     try:

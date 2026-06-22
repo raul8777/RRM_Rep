@@ -376,6 +376,83 @@ class FuturesClient:
         aligned = (p / t).to_integral_value() * t
         return float(aligned)
 
+    # ── ATR (Average True Range) for volatility-aware trailing ─────────────────
+    _atr_cache: Dict[str, Tuple[float, float]] = {}  # symbol → (atr_pct, timestamp)
+    _ATR_CACHE_TTL = 300  # 5 minutes
+
+    def get_atr_pct(self, symbol: str, interval: str = "5m", periods: int = 14) -> float:
+        """Return ATR as a percentage of current price (cached 5 min).
+        
+        ATR measures average candle range — represents normal volatility noise.
+        Trail distances must be > ATR to avoid triggering on normal wicks.
+        """
+        if self.dry_run:
+            return 0.005  # 0.5% fallback for dry-run/tests — no network call
+
+        now = time.time()
+        cached = self._atr_cache.get(symbol)
+        if cached and (now - cached[1]) < self._ATR_CACHE_TTL:
+            return cached[0]
+
+        try:
+            # Fetch klines: [open_time, open, high, low, close, volume, ...]
+            klines = self._get(f"/fapi/v1/klines", {
+                "symbol": symbol, "interval": interval, "limit": periods + 1
+            })
+            if not klines or len(klines) < periods + 1:
+                return 0.005  # fallback 0.5%
+
+            # True Range = max(H-L, |H-prev_close|, |L-prev_close|)
+            tr_values = []
+            for i in range(1, len(klines)):
+                h = float(klines[i][2])
+                l = float(klines[i][3])
+                prev_c = float(klines[i - 1][4])
+                tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+                tr_values.append(tr)
+
+            atr = sum(tr_values[-periods:]) / periods
+            # Convert to percentage of current price
+            current_price = float(klines[-1][4])
+            atr_pct = (atr / current_price) if current_price > 0 else 0.005
+
+            self._atr_cache[symbol] = (atr_pct, now)
+            return atr_pct
+        except Exception as e:
+            print(f"[Futures/ATR] {symbol} fetch failed: {e} — using fallback 0.5%")
+            return 0.005  # safe fallback
+
+    def compute_trail_distance(self, symbol: str, pnl_pct: float, settings=None) -> float:
+        """Compute ATR-scaled trailing distance for a given symbol and PnL level.
+        
+        Returns trail distance as a decimal (e.g., 0.008 = 0.8%).
+        Formula: trail_dist = max(floor, min(ceiling, ATR * multiplier))
+        """
+        _atr_enabled = getattr(settings, 'futures_trail_atr_enabled', True) if settings else True
+        _floor = getattr(settings, 'futures_trail_floor_pct', 0.4) / 100.0 if settings else 0.004
+        _ceiling = getattr(settings, 'futures_trail_ceiling_pct', 1.2) / 100.0 if settings else 0.012
+
+        if not _atr_enabled:
+            # Fallback to static schedule (legacy)
+            return getattr(settings, 'futures_trailing_distance_pct', 1.5) / 100.0 if settings else 0.015
+
+        # Select multiplier based on PnL level
+        if pnl_pct >= 0.08:
+            mult = getattr(settings, 'futures_trail_atr_multiplier_deep', 0.8) if settings else 0.8
+        elif pnl_pct >= 0.05:
+            mult = getattr(settings, 'futures_trail_atr_multiplier_high', 1.0) if settings else 1.0
+        elif pnl_pct >= 0.03:
+            mult = getattr(settings, 'futures_trail_atr_multiplier_mid', 1.2) if settings else 1.2
+        else:
+            mult = getattr(settings, 'futures_trail_atr_multiplier_low', 1.5) if settings else 1.5
+
+        atr_pct = self.get_atr_pct(symbol)
+        trail_dist = atr_pct * mult
+
+        # Clamp between floor and ceiling
+        trail_dist = max(_floor, min(_ceiling, trail_dist))
+        return trail_dist
+
     def _align_qty(self, qty: float, step: float) -> float:
         from decimal import Decimal
         if step <= 0 or qty <= 0:
@@ -602,18 +679,37 @@ class FuturesClient:
                 self._open_positions[key] = pos
                 print(f"[Futures] Synced position: {side} {sym} qty={qty} entry={entry:.4f} (SL={sl_price:.4f}, TP={tp_price:.4f})")
 
-            # FIX-S2: Restore _smart_meta from trades_open DB for each synced position
+            # FIX-S2+S6: Restore _smart_meta from trades_open DB for each synced position
+            # Uses entry_price matching to pick correct row when duplicates exist
             if self.db_client and self._open_positions:
                 try:
                     _db_rows = self.db_client.execute_query(
-                        """SELECT symbol, side, metadata, pnl_prediction, indicators_at_entry, entry_time
+                        """SELECT id, symbol, side, price, metadata, pnl_prediction,
+                                  indicators_at_entry, entry_time
                            FROM trades_open
-                           WHERE metadata->>'trade_type' = 'futures'"""
+                           WHERE metadata->>'trade_type' = 'futures'
+                           ORDER BY entry_time DESC"""
                     )
-                    _db_map = {}
+                    # Build map: key → list of rows (handles duplicates)
+                    _db_multi = {}
                     for _r in _db_rows:
                         _s = 'SHORT' if _r['side'] == 'SELL' else 'LONG'
-                        _db_map[self._pos_key(_r['symbol'], _s)] = _r
+                        _k = self._pos_key(_r['symbol'], _s)
+                        _db_multi.setdefault(_k, []).append(_r)
+                    # Pick best row per key: match by entry_price, fallback newest
+                    _db_map = {}
+                    for _k, _rows in _db_multi.items():
+                        _pos = self._open_positions.get(_k)
+                        if _pos:
+                            _best = None
+                            for _r in _rows:
+                                _db_price = float(_r.get('price', 0))
+                                if abs(_db_price - _pos.entry_price) < 0.01:
+                                    _best = _r
+                                    break
+                            _db_map[_k] = _best or _rows[0]  # fallback: newest (ORDER BY DESC)
+                        else:
+                            _db_map[_k] = _rows[0]
                     for _k, _p in self._open_positions.items():
                         if _p.closed:
                             continue
@@ -673,29 +769,25 @@ class FuturesClient:
                         _cur_price = self.get_price(_p.symbol)
                         _pnl_pct_sync = _p.unrealized_pnl(_cur_price) / (_p.entry_price * _p.qty) if _p.entry_price > 0 and _p.qty > 0 else 0.0
                         if _pnl_pct_sync >= 0.015:  # 1.5% = trailing activation threshold
+                            # ATR-scaled trail distance for sync inference
+                            _trail_dist = self.compute_trail_distance(_p.symbol, _pnl_pct_sync)
                             if _p.side == "SHORT":
                                 # For SHORT, trailing best = SL / (1 + trail_dist)
-                                _trail_dist = 0.015  # default
-                                if _pnl_pct_sync >= 0.05: _trail_dist = 0.007
-                                elif _pnl_pct_sync >= 0.03: _trail_dist = 0.010
                                 _inferred_best = _p.sl_price / (1.0 + _trail_dist)
                                 if _inferred_best < _p.entry_price:
                                     _p._smart_meta['trail_best_price'] = _inferred_best
                                     _p._smart_meta['breakeven_done'] = True
-                                    print(f"[Futures/Sync] {_p.symbol} SHORT: trailing inferred best={_inferred_best:.4f} (PnL={_pnl_pct_sync*100:.2f}%)")
+                                    print(f"[Futures/Sync] {_p.symbol} SHORT: trailing inferred best={_inferred_best:.4f} (PnL={_pnl_pct_sync*100:.2f}%, dist={_trail_dist*100:.2f}%)")
                                 else:
                                     _p._smart_meta['trail_best_price'] = _cur_price
                                     print(f"[Futures/Sync] {_p.symbol} SHORT: trailing initialized at {_cur_price:.4f}")
                             elif _p.side == "LONG":
-                                _trail_dist = 0.015
-                                if _pnl_pct_sync >= 0.05: _trail_dist = 0.007
-                                elif _pnl_pct_sync >= 0.03: _trail_dist = 0.010
                                 _denom = 1.0 - _trail_dist
                                 _inferred_best = _p.sl_price / _denom if _denom > 0 else _cur_price
                                 if _inferred_best > _p.entry_price:
                                     _p._smart_meta['trail_best_price'] = _inferred_best
                                     _p._smart_meta['breakeven_done'] = True
-                                    print(f"[Futures/Sync] {_p.symbol} LONG: trailing inferred best={_inferred_best:.4f}")
+                                    print(f"[Futures/Sync] {_p.symbol} LONG: trailing inferred best={_inferred_best:.4f} (dist={_trail_dist*100:.2f}%)")
                                 else:
                                     _p._smart_meta['trail_best_price'] = _cur_price
                                     print(f"[Futures/Sync] {_p.symbol} LONG: trailing initialized at {_cur_price:.4f}")
@@ -720,6 +812,43 @@ class FuturesClient:
                                   f"id={_fdr['id']} {_fdr['symbol']} {_fdr['side']} (no Binance position)")
                 except Exception as _gc_err:
                     print(f"[Futures/Sync] Ghost cleanup failed: {_gc_err}")
+
+            # FIX-S5: Deduplicate trades_open — when multiple records exist for same symbol+side,
+            # keep only the one whose price matches Binance entry_price
+            if self.db_client and self._open_positions:
+                try:
+                    _dedup_rows = self.db_client.execute_query(
+                        """SELECT id, symbol, side, price FROM trades_open
+                           WHERE metadata->>'trade_type' = 'futures'
+                           ORDER BY entry_time DESC"""
+                    )
+                    _dedup_groups = {}
+                    for _dr in _dedup_rows:
+                        _ds = 'SHORT' if _dr['side'] == 'SELL' else 'LONG'
+                        _dk = self._pos_key(_dr['symbol'], _ds)
+                        _dedup_groups.setdefault(_dk, []).append(_dr)
+                    for _dk, _drows in _dedup_groups.items():
+                        if len(_drows) <= 1:
+                            continue
+                        _pos = self._open_positions.get(_dk)
+                        _keep_id = None
+                        if _pos:
+                            for _dr in _drows:
+                                if abs(float(_dr['price']) - _pos.entry_price) < 0.01:
+                                    _keep_id = _dr['id']
+                                    break
+                        if _keep_id is None:
+                            _keep_id = _drows[0]['id']  # newest
+                        for _dr in _drows:
+                            if _dr['id'] != _keep_id:
+                                self.db_client.execute_update(
+                                    "DELETE FROM trades_open WHERE id = %s", (_dr['id'],)
+                                )
+                                print(f"[Futures/Sync] Dedup: deleted stale trades_open "
+                                      f"id={_dr['id']} {_dr['symbol']} price={_dr['price']} "
+                                      f"(keeping id={_keep_id})")
+                except Exception as _dd_err:
+                    print(f"[Futures/Sync] Dedup failed: {_dd_err}")
 
             # FIX-S4b: Ensure all synced positions have a trades_open DB record
             if self.db_client:
@@ -1562,8 +1691,13 @@ class FuturesClient:
                     "quantity": str(pos.qty), "triggerPrice": str(_sl_aligned),
                     "positionSide": _pos_side, "timeInForce": "GTC",
                 })
-                pos.sl_order_id = str(_sl_order.get("algoId", _sl_order.get("orderId", "")))
-                pos.sl_price    = _sl_aligned
+                _new_sl_id = str(_sl_order.get("algoId", _sl_order.get("orderId", "")))
+                if not _new_sl_id or _new_sl_id == "None":
+                    print(f"[Futures/WARN] {symbol} {side}: SL order response missing algoId — response={_sl_order}")
+                    success = False
+                else:
+                    pos.sl_order_id = _new_sl_id
+                    pos.sl_price    = _sl_aligned
                 # 2. THEN: cancel old SL (position is already protected by new one)
                 if _old_sl_id:
                     try:
@@ -1692,6 +1826,52 @@ class FuturesClient:
             except Exception as _ge:
                 print(f"[Futures/Ghost] detection error: {_ge}")
 
+        # ── FIX-T7b: Periodic Binance SL/TP sync — detect and fix drifts ──
+        if not self.dry_run:
+            try:
+                _all_algo = self._get("/fapi/v1/openAlgoOrders", signed=True)
+                _algo_list = _all_algo if isinstance(_all_algo, list) else _all_algo.get("orders", _all_algo.get("algoOrders", []))
+                # Build map: symbol → {sl_trigger, tp_trigger, sl_id, tp_id}
+                _binance_sl_tp = {}
+                for _ao in _algo_list:
+                    _ao_sym = _ao.get("symbol", "")
+                    _ao_side = _ao.get("positionSide", "BOTH")
+                    _ao_type = _ao.get("type") or _ao.get("orderType", "")
+                    _ao_trigger = float(_ao.get("triggerPrice", 0))
+                    _ao_id = str(_ao.get("algoId", _ao.get("orderId", "")))
+                    if not _ao_sym or _ao_trigger <= 0:
+                        continue
+                    _bk = f"{_ao_sym}_{_ao_side}"
+                    _binance_sl_tp.setdefault(_bk, {})
+                    if _ao_type == "STOP_MARKET":
+                        _binance_sl_tp[_bk]["sl_trigger"] = _ao_trigger
+                        _binance_sl_tp[_bk]["sl_id"] = _ao_id
+                    elif _ao_type == "TAKE_PROFIT_MARKET":
+                        _binance_sl_tp[_bk]["tp_trigger"] = _ao_trigger
+                        _binance_sl_tp[_bk]["tp_id"] = _ao_id
+                for _pk, _pp in self._open_positions.items():
+                    if _pp.closed:
+                        continue
+                    _bk = f"{_pp.symbol}_{_pp.side}"
+                    _bdata = _binance_sl_tp.get(_bk, {})
+                    _b_sl = _bdata.get("sl_trigger")
+                    if _b_sl is not None and abs(_b_sl - _pp.sl_price) > 0.001:
+                        # Binance SL differs from in-memory — check if it's WORSE
+                        _is_worse = (_pp.side == "SHORT" and _b_sl > _pp.sl_price) or \
+                                    (_pp.side == "LONG" and _b_sl < _pp.sl_price)
+                        if _is_worse:
+                            print(f"[Futures/SyncSL] {_pp.symbol} {_pp.side}: Binance SL={_b_sl:.4f} is WORSE than "
+                                  f"expected {_pp.sl_price:.4f} — re-placing order")
+                            self.update_sl_tp(_pp.symbol, _pp.side, new_sl=_pp.sl_price)
+                        else:
+                            # Binance SL is better (tighter) — adopt it
+                            _pp.sl_price = _b_sl
+                            if _bdata.get("sl_id"):
+                                _pp.sl_order_id = _bdata["sl_id"]
+                            print(f"[Futures/SyncSL] {_pp.symbol} {_pp.side}: adopted Binance SL={_b_sl:.4f} (tighter)")
+            except Exception as _sync_err:
+                print(f"[Futures/SyncSL] algo order sync failed: {_sync_err}")
+
         # Read settings — use safe defaults if not provided
         _trailing_enabled      = getattr(settings, 'futures_trailing_enabled', True)      if settings else True
         _trail_act_pct        = getattr(settings, 'futures_trailing_activation_pct', 2.0) if settings else 2.0
@@ -1717,6 +1897,70 @@ class FuturesClient:
                       f"entry={entry:.4f}, unr_pnl=${unr:.2f} ({pnl_pct*100:.2f}%), "
                       f"SL={pos.sl_price:.4f}, TP={pos.tp_price:.4f}")
 
+                # ── 0a. Track peak PnL for momentum reversal ───────────────────
+                _prev_peak = pos._smart_meta.get('peak_pnl_pct', 0.0)
+                if pnl_pct > _prev_peak:
+                    pos._smart_meta['peak_pnl_pct'] = pnl_pct
+                    self._persist_smart_meta(pos)
+
+                # ── 0b. PV1: Scale-out — close partial at first profit milestone ─
+                _so_pct = getattr(settings, 'futures_scale_out_pct', 1.5) / 100.0 if settings else 0.015
+                _so_frac = getattr(settings, 'futures_scale_out_fraction', 0.5) if settings else 0.5
+                if pnl_pct >= _so_pct and not pos._smart_meta.get('scale_out_done'):
+                    _so_qty = pos.qty * _so_frac
+                    _step = self._get_step_size(symbol)
+                    _so_qty_aligned = self._align_qty(_so_qty, _step)
+                    if _so_qty_aligned > 0:
+                        _so_ok = False
+                        if self.dry_run:
+                            _so_ok = True
+                        else:
+                            try:
+                                _side = "BUY" if pos.side == "SHORT" else "SELL"
+                                self._post("/fapi/v1/order", {
+                                    "symbol": symbol, "side": _side, "type": "MARKET",
+                                    "quantity": str(_so_qty_aligned),
+                                    "positionSide": pos.side,
+                                    "reduceOnly": "true",
+                                })
+                                _so_ok = True
+                            except Exception as _so_err:
+                                print(f"[Futures/PV1] {symbol} scale-out FAILED: {_so_err}")
+                        if _so_ok:
+                            _so_pnl = (entry - price) * _so_qty_aligned if pos.side == "SHORT" else (price - entry) * _so_qty_aligned
+                            pos.qty -= _so_qty_aligned
+                            pos._smart_meta['scale_out_done'] = True
+                            pos._smart_meta['scale_out_pnl'] = _so_pnl
+                            self._persist_smart_meta(pos)
+                            # Re-place SL/TP orders with reduced qty
+                            self.update_sl_tp(symbol, pos.side, new_sl=pos.sl_price, new_tp=pos.tp_price)
+                            print(f"[Futures/PV1] {symbol} {pos.side}: SCALE-OUT {_so_frac*100:.0f}% "
+                                  f"qty={_so_qty_aligned:.6f} at PnL={pnl_pct*100:.2f}% "
+                                  f"→ locked ${_so_pnl:.2f} | remaining qty={pos.qty:.6f}")
+                            closed.append({"symbol": symbol, "side": pos.side,
+                                           "reason": "scale_out", "pnl": _so_pnl,
+                                           "partial": True})
+
+                # ── 0c. PV2: Momentum reversal close — close remaining after peak drawback ─
+                _mr_enabled = getattr(settings, 'futures_momentum_reversal_enabled', True) if settings else True
+                _mr_min_peak = getattr(settings, 'futures_momentum_reversal_min_peak', 2.0) / 100.0 if settings else 0.02
+                _mr_drawback = getattr(settings, 'futures_momentum_reversal_drawback', 0.8) / 100.0 if settings else 0.008
+                _current_peak = pos._smart_meta.get('peak_pnl_pct', 0.0)
+                if (_mr_enabled
+                        and pos._smart_meta.get('scale_out_done')
+                        and _current_peak >= _mr_min_peak
+                        and (_current_peak - pnl_pct) >= _mr_drawback
+                        and pnl_pct > 0):  # only close if still in profit
+                    _close_fn = self.close_long if pos.side == "LONG" else self.close_short
+                    _mr_result = _close_fn(symbol, reason="momentum_reversal")
+                    if _mr_result:
+                        print(f"[Futures/PV2] {symbol} {pos.side}: MOMENTUM REVERSAL CLOSE "
+                              f"peak={_current_peak*100:.2f}% → current={pnl_pct*100:.2f}% "
+                              f"(gave back {(_current_peak-pnl_pct)*100:.2f}% >= {_mr_drawback*100:.1f}%)")
+                        closed.append({"symbol": symbol, "side": pos.side,
+                                       "reason": "momentum_reversal", "pnl": pos.pnl or unr})
+                    continue  # position closed, move to next
+
                 # ── 1. Breakeven SL ─────────────────────────────────────────────
                 if _trailing_enabled and pnl_pct >= _breakeven_act_pct / 100.0:
                     if not pos._smart_meta.get('breakeven_done'):
@@ -1735,14 +1979,8 @@ class FuturesClient:
 
                 # ── 2. Trailing stop ────────────────────────────────────────────
                 if _trailing_enabled and pnl_pct >= _trail_act_pct / 100.0:
-                    # FIX-T2B: Dynamic trail distance — tighter as profit grows
-                    _base_dist = _trail_dist_pct / 100.0
-                    if pnl_pct >= 0.05:
-                        _trail_dist = 0.007   # 0.7% — very tight for big gains
-                    elif pnl_pct >= 0.03:
-                        _trail_dist = 0.010   # 1.0% — tight
-                    else:
-                        _trail_dist = _base_dist  # default (1.5%)
+                    # ATR-scaled trail: respects per-symbol volatility to avoid wick stop-outs
+                    _trail_dist = self.compute_trail_distance(symbol, pnl_pct, settings)
                     tick = self._get_tick_size(symbol)
 
                     if pos.side == "SHORT":
@@ -2055,5 +2293,8 @@ class FuturesClient:
                 "trailing_active":  _vis_trail_active,
                 "tp_extensions":    pos._smart_meta.get('tp_extensions_count', 0),
                 "dynamic_trail_dist_pct": round(_trail_dist_now * 100, 2),
+                "scale_out_done":   bool(pos._smart_meta.get('scale_out_done', False)),
+                "scale_out_pnl":    round(float(pos._smart_meta.get('scale_out_pnl', 0)), 4),
+                "peak_pnl_pct":     round(float(pos._smart_meta.get('peak_pnl_pct', 0)) * 100, 2),
             })
         return result

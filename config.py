@@ -99,11 +99,36 @@ class Settings(BaseSettings):
     futures_trailing_enabled: bool = Field(default=True, env="FUTURES_TRAILING_ENABLED")
     futures_trailing_activation_pct: float = Field(default=1.5, env="FUTURES_TRAILING_ACTIVATION_PCT")  # H-FIX: 3.0→1.5 (trailing más temprano, protege ganancias acumuladas)
     futures_trailing_distance_pct: float = Field(default=1.5, env="FUTURES_TRAILING_DISTANCE_PCT")      # FIX-F4: trail SL/TP 1.5% from best price (was 1.0 — avoids premature exits on volatility)
-    futures_breakeven_activation_pct: float = Field(default=2.0, env="FUTURES_BREAKEVEN_ACTIVATION_PCT")  # H-FIX: 1.2→2.0 (da más respiro antes de mover SL a breakeven)
+    # ATR-scaled trailing: trail_dist = max(floor, min(ceiling, ATR_5m * multiplier))
+    # This prevents stops from triggering on normal volatility wicks
+    futures_trail_atr_enabled: bool = Field(default=True, env="FUTURES_TRAIL_ATR_ENABLED")
+    futures_trail_atr_multiplier_low: float = Field(default=1.5, env="FUTURES_TRAIL_ATR_MULT_LOW")    # 1.5x ATR at 1.5-3% PnL
+    futures_trail_atr_multiplier_mid: float = Field(default=1.2, env="FUTURES_TRAIL_ATR_MULT_MID")    # 1.2x ATR at 3-5% PnL
+    futures_trail_atr_multiplier_high: float = Field(default=1.0, env="FUTURES_TRAIL_ATR_MULT_HIGH")  # 1.0x ATR at 5-8% PnL
+    futures_trail_atr_multiplier_deep: float = Field(default=0.8, env="FUTURES_TRAIL_ATR_MULT_DEEP")  # 0.8x ATR at 8%+ PnL
+    futures_trail_floor_pct: float = Field(default=0.4, env="FUTURES_TRAIL_FLOOR_PCT")   # absolute min trail dist %
+    futures_trail_ceiling_pct: float = Field(default=1.2, env="FUTURES_TRAIL_CEILING_PCT")  # absolute max trail dist %
+    futures_breakeven_activation_pct: float = Field(default=1.0, env="FUTURES_BREAKEVEN_ACTIVATION_PCT")  # FIX-T2C: 2.0→1.0 (breakeven fires BEFORE trailing 1.5%)
     # FIX-F1: Cooldown after futures SL hit — prevents re-entering same symbol immediately after stop out
-    futures_sl_cooldown_hours: float = Field(default=1.0, env="FUTURES_SL_COOLDOWN_HOURS")  # 1h cooldown after SL hit
+    futures_sl_cooldown_hours: float = Field(default=4.0, env="FUTURES_SL_COOLDOWN_HOURS")  # PB6: 1h→4h — stop chasing after SL
+    # PB1: Stagger entries — max new shorts per single cycle (de-correlates entries)
+    futures_max_new_per_cycle: int = Field(default=3, env="FUTURES_MAX_NEW_PER_CYCLE")  # max 3 new shorts opened per 4min cycle
+    # PB2: Mass SL circuit breaker — global pause after N+ positions stop in same check
+    futures_mass_sl_threshold: int = Field(default=3, env="FUTURES_MASS_SL_THRESHOLD")  # trigger if 3+ positions stop together
+    futures_mass_sl_cooldown_hours: float = Field(default=4.0, env="FUTURES_MASS_SL_COOLDOWN_HOURS")  # 4h global pause
+    # PB3: Confirm SHORT entry with red 5m candle (don't short into green momentum)
+    futures_confirm_red_candle: bool = Field(default=True, env="FUTURES_CONFIRM_RED_CANDLE")  # require last 5m candle red
+    # PB5: BTC 3h rolling momentum filter — catches gradual rallies that 1h misses
+    futures_no_short_btc_3h_threshold: float = Field(default=1.0, env="FUTURES_NO_SHORT_BTC_3H_THRESHOLD")  # block if BTC up >1% in 3h
     # FIX-F2: BTC 1h bounce filter — skip new SHORTs if BTC 1h candle is rising above threshold
     futures_no_short_btc_1h_threshold: float = Field(default=0.8, env="FUTURES_NO_SHORT_BTC_1H_THRESHOLD")  # 0.8% = meaningful bounce
+    # PV1: Scale-out — close partial position at first profit milestone
+    futures_scale_out_pct: float = Field(default=1.5, env="FUTURES_SCALE_OUT_PCT")  # trigger at +1.5% PnL
+    futures_scale_out_fraction: float = Field(default=0.5, env="FUTURES_SCALE_OUT_FRACTION")  # close 50% of qty
+    # PV2: Momentum reversal close — close remaining after peak drawback
+    futures_momentum_reversal_enabled: bool = Field(default=True, env="FUTURES_MOMENTUM_REVERSAL_ENABLED")
+    futures_momentum_reversal_min_peak: float = Field(default=2.0, env="FUTURES_MOMENTUM_REVERSAL_MIN_PEAK")  # peak must reach 2%+
+    futures_momentum_reversal_drawback: float = Field(default=0.8, env="FUTURES_MOMENTUM_REVERSAL_DRAWBACK")  # close if given back 0.8% from peak
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True, env="WR_SCREENER_ENABLED")
     wr_screener_consecutive_sl_block: int = Field(default=3, env="WR_SCREENER_CONSECUTIVE_SL_BLOCK")  # block after N consecutive SL
@@ -317,10 +342,10 @@ class Settings(BaseSettings):
     # min_volspike: VolSpike mínimo para confirmar señal (informativo, no enforcement aquí)
     # MEJO-A: NARRATIVE trailing aumentado (8%/3%) para capturar breakouts +15-30% completos
     category_thresholds: dict = Field(default={
-        "LARGE_CAP":  {"min_prob": 0.55, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.2, "tp_extension_pct": 1.5},
-        "MIDCAP_ALT": {"min_prob": 0.50, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.2, "tp_extension_pct": 2.0},
-        "NARRATIVE":  {"min_prob": 0.45, "min_pnl": -1.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 8.0, "trailing_distance_pct": 3.0, "tp_extension_pct": 3.0},  # V3: min_pnl -5.0→-1.0, min_prob 0.42→0.45 (evitar entradas sin catalizador)
-        "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.0, "take_profit_pct": 4.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 1.5, "tp_extension_pct": 2.5},
+        "LARGE_CAP":  {"min_prob": 0.55, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.8, "tp_extension_pct": 1.5},
+        "MIDCAP_ALT": {"min_prob": 0.50, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.8, "tp_extension_pct": 2.0},
+        "NARRATIVE":  {"min_prob": 0.45, "min_pnl": -1.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 2.0, "tp_extension_pct": 3.0},  # V4: trail tighter (8/3→5/2) to lock breakout profits
+        "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.0, "take_profit_pct": 4.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.0, "tp_extension_pct": 2.5},
     }, env="CATEGORY_THRESHOLDS")
     
     # ── Predicción con prioridad absoluta (jun 17 2026) ──────────────────────
@@ -342,7 +367,7 @@ class Settings(BaseSettings):
     futures_leverage: int = Field(default=2, env="FUTURES_LEVERAGE")           # hard max 2x
     futures_max_shorts: int = Field(default=5, env="FUTURES_MAX_SHORTS")       # max simultaneous shorts
     futures_max_largecap_shorts: int = Field(default=5, env="FUTURES_MAX_LARGECAP_SHORTS")  # max LARGE_CAP shorts simultaneously (diversification guard — raise MAX_SHORTS but keep this at 5 to force MID-CAP slots)
-    futures_usdt_per_trade: float = Field(default=20.0, env="FUTURES_USDT_PER_TRADE")  # margin per short
+    futures_usdt_per_trade: float = Field(default=50.0, env="FUTURES_USDT_PER_TRADE")  # PB4: 20→50 minimum margin floor per short
     futures_sl_pct: float = Field(default=2.5, env="FUTURES_SL_PCT")           # SL % above entry (A4: 2.5%)
     futures_tp_pct: float = Field(default=7.0, env="FUTURES_TP_PCT")           # TP % below entry (A4+v4: 7.0%, EV +1.40%/trade)
     futures_min_btc_7d_drop: float = Field(default=-7.0, env="FUTURES_MIN_BTC_7D_DROP")  # only short in bear
@@ -361,7 +386,7 @@ class Settings(BaseSettings):
     # M1: Minimum strength to inject a symbol into the futures signal pool (filters weak HOLDs)
     futures_min_inject_strength: float = Field(default=0.40, env="FUTURES_MIN_INJECT_STRENGTH")
     # Futures Kelly dynamic cap
-    futures_kelly_cap_pct: float = Field(default=0.15, env="FUTURES_KELLY_CAP_PCT")  # 15% of available futures margin
+    futures_kelly_cap_pct: float = Field(default=0.20, env="FUTURES_KELLY_CAP_PCT")  # PB4: 15→20% of available futures margin (bigger positions)
     # Capital Bridge: bidirectional autonomous spot↔futures transfer
     futures_capital_bridge_enabled: bool = Field(default=True, env="FUTURES_CAPITAL_BRIDGE_ENABLED")
     futures_capital_bridge_min_transfer: float = Field(default=10.0, env="FUTURES_CAPITAL_BRIDGE_MIN_TRANSFER")  # min USDT to trigger transfer

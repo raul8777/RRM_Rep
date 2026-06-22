@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 21 2026 17:39 UTC-6 | Sesión 14: Trailing SL protection, ghost cleanup, critical bug fixes — tag v0.14-trailing-protection
+> Última actualización: jun 21 2026 20:40 UTC-6 | Sesión 16: Profit Boost $40/day — entry decorrelation, mass SL breaker, position sizing — tag v0.16-profit-boost
 
 ---
 
@@ -238,12 +238,14 @@ Efecto: omite PnL predictor, entra directamente
 ### Umbrales por categoría de token
 | Categoría | min_prob | min_pnl | SL% | TP% | trailing_act% | trailing_dist% | tp_ext% |
 |-----------|---------|---------|-----|-----|---------------|----------------|--------|
-| LARGE_CAP | 55% | $0.10 | 1.8% | 3.5% | 2.5% | 1.2% | 1.5% |
-| MIDCAP_ALT | 50% | $0.00 | 1.8% | 3.5% | 2.5% | 1.2% | 2.0% |
-| NARRATIVE | **45%** | **-$1.00** | **3.5%** | **7.0%** | **8.0%** | **3.0%** | **3.0%** |
-| MEME | 52% | $0.05 | 2.0% | 4.5% | 2.5% | 1.5% | 2.5% |
+| LARGE_CAP | 55% | $0.10 | 1.8% | 3.5% | **2.0%** | **0.8%** (ATR-scaled) | 1.5% |
+| MIDCAP_ALT | 50% | $0.00 | 1.8% | 3.5% | **2.0%** | **0.8%** (ATR-scaled) | 2.0% |
+| NARRATIVE | **45%** | **-$1.00** | **3.5%** | **7.0%** | **5.0%** | **2.0%** (ATR-scaled) | **3.0%** |
+| MEME | 52% | $0.05 | 2.0% | 4.5% | **2.0%** | **1.0%** (ATR-scaled) | 2.5% |
 
-> NARRATIVE V3 (jun 17): `min_pnl -5.0→-1.0`, `min_prob 0.42→0.45`, `trailing_act 3%→8%` para capturar breakouts +15-30%. Fuente: `config.py:category_thresholds`
+> V4 (jun 21): trail distances ahora son ATR-scaled en runtime (los valores de tabla son config base/fallback).
+> Fórmula: `trail_dist = max(floor, min(ceiling, ATR_5m × mult))`. Ver sección "TRAILING STOP DESIGN PRINCIPLES".
+> Fuente: `config.py:category_thresholds` + `run_trades.py:_compute_spot_trail_distance()`
 
 ---
 
@@ -1554,6 +1556,175 @@ Visibilidad total del ciclo de vida de SL y TP durante la vida de cada posición
 
 ### REGLA DE ORO visible
 El modal futures muestra: "⚖️ REGLA DE ORO: SL nunca retrocede — solo baja/sube" como recordatorio constante del principio de protección.
+
+---
+
+---
+
+## TRAILING STOP DESIGN PRINCIPLES (jun 21 2026 — sesión 15)
+
+> **PRINCIPIO FUNDAMENTAL: Proteger ganancias SIN impedir crecimiento.**
+> Las posiciones deben poder CRECER libremente. Solo cuando ya están ganando significativamente,
+> el trailing debe activarse como un PROTECTOR — nunca como un limitador.
+
+### Secuencia de protección (orden estricto)
+
+```
+0% → breakeven_pct (1.0% fut / 1.5% spot): SOLO SL inicial. Sin intervención.
+breakeven_pct → trail_activation (1.5% fut / 2.0% spot): Solo breakeven SL (SL → entry). Sin trailing.
+trail_activation → ∞: ATR-scaled trailing activo. Posición ya PROBÓ dirección.
+```
+
+### 10 Reglas NO NEGOCIABLES
+
+1. **NUNCA usar trail distances fijos < 1.0% para altcoins.** BTC tiene 0.37% 90th pct 5m range; SOL 0.63%; LINK 0.51%.
+2. **Trail distance DEBE considerar volatilidad del activo (ATR).** Un 0.35% trail en SOL = stop instantáneo por ruido.
+3. **El SL es un STOP_MARKET order en Binance — se ejecuta INSTANTÁNEAMENTE** en cualquier wick que lo toque. No hay segunda oportunidad.
+4. **Posiciones DEBEN poder crecer.** Solo empezar a trailing DESPUÉS de probar dirección profitable (>1.5% futures, >2.0% spot).
+5. **La secuencia correcta es: SL inicial → breakeven → trailing.** Cada paso requiere más PnL que el anterior.
+6. **El trailing protege contra REVERSIONES DE TENDENCIA**, no contra volatilidad normal.
+7. **Objetivo: capturar 60-80% del PnL no realizado en ganancias profundas** — NO 90% (eso triggerea en noise).
+8. **El problema del 20 de junio fue AUSENCIA de trailing** (SL se quedó en 3% inicial). El fix es trailing CON distancia adecuada — no trailing con distancia imposible.
+9. **Testear trail distance vs 90th percentile 5m range del activo:**
+   - BTC: 0.37% | SOL/ETH/BNB: 0.5-0.7% | LINK/DOT/UNI: 0.5-0.6% | Memes: 1.0-2.0%
+10. **Máxima extracción de profit = dejar que ganadores corran tanto como su tendencia lo permita**, luego capturar 60-80% del movimiento via ATR trailing.
+
+### Fórmula ATR implementada (jun 21 2026)
+
+```
+trail_dist = max(floor, min(ceiling, ATR_5m_14periods × multiplier))
+```
+
+| PnL Level | Multiplier | Floor | Ceiling | Locking |
+|-----------|-----------|-------|---------|---------|
+| 1.5-3%    | 1.5× ATR  | 0.4%  | 1.2%    | ~40-60% del profit |
+| 3-5%      | 1.2× ATR  | 0.4%  | 1.2%    | ~50-70% del profit |
+| 5-8%      | 1.0× ATR  | 0.4%  | 1.2%    | ~60-80% del profit |
+| 8%+       | 0.8× ATR  | 0.4%  | 1.2%    | ~70-85% del profit |
+
+### Ejemplos reales (medidos jun 21 2026)
+
+| Símbolo | ATR 5m | Trail @2% PnL | Trail @5% PnL | Trail @8% PnL |
+|---------|--------|---------------|---------------|---------------|
+| BTCUSDT | 0.18%  | 0.4% (floor)  | 0.4% (floor)  | 0.4% (floor)  |
+| SOLUSDT | 0.32%  | 0.48%         | 0.40%         | 0.40%         |
+| LINKUSDT| 0.26%  | 0.40%         | 0.40%         | 0.40%         |
+
+> **Importante:** ATR se cachea 5 minutos. En dry_run/tests devuelve 0.5% fallback.
+> En producción: se calcula en cada `check_positions()` usando klines reales de Binance.
+
+### Anti-patterns (NUNCA hacer)
+
+- ❌ Trail distance = 0.35% para altcoins → **stop instantáneo por ruido normal**
+- ❌ Trailing que activa en <1% PnL → **impide que la posición respire**
+- ❌ Trailing distance igual para BTC y memecoins → **BTC es 5x más estable**
+- ❌ Confiar en que el ciclo de 5min verifica antes de que Binance ejecute el SL → **Binance ejecuta inmediatamente**
+- ❌ Reducir trailing distance para "proteger más" sin verificar ATR → **protege menos porque sale en noise**
+
+### Config keys (config.py + docker-compose.yml)
+
+```
+FUTURES_TRAIL_ATR_ENABLED=true          # master switch
+FUTURES_TRAIL_ATR_MULT_LOW=1.5          # at 1.5-3% PnL
+FUTURES_TRAIL_ATR_MULT_MID=1.2          # at 3-5% PnL
+FUTURES_TRAIL_ATR_MULT_HIGH=1.0         # at 5-8% PnL
+FUTURES_TRAIL_ATR_MULT_DEEP=0.8         # at 8%+ PnL
+FUTURES_TRAIL_FLOOR_PCT=0.4             # absolute min %
+FUTURES_TRAIL_CEILING_PCT=1.2           # absolute max %
+FUTURES_BREAKEVEN_ACTIVATION_PCT=1.0    # breakeven fires here
+FUTURES_TRAILING_ACTIVATION_PCT=1.5     # trailing starts here
+```
+
+---
+
+## ENTRY QUALITY & CORRELATION RULES (jun 21 2026 — sesión 16)
+
+> **TARGET: $40+/day net profit.** Requires 2-3 TP hits/day at ~$28 gain each.
+> Previous 48h showed -$23.18 loss from a single correlated mass stop-out event.
+
+### Non-negotiable entry rules for FUTURES_SHORT:
+
+1. **PB1 — Stagger entries**: Max 3 new shorts per 4-minute cycle. Rest queue for next cycle.
+   - Prevents 7+ positions opening at exact same price level.
+   - Config: `FUTURES_MAX_NEW_PER_CYCLE=3`
+
+2. **PB2 — Mass SL circuit breaker**: If 3+ positions stop in same cycle → 4h global pause.
+   - Prevents cascading losses after correlated SL event.
+   - Config: `FUTURES_MASS_SL_THRESHOLD=3`, `FUTURES_MASS_SL_COOLDOWN_HOURS=4.0`
+
+3. **PB3 — Red candle confirmation**: Last completed 5m candle must be RED (close < open) for the symbol AND BTC before opening a SHORT.
+   - If both are green → skip, wait for confirmation.
+   - Prevents shorting into active rallies.
+   - Config: `FUTURES_CONFIRM_RED_CANDLE=true`
+
+4. **PB4 — Larger positions**: Kelly cap raised 15%→20%, floor raised $20→$50.
+   - At ~$200 margin × 2x: SL=$12, TP=$28.
+   - Config: `FUTURES_KELLY_CAP_PCT=0.20`, `FUTURES_USDT_PER_TRADE=50`
+
+5. **PB5 — BTC 3h momentum filter**: Block new shorts if BTC rose >1% over last 3 hours.
+   - Catches gradual rallies that the 1h filter misses.
+   - Config: `FUTURES_NO_SHORT_BTC_3H_THRESHOLD=1.0`
+
+6. **PB6 — Extended cooldown**: Per-symbol SL cooldown raised 1h→4h.
+   - Prevents chasing (re-entering same losing symbol immediately).
+   - Config: `FUTURES_SL_COOLDOWN_HOURS=4.0`
+
+### Expected impact:
+- Jun 20 mass stop-out (-$19.99) → **fully prevented** by PB1+PB2+PB3
+- NEAR re-entries (-$3.19) → **fully prevented** by PB6
+- Per-trade profit: $18→$28 (PB4)
+- Net target: 2-3 TP hits/day × $28 = $56-84 gross → $40+ net after losses
+
+---
+
+## PROFIT VELOCITY — EXIT OPTIMIZATION (jun 21 2026 — sesión 17)
+
+> **Problem**: SL=3% was stopping positions on normal 1-2% intraday bounces that always reversed.
+> 9/9 stops in 48h were moves of 0.32-2.14% — ALL would have survived with 5% SL.
+> Market came back every time (re-entered at same prices 2-4h later = wasted $23.18 + fees).
+
+### Parameters changed:
+- `FUTURES_SL_PCT`: 3.0 → **5.0** (survive normal bear-market bounces)
+- `FUTURES_TRAILING_ACTIVATION_PCT`: 1.5 → **2.5** (let scale-out fire first)
+
+### New exit mechanisms (PV1 + PV2):
+
+1. **PV1 — Scale-out 50% at +1.5% PnL**
+   - When unrealized PnL ≥ 1.5%: close 50% of qty at market, keep remaining 50% running.
+   - Locks guaranteed partial profit ($1.83 avg at $244 notional).
+   - Re-places SL/TP orders with reduced qty after scale-out.
+   - Config: `FUTURES_SCALE_OUT_PCT=1.5`, `FUTURES_SCALE_OUT_FRACTION=0.5`
+   - 48h data: 5/7 positions reached 1.5% → would have realized +$9.17
+
+2. **PV2 — Momentum reversal close (remaining 50%)**
+   - Tracks `peak_pnl_pct` in _smart_meta (updated every check cycle).
+   - Fires when: peak ≥ 2.0% AND (peak - current_pnl) ≥ 0.8% AND scale_out already done AND still in profit.
+   - Closes remaining 50% immediately (reason: `momentum_reversal`).
+   - Captures profit at the peak before the position gives it all back.
+   - Config: `FUTURES_MOMENTUM_REVERSAL_ENABLED=true`, `FUTURES_MOMENTUM_REVERSAL_MIN_PEAK=2.0`, `FUTURES_MOMENTUM_REVERSAL_DRAWBACK=0.8`
+   - 48h data: would have captured +$10.70 in realized profit
+
+### Exit priority order in check_positions():
+```
+0a. Track peak PnL (always)
+0b. PV1 Scale-out: pnl >= 1.5% AND not scaled_out → close 50%
+0c. PV2 Momentum reversal: peak >= 2% AND drawback >= 0.8% AND scaled_out → close remaining
+1.  Breakeven SL: pnl >= 1.0% → move SL to entry
+2.  Trailing: pnl >= 2.5% → ATR-scaled trail (safety net for remaining 50%)
+3.  Hard SL: 5% → last resort
+4.  Hard TP: 7% + SmartTP extend → captures big crash moves
+```
+
+### Expected daily PnL improvement:
+- Avoided stops: +$23.18/48h saved (9/9 stops were noise)
+- Scale-outs: ~$3.66-5.49/day (2-3 events × $1.83)
+- Momentum reversals: ~$2.50-5.00/day (1-2 events × $2.50)
+- Realistic net: **+$10-15/day** (vs previous -$11.59/day = +$21-26 swing)
+
+### Files modified:
+- `futures_client.py`: PV1+PV2 logic + peak tracking in `check_positions()`
+- `config.py`: 5 new fields (scale_out_pct/fraction, momentum_reversal_enabled/min_peak/drawback)
+- `docker-compose.yml`: SL=5.0, trailing_activation=2.5, 5 new PV env vars
 
 ---
 

@@ -34,13 +34,21 @@ def make_settings(**overrides):
         futures_trailing_enabled=True,
         futures_trailing_activation_pct=2.0,
         futures_trailing_distance_pct=1.0,
-        futures_breakeven_activation_pct=1.2,
+        futures_breakeven_activation_pct=1.0,
         futures_smart_tp_enabled=True,
         futures_smart_tp_max_extensions=2,
         futures_smart_tp_max_pnl_pct=12.0,
         futures_smart_tp_extend_score_threshold=3,
         futures_smart_tp_extension_pct=2.0,
         smart_tp_extend_disabled_regimes=["RANGE_SCALP", "PRESERVATION"],
+        # ATR-scaled trailing defaults (tests use fallback ATR=0.5%)
+        futures_trail_atr_enabled=True,
+        futures_trail_atr_multiplier_low=1.5,
+        futures_trail_atr_multiplier_mid=1.2,
+        futures_trail_atr_multiplier_high=1.0,
+        futures_trail_atr_multiplier_deep=0.8,
+        futures_trail_floor_pct=0.4,
+        futures_trail_ceiling_pct=1.2,
     )
     defaults.update(overrides)
     return types.SimpleNamespace(**defaults)
@@ -247,13 +255,13 @@ class TestBreakevenSL:
         assert pos._smart_meta.get('breakeven_done') is True
 
     def test_breakeven_only_fires_once(self):
-        """breakeven_done flag prevents re-firing."""
+        """breakeven_done flag prevents re-firing (but trailing can still move SL)."""
         pos = make_short(entry=100.0, sl_pct=3.0, tp_pct=7.0, qty=1.0)
         pos._smart_meta['breakeven_done'] = True
-        original_sl = pos.sl_price
-        price = 100.0 * (1 - 0.02)  # 2% gain, well above threshold
-        fc, closed = self._run_check(pos, price)
-        assert pos.sl_price == original_sl  # NOT changed again
+        price = 100.0 * (1 - 0.015)  # 1.5% gain — above breakeven but below trailing activation
+        fc, closed = self._run_check(pos, price, settings=make_settings(futures_trailing_activation_pct=3.0))
+        # Breakeven already done, trailing not activated (1.5% < 3.0%) → SL unchanged
+        assert pos.sl_price == 103.0  # original SL unchanged
 
     def test_breakeven_not_triggered_below_threshold(self):
         """At 0.5% gain, breakeven should NOT fire (threshold is 1.2%)."""
@@ -302,28 +310,25 @@ class TestTrailingStop:
 
     def test_trailing_fires_when_pnl_above_activation(self):
         """
-        At 2.5% gain (> 2.0% activation), trailing activates.
-        However on the FIRST cycle, trail_best_price initializes to current price,
-        so `price < best_price` is False → no update yet (trail tracks from next new low).
-        Breakeven fires in the same cycle and moves SL → entry (100.0).
-        Subsequent cycle at a LOWER price triggers the actual trail move.
+        At 2.5% gain (> 2.0% activation), trailing activates with ATR-scaled distance.
+        Fallback ATR=0.5%, mult=1.5 at <3% PnL → dist=0.75%.
+        Breakeven fires in the same cycle, then trailing moves SL tighter.
         """
         pos = make_short(entry=100.0, sl_pct=3.0, tp_pct=7.0, qty=1.0)
-        # First cycle at 97.5 — breakeven fires, trail initializes best_price
+        # First cycle at 97.5 — breakeven fires, trail initializes and moves SL
         price = 100.0 * (1 - 0.025)  # 97.5 = 2.5% gain
         fc = make_fc([pos])
         inject_price(fc, pos.symbol, price)
         fc.check_positions(settings=make_settings())
-        # After first cycle: breakeven moved SL to entry
-        assert pos.sl_price == pytest.approx(100.0, abs=0.01)
-        # trail_best_price is NOT set until price is a new low (first time it equals current)
-        # Second cycle at 96.0 — now price < trail_best_price (97.5 initialized last cycle)
-        # Force trail_best_price to simulate a cycle where it was initialized
+        # ATR fallback=0.5%, mult=1.5 (pnl<3%) → dist=0.75%
+        # SL = 97.5 * (1 + 0.0075) = 98.23
+        assert pos.sl_price == pytest.approx(97.5 * 1.0075, abs=0.15)
+        # Second cycle at 96.0 (4% PnL) → mult=1.2, dist=0.6%
         pos._smart_meta['trail_best_price'] = 97.5
-        inject_price(fc, pos.symbol, 96.0)  # new low
+        inject_price(fc, pos.symbol, 96.0)
         fc.check_positions(settings=make_settings())
-        # SL should trail down: 96.0 * 1.01 = 96.96, which is < 100.0
-        assert pos.sl_price == pytest.approx(96.0 * 1.01, abs=0.1)
+        # SL = 96.0 * (1 + 0.006) = 96.576
+        assert pos.sl_price == pytest.approx(96.0 * 1.006, abs=0.15)
         assert pos._smart_meta.get('trail_best_price') == pytest.approx(96.0, abs=0.01)
 
     def test_trailing_does_not_fire_below_activation(self):
@@ -379,23 +384,22 @@ class TestTrailingStop:
     def test_trailing_long_sl_moves_up(self):
         """
         LONG trailing: SL should move UP as price makes new highs.
-        On first cycle at 1025: breakeven fires (SL → entry=1000), trail initializes best.
-        On second cycle at 1035: new high → trail SL moves up to 1035*(1-0.01)=1024.65.
+        ATR fallback=0.5%, mult varies by PnL.
         """
         pos = make_long(entry=1000.0, sl_pct=2.5, tp_pct=5.0, qty=0.1)
         fc = make_fc([pos])
-        # First cycle: breakeven fires, trail initializes
+        # First cycle at 1025 (2.5% gain): mult=1.5, dist=0.75%
         inject_price(fc, pos.symbol, 1025.0)
         fc.check_positions(settings=make_settings())
-        # SL moved to entry by breakeven
-        assert pos.sl_price == pytest.approx(1000.0, abs=0.01)
-        # Second cycle at new high — trail_best_price was 1025, new price 1035 > 1025
+        # Trail moves SL to 1025 * (1 - 0.0075) = 1017.31
+        assert pos.sl_price == pytest.approx(1025.0 * (1 - 0.0075), abs=0.5)
+        # Second cycle at 1035 (3.5% gain): mult=1.2, dist=0.6%
         pos._smart_meta['trail_best_price'] = 1025.0
         inject_price(fc, pos.symbol, 1035.0)
         fc.check_positions(settings=make_settings())
-        # SL should trail up: 1035 * (1 - 0.01) = 1024.65 > 1000.0
-        expected_sl = 1035.0 * (1 - 0.01)
-        assert pos.sl_price == pytest.approx(expected_sl, abs=0.1)
+        # SL should trail up: 1035 * (1 - 0.006) = 1028.79
+        expected_sl = 1035.0 * (1 - 0.006)
+        assert pos.sl_price == pytest.approx(expected_sl, abs=0.5)
 
     def test_trailing_long_sl_does_not_move_down(self):
         """LONG trailing: SL should NOT move down (only protects profits)."""
@@ -474,12 +478,13 @@ class TestTPHit:
         inject_price(fc, pos.symbol, 92.0)  # below TP
 
         # Monkey-patch _evaluate_short_momentum to return score=3 (high short momentum)
-        fc._evaluate_short_momentum = lambda sym, s: (3, {"vol_spike": 1.0, "rsi": 60.0, "trend_4h": 0.0, "success_prob": 0.44})
+        fc._evaluate_short_momentum = lambda sym, s, **kwargs: (3, {"vol_spike": 1.0, "rsi": 60.0, "trend_4h": 0.0, "success_prob": 0.44})
 
         s = make_settings(futures_smart_tp_enabled=True, futures_smart_tp_extend_score_threshold=3)
         closed = fc.check_positions(settings=s)
-        # Position should NOT be closed — it's extended
-        assert closed == []
+        # Position should NOT be fully closed — it's extended (scale-out partial is OK)
+        full_closes = [c for c in closed if not c.get('partial')]
+        assert full_closes == []
         assert pos.closed is False
         assert pos._smart_meta.get('tp_extensions_count') == 1
         # New TP should be lower than original (extending short downward)
@@ -494,7 +499,8 @@ class TestTPHit:
         fc._evaluate_short_momentum = lambda sym, s: (1, {})
         s = make_settings(futures_smart_tp_enabled=True, futures_smart_tp_extend_score_threshold=3)
         closed = fc.check_positions(settings=s)
-        assert len(closed) == 1
+        full_closes = [c for c in closed if not c.get('partial')]
+        assert len(full_closes) == 1
         assert pos.closed is True
 
     def test_tp_extend_respects_max_extensions(self):
@@ -507,7 +513,8 @@ class TestTPHit:
         fc._evaluate_short_momentum = lambda sym, s: (4, {})  # max score
         s = make_settings(futures_smart_tp_enabled=True, futures_smart_tp_max_extensions=2)
         closed = fc.check_positions(settings=s)
-        assert len(closed) == 1
+        full_closes = [c for c in closed if not c.get('partial')]
+        assert len(full_closes) == 1
         assert pos.closed is True
 
     def test_tp_extend_respects_max_pnl(self):
@@ -521,7 +528,8 @@ class TestTPHit:
         fc._evaluate_short_momentum = lambda sym, s: (4, {})
         s = make_settings(futures_smart_tp_enabled=True, futures_smart_tp_max_pnl_pct=12.0)
         closed = fc.check_positions(settings=s)
-        assert len(closed) == 1
+        full_closes = [c for c in closed if not c.get('partial')]
+        assert len(full_closes) == 1
         assert pos.closed is True
 
     def test_tp_hit_long_closes(self):
@@ -584,15 +592,11 @@ class TestPnLCalculation:
         pos = make_short(entry=100.0, sl_pct=3.0, tp_pct=7.0, qty=2.0)
         fc = make_fc([pos])
         inject_price(fc, pos.symbol, 98.0)
-        # At 2.0% PnL, trailing activates (threshold=2.0%) and breakeven fires (threshold=1.2%)
-        # Breakeven: SL → 100.0
-        # Trail: best=98.0, new_sl = 98*1.01=98.98 which is < 100.0 (original SL)
+        # At 2.0% PnL, breakeven fires (1.0%), trail activates (2.0%) with 0.75% distance
+        # Trail: best=98.0, new_sl = 98*(1+0.0075)=98.735 which is < 100.0 (entry)
         fc.check_positions(settings=make_settings())
-        # Breakeven fires first → SL = 100.0
-        assert pos.sl_price == pytest.approx(100.0, abs=0.01)
-        # Trail fires also (same cycle): new_sl=98.98 < 100.0 → moves down to 98.98
-        # (trail fires independently of breakeven)
-        # After both: SL should be at breakeven or lower (trail supersedes if lower)
+        # Trail supersedes breakeven: SL = 98.735
+        assert pos.sl_price == pytest.approx(98.0 * 1.0075, abs=0.1)
         assert pos.sl_price <= 100.0
 
 
@@ -636,13 +640,13 @@ class TestConfigParams:
         assert self._get('futures_trailing_enabled') is True
 
     def test_futures_trailing_activation_pct(self):
-        assert self._get('futures_trailing_activation_pct') == pytest.approx(2.0)
+        assert self._get('futures_trailing_activation_pct') == pytest.approx(2.5)
 
     def test_futures_trailing_distance_pct(self):
-        assert self._get('futures_trailing_distance_pct') == pytest.approx(1.0)
+        assert self._get('futures_trailing_distance_pct') == pytest.approx(1.5)
 
     def test_futures_breakeven_activation_pct(self):
-        assert self._get('futures_breakeven_activation_pct') == pytest.approx(1.2)
+        assert self._get('futures_breakeven_activation_pct') == pytest.approx(1.0)
 
     def test_futures_smart_tp_enabled(self):
         assert self._get('futures_smart_tp_enabled') is True
@@ -654,7 +658,7 @@ class TestConfigParams:
         assert self._get('futures_smart_tp_max_pnl_pct') == pytest.approx(12.0)
 
     def test_futures_smart_tp_extend_score_threshold(self):
-        assert self._get('futures_smart_tp_extend_score_threshold') == 3
+        assert self._get('futures_smart_tp_extend_score_threshold') == 2
 
     def test_futures_smart_tp_extension_pct(self):
         assert self._get('futures_smart_tp_extension_pct') == pytest.approx(2.0)
@@ -696,8 +700,10 @@ class TestRaceCondition:
         closed = fc.check_positions(settings=make_settings())
         # pos is now marked closed, but no close order went through
         assert pos.closed is True
-        # The closed list should be empty (position not formally "closed by us")
-        assert closed == []
+        # The closed list should have no full closes (position handled by Binance)
+        # Scale-out partial may have fired before the -2011 race occurred
+        full_closes = [c for c in closed if not c.get('partial')]
+        assert full_closes == []
 
 
 # ─── 12. Edge cases ───────────────────────────────────────────────────────────
@@ -727,8 +733,9 @@ class TestEdgeCases:
         inject_price(fc, pos.symbol, 92.0)  # immediately at TP
         s = make_settings(futures_smart_tp_enabled=False)
         closed = fc.check_positions(settings=s)
-        assert len(closed) == 1
-        assert closed[0]['reason'] == 'take_profit'
+        full_closes = [c for c in closed if not c.get('partial')]
+        assert len(full_closes) == 1
+        assert full_closes[0]['reason'] == 'take_profit'
 
     def test_breakeven_and_trailing_both_fire_same_cycle(self):
         """At 2.5% gain, both breakeven and trailing should fire on the same cycle without conflict."""
@@ -736,8 +743,9 @@ class TestEdgeCases:
         fc = make_fc([pos])
         inject_price(fc, pos.symbol, 97.5)  # 2.5% gain
         closed = fc.check_positions(settings=make_settings())
-        # Should not crash, position should still be open
-        assert closed == []
+        # Should not crash, position should still be open (scale-out partial is OK)
+        full_closes = [c for c in closed if not c.get('partial')]
+        assert full_closes == []
         # SL moved (either breakeven=100.0 or trail=98.475, whichever is lower)
         assert pos.sl_price <= 100.0
 

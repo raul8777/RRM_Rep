@@ -1,6 +1,6 @@
 import time
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import error_collector as ec
 from binance_client import BinanceClient
@@ -98,6 +98,9 @@ _futures_overflow_positions: set = set()
 # FIX-F1: Futures SHORT SL cooldown — prevent re-entering same symbol for N minutes after SL hit.
 # {symbol: datetime_of_sl_hit}  (UTC)
 _FUTURES_SL_COOLDOWN: Dict[str, datetime] = {}
+
+# PB2: Mass SL circuit breaker — global pause when 3+ positions stop in one check cycle
+_FUTURES_MASS_SL_COOLDOWN_UNTIL: Optional[datetime] = None  # UTC — None = not paused
 
 # ── Circuit breaker: consecutive order failures (technical errors only) ──────
 _consecutive_failures: int = 0
@@ -1020,6 +1023,66 @@ def _calc_atr_sl_pct(client: BinanceClient, symbol: str, settings, category_sl_p
         return category_sl_pct
 
 
+_spot_atr_cache: Dict[str, tuple] = {}  # symbol → (atr_pct, timestamp)
+_SPOT_ATR_CACHE_TTL = 300  # 5 minutes
+
+
+def _compute_spot_trail_distance(client: BinanceClient, symbol: str, pnl_pct: float, settings) -> float:
+    """Compute ATR-scaled trailing distance for SPOT positions.
+    
+    Returns trail distance as a decimal (e.g., 0.008 = 0.8%).
+    Formula: trail_dist = max(floor, min(ceiling, ATR_5m * multiplier))
+    """
+    import time as _t
+    _atr_enabled = getattr(settings, 'futures_trail_atr_enabled', True)
+    # SPOT uses slightly wider floor/ceiling than futures (no leverage = more room)
+    _floor = 0.005    # 0.5% absolute minimum for SPOT
+    _ceiling = 0.015  # 1.5% absolute maximum for SPOT
+
+    if not _atr_enabled:
+        # Fallback to category-based static distance
+        return 0.008  # 0.8% default
+
+    # Select multiplier based on PnL level (SPOT is more patient = slightly wider)
+    if pnl_pct >= 0.08:
+        mult = 1.0
+    elif pnl_pct >= 0.05:
+        mult = 1.2
+    elif pnl_pct >= 0.03:
+        mult = 1.5
+    else:
+        mult = 1.8  # wider at low PnL to let position breathe
+
+    # Get or compute ATR
+    now = _t.time()
+    cached = _spot_atr_cache.get(symbol)
+    if cached and (now - cached[1]) < _SPOT_ATR_CACHE_TTL:
+        atr_pct = cached[0]
+    else:
+        try:
+            _klines = client.client.get_klines(symbol=symbol, interval='5m', limit=15)
+            if _klines and len(_klines) >= 15:
+                tr_values = []
+                for i in range(1, len(_klines)):
+                    h = float(_klines[i][2])
+                    l = float(_klines[i][3])
+                    prev_c = float(_klines[i - 1][4])
+                    tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+                    tr_values.append(tr)
+                atr = sum(tr_values[-14:]) / 14
+                price = float(_klines[-1][4])
+                atr_pct = (atr / price) if price > 0 else 0.005
+            else:
+                atr_pct = 0.005  # fallback
+        except Exception:
+            atr_pct = 0.005
+        _spot_atr_cache[symbol] = (atr_pct, now)
+
+    trail_dist = atr_pct * mult
+    trail_dist = max(_floor, min(_ceiling, trail_dist))
+    return trail_dist
+
+
 def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, news_client=None, regime: str = None) -> List[Dict]:
     """
     Check all open positions against Stop-Loss, Take-Profit, and Trailing Stop rules.
@@ -1135,14 +1198,22 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 if close_reason is None and pnl_pct >= tp_pct:
                     close_reason = f"take_profit ({pnl_pct*100:.2f}%)"
 
+                # ── Breakeven SL (SPOT) ───────────────────────────────────
+                # Move SL to entry price once position reaches 1.5% profit
+                # Prevents any trailing-active position from going negative
+                if close_reason is None and trailing_enabled and pnl_pct >= 0.015:
+                    _cur_sl_val = float(pos.stop_loss or 0)
+                    if _cur_sl_val < entry_price:
+                        try:
+                            position_manager.update_position_sl(pos.position_id, round(entry_price, 8))
+                            print(f"[Breakeven] {symbol}: SL → entry={entry_price:.6f} (PnL={pnl_pct*100:.2f}%)")
+                        except Exception:
+                            pass
+
                 # ── Trailing Stop ──────────────────────────────────────────
                 if close_reason is None and trailing_enabled and pnl_pct >= trail_activate:
-                    # FIX-T2B: Dynamic trail distance — tighter as profit grows
-                    if pnl_pct >= 0.05:
-                        trail_dist = 0.007   # 0.7% — very tight for big gains
-                    elif pnl_pct >= 0.03:
-                        trail_dist = 0.010   # 1.0% — tight
-                    # else: keep category default
+                    # ATR-scaled trail: respects per-symbol volatility to avoid wick stop-outs
+                    trail_dist = _compute_spot_trail_distance(client, symbol, pnl_pct, settings)
                     # Peak is stored in position metadata; update if new high
                     metadata = getattr(pos, 'metadata', {}) or {}
                     peak_price = float(metadata.get('trailing_peak', entry_price))
@@ -1659,12 +1730,21 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     _regime_max = _get_max_positions_for_regime(settings, _regime_mode)
     # BUG-E5 fix: fetch balance once before the loop; refresh only after a successful buy
     usdt_liquid_now = float(client.get_account_balance().get("USDT", usdt_liquid))
+    # PB1: Stagger entries — track new shorts opened this cycle (max N per cycle)
+    _pb_new_shorts_this_cycle = 0
+    _pb_max_new_per_cycle = int(getattr(settings, 'futures_max_new_per_cycle', 3))
     for symbol in top_symbols:
         # ── FUTURES_SHORT mode — evaluated BEFORE spot position limits ────────
         # Futures positions are in a separate wallet — they must NOT be blocked
         # by the spot max_positions counter (which fills up with open spot trades).
         if _regime and _regime.confirmed and _regime_mode == "FUTURES_SHORT":
             if getattr(settings, 'futures_enabled', False):
+                # PB2: Mass SL circuit breaker — skip ALL new shorts during global cooldown
+                if _FUTURES_MASS_SL_COOLDOWN_UNTIL and datetime.now(timezone.utc) < _FUTURES_MASS_SL_COOLDOWN_UNTIL:
+                    _cd_rem = (_FUTURES_MASS_SL_COOLDOWN_UNTIL - datetime.now(timezone.utc)).total_seconds() / 3600
+                    print(f'[Futures/MASS-SL] {symbol}: GLOBAL COOLDOWN active ({_cd_rem:.1f}h remaining) — no new shorts')
+                    update_signal_decision(symbol, 'rejected', 'MASS_SL_COOLDOWN')
+                    continue
                 _futures_symbols = list(getattr(settings, 'futures_symbols', ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']))
                 if screened_pairs_cache:
                     _futures_symbols = list(dict.fromkeys(_futures_symbols + screened_pairs_cache.get("futures", [])))
@@ -1806,11 +1886,51 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         continue
                 except Exception:
                     pass
+                # PB5: BTC 3h rolling momentum filter — catches gradual rallies
+                _no_short_btc_3h_threshold = getattr(settings, 'futures_no_short_btc_3h_threshold', 1.0)
+                try:
+                    _btc_3h_klines = client.get_klines('BTCUSDT', '1h', limit=4)  # 4 candles = last 3 completed + current
+                    if _btc_3h_klines and len(_btc_3h_klines) >= 4:
+                        _btc_3h_open = float(_btc_3h_klines[-4][1])  # open of 3h ago candle
+                        _btc_3h_close = float(_btc_3h_klines[-1][4])  # close of current candle
+                        _btc_3h_chg = (_btc_3h_close - _btc_3h_open) / _btc_3h_open * 100
+                        if _btc_3h_chg >= _no_short_btc_3h_threshold:
+                            print(f'[Futures/PB5] SHORT {symbol} SKIPPED: BTC 3h momentum={_btc_3h_chg:+.2f}% >= {_no_short_btc_3h_threshold}% — sustained rally, no new shorts')
+                            update_signal_decision(symbol, 'rejected', 'BTC_3H_RALLY')
+                            continue
+                except Exception:
+                    pass
+                # PB3: Confirm entry with red 5m candle — don't short into active green momentum
+                _confirm_red = getattr(settings, 'futures_confirm_red_candle', True)
+                if _confirm_red:
+                    try:
+                        _5m_klines = client.get_klines(symbol, '5m', limit=2)
+                        if _5m_klines and len(_5m_klines) >= 2:
+                            _last_5m = _5m_klines[-2]  # last COMPLETED 5m candle
+                            _5m_open = float(_last_5m[1])
+                            _5m_close = float(_last_5m[4])
+                            if _5m_close > _5m_open:  # green candle = price rising
+                                # Fallback: check BTC 5m instead
+                                _btc_5m = client.get_klines('BTCUSDT', '5m', limit=2)
+                                _btc_5m_close = float(_btc_5m[-2][4]) if _btc_5m and len(_btc_5m) >= 2 else 0
+                                _btc_5m_open = float(_btc_5m[-2][1]) if _btc_5m and len(_btc_5m) >= 2 else 0
+                                if _btc_5m_close > _btc_5m_open:
+                                    print(f'[Futures/PB3] SHORT {symbol} SKIPPED: last 5m candle GREEN ({symbol} & BTC) — wait for red confirmation')
+                                    update_signal_decision(symbol, 'rejected', 'NO_RED_CANDLE')
+                                    continue
+                    except Exception:
+                        pass  # on error, allow entry (don't block)
+                # PB1: Stagger check — max N new shorts per cycle
+                if _pb_new_shorts_this_cycle >= _pb_max_new_per_cycle:
+                    print(f'[Futures/PB1] SHORT {symbol} SKIPPED: max {_pb_max_new_per_cycle} new shorts/cycle reached — queued for next cycle')
+                    update_signal_decision(symbol, 'rejected', 'STAGGER_LIMIT')
+                    continue
                 print(f"[Futures] FUTURES_SHORT mode: opening short {symbol} margin=${_f_usdt}")
                 _pos = _fc.open_short(symbol, usdt_amount=_f_usdt,
                                       sl_pct=_f_sl, tp_pct=_f_tp, leverage=_f_lev,
                                       pnl_prediction=_f_prediction, indicators_at_entry=_f_indicators)
                 if _pos:
+                    _pb_new_shorts_this_cycle += 1
                     orders.append({"symbol": symbol, "side": "SHORT_FUTURES",
                                     "qty": _pos.qty, "entry_price": _pos.entry_price,
                                     "sl": _pos.sl_price, "tp": _pos.tp_price})
@@ -2960,16 +3080,27 @@ def execute_once(monitor_only: bool = False):
             if _cycle_closes:
                 futures_closes.extend(_cycle_closes)
                 print(f"[Futures] Closed {len(_cycle_closes)} position(s) via SL/TP: {_cycle_closes}")
+                _sl_count_this_cycle = 0
                 for _cc in _cycle_closes:
                     _cc_sym = _cc.get('symbol') if isinstance(_cc, dict) else getattr(_cc, 'symbol', None)
                     if _cc_sym:
                         _futures_overflow_positions.discard(_cc_sym)
                         # FIX-F1: Register SL cooldown to prevent immediate re-entry on the same symbol
                         if _cc.get('reason') == 'stop_loss':
-                            _sl_cd_hours = getattr(settings, 'futures_sl_cooldown_hours', 1.0)
+                            _sl_count_this_cycle += 1
+                            _sl_cd_hours = getattr(settings, 'futures_sl_cooldown_hours', 4.0)
                             _FUTURES_SL_COOLDOWN[_cc_sym] = datetime.now(timezone.utc)
                             _set_cooldown(_cc_sym, 'futures_sl', _sl_cd_hours, {'reason': 'sl_hit'})
                             print(f'[Futures/SL-CD] {_cc_sym}: cooldown {_sl_cd_hours}h — no re-entry until next window')
+                # PB2: Mass SL circuit breaker — global pause if too many positions stopped together
+                global _FUTURES_MASS_SL_COOLDOWN_UNTIL
+                _mass_sl_threshold = int(getattr(settings, 'futures_mass_sl_threshold', 3))
+                if _sl_count_this_cycle >= _mass_sl_threshold:
+                    _mass_cd_hours = float(getattr(settings, 'futures_mass_sl_cooldown_hours', 4.0))
+                    from datetime import timedelta as _td_mass
+                    _FUTURES_MASS_SL_COOLDOWN_UNTIL = datetime.now(timezone.utc) + _td_mass(hours=_mass_cd_hours)
+                    print(f'[Futures/MASS-SL] {_sl_count_this_cycle} positions stopped in same cycle! '
+                          f'GLOBAL COOLDOWN {_mass_cd_hours}h — no new shorts until {_FUTURES_MASS_SL_COOLDOWN_UNTIL.strftime("%H:%M UTC")}')
         except Exception as _fce:
             print(f"[Futures] check_positions error: {_fce}")
 

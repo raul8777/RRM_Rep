@@ -878,3 +878,57 @@ body {
    CHART TALL (Performance tab)
    ════════════════════════════════════════════════════════════════════════════ */
 .chart-tall { min-height:220px; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   PROFIT TRACKER CARD
+   ════════════════════════════════════════════════════════════════════════════ */
+.card-profit-tracker { border-color:rgba(78,204,163,0.25); }
+
+.pt-toggle { display:flex; gap:4px; margin-bottom:10px; }
+.pt-toggle-btn {
+    background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1);
+    color:var(--text-muted); font-size:11px; font-weight:600; padding:3px 12px;
+    border-radius:4px; cursor:pointer; transition:all 0.2s;
+}
+.pt-toggle-btn.active { background:rgba(78,204,163,0.15); color:var(--green); border-color:rgba(78,204,163,0.4); }
+.pt-toggle-btn:hover  { background:rgba(255,255,255,0.08); }
+
+.pt-target-section { margin-bottom:10px; }
+.pt-target-label { display:flex; align-items:center; gap:6px; font-size:13px; margin-bottom:4px; flex-wrap:wrap; }
+.pt-target-meta  { color:var(--text-muted); font-size:11px; }
+.pt-bar-bg {
+    position:relative; height:18px; background:rgba(255,255,255,0.06);
+    border-radius:9px; overflow:hidden;
+}
+.pt-bar-fill {
+    height:100%; border-radius:9px; transition:width 0.5s ease, background 0.3s;
+    min-width:2px;
+}
+.pt-bar-pct {
+    position:absolute; right:6px; top:0; bottom:0; display:flex;
+    align-items:center; font-size:10px; font-weight:700; color:#fff;
+    text-shadow:0 1px 2px rgba(0,0,0,0.5);
+}
+
+.pt-reasons { margin-bottom:8px; }
+.pt-reason-row {
+    display:flex; align-items:center; gap:6px; padding:3px 0;
+    border-bottom:1px solid rgba(255,255,255,0.04); font-size:12px;
+}
+.pt-reason-row:last-child { border-bottom:none; }
+.pt-reason-label { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.pt-reason-count { color:var(--text-muted); font-size:11px; min-width:60px; text-align:right; }
+.pt-reason-pnl   { font-weight:600; min-width:80px; text-align:right; }
+
+.pt-footer {
+    display:flex; flex-wrap:wrap; gap:8px; font-size:11px; color:var(--text-muted);
+    padding-top:6px; border-top:1px solid rgba(255,255,255,0.06);
+}
+.pt-footer strong { color:var(--text); }
+
+.pt-empty { color:var(--text-dim); font-size:12px; font-style:italic; padding:8px 0; }
+
+/* SL/TP badge: scale-out + peak + momentum reversal */
+.sl-badge.scale { background:rgba(46,204,113,0.15); color:#2ecc71; border-color:rgba(46,204,113,0.3); }
+.sl-badge.peak  { background:rgba(52,152,219,0.12); color:#3498db; border-color:rgba(52,152,219,0.25); font-size:10px; }
+.sl-badge.mr    { background:rgba(155,89,182,0.15); color:#9b59b6; border-color:rgba(155,89,182,0.3); }

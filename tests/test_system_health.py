@@ -201,7 +201,7 @@ class TestCat2_MarketRegimeLogic:
         r = _build_regime(self._raw("FUTURES_SHORT", btc_7d=-20.0, btc_30d=-18.0),
                           confirmed=True)
         assert r.sl_pct == 3.0
-        assert r.tp_pct == 5.0
+        assert r.tp_pct == 7.0
 
     def test_preservation_upgrades_to_futures_short_when_enabled(self):
         """With futures_enabled=True, confirmed PRESERVATION → FUTURES_SHORT."""
@@ -408,8 +408,9 @@ class TestCat3_FuturesClientCore:
         pos._smart_meta['breakeven_done'] = True
         original = pos.sl_price
         fc = make_fc([pos])
-        inject_price(fc, "BTCUSDT", 97.0)  # deep gain, but flag set
-        fc.check_positions(settings=make_settings())
+        inject_price(fc, "BTCUSDT", 98.5)  # 1.5% gain, above breakeven but below trailing
+        s = make_settings(futures_trailing_activation_pct=3.0)  # disable trailing for this test
+        fc.check_positions(settings=s)
         assert pos.sl_price == original
 
     # ── check_positions: TP hit ───────────────────────────────────────────────
@@ -426,11 +427,12 @@ class TestCat3_FuturesClientCore:
         pos = make_short(entry=100.0, tp_pct=7.0)
         fc = make_fc([pos])
         inject_price(fc, "BTCUSDT", 92.0)
-        fc._evaluate_short_momentum = lambda sym, s: (3, {})
+        fc._evaluate_short_momentum = lambda sym, s, **kwargs: (3, {})
         s = make_settings(futures_smart_tp_enabled=True,
                           futures_smart_tp_extend_score_threshold=3)
         closed = fc.check_positions(settings=s)
-        assert closed == []
+        full_closes = [c for c in closed if not c.get('partial')]
+        assert full_closes == []
         assert pos._smart_meta.get('tp_extensions_count') == 1
 
     def test_tp_extend_capped_at_max_extensions(self):
@@ -438,10 +440,11 @@ class TestCat3_FuturesClientCore:
         pos._smart_meta['tp_extensions_count'] = 2
         fc = make_fc([pos])
         inject_price(fc, "BTCUSDT", 92.0)
-        fc._evaluate_short_momentum = lambda sym, s: (4, {})
+        fc._evaluate_short_momentum = lambda sym, s, **kwargs: (4, {})
         s = make_settings(futures_smart_tp_enabled=True, futures_smart_tp_max_extensions=2)
         closed = fc.check_positions(settings=s)
-        assert len(closed) == 1  # extensions exhausted → close
+        full_closes = [c for c in closed if not c.get('partial')]
+        assert len(full_closes) == 1  # extensions exhausted → close
 
     # ── _evaluate_short_momentum: BH6 ────────────────────────────────────────
 
@@ -479,22 +482,22 @@ class TestCat3_FuturesClientCore:
         inferred from SL (sl / (1+dist)) — NOT from current price — if SL < entry."""
         pos = make_short(entry=100.0, sl_pct=3.0, tp_pct=7.0)
         fc = make_fc([pos])
-        # Simulate trailing already moved SL down to 96.0 (price was 94.0, dist=2%)
-        pos.sl_price = 96.0  # below entry → trailing already acted
+        # Simulate trailing already moved SL down to 94.0 (deeper move)
+        pos.sl_price = 94.0  # below entry → trailing already acted
         # _smart_meta is empty (restart scenario)
         assert 'trail_best_price' not in pos._smart_meta
-        # Inject price at 95.0 (still profitable SHORT)
-        inject_price(fc, "BTCUSDT", 95.0)
+        # Inject price at 93.0 (7% gain, still profitable SHORT)
+        inject_price(fc, "BTCUSDT", 93.0)
         s = make_settings(futures_trailing_enabled=True,
                           futures_trailing_activation_pct=2.0,
                           futures_trailing_distance_pct=2.0)
         fc.check_positions(settings=s)
-        # Fix 3: inferred best = 96.0 / 1.02 = 94.12 < entry(100) and < price(95) ✓
-        # → trail_best_price should be ~94.12, NOT 95.0 (current price)
+        # Fix 3: inferred best = 94.0 / 1.0035 = 93.67 < entry(100) and < price... 
+        # With new tighter distances (0.35% at 7% PnL), best ≈ 93.67
         best = pos._smart_meta.get('trail_best_price', None)
         assert best is not None, "Fix 3: trail_best_price not initialized"
         assert best < 100.0, "Fix 3: trail_best_price must be < entry for SHORT"
-        assert best < 95.0, "Fix 3: trail_best_price must be inferred from SL, not current price"
+        assert best <= 94.0, "Fix 3: trail_best_price must be inferred from SL, not current price"
 
     def test_Fix3_trail_best_price_fresh_activation_when_sl_is_default(self):
         """Fix 3: When SL is still at default (entry*1.03), inferred best > entry → fresh activation at price."""
@@ -859,7 +862,8 @@ class TestCat8_ProfitBlockingBugs:
                           futures_smart_tp_extend_score_threshold=3)
         closed = fc.check_positions(settings=s)
         # score=-1 < threshold=3 → should CLOSE (not extend indefinitely)
-        assert len(closed) == 1
+        full_closes = [c for c in closed if not c.get('partial')]
+        assert len(full_closes) == 1
 
     # Fix 1 regression: SL never retreats
     def test_BH_SL_never_retreats_after_smart_tp_extend(self):

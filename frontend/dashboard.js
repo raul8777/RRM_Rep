@@ -143,7 +143,10 @@ const _CLOSE_REASON_MAP = {
     'smart_tp_reversal':           ['🟡 SmartTP Reversal',      'reason-neutral'],
     'prediction_exit_deteriorated':['🤖 PredExit',              'reason-sl'],
     'binance_safety_close':        ['⚡ Binance Safety',        'reason-sl'],
-    'scale_out':                   ['🟡 Scale-Out parcial',     'reason-neutral'],
+    'scale_out':                   ['✂️ Scale-Out parcial',     'reason-tp'],
+    'momentum_reversal':           ['⚡ Momentum Rev.',          'reason-tp'],
+    'trailing_sl_binance':         ['🟢 Trailing (Binance)',     'reason-tp'],
+    'regime_change_to_short':      ['⚡ Régimen → SHORT',        'reason-neutral'],
     'portfolio_rebalancing':       ['🔄 Rebalanceo técnico',    'reason-rebal'],
     'prediction_reallocation':     ['🔄 Reemplazo por EV',      'reason-rebal'],
     'reallocation_slot_pressure':  ['🔄 Presión de slots',      'reason-rebal'],
@@ -173,7 +176,11 @@ function fmtSlTpBadges(p) {
     if (p.breakeven_done)  badges += '<span class="sl-badge be" title="Breakeven activado">🛡BE</span>';
     if (p.trailing_active) badges += '<span class="sl-badge trail" title="Trailing activo">📈T</span>';
     if (p.tp_extensions > 0) badges += `<span class="sl-badge ext" title="SmartTP extendido ${p.tp_extensions}×">🔄${p.tp_extensions}</span>`;
-    if (p.scale_out_done)  badges += '<span class="sl-badge scale" title="Scale-out ejecutado">✂️</span>';
+    if (p.scale_out_done) {
+        const soTip = p.scale_out_pnl ? `Scale-out: +$${fmt(p.scale_out_pnl)} locked` : 'Scale-out ejecutado';
+        badges += `<span class="sl-badge scale" title="${soTip}">✂️$${fmt(p.scale_out_pnl || 0)}</span>`;
+    }
+    if (p.peak_pnl_pct > 0) badges += `<span class="sl-badge peak" title="Peak PnL alcanzado: ${fmt(p.peak_pnl_pct, 1)}%">📊${fmt(p.peak_pnl_pct, 1)}%</span>`;
     return badges || '<span class="sl-badge none">—</span>';
 }
 function fmtCloseReason(r) {
@@ -239,6 +246,7 @@ function renderExecutiveSummary(data) {
     const invested    = positions.reduce((s, p) => s + parseFloat(p.trade_type === 'futures' ? (p.margin_usdt || p.invested_usdt || 0) : (p.invested_usdt || 0)), 0);
     const exposurePct = totalUsdt > 0 ? ((invested / totalUsdt) * 100).toFixed(1) : '0.0';
     const unrealPnl   = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
+    const lockedPnl   = positions.reduce((s, p) => s + (p.scale_out_done ? parseFloat(p.scale_out_pnl || 0) : 0), 0);
     const pnlToday    = parseFloat((pnlH.day && pnlH.day.total_pnl) || 0);
     const mode        = regime.trading_mode || 'SPOT_BULL';
     const modeInfo    = MODE_CFG[mode] || MODE_CFG['SPOT_BULL'];
@@ -322,6 +330,7 @@ function renderExecutiveSummary(data) {
                 <div class="exec-section-title">📈 PnL</div>
                 <div class="exec-line">
                     Abierto: <span class="${unrealCls}"><strong>${unrealPnl >= 0 ? '+' : ''}$${fmt(unrealPnl)} USDT</strong></span>
+                    ${lockedPnl > 0 ? `&nbsp; <span class="positive" title="Ganancia asegurada por scale-out en posiciones abiertas">✂️+$${fmt(lockedPnl)}</span>` : ''}
                     &nbsp; Hoy: <span class="${pnlHCls}">${pnlToday >= 0 ? '+' : ''}$${fmt(pnlToday)}</span>
                     &nbsp; WR: <span class="${wrCls}">${fmt(wr, 1)}%</span>
                     &nbsp; PF: <span class="${pf >= 1.5 ? 'positive' : pf >= 1.0 ? 'exec-warn' : 'negative'}">${fmt(pf)}</span>
@@ -799,6 +808,82 @@ function renderPnlHistory(d) {
         row('PnL Hoy', d.day) + row('PnL Semana', d.week) + row('PnL Año', d.year);
 }
 
+// ── Profit Tracker card ──────────────────────────────────────────────────────
+let _profitTrackerPeriod = 'today';
+function switchProfitTrackerPeriod(period) {
+    _profitTrackerPeriod = period;
+    if (_cachedData && _cachedData.pnl_by_close_reason) renderProfitTracker(_cachedData.pnl_by_close_reason);
+}
+function renderProfitTracker(d) {
+    const el = document.getElementById('profitTrackerData');
+    if (!el || !d || d.error) return;
+
+    const period = _profitTrackerPeriod === 'week' ? d.week : d.today;
+    if (!period) return;
+    const target = d.daily_target || 40.0;
+    const totalPnl = period.total_pnl || 0;
+    const totalTrades = period.total_trades || 0;
+    const byReason = period.by_reason || [];
+    const spotPnl = period.spot_pnl || 0;
+    const futPnl = period.futures_pnl || 0;
+    const spotC = period.spot_count || 0;
+    const futC = period.futures_count || 0;
+
+    // Progress bar
+    const progressPct = Math.min(100, Math.max(0, (totalPnl / target) * 100));
+    const barColor = totalPnl >= target ? '#4ecca3' : totalPnl >= target * 0.5 ? '#f39c12' : totalPnl > 0 ? '#3498db' : '#e74c3c';
+
+    // Win rate for the period
+    const wins = byReason.filter(r => r.pnl > 0).reduce((s, r) => s + r.count, 0);
+    const wr = totalTrades > 0 ? ((wins / totalTrades) * 100).toFixed(1) : '0.0';
+
+    // Reason icon map
+    const reasonIcon = (r) => {
+        const m = _CLOSE_REASON_MAP[r];
+        return m ? m[0] : r;
+    };
+
+    const reasonRows = byReason.map(r => {
+        const cls = r.pnl >= 0 ? 'positive' : 'negative';
+        return `<div class="pt-reason-row">
+            <span class="pt-reason-label">${reasonIcon(r.reason)}</span>
+            <span class="pt-reason-count">${r.count} trade${r.count !== 1 ? 's' : ''}</span>
+            <span class="pt-reason-pnl ${cls}">${r.pnl >= 0 ? '+' : ''}${fmt(r.pnl)} USDT</span>
+        </div>`;
+    }).join('');
+
+    const periodLabel = _profitTrackerPeriod === 'week' ? '7 días' : 'Hoy';
+    const periodBtnToday = _profitTrackerPeriod === 'today' ? 'active' : '';
+    const periodBtnWeek = _profitTrackerPeriod === 'week' ? 'active' : '';
+
+    el.innerHTML = `
+        <div class="pt-toggle">
+            <button class="pt-toggle-btn ${periodBtnToday}" onclick="switchProfitTrackerPeriod('today')">Hoy</button>
+            <button class="pt-toggle-btn ${periodBtnWeek}" onclick="switchProfitTrackerPeriod('week')">7d</button>
+        </div>
+        <div class="pt-target-section">
+            <div class="pt-target-label">
+                <span>${periodLabel}:</span>
+                <span class="${pnlClass(totalPnl)}"><strong>${totalPnl >= 0 ? '+' : ''}$${fmt(totalPnl)} USDT</strong></span>
+                <span class="pt-target-meta"> / $${fmt(target)} meta</span>
+            </div>
+            <div class="pt-bar-bg">
+                <div class="pt-bar-fill" style="width:${progressPct}%;background:${barColor}"></div>
+                <span class="pt-bar-pct">${progressPct.toFixed(0)}%</span>
+            </div>
+        </div>
+        <div class="pt-reasons">
+            ${reasonRows || '<div class="pt-empty">Sin trades cerrados en este período</div>'}
+        </div>
+        <div class="pt-footer">
+            <span>${totalTrades} trades</span>
+            <span>WR: <strong>${wr}%</strong></span>
+            <span>Spot: <span class="${pnlClass(spotPnl)}">${spotPnl >= 0 ? '+' : ''}$${fmt(spotPnl)}</span> (${spotC})</span>
+            <span>Fut: <span class="${pnlClass(futPnl)}">${futPnl >= 0 ? '+' : ''}$${fmt(futPnl)}</span> (${futC})</span>
+        </div>
+    `;
+}
+
 function renderOpenPositions(d) {
     if (!d) return;
     _lastOpenData = d;  // FIX-L6c: cache for sub-tab re-render
@@ -995,7 +1080,12 @@ function renderClosedPositions(d) {
                     let lifecycleBadges = '';
                     if (p.trailing_peak) lifecycleBadges += `<span class="sl-badge trail" title="Peak: $${fmt(p.trailing_peak)}">📈T</span>`;
                     if (p.tp_extensions > 0) lifecycleBadges += `<span class="sl-badge ext" title="SmartTP ×${p.tp_extensions}">🔄${p.tp_extensions}</span>`;
-                    if (p.scale_out_done) lifecycleBadges += '<span class="sl-badge scale" title="Scale-out">✂️</span>';
+                    if (p.scale_out_done) {
+                        const soTipCl = p.scale_out_pnl ? `Scale-out: +$${fmt(p.scale_out_pnl)} locked` : 'Scale-out ejecutado';
+                        lifecycleBadges += `<span class="sl-badge scale" title="${soTipCl}">✂️$${fmt(p.scale_out_pnl || 0)}</span>`;
+                    }
+                    if (p.peak_pnl_pct > 0) lifecycleBadges += `<span class="sl-badge peak" title="Peak PnL: ${fmt(p.peak_pnl_pct, 1)}%">📊${fmt(p.peak_pnl_pct, 1)}%</span>`;
+                    if (p.close_reason === 'momentum_reversal') lifecycleBadges += '<span class="sl-badge mr" title="Cerrado por momentum reversal">⚡MR</span>';
                     if (!lifecycleBadges) lifecycleBadges = '<span class="sl-badge none">—</span>';
 
                     return `
@@ -2996,6 +3086,7 @@ async function updateDashboard() {
     renderSignals(data.signals);
     renderBalance(data.balance);
     renderPnlHistory(data.pnl_history);
+    renderProfitTracker(data.pnl_by_close_reason);
     renderOpenPositions(data.open_positions);
     renderExpectativaVsRealidad(data);
     renderVolSpikeAudit();  // Auditoría VolSpike Override
