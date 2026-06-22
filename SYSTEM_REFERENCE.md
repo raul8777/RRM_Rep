@@ -2051,4 +2051,47 @@ Cada posición genera un log `[SSO/F]` (futures) o `[SSO/S]` (spot) mostrando:
 
 ---
 
+## ⭐ SAFEPOINT v1 — SISTEMA PRODUCTIVO (jun 22 2026, 17:15 UTC-6)
+
+> **El sistema comenzó a ser consistentemente productivo en este punto.**
+> Usar como referencia para cualquier comparación futura de rendimiento.
+
+### Git Tag: `safepoint-v1-jun22-2026` (commit `b078c03`)
+```bash
+git checkout safepoint-v1-jun22-2026 -- docker-compose.yml && docker-compose up -d --force-recreate app
+```
+
+### Estado al Safepoint:
+- **Régimen**: FUTURES_SHORT — Bear estructural (BTC 30d=-17%, F&G=20 Extreme Fear)
+- **SHORTs activos**: 11/12 (TAOUSDT, FILUSDT, DOTUSDT, BCHUSDT, XRPUSDT, LINKUSDT, SOLUSDT, AVAXUSDT, UNIUSDT, DOGEUSDT, ADAUSDT)
+- **SSO realizados**: ~$10.49 (5 cierres: SUIUSDT +$3.77, UNIUSDT +$3.23, ETH +$1.75, AVAX +$1.74)
+- **Tests**: 98 passed, 0 failures
+
+### Parámetros Críticos en Este Punto:
+| Param | Valor |
+|-------|-------|
+| FUTURES_MAX_SHORTS | 12 |
+| FUTURES_OVERFLOW_MIN_STRENGTH | 0.55 |
+| FUTURES_SL_PCT / TP_PCT | 7% / 7% |
+| STOP_LOSS_PCT (SPOT) | 2.5% |
+| SSO_DECAY_THRESHOLD_PCT | 0.4% |
+| SSO_SLOW_VELOCITY_THRESHOLD | 0.1%/h |
+
+### Señales de Degradación (triggers para revisar vs este safepoint):
+- Win Rate futures < 40% en 48h
+- Avg PnL/trade < $0 (5+ trades)
+- > 3 SL simultáneos en 24h
+- F&G > 60 con régimen aún FUTURES_SHORT
+- SSO firing repetidamente sin profit neto
+
+### Archivo Completo: `SAFEPOINT_v1_jun22_2026.md`
+
+### Futures Slot Fix (misma sesión):
+- PEPEUSDT → 1000PEPEUSDT (bug: símbolo inválido en Binance futures)
+- FUTURES_MAX_SHORTS: 9 → 12
+- Overflow simplificado: removidos vol_spike + BTC 4h gates (redundantes con filtros de entrada)
+- Resultado: sistema pasó de 8/9 → 12/12 shorts en primer ciclo
+
+---
+
 *Revisar este archivo al inicio de cada sesión de análisis o implementación.*
