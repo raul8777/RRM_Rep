@@ -819,7 +819,18 @@ class PositionManager:
             if now_mono - cached_ts < self._perf_cache_ttl:
                 return cached_result
 
-        if not self._closed_positions:
+        _EXCLUDED_REASONS = {
+            'portfolio_rebalancing', 'manual_rebalance',
+            'manual_liquidation_idle_capital', 'excluded_symbol_cleanup',
+            'manual_b2_stablecoin_cleanup', 'regime_futures_short_spot_cleanup',
+            'balance_sync',
+        }
+        real_trades = [
+            pos for pos in self._closed_positions
+            if getattr(pos, 'close_reason', '') not in _EXCLUDED_REASONS
+        ]
+
+        if not real_trades:
             return {
                 "win_rate": 0.0,
                 "profit_factor": 0.0,
@@ -831,13 +842,13 @@ class PositionManager:
                 "total_loss": 0.0
             }
         
-        winning_trades = [pos for pos in self._closed_positions if float(pos.pnl) > 0]
-        losing_trades = [pos for pos in self._closed_positions if float(pos.pnl) < 0]
+        winning_trades = [pos for pos in real_trades if float(pos.pnl) > 0]
+        losing_trades = [pos for pos in real_trades if float(pos.pnl) < 0]
 
         total_profit = sum(float(pos.pnl) for pos in winning_trades)
         total_loss = abs(sum(float(pos.pnl) for pos in losing_trades))
         
-        win_rate = (len(winning_trades) / len(self._closed_positions) * 100) if self._closed_positions else 0.0
+        win_rate = (len(winning_trades) / len(real_trades) * 100) if real_trades else 0.0
         profit_factor = (total_profit / total_loss) if total_loss > 0 else 0.0
         
         # Calculate max drawdown
@@ -847,7 +858,7 @@ class PositionManager:
         
         # Sort by exit_time to calculate drawdown chronologically
         sorted_positions = sorted(
-            self._closed_positions,
+            real_trades,
             key=lambda x: _parse_exit_time(x.exit_time)
         )
         
@@ -863,7 +874,7 @@ class PositionManager:
             "win_rate": win_rate,
             "profit_factor": profit_factor,
             "max_drawdown": max_drawdown * 100,  # Convert to percentage
-            "total_trades": len(self._closed_positions),
+            "total_trades": len(real_trades),
             "winning_trades": len(winning_trades),
             "losing_trades": len(losing_trades),
             "total_profit": total_profit,

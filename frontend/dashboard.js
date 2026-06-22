@@ -236,10 +236,9 @@ function renderExecutiveSummary(data) {
     const totalUsdt   = parseFloat(balance.total_usdt || 0);
     const liquidUsdt  = parseFloat(balance.usdt_available || balance.total_usdt || 0);
     const positions   = openPos.positions || [];
-    const invested    = positions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
+    const invested    = positions.reduce((s, p) => s + parseFloat(p.trade_type === 'futures' ? (p.margin_usdt || p.invested_usdt || 0) : (p.invested_usdt || 0)), 0);
     const exposurePct = totalUsdt > 0 ? ((invested / totalUsdt) * 100).toFixed(1) : '0.0';
-    const unrealPnlSpot = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
-    const unrealPnl   = unrealPnlSpot + _futuresUnrealPnl;  // Spot + Futures
+    const unrealPnl   = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
     const pnlToday    = parseFloat((pnlH.day && pnlH.day.total_pnl) || 0);
     const mode        = regime.trading_mode || 'SPOT_BULL';
     const modeInfo    = MODE_CFG[mode] || MODE_CFG['SPOT_BULL'];
@@ -373,11 +372,10 @@ function renderKPIRow(data) {
     const totalUsdt  = parseFloat(balance.total_usdt || 0);
     const liquidUsdt = parseFloat(balance.usdt_available || balance.total_usdt || 0);
     const positions  = openPos.positions || [];
-    const invested   = positions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
+    const invested   = positions.reduce((s, p) => s + parseFloat(p.trade_type === 'futures' ? (p.margin_usdt || p.invested_usdt || 0) : (p.invested_usdt || 0)), 0);
     const expPct     = totalUsdt > 0 ? ((invested / totalUsdt) * 100) : 0;
     const maxExpPct  = 75;
-    const unrealPnlSpot = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
-    const unrealPnl  = unrealPnlSpot + _futuresUnrealPnl;  // Spot + Futures
+    const unrealPnl  = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
     const pnlToday   = parseFloat((pnlH.day && pnlH.day.total_pnl) || 0);
     const m          = perf.metrics || {};
     const wr         = parseFloat(m.win_rate || 0);
@@ -838,6 +836,16 @@ function renderOpenPositions(d) {
         ? predPositions.reduce((s, p) => s + (parseFloat(p.unrealized_pnl || 0) / parseFloat(p.pnl_prediction.expected_pnl || 1)), 0) / predPositions.length 
         : 0;
 
+    // SL Global: worst-case PnL if every position hits its stop loss
+    const slGlobalPnl = visiblePositions.reduce((s, p) => {
+        const sl = parseFloat(p.stop_loss || 0);
+        const entry = parseFloat(p.entry_price || 0);
+        const qty = parseFloat(p.quantity || 0);
+        if (!sl || !entry || !qty) return s;
+        const isShort = (p.side || '').toUpperCase() === 'SHORT' || (p.side || '').toUpperCase() === 'SELL';
+        return s + (isShort ? (entry - sl) * qty : (sl - entry) * qty);
+    }, 0);
+
     el.innerHTML = `
         <div class="table-scroll-10">
         <table class="positions-table">
@@ -892,6 +900,10 @@ function renderOpenPositions(d) {
                 <strong>${totalUnreal >= 0 ? '+' : ''}${fmt(totalUnreal)} USDT</strong>
             </span>
             ${predPositions.length > 0 ? `&nbsp;|&nbsp;Precisión Pred. Promedio: <strong>${(avgAccuracy * 100).toFixed(0)}%</strong>` : ''}
+            &nbsp;|&nbsp;SL Global:
+            <span class="${pnlClass(slGlobalPnl)}">
+                <strong>${slGlobalPnl >= 0 ? '+' : ''}${fmt(slGlobalPnl)} USDT</strong>
+            </span>
         </div>
     `;
 }
