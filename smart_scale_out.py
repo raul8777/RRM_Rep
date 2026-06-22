@@ -27,6 +27,7 @@ class SSOAction:
     detail: str = ""                 # human-readable explanation
     trigger: str = ""                # SSO-1, SSO-2, etc.
     priority: int = 99              # lower = higher priority
+    diagnosis: str = ""             # always set: why each sub-trigger did/didn't fire
 
 
 @dataclass
@@ -103,89 +104,132 @@ class SmartScaleOut:
         """
         Evaluate all SSO triggers in priority order.
         Returns the first (highest priority) action that fires, or no-action.
+        Always populates diagnosis with per-trigger status.
         """
+        _diag_parts = []
         checks = [
-            self._check_sso1_stagnant,
-            self._check_sso2_momentum_exhausted,
-            self._check_sso3_multilevel,
-            self._check_sso4_target_contribution,
-            self._check_sso5_reentry_upgrade,
+            ("SSO-1", self._check_sso1_stagnant),
+            ("SSO-2", self._check_sso2_momentum_exhausted),
+            ("SSO-3", self._check_sso3_multilevel),
+            ("SSO-4", self._check_sso4_target_contribution),
+            ("SSO-5", self._check_sso5_reentry_upgrade),
         ]
-        for check_fn in checks:
+        for label, check_fn in checks:
             action = check_fn(pos)
             if action and action.should_close:
+                action.diagnosis = " | ".join(_diag_parts + [f"{label}:FIRE({action.reason})"])
                 return action
-        return SSOAction()  # no action
+            # Collect why it didn't fire
+            _skip_reason = action.diagnosis if (action and action.diagnosis) else f"{label}:skip"
+            _diag_parts.append(_skip_reason)
+        no_action = SSOAction()
+        no_action.diagnosis = " | ".join(_diag_parts)
+        return no_action
 
     # ── SSO-1: Capital Velocity — decay / slow / stagnant ───────────────────────
     def _check_sso1_stagnant(self, pos: SSOPositionData) -> Optional[SSOAction]:
         """Close 100% if position is decaying, crawling too slowly, or fully stagnant.
-        Three sub-checks with independent gates (SSO-1b, SSO-1c, SSO-1)."""
+        Three sub-checks with independent gates (SSO-1b, SSO-1c, SSO-1).
+        Always returns an SSOAction with diagnosis even on no-fire."""
         if not pos.opened_at:
-            return None
+            return SSOAction(diagnosis="SSO-1:skip(no opened_at)")
         age_hours = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
+        _lifetime_vel = (pos.pnl_pct / age_hours) if age_hours > 0 else 0.0
+        _snap_vel = pos.pnl_velocity_1h
 
         # ── SSO-1b: Profit Decay — giving back gains ──────────────────────────
         _decay_threshold = self._cfg('sso_decay_threshold_pct', 0.004)
         _decay_min_profit = self._cfg('sso_decay_min_profit_usd', 2.0)
         _decay_min_hours = self._cfg('sso_decay_min_hours', 1.5)
         decay_pct = pos.peak_pnl_pct - pos.pnl_pct
-        if (decay_pct >= _decay_threshold
-                and pos.pnl_usdt >= _decay_min_profit
-                and age_hours >= _decay_min_hours):
+        _1b_reasons = []
+        if decay_pct < _decay_threshold:
+            _1b_reasons.append(f"decay={decay_pct*100:.2f}%<{_decay_threshold*100:.1f}%")
+        if pos.pnl_usdt < _decay_min_profit:
+            _1b_reasons.append(f"${pos.pnl_usdt:.1f}<${_decay_min_profit:.0f}")
+        if age_hours < _decay_min_hours:
+            _1b_reasons.append(f"age={age_hours:.1f}h<{_decay_min_hours:.1f}h")
+        if not _1b_reasons:  # all conditions met → FIRE
             return SSOAction(
-                should_close=True,
-                close_pct=1.0,
+                should_close=True, close_pct=1.0,
                 reason="sso_profit_decay",
-                detail=f"Decay: peak={pos.peak_pnl_pct*100:.2f}% \u2192 {pos.pnl_pct*100:.2f}% "
+                detail=f"Decay: peak={pos.peak_pnl_pct*100:.2f}% → {pos.pnl_pct*100:.2f}% "
                        f"(gave back {decay_pct*100:.2f}%, ${pos.pnl_usdt:.2f} remaining, "
                        f"age={age_hours:.1f}h)",
-                trigger="SSO-1",
-                priority=1,
+                trigger="SSO-1", priority=1,
             )
+        _1b_diag = f"1b:no({','.join(_1b_reasons)})"
 
-        # ── SSO-1c: Slow Crawl — velocity too low to justify slot ─────────────
-        _slow_vel_threshold = self._cfg('sso_slow_velocity_threshold', 0.001)  # 0.1%/h
+        # ── SSO-1c: Slow Crawl — lifetime + snapshot velocity ─────────────────
+        _slow_vel_base = self._cfg('sso_slow_velocity_threshold', 0.001)  # 0.1%/h
         _slow_min_profit = self._cfg('sso_slow_min_profit_usd', 1.0)
         _slow_min_hours = self._cfg('sso_slow_min_hours', 2.0)
-        _slow_stricter_hours = self._cfg('sso_slow_min_age_stricter', 4.0)
-        if (pos.pnl_velocity_1h is not None
-                and pos.pnl_usdt >= _slow_min_profit
-                and age_hours >= _slow_min_hours):
-            # After _slow_stricter_hours, raise threshold by 50% (be more aggressive)
-            _effective_vel = _slow_vel_threshold
-            if age_hours >= _slow_stricter_hours:
-                _effective_vel = _slow_vel_threshold * 1.5  # 0.15%/h after 4h
-            if pos.pnl_velocity_1h <= _effective_vel:
+        _slow_t2 = self._cfg('sso_slow_tier2_hours', 4.0)
+        _slow_t3 = self._cfg('sso_slow_tier3_hours', 6.0)
+        _slow_t4 = self._cfg('sso_slow_tier4_hours', 8.0)
+
+        _1c_reasons = []
+        if pos.pnl_usdt < _slow_min_profit:
+            _1c_reasons.append(f"${pos.pnl_usdt:.1f}<${_slow_min_profit:.0f}")
+        if age_hours < _slow_min_hours:
+            _1c_reasons.append(f"age={age_hours:.1f}h<{_slow_min_hours:.1f}h")
+
+        if not _1c_reasons:
+            # Determine tier threshold
+            if age_hours >= _slow_t4:
+                _effective_vel = _slow_vel_base * 5.0    # 0.50%/h
+                _tier = "T4"
+            elif age_hours >= _slow_t3:
+                _effective_vel = _slow_vel_base * 3.5    # 0.35%/h
+                _tier = "T3"
+            elif age_hours >= _slow_t2:
+                _effective_vel = _slow_vel_base * 1.5    # 0.15%/h
+                _tier = "T2"
+            else:
+                _effective_vel = _slow_vel_base           # 0.10%/h
+                _tier = "T1"
+
+            # Use worst of snapshot and lifetime velocity
+            _worst_vel = min(_snap_vel if _snap_vel is not None else _lifetime_vel, _lifetime_vel)
+            if _worst_vel <= _effective_vel:
                 return SSOAction(
-                    should_close=True,
-                    close_pct=1.0,
+                    should_close=True, close_pct=1.0,
                     reason="sso_slow_crawl",
-                    detail=f"Slow: vel={pos.pnl_velocity_1h*100:.3f}%/h <= {_effective_vel*100:.3f}%/h "
-                           f"(${pos.pnl_usdt:.2f} profit, age={age_hours:.1f}h)",
-                    trigger="SSO-1",
-                    priority=1,
+                    detail=f"Slow {_tier}: life={_lifetime_vel*100:.3f}%/h snap={(_snap_vel or 0)*100:.3f}%/h "
+                           f"worst={_worst_vel*100:.3f}%/h<={_effective_vel*100:.2f}%/h "
+                           f"(${pos.pnl_usdt:.2f}, age={age_hours:.1f}h)",
+                    trigger="SSO-1", priority=1,
                 )
+            _1c_reasons.append(f"worst={_worst_vel*100:.2f}%/h>{_effective_vel*100:.2f}%/h({_tier})")
+        _1c_diag = f"1c:no({','.join(_1c_reasons)})"
 
         # ── SSO-1: Original Stagnant — velocity zero or negative ──────────────
         min_profit = max(self.stagnant_min_profit_floor,
                          pos.position_size_usdt * self.stagnant_min_profit_factor)
+        _1_reasons = []
         if pos.pnl_usdt < min_profit:
-            return None
+            _1_reasons.append(f"${pos.pnl_usdt:.1f}<${min_profit:.0f}")
         if age_hours < self.stagnant_min_hours:
-            return None
-        if pos.pnl_velocity_1h is None:
-            return None
-        if pos.pnl_velocity_1h > 0.001:  # still advancing (>0.1% per hour)
-            return None
+            _1_reasons.append(f"age={age_hours:.1f}h<{self.stagnant_min_hours:.1f}h")
+        if _snap_vel is None:
+            _1_reasons.append("vel=None")
+        elif _snap_vel > 0.001:
+            _1_reasons.append(f"vel={_snap_vel*100:.3f}%/h>0.1%")
+
+        if not _1_reasons:
+            return SSOAction(
+                should_close=True, close_pct=1.0,
+                reason="sso_stagnant_profit",
+                detail=f"${pos.pnl_usdt:.2f} stagnant {age_hours:.1f}h (vel={(_snap_vel or 0)*100:.3f}%/h)",
+                trigger="SSO-1", priority=1,
+            )
+        _1_diag = f"1:no({','.join(_1_reasons)})"
 
         return SSOAction(
-            should_close=True,
-            close_pct=1.0,
-            reason="sso_stagnant_profit",
-            detail=f"${pos.pnl_usdt:.2f} profit stagnant {age_hours:.1f}h (velocity={pos.pnl_velocity_1h*100:.3f}%/h)",
-            trigger="SSO-1",
-            priority=1,
+            diagnosis=f"SSO-1:[{_1b_diag} {_1c_diag} {_1_diag}] "
+                      f"pk={pos.peak_pnl_pct*100:.2f}% cur={pos.pnl_pct*100:.2f}% "
+                      f"life={_lifetime_vel*100:.3f}%/h snap={(_snap_vel or 0)*100:.3f}%/h "
+                      f"${pos.pnl_usdt:.2f} {age_hours:.1f}h"
         )
 
     # ── SSO-2: Momentum Exhausted ─────────────────────────────────────────────

@@ -1962,6 +1962,12 @@ class FuturesClient:
                             trade_type="futures",
                         )
                         _sso_action = _sso.evaluate(_sso_pos)
+                        # Full SSO visibility — always log evaluation result
+                        if _sso_action.should_close:
+                            print(f"[SSO/F] {symbol} {pos.side}: → CLOSE {_sso_action.close_pct*100:.0f}% "
+                                  f"{_sso_action.reason} | {_sso_action.detail}")
+                        else:
+                            print(f"[SSO/F] {symbol} {pos.side}: NO ACTION | {_sso_action.diagnosis}")
                         if _sso_action.should_close:
                             _sso_close_pct = _sso_action.close_pct
                             _sso_qty = pos.qty * _sso_close_pct

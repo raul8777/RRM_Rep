@@ -1970,34 +1970,39 @@ SSO-1b evalúa en cada ciclo (4min):
 ### SSO-1 ahora tiene 3 sub-checks independientes:
 ```
 SSO-1b DECAY:    peak-current >= 0.4%, profit >= $2, age >= 1.5h → CLOSE 100%
-SSO-1c SLOW:     velocity <= 0.1%/h, profit >= $1, age >= 2h → CLOSE 100%
-                 (after 4h: threshold sube a 0.15%/h — más agresivo)
+SSO-1c SLOW:     worst(snapshot, lifetime) <= tier threshold → CLOSE 100%
+                 T1(2-4h): 0.10%/h | T2(4-6h): 0.15%/h | T3(6-8h): 0.35%/h | T4(8h+): 0.50%/h
+                 Uses min(snapshot_vel, lifetime_vel = pnl_pct/age_hours)
 SSO-1  STAGNANT: velocity <= 0, profit >= $3, age >= 2h → CLOSE 100%
 ```
 
 ### Config SSO-1c:
 | Setting | Default | Env |
 |---------|---------|-----|
-| `sso_slow_velocity_threshold` | 0.001 (0.1%/h) | `SSO_SLOW_VELOCITY_THRESHOLD` |
+| `sso_slow_velocity_threshold` | 0.001 (0.1%/h base) | `SSO_SLOW_VELOCITY_THRESHOLD` |
 | `sso_slow_min_profit_usd` | 1.0 | `SSO_SLOW_MIN_PROFIT_USD` |
 | `sso_slow_min_hours` | 2.0 | `SSO_SLOW_MIN_HOURS` |
-| `sso_slow_min_age_stricter` | 4.0 | `SSO_SLOW_MIN_AGE_STRICTER` |
+| `sso_slow_tier2_hours` | 4.0 | `SSO_SLOW_TIER2_HOURS` |
+| `sso_slow_tier3_hours` | 6.0 | `SSO_SLOW_TIER3_HOURS` |
+| `sso_slow_tier4_hours` | 8.0 | `SSO_SLOW_TIER4_HOURS` |
+
+### SSO Full Visibility (sesión 19e):
+Cada posición genera un log `[SSO/F]` (futures) o `[SSO/S]` (spot) mostrando:
+- Cuando FIRE: `[SSO/F] SUIUSDT SHORT: → CLOSE 100% sso_slow_crawl | detail...`
+- Cuando NO: `[SSO/F] SUIUSDT SHORT: NO ACTION | SSO-1:[1b:no(...) 1c:no(...) 1:no(...)] pk=X cur=Y life=Z snap=W`
+- `diagnosis` field en SSOAction siempre populated con razones por sub-trigger
 
 ### Bugfixes incluidos:
 - **Gate ordering**: Cada sub-check tiene sus propios gates — SSO-1b ya no bloqueado por $3/2h de SSO-1
 - **Snapshot persist**: `_persist_smart_meta()` después de actualizar velocity snapshot → sobrevive reinicios
+- **Lifetime velocity**: SSO-1c usa `min(snap, lifetime)` — no depende solo del snapshot de 30min
 
-### Rationale:
-- $50 × 0.1%/h = $0.05/h = $1.20/día → no justifica slot
-- Fresh signal promedio: 1.5% en 4h → $0.75/trade
-- Break-even: velocity < 0.1%/h por 2h+ → recycling es +EV
-
-### Tests: 96 passed, 0 failures
-### Files: smart_scale_out.py, config.py, futures_client.py, docker-compose.yml
+### Tests: 98 passed, 0 failures
+### Files: smart_scale_out.py, config.py, futures_client.py, run_trades.py, docker-compose.yml
 
 ### 🔍 MONITOR (24h):
-- ¿SSO-1c cierra SOLUSDT/BNBUSDT tipo positions (velocity ~0.05%/h)?
-- ¿SSO-1b dispara en decays reales?
+- Revisar logs `[SSO/F]` y `[SSO/S]` para validar que diagnósticos son claros
+- ¿SSO-1c T3 cierra SUIUSDT (~0.30%/h lifetime)?
 - ¿Capital reciclado genera mejores trades?
 - ¿No hay over-closure? (positions cerradas que luego habrían ganado más)
 

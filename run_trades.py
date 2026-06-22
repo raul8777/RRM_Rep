@@ -1258,10 +1258,15 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             trade_type="spot",
                         )
                         _sso_s_action = _sso_spot.evaluate(_sso_s_pos)
+                        # Full SSO visibility — always log evaluation result
+                        if _sso_s_action.should_close:
+                            print(f"[SSO/S] {symbol}: → CLOSE {_sso_s_action.close_pct*100:.0f}% "
+                                  f"{_sso_s_action.reason} | {_sso_s_action.detail}")
+                        else:
+                            print(f"[SSO/S] {symbol}: NO ACTION | {_sso_s_action.diagnosis}")
                         if _sso_s_action.should_close:
                             if _sso_s_action.close_pct >= 1.0:
                                 close_reason = f"{_sso_s_action.reason} ({pnl_pct*100:.2f}%)"
-                                print(f"[SSO/SPOT] {symbol}: {_sso_s_action.trigger} CLOSE 100% | {_sso_s_action.detail}")
                             else:
                                 # Partial close for SPOT
                                 try:

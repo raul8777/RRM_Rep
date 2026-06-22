@@ -877,72 +877,86 @@ class TestSSOProfitDecay:
 # ─── 12. SSO-1c Slow Crawl tests ────────────────────────────────────────────
 
 class TestSSOSlowCrawl:
-    """SSO-1c: Slow Crawl trigger unit tests."""
+    """SSO-1c: Slow Crawl with lifetime velocity + escalating tiers."""
 
-    def test_slow_fires_when_velocity_too_low(self):
-        """Velocity 0.05%/h, $2 profit, 3h age → should close."""
+    def test_slow_fires_lifetime_low(self):
+        """Lifetime 0.05%/h at 3h, snap 0.05%/h → T1 threshold 0.10%/h → fires."""
         from datetime import timedelta
         from smart_scale_out import SmartScaleOut, SSOPositionData
         sso = SmartScaleOut(make_settings())
         pos = SSOPositionData(
             symbol="SOLUSDT", side="SHORT",
-            pnl_pct=0.01, pnl_usdt=2.0,
+            pnl_pct=0.0015, pnl_usdt=2.0,  # 0.15% in 3h = 0.05%/h lifetime
             position_size_usdt=100.0,
-            entry_price=73.0, current_price=72.27,
+            entry_price=73.0, current_price=72.89,
             opened_at=datetime.now(timezone.utc) - timedelta(hours=3),
-            peak_pnl_pct=0.012,
-            pnl_velocity_1h=0.0005,  # 0.05%/h — below 0.1%/h threshold
-            sso_levels_done=[],
-            atr_4h_pct=0.015,
-            trade_type="futures",
+            peak_pnl_pct=0.002,
+            pnl_velocity_1h=0.0005,  # 0.05%/h snap
+            sso_levels_done=[], atr_4h_pct=0.015, trade_type="futures",
         )
         action = sso.evaluate(pos)
         assert action.should_close is True
         assert "sso_slow_crawl" in action.reason
 
-    def test_slow_stricter_after_4h(self):
-        """After 4h, threshold rises to 0.15%/h — velocity 0.12%/h should fire."""
-        from datetime import timedelta
-        from smart_scale_out import SmartScaleOut, SSOPositionData
-        sso = SmartScaleOut(make_settings())
-        pos = SSOPositionData(
-            symbol="BNBUSDT", side="SHORT",
-            pnl_pct=0.007, pnl_usdt=1.5,
-            position_size_usdt=100.0,
-            entry_price=597.0, current_price=592.8,
-            opened_at=datetime.now(timezone.utc) - timedelta(hours=5),
-            peak_pnl_pct=0.009,
-            pnl_velocity_1h=0.0012,  # 0.12%/h — above 0.1% but below 0.15%
-            sso_levels_done=[],
-            atr_4h_pct=0.012,
-            trade_type="futures",
-        )
-        action = sso.evaluate(pos)
-        assert action.should_close is True
-        assert "sso_slow_crawl" in action.reason
-
-    def test_slow_does_not_fire_healthy_velocity(self):
-        """Velocity 0.3%/h → should NOT fire."""
+    def test_slow_tier3_catches_suiusdt_pattern(self):
+        """SUIUSDT: 1.9% in 6.3h = 0.30%/h lifetime, snap 0.46%/h → T3 thresh 0.35%/h → fires."""
         from datetime import timedelta
         from smart_scale_out import SmartScaleOut, SSOPositionData
         sso = SmartScaleOut(make_settings())
         pos = SSOPositionData(
             symbol="SUIUSDT", side="SHORT",
-            pnl_pct=0.018, pnl_usdt=5.0,
+            pnl_pct=0.019, pnl_usdt=5.0,  # 1.9% in 6.3h = 0.30%/h
             position_size_usdt=100.0,
-            entry_price=0.73, current_price=0.717,
-            opened_at=datetime.now(timezone.utc) - timedelta(hours=5),
-            peak_pnl_pct=0.019,
-            pnl_velocity_1h=0.003,  # 0.3%/h — healthy
-            sso_levels_done=[],
-            atr_4h_pct=0.02,
-            trade_type="futures",
+            entry_price=0.733, current_price=0.719,
+            opened_at=datetime.now(timezone.utc) - timedelta(hours=6, minutes=18),
+            peak_pnl_pct=0.0205,
+            pnl_velocity_1h=0.0046,  # 0.46%/h snap (recent burst)
+            sso_levels_done=[], atr_4h_pct=0.02, trade_type="futures",
+        )
+        action = sso.evaluate(pos)
+        assert action.should_close is True
+        assert "sso_slow_crawl" in action.reason
+        assert "T3" in action.detail
+
+    def test_slow_tier4_very_old(self):
+        """16h position, 1% total → 0.06%/h lifetime → T4 thresh 0.50%/h → fires."""
+        from datetime import timedelta
+        from smart_scale_out import SmartScaleOut, SSOPositionData
+        sso = SmartScaleOut(make_settings())
+        pos = SSOPositionData(
+            symbol="SOLUSDT", side="SHORT",
+            pnl_pct=0.01, pnl_usdt=2.5,
+            position_size_usdt=100.0,
+            entry_price=73.0, current_price=72.27,
+            opened_at=datetime.now(timezone.utc) - timedelta(hours=16),
+            peak_pnl_pct=0.012,
+            pnl_velocity_1h=0.0005,
+            sso_levels_done=[], atr_4h_pct=0.015, trade_type="futures",
+        )
+        action = sso.evaluate(pos)
+        assert action.should_close is True
+        assert "sso_slow_crawl" in action.reason
+
+    def test_slow_healthy_velocity_no_fire(self):
+        """0.8%/h lifetime at 3h → well above T1 0.10%/h → NO fire."""
+        from datetime import timedelta
+        from smart_scale_out import SmartScaleOut, SSOPositionData
+        sso = SmartScaleOut(make_settings())
+        pos = SSOPositionData(
+            symbol="UNIUSDT", side="SHORT",
+            pnl_pct=0.024, pnl_usdt=3.0,  # 2.4% in 3h = 0.8%/h
+            position_size_usdt=100.0,
+            entry_price=3.09, current_price=3.016,
+            opened_at=datetime.now(timezone.utc) - timedelta(hours=3),
+            peak_pnl_pct=0.025,
+            pnl_velocity_1h=0.005,  # 0.5%/h snap
+            sso_levels_done=[], atr_4h_pct=0.018, trade_type="futures",
         )
         action = sso.evaluate(pos)
         assert "sso_slow_crawl" not in (action.reason or "")
 
-    def test_slow_does_not_fire_too_young(self):
-        """Age < 2h → should NOT fire slow crawl."""
+    def test_slow_too_young_no_fire(self):
+        """Age < 2h → should NOT fire."""
         from datetime import timedelta
         from smart_scale_out import SmartScaleOut, SSOPositionData
         sso = SmartScaleOut(make_settings())
@@ -953,15 +967,13 @@ class TestSSOSlowCrawl:
             entry_price=0.95, current_price=0.945,
             opened_at=datetime.now(timezone.utc) - timedelta(hours=1),
             peak_pnl_pct=0.006,
-            pnl_velocity_1h=0.0005,  # slow but too young
-            sso_levels_done=[],
-            atr_4h_pct=0.015,
-            trade_type="futures",
+            pnl_velocity_1h=0.0005,
+            sso_levels_done=[], atr_4h_pct=0.015, trade_type="futures",
         )
         action = sso.evaluate(pos)
         assert "sso_slow_crawl" not in (action.reason or "")
 
-    def test_slow_does_not_fire_negative_profit(self):
+    def test_slow_low_profit_no_fire(self):
         """Profit < $1 → should NOT fire."""
         from datetime import timedelta
         from smart_scale_out import SmartScaleOut, SSOPositionData
@@ -973,10 +985,27 @@ class TestSSOSlowCrawl:
             entry_price=64700.0, current_price=64570.0,
             opened_at=datetime.now(timezone.utc) - timedelta(hours=5),
             peak_pnl_pct=0.003,
-            pnl_velocity_1h=0.0003,  # very slow, but profit too low
-            sso_levels_done=[],
-            atr_4h_pct=0.008,
-            trade_type="futures",
+            pnl_velocity_1h=0.0003,
+            sso_levels_done=[], atr_4h_pct=0.008, trade_type="futures",
         )
         action = sso.evaluate(pos)
         assert "sso_slow_crawl" not in (action.reason or "")
+
+    def test_diagnosis_always_populated(self):
+        """Even when no trigger fires, diagnosis must be populated."""
+        from datetime import timedelta
+        from smart_scale_out import SmartScaleOut, SSOPositionData
+        sso = SmartScaleOut(make_settings())
+        pos = SSOPositionData(
+            symbol="ETHUSDT", side="SHORT",
+            pnl_pct=0.005, pnl_usdt=0.30,  # tiny profit, no trigger fires
+            position_size_usdt=100.0,
+            entry_price=1760.0, current_price=1751.2,
+            opened_at=datetime.now(timezone.utc) - timedelta(hours=1),
+            peak_pnl_pct=0.006,
+            pnl_velocity_1h=0.003,
+            sso_levels_done=[], atr_4h_pct=0.012, trade_type="futures",
+        )
+        action = sso.evaluate(pos)
+        assert action.diagnosis != ""
+        assert "SSO-1" in action.diagnosis
