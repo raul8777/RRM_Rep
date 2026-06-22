@@ -1959,12 +1959,47 @@ SSO-1b evalúa en cada ciclo (4min):
 - **Velocity window 60→30min** — snapshots más frescos para SSO-1 stagnant original
 
 ### Files: smart_scale_out.py, config.py, docker-compose.yml, tests/test_futures_smart_exits.py
-### Tests: 90 passed, 0 failures
+
+---
+
+## SSO-1c SLOW CRAWL + RESTRUCTURE (jun 22 2026 — sesión 19d)
+
+> **Purpose**: Cerrar posiciones que suben demasiado lento para justificar el slot,
+> liberar capital para re-entry con señal fresca. Fix gate ordering + snapshot persist.
+
+### SSO-1 ahora tiene 3 sub-checks independientes:
+```
+SSO-1b DECAY:    peak-current >= 0.4%, profit >= $2, age >= 1.5h → CLOSE 100%
+SSO-1c SLOW:     velocity <= 0.1%/h, profit >= $1, age >= 2h → CLOSE 100%
+                 (after 4h: threshold sube a 0.15%/h — más agresivo)
+SSO-1  STAGNANT: velocity <= 0, profit >= $3, age >= 2h → CLOSE 100%
+```
+
+### Config SSO-1c:
+| Setting | Default | Env |
+|---------|---------|-----|
+| `sso_slow_velocity_threshold` | 0.001 (0.1%/h) | `SSO_SLOW_VELOCITY_THRESHOLD` |
+| `sso_slow_min_profit_usd` | 1.0 | `SSO_SLOW_MIN_PROFIT_USD` |
+| `sso_slow_min_hours` | 2.0 | `SSO_SLOW_MIN_HOURS` |
+| `sso_slow_min_age_stricter` | 4.0 | `SSO_SLOW_MIN_AGE_STRICTER` |
+
+### Bugfixes incluidos:
+- **Gate ordering**: Cada sub-check tiene sus propios gates — SSO-1b ya no bloqueado por $3/2h de SSO-1
+- **Snapshot persist**: `_persist_smart_meta()` después de actualizar velocity snapshot → sobrevive reinicios
+
+### Rationale:
+- $50 × 0.1%/h = $0.05/h = $1.20/día → no justifica slot
+- Fresh signal promedio: 1.5% en 4h → $0.75/trade
+- Break-even: velocity < 0.1%/h por 2h+ → recycling es +EV
+
+### Tests: 96 passed, 0 failures
+### Files: smart_scale_out.py, config.py, futures_client.py, docker-compose.yml
 
 ### 🔍 MONITOR (24h):
-- ¿SSO-1b dispara en posiciones con decay ≥ 0.4%?
-- ¿Capital liberado se re-invierte exitosamente?
-- ¿No hay over-closure (posiciones cerradas que luego habrían subido)?
+- ¿SSO-1c cierra SOLUSDT/BNBUSDT tipo positions (velocity ~0.05%/h)?
+- ¿SSO-1b dispara en decays reales?
+- ¿Capital reciclado genera mejores trades?
+- ¿No hay over-closure? (positions cerradas que luego habrían ganado más)
 
 ---
 

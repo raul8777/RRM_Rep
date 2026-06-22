@@ -117,24 +117,15 @@ class SmartScaleOut:
                 return action
         return SSOAction()  # no action
 
-    # ── SSO-1: Stagnant Profit ─────────────────────────────────────────────────
+    # ── SSO-1: Capital Velocity — decay / slow / stagnant ───────────────────────
     def _check_sso1_stagnant(self, pos: SSOPositionData) -> Optional[SSOAction]:
-        """Close 100% if profitable but velocity = 0 for extended period."""
-        # Min profit threshold (adaptive to position size)
-        min_profit = max(self.stagnant_min_profit_floor,
-                         pos.position_size_usdt * self.stagnant_min_profit_factor)
-        if pos.pnl_usdt < min_profit:
-            return None
-
-        # Time check
+        """Close 100% if position is decaying, crawling too slowly, or fully stagnant.
+        Three sub-checks with independent gates (SSO-1b, SSO-1c, SSO-1)."""
         if not pos.opened_at:
             return None
         age_hours = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
-        if age_hours < self.stagnant_min_hours:
-            return None
 
-        # SSO-1b: Profit Decay — position actively giving back gains
-        # More urgent than stagnation: fires when confirmed decay from peak
+        # ── SSO-1b: Profit Decay — giving back gains ──────────────────────────
         _decay_threshold = self._cfg('sso_decay_threshold_pct', 0.004)
         _decay_min_profit = self._cfg('sso_decay_min_profit_usd', 2.0)
         _decay_min_hours = self._cfg('sso_decay_min_hours', 1.5)
@@ -153,7 +144,36 @@ class SmartScaleOut:
                 priority=1,
             )
 
-        # Velocity check: PnL not advancing
+        # ── SSO-1c: Slow Crawl — velocity too low to justify slot ─────────────
+        _slow_vel_threshold = self._cfg('sso_slow_velocity_threshold', 0.001)  # 0.1%/h
+        _slow_min_profit = self._cfg('sso_slow_min_profit_usd', 1.0)
+        _slow_min_hours = self._cfg('sso_slow_min_hours', 2.0)
+        _slow_stricter_hours = self._cfg('sso_slow_min_age_stricter', 4.0)
+        if (pos.pnl_velocity_1h is not None
+                and pos.pnl_usdt >= _slow_min_profit
+                and age_hours >= _slow_min_hours):
+            # After _slow_stricter_hours, raise threshold by 50% (be more aggressive)
+            _effective_vel = _slow_vel_threshold
+            if age_hours >= _slow_stricter_hours:
+                _effective_vel = _slow_vel_threshold * 1.5  # 0.15%/h after 4h
+            if pos.pnl_velocity_1h <= _effective_vel:
+                return SSOAction(
+                    should_close=True,
+                    close_pct=1.0,
+                    reason="sso_slow_crawl",
+                    detail=f"Slow: vel={pos.pnl_velocity_1h*100:.3f}%/h <= {_effective_vel*100:.3f}%/h "
+                           f"(${pos.pnl_usdt:.2f} profit, age={age_hours:.1f}h)",
+                    trigger="SSO-1",
+                    priority=1,
+                )
+
+        # ── SSO-1: Original Stagnant — velocity zero or negative ──────────────
+        min_profit = max(self.stagnant_min_profit_floor,
+                         pos.position_size_usdt * self.stagnant_min_profit_factor)
+        if pos.pnl_usdt < min_profit:
+            return None
+        if age_hours < self.stagnant_min_hours:
+            return None
         if pos.pnl_velocity_1h is None:
             return None
         if pos.pnl_velocity_1h > 0.001:  # still advancing (>0.1% per hour)

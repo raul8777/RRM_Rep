@@ -139,6 +139,11 @@ class Settings(BaseSettings):
     sso_decay_threshold_pct: float = Field(default=0.004, env="SSO_DECAY_THRESHOLD_PCT")     # 0.4% drawback from peak triggers close
     sso_decay_min_profit_usd: float = Field(default=2.0, env="SSO_DECAY_MIN_PROFIT_USD")     # min $2 unrealized to bother closing
     sso_decay_min_hours: float = Field(default=1.5, env="SSO_DECAY_MIN_HOURS")               # min 1.5h holding before decay check
+    # SSO-1c: Slow Crawl — close when velocity too low to justify slot
+    sso_slow_velocity_threshold: float = Field(default=0.001, env="SSO_SLOW_VELOCITY_THRESHOLD")  # 0.1%/h — below this, recycle capital
+    sso_slow_min_profit_usd: float = Field(default=1.0, env="SSO_SLOW_MIN_PROFIT_USD")           # min $1 profit to close (don't close losses)
+    sso_slow_min_hours: float = Field(default=2.0, env="SSO_SLOW_MIN_HOURS")                     # min 2h holding before slow check
+    sso_slow_min_age_stricter: float = Field(default=4.0, env="SSO_SLOW_MIN_AGE_STRICTER")       # after 4h: threshold rises 50% (0.15%/h)
     sso_momentum_rsi_overbought: float = Field(default=70.0, env="SSO_MOMENTUM_RSI_OVERBOUGHT")
     sso_momentum_rsi_oversold: float = Field(default=30.0, env="SSO_MOMENTUM_RSI_OVERSOLD")
     sso_momentum_min_pnl_pct_futures: float = Field(default=1.0, env="SSO_MOMENTUM_MIN_PNL_PCT_FUTURES")

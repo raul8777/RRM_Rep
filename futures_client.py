@@ -1914,6 +1914,7 @@ class FuturesClient:
                         _sso_vel, _sso_new_snap = compute_pnl_velocity(pnl_pct, _sso_snap)
                         if _sso_new_snap != _sso_snap:
                             pos._smart_meta['sso_pnl_snapshot'] = _sso_new_snap
+                            self._persist_smart_meta(pos)  # FIX: persist velocity snapshot to DB
                         # Get ATR for multilevel (4h)
                         _sso_atr = None
                         try:
