@@ -250,6 +250,24 @@ class FuturesClient:
             print(f"[Futures] _get_realized_pnl_from_trades {symbol}: {e}")
         return {"exit_price": 0, "pnl": 0, "reason": "binance_safety_close"}
 
+    def _verify_position_closed(self, symbol: str, side: str) -> bool:
+        """Query Binance positionRisk to confirm position is actually closed (qty=0)."""
+        if self.dry_run:
+            return True
+        try:
+            positions = self._get("/fapi/v2/positionRisk", {"symbol": symbol}, signed=True)
+            for p in positions:
+                if p.get("positionSide") == side.upper():
+                    amt = abs(float(p.get("positionAmt", 0)))
+                    if amt > 0:
+                        print(f"[Futures/Verify] {symbol} {side}: STILL OPEN on Binance (amt={amt})")
+                        return False
+            print(f"[Futures/Verify] {symbol} {side}: confirmed closed on Binance ✓")
+            return True
+        except Exception as e:
+            print(f"[Futures/Verify] {symbol} {side}: verification failed: {e}")
+            return False
+
     # ── Position key helpers ──────────────────────────────────────────────────
 
     @staticmethod
@@ -1534,6 +1552,7 @@ class FuturesClient:
             if pos:
                 pos.closed = True; pos.closed_at = datetime.now(timezone.utc); pos.exit_price = current_price; pos.pnl = pnl
                 self._save_futures_closed(pos, reason)  # FIX-G: persist to DB
+            self._verify_position_closed(symbol, "LONG")
             print(f"[Futures] LONG {symbol} CLOSED: PnL~${pnl:.2f}")
             return result
         except Exception as e:
@@ -1605,6 +1624,7 @@ class FuturesClient:
                 pos.exit_price = current_price
                 pos.pnl        = pnl
                 self._save_futures_closed(pos, reason)  # FIX-G: persist to DB
+            self._verify_position_closed(symbol, "SHORT")
             print(f"[Futures] SHORT {symbol} CLOSED: PnL~${pnl:.2f}")
             return result
         except Exception as e:
@@ -2016,14 +2036,30 @@ class FuturesClient:
                                                    "partial": _sso_close_pct < 1.0,
                                                    "sso_trigger": _sso_action.trigger})
                                     if pos.qty <= 0 or _sso_close_pct >= 1.0:
-                                        # Fully closed via SSO — use close_long/close_short for remaining
+                                        # Fully closed via SSO
                                         if pos.qty > 0:
                                             _close_fn = self.close_long if pos.side == "LONG" else self.close_short
                                             _close_fn(symbol, reason=_sso_action.reason)
                                         else:
+                                            # Cancel orphaned SL/TP algo orders
+                                            for _oid in [pos.sl_order_id, pos.tp_order_id]:
+                                                if _oid:
+                                                    try:
+                                                        self._delete("/fapi/v1/algoOrder", {"symbol": symbol, "algoId": _oid})
+                                                    except Exception:
+                                                        pass
+                                            # Verify on Binance that position is actually closed
+                                            self._verify_position_closed(symbol, pos.side)
+                                            # Persist to DB — restore qty for correct PnL calc
                                             pos.closed = True
                                             pos.exit_price = price
                                             pos.closed_at = datetime.now(timezone.utc)
+                                            pos.pnl = _sso_pnl
+                                            _original_qty = _sso_qty_aligned
+                                            pos.qty = _original_qty
+                                            self._save_futures_closed(pos, _sso_action.reason)
+                                            pos.qty = 0
+                                            print(f"[Futures/SSO] {symbol} {pos.side}: DB saved ✓ (reason={_sso_action.reason}, PnL=${_sso_pnl:.2f})")
                                         continue  # move to next position
                     except Exception as _sso_exc:
                         print(f"[Futures/SSO] {symbol} evaluation error: {_sso_exc}")
