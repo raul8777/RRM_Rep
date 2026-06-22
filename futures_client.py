@@ -1984,7 +1984,6 @@ class FuturesClient:
                                             "symbol": symbol, "side": _side, "type": "MARKET",
                                             "quantity": str(_sso_qty_aligned),
                                             "positionSide": pos.side,
-                                            "reduceOnly": "true",
                                         })
                                         _sso_ok = True
                                     except Exception as _sso_err:
