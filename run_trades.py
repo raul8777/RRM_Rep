@@ -414,12 +414,11 @@ def _is_futures_overflow_eligible(
     chg24: float, btc_4h_chg: float, settings, fc
 ) -> bool:
     """Return True if a futures SHORT qualifies for an extra slot beyond futures_max_shorts.
-    Requires: high-strength signal + vol spike + confirmed drop + BTC in downtrend.
-    Max simultaneous overflow slots controlled by futures_overflow_max_extra (default 3).
-    NOTE: review after 1 week of live data to tune thresholds up/down."""
-    _min_str   = getattr(settings, 'futures_overflow_min_strength', 0.82)
-    _min_vol   = getattr(settings, 'futures_overflow_min_vol_spike', 2.5)
-    _min_drop  = getattr(settings, 'futures_overflow_min_drop_24h', -5.0)
+    Simplified: in FUTURES_SHORT regime (confirmed bear), only require strength + 24h drop.
+    BTC momentum and vol_spike are already checked at entry time by separate filters.
+    Max simultaneous overflow slots controlled by futures_overflow_max_extra (default 3)."""
+    _min_str   = getattr(settings, 'futures_overflow_min_strength', 0.55)
+    _min_drop  = getattr(settings, 'futures_overflow_min_drop_24h', -3.0)
     _max_extra = getattr(settings, 'futures_overflow_max_extra', 3)
     _cur_ovfl  = len(_futures_overflow_positions)
     if _cur_ovfl >= _max_extra:
@@ -428,20 +427,14 @@ def _is_futures_overflow_eligible(
     if strength < _min_str:
         print(f"[Futures/Overflow] {symbol}: strength={strength:.2f} < min={_min_str} — not eligible")
         return False
-    if vol_spike < _min_vol:
-        print(f"[Futures/Overflow] {symbol}: vol_spike={vol_spike:.2f}x < min={_min_vol}x — not eligible")
-        return False
     if chg24 > _min_drop:
         print(f"[Futures/Overflow] {symbol}: chg24={chg24:.2f}% > {_min_drop}% drop threshold — not eligible")
-        return False
-    if btc_4h_chg >= 0:
-        print(f"[Futures/Overflow] {symbol}: BTC 4h={btc_4h_chg:+.2f}% — no overflow on BTC rebound")
         return False
     # Already have this symbol in overflow
     if symbol in _futures_overflow_positions:
         print(f"[Futures/Overflow] {symbol}: already in overflow set")
         return False
-    print(f"[Futures/Overflow] {symbol}: ELIGIBLE — str={strength:.2f}, vol={vol_spike:.1f}x, chg24={chg24:.1f}%, btc4h={btc_4h_chg:+.2f}%")
+    print(f"[Futures/Overflow] {symbol}: ELIGIBLE — str={strength:.2f}, chg24={chg24:.1f}%")
     return True
 
 
