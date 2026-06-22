@@ -1866,6 +1866,15 @@ SSO_TARGET_CONTRIBUTION_PCT=0.15
 
 ### Tests: 86 passed (65 smart exits + 21 profit boost), 0 failures
 
+### 🔍 ANÁLISIS PENDIENTE (markers sesión 19):
+1. **48h check**: ¿SSO-3 multilevel dispara a niveles ATR correctos por símbolo? (SUI/SOL alta vol vs BTC baja vol)
+2. **24h check**: ¿SSO-1 cierra posiciones estancadas ($3+ / 2h+ / vel=0)?
+3. **Coordinación PV2+SSO**: ¿PV2 sigue disparando como safety net después de SSO partial?
+4. **GAP — `sso_today_realized`**: No populado → SSO-4 usa 0.0 (conservador). Próximo: agregar daily PnL aggregator.
+5. **GAP — SSO-5 datos faltantes**: `all_slots_full` y `best_available_ev` no populados → SSO-5 inactivo hasta integrar pipeline de señales.
+6. **GAP — Spot `today_realized_pnl`**: Hardcoded 0.0 → necesita cache de summary inyectado.
+7. **Futuro**: Endpoint `/api/sso/stats` con conteo de triggers y profit promedio por tipo.
+
 ---
 
 *Revisar este archivo al inicio de cada sesión de análisis o implementación.*
