@@ -1728,4 +1728,56 @@ FUTURES_TRAILING_ACTIVATION_PCT=1.5     # trailing starts here
 
 ---
 
+## DASHBOARD — PROFIT TRACKER & PV VISIBILITY (jun 22 2026 — sesión 18)
+
+> **Purpose**: Provide real-time analytics of which exit strategies generate profits,
+> enabling rapid tuning of PV1/PV2 parameters to maximize daily PnL.
+
+### New card: 💰 Profit Tracker
+- **Progress bar** toward $40/day target (configurable via `daily_target` in backend)
+- **PnL breakdown by close reason** — sorted by PnL descending:
+  - 🟢 Take Profit, ✂️ Scale-Out, ⚡ Momentum Rev., 📈 Trailing, 🔴 Stop Loss, etc.
+- **Hoy / 7d toggle** — view daily or weekly performance
+- **Spot vs Futures split** — at-a-glance which strategy type is performing
+- **Win Rate** for the selected period
+- Location: right column in Operations tab (below PnL chart)
+
+### Enhanced position table badges:
+- **Open positions**: ✂️ shows locked $ amount, 📊 shows peak PnL % reached
+- **Closed positions**: ✂️ with $ locked, 📊 peak %, ⚡MR badge for momentum reversal closes
+- **Executive summary PnL line**: shows `✂️+$X` locked profit from scale-outs on open positions
+
+### Backend: `pnl_by_close_reason` in `/dashboard/summary`
+```json
+{
+  "today": { "by_reason": [...], "total_pnl": X, "total_trades": N, "spot_pnl": Y, "futures_pnl": Z },
+  "week":  { "by_reason": [...], "total_pnl": X, "total_trades": N, "spot_pnl": Y, "futures_pnl": Z },
+  "daily_target": 40.0
+}
+```
+- Aggregates from `closed_positions` already in summary (no extra DB queries)
+- Includes `scale_out_pnl` in the total for positions that had partial close
+
+### Data exposed for open positions:
+- `scale_out_done`: bool — whether PV1 fired
+- `scale_out_pnl`: float — locked profit from the partial close (USDT)
+- `peak_pnl_pct`: float — highest unrealized PnL % reached (for PV2 monitoring)
+
+### Close reasons added to frontend map:
+- `momentum_reversal` → ⚡ Momentum Rev. (green/TP class)
+- `trailing_sl_binance` → 🟢 Trailing (Binance)
+- `regime_change_to_short` → ⚡ Régimen → SHORT
+
+### Files modified:
+- `futures_client.py`: 3 new fields in `get_open_positions_summary()`
+- `app.py`: expose PV fields in open/closed positions + `pnl_by_close_reason` aggregation
+- `frontend/dashboard.js`: Profit Tracker card + enhanced badges + exec summary locked PnL
+- `frontend/index.html`: card container + v21 cache bust
+- `frontend/styles.css`: `.pt-*` classes + `.sl-badge.scale/.peak/.mr`
+- `tests/test_futures_smart_exits.py`: fixed `trailing_activation_pct` test (1.5→2.5)
+
+### Tests: 193 passed (172 smart exits + 21 profit boost), 0 failures
+
+---
+
 *Revisar este archivo al inicio de cada sesión de análisis o implementación.*
