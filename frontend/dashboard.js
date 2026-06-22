@@ -156,6 +156,13 @@ const _CLOSE_REASON_MAP = {
     'prediction_realloc':          ['🔄 Reemplazo por EV',      'reason-rebal'],
     'regime_change':               ['⚡ Cambio de régimen',     'reason-neutral'],
     'manual':                      ['✋ Manual',                 'reason-neutral'],
+    'sso_stagnant_profit':         ['⏱️ SSO Estancada',          'reason-tp'],
+    'sso_momentum_exhausted':      ['📉 SSO Momentum Agotado',   'reason-tp'],
+    'sso_multilevel_l1':           ['📊 SSO Nivel 1',            'reason-tp'],
+    'sso_multilevel_l2':           ['📊 SSO Nivel 2',            'reason-tp'],
+    'sso_multilevel_l3':           ['📊 SSO Nivel 3',            'reason-tp'],
+    'sso_target_contribution':     ['🎯 SSO Target',             'reason-tp'],
+    'sso_reentry_upgrade':         ['🔄 SSO Upgrade',            'reason-tp'],
 };
 
 // VIS-3: SL/TP lifecycle helpers
@@ -181,6 +188,10 @@ function fmtSlTpBadges(p) {
         badges += `<span class="sl-badge scale" title="${soTip}">✂️$${fmt(p.scale_out_pnl || 0)}</span>`;
     }
     if (p.peak_pnl_pct > 0) badges += `<span class="sl-badge peak" title="Peak PnL alcanzado: ${fmt(p.peak_pnl_pct, 1)}%">📊${fmt(p.peak_pnl_pct, 1)}%</span>`;
+    if (p.sso_levels_done && p.sso_levels_done.length > 0) {
+        const lvls = p.sso_levels_done.join(',');
+        badges += `<span class="sl-badge sso" title="SSO Levels: ${lvls} | ${p.sso_last_trigger || ''}">🎯L${lvls}</span>`;
+    }
     return badges || '<span class="sl-badge none">—</span>';
 }
 function fmtCloseReason(r) {

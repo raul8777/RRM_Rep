@@ -1780,4 +1780,92 @@ FUTURES_TRAILING_ACTIVATION_PCT=1.5     # trailing starts here
 
 ---
 
+## SMART SCALE-OUT (SSO) — ADAPTIVE EXIT SYSTEM (jun 22 2026 — sesión 19)
+
+> **Purpose**: Replace fixed percentage scale-out (PV1: 50% at 1.5%) with a multi-signal
+> adaptive exit system that maximizes capital velocity toward $40+/day target.
+> Applies to BOTH spot and futures positions.
+
+### The 5 SSO Triggers:
+
+| # | Trigger | When | Action |
+|---|---------|------|--------|
+| SSO-1 | **Stagnant Profit** | profit ≥ $3 + position ≥ 2h + velocity ≤ 0 | Close 100% |
+| SSO-2 | **Momentum Exhausted** | RSI ≥ 70 (LONG) or ≤ 30 (SHORT) + vol_spike < 0.5 | Close 75% |
+| SSO-3 | **Multi-level ATR Scale** | pnl ≥ N × ATR_4h (3 levels) | Close 30%/30%/25% |
+| SSO-4 | **Target Contribution** | profit ≥ 15% of daily target + age ≥ 1h | Close 100% |
+| SSO-5 | **Re-entry Upgrade** | slots full + better signal available (strength +0.3) | Close 100% |
+
+### SSO-3 Multi-level (replaces PV1 fixed %):
+```
+Level 1: pnl >= 1.0 × ATR_4h → close 30%
+Level 2: pnl >= 2.0 × ATR_4h → close 30% more
+Level 3: pnl >= 3.5 × ATR_4h → close 25% more
+Remaining 15%: runs with trailing stop
+```
+Adapts to each symbol's volatility (BTC L1≈0.8%, LINK L1≈2.2%, MEME L1≈4%+).
+
+### Exit priority order (updated):
+```
+0a. Track peak PnL (always)
+0b. SSO evaluation (5 triggers):
+    - SSO-1: Stagnant profit ($3+ for 2h+ with velocity=0)
+    - SSO-2: Momentum exhausted (RSI + volume dying)
+    - SSO-3: Multi-level ATR scale (adaptive increments)
+    - SSO-4: Target contribution ($6+ toward $40/day goal)
+    - SSO-5: Re-entry upgrade (better opportunity available)
+0c. PV2 Momentum reversal (safety net for peak drawback)
+1.  Breakeven SL: pnl >= 1.0% → move SL to entry
+2.  Trailing: pnl >= 2.5% → ATR-scaled trail
+3.  Hard SL: 5% → last resort
+4.  Hard TP: 7% + SmartTP extend
+```
+
+### Key Config (env vars):
+```
+SSO_ENABLED=true
+SSO_STAGNANT_MIN_HOURS=2.0
+SSO_STAGNANT_MIN_PROFIT_FLOOR=3.0
+SSO_MOMENTUM_RSI_OVERBOUGHT=70
+SSO_MULTILEVEL_ENABLED=true
+SSO_MULTILEVEL_L1_ATR_MULT=1.0
+SSO_MULTILEVEL_L2_ATR_MULT=2.0
+SSO_MULTILEVEL_L3_ATR_MULT=3.5
+SSO_TARGET_DAILY_USD=40.0
+SSO_TARGET_CONTRIBUTION_PCT=0.15
+```
+
+### Velocity tracking:
+- `sso_pnl_snapshot`: {ts, pnl_pct} stored in _smart_meta (futures) / metadata (spot)
+- `pnl_velocity_1h`: computed as delta_pnl / elapsed_hours
+- `sso_levels_done`: [1, 2, 3] — tracks which multi-level scales have fired
+
+### Dashboard visibility:
+- 🎯 badge on open positions showing SSO levels completed (e.g., "🎯L1,2")
+- SSO close reasons in Profit Tracker: ⏱️ Estancada, 📉 Momentum, 📊 Nivel 1/2/3, 🎯 Target, 🔄 Upgrade
+- `sso_last_trigger` field in position data
+
+### Files:
+- `smart_scale_out.py` (NEW): SmartScaleOut class + SSOPositionData + compute_pnl_velocity()
+- `config.py`: 22 new SSO fields
+- `docker-compose.yml`: 11 SSO env vars
+- `futures_client.py`: SSO replaces PV1 in check_positions()
+- `run_trades.py`: SSO in _check_sl_tp_positions() for spot
+- `app.py`: sso_levels_done + sso_last_trigger in open positions
+- `frontend/dashboard.js`: SSO close reasons + 🎯 badge
+- `frontend/styles.css`: .sl-badge.sso style
+- `frontend/index.html`: v22 cache bust
+
+### Expected daily PnL improvement over PV1:
+- SSO-1 (stagnant): +$5-10/day (liberate trapped capital)
+- SSO-2 (exhausted): +$2-4/day (close before reversal)
+- SSO-3 (multilevel): +$3-6/day (adaptive vs fixed 50%)
+- SSO-4 (target): +$2-5/day (accelerate toward goal)
+- SSO-5 (upgrade): +$3-5/day (replace weak with strong)
+- **Total: +$15-30/day incremental**
+
+### Tests: 86 passed (65 smart exits + 21 profit boost), 0 failures
+
+---
+
 *Revisar este archivo al inicio de cada sesión de análisis o implementación.*

@@ -1903,43 +1903,124 @@ class FuturesClient:
                     pos._smart_meta['peak_pnl_pct'] = pnl_pct
                     self._persist_smart_meta(pos)
 
-                # ── 0b. PV1: Scale-out — close partial at first profit milestone ─
-                _so_pct = getattr(settings, 'futures_scale_out_pct', 1.5) / 100.0 if settings else 0.015
-                _so_frac = getattr(settings, 'futures_scale_out_fraction', 0.5) if settings else 0.5
-                if pnl_pct >= _so_pct and not pos._smart_meta.get('scale_out_done'):
-                    _so_qty = pos.qty * _so_frac
-                    _step = self._get_step_size(symbol)
-                    _so_qty_aligned = self._align_qty(_so_qty, _step)
-                    if _so_qty_aligned > 0:
-                        _so_ok = False
-                        if self.dry_run:
-                            _so_ok = True
-                        else:
-                            try:
-                                _side = "BUY" if pos.side == "SHORT" else "SELL"
-                                self._post("/fapi/v1/order", {
-                                    "symbol": symbol, "side": _side, "type": "MARKET",
-                                    "quantity": str(_so_qty_aligned),
-                                    "positionSide": pos.side,
-                                    "reduceOnly": "true",
-                                })
-                                _so_ok = True
-                            except Exception as _so_err:
-                                print(f"[Futures/PV1] {symbol} scale-out FAILED: {_so_err}")
-                        if _so_ok:
-                            _so_pnl = (entry - price) * _so_qty_aligned if pos.side == "SHORT" else (price - entry) * _so_qty_aligned
-                            pos.qty -= _so_qty_aligned
-                            pos._smart_meta['scale_out_done'] = True
-                            pos._smart_meta['scale_out_pnl'] = _so_pnl
-                            self._persist_smart_meta(pos)
-                            # Re-place SL/TP orders with reduced qty
-                            self.update_sl_tp(symbol, pos.side, new_sl=pos.sl_price, new_tp=pos.tp_price)
-                            print(f"[Futures/PV1] {symbol} {pos.side}: SCALE-OUT {_so_frac*100:.0f}% "
-                                  f"qty={_so_qty_aligned:.6f} at PnL={pnl_pct*100:.2f}% "
-                                  f"→ locked ${_so_pnl:.2f} | remaining qty={pos.qty:.6f}")
-                            closed.append({"symbol": symbol, "side": pos.side,
-                                           "reason": "scale_out", "pnl": _so_pnl,
-                                           "partial": True})
+                # ── 0b. SSO: Smart Scale-Out — replaces fixed PV1 with multi-signal system ─
+                _sso_enabled = getattr(settings, 'sso_enabled', True) if settings else True
+                if _sso_enabled and pnl_pct > 0:
+                    try:
+                        from smart_scale_out import SmartScaleOut, SSOPositionData, compute_pnl_velocity, extract_sso_level_from_reason
+                        _sso = SmartScaleOut(settings)
+                        # Compute velocity
+                        _sso_snap = pos._smart_meta.get('sso_pnl_snapshot')
+                        _sso_vel, _sso_new_snap = compute_pnl_velocity(pnl_pct, _sso_snap)
+                        if _sso_new_snap != _sso_snap:
+                            pos._smart_meta['sso_pnl_snapshot'] = _sso_new_snap
+                        # Get ATR for multilevel (4h)
+                        _sso_atr = None
+                        try:
+                            _sso_atr = self.get_atr_pct(symbol, interval="4h", periods=14)
+                        except Exception:
+                            _sso_atr = self.get_atr_pct(symbol)  # fallback to 5m
+                        # Get RSI/vol_spike (lightweight — reuse cached if possible)
+                        _sso_rsi = None
+                        _sso_vol = None
+                        try:
+                            _bc_ref = getattr(self, '_binance_client_ref', None)
+                            if _bc_ref:
+                                from autonomous_signals import AutonomousSignalGenerator
+                                _sso_sg = AutonomousSignalGenerator(_bc_ref)
+                                _sso_sig = _sso_sg.analyze_symbol(symbol, interval='1h', use_multi_timeframe=True)
+                                _sso_ind = _sso_sig.get("indicators", {}) if _sso_sig else {}
+                                _sso_rsi = float(_sso_ind.get("rsi", 50))
+                                _sso_vol = float(_sso_ind.get("vol_spike") or _sso_ind.get("volume_ratio") or 1.0)
+                        except Exception:
+                            pass
+                        # Get today's realized PnL
+                        _sso_today_pnl = 0.0
+                        try:
+                            _sso_today_pnl = float(pos._smart_meta.get('sso_today_realized', 0))
+                        except Exception:
+                            pass
+                        _sso_pos = SSOPositionData(
+                            symbol=symbol,
+                            side=pos.side,
+                            pnl_pct=pnl_pct,
+                            pnl_usdt=unr,
+                            position_size_usdt=entry * pos.qty,
+                            entry_price=entry,
+                            current_price=price,
+                            opened_at=pos.opened_at,
+                            peak_pnl_pct=pos._smart_meta.get('peak_pnl_pct', 0.0),
+                            last_pnl_snapshot=_sso_snap,
+                            pnl_velocity_1h=_sso_vel,
+                            sso_levels_done=pos._smart_meta.get('sso_levels_done', []),
+                            rsi_1h=_sso_rsi,
+                            vol_spike=_sso_vol,
+                            atr_4h_pct=_sso_atr,
+                            today_realized_pnl=_sso_today_pnl,
+                            daily_target=getattr(settings, 'sso_target_daily_usd', 40.0) if settings else 40.0,
+                            trade_type="futures",
+                        )
+                        _sso_action = _sso.evaluate(_sso_pos)
+                        if _sso_action.should_close:
+                            _sso_close_pct = _sso_action.close_pct
+                            _sso_qty = pos.qty * _sso_close_pct
+                            _step = self._get_step_size(symbol)
+                            _sso_qty_aligned = self._align_qty(_sso_qty, _step)
+                            if _sso_qty_aligned > 0 and _sso_qty_aligned <= pos.qty:
+                                _sso_ok = False
+                                if self.dry_run:
+                                    _sso_ok = True
+                                else:
+                                    try:
+                                        _side = "BUY" if pos.side == "SHORT" else "SELL"
+                                        self._post("/fapi/v1/order", {
+                                            "symbol": symbol, "side": _side, "type": "MARKET",
+                                            "quantity": str(_sso_qty_aligned),
+                                            "positionSide": pos.side,
+                                            "reduceOnly": "true",
+                                        })
+                                        _sso_ok = True
+                                    except Exception as _sso_err:
+                                        print(f"[Futures/SSO] {symbol} {_sso_action.trigger} FAILED: {_sso_err}")
+                                if _sso_ok:
+                                    _sso_pnl = (entry - price) * _sso_qty_aligned if pos.side == "SHORT" else (price - entry) * _sso_qty_aligned
+                                    pos.qty -= _sso_qty_aligned
+                                    # Track cumulative scale-out PnL
+                                    _prev_so_pnl = float(pos._smart_meta.get('scale_out_pnl', 0))
+                                    pos._smart_meta['scale_out_pnl'] = _prev_so_pnl + _sso_pnl
+                                    pos._smart_meta['scale_out_done'] = True
+                                    pos._smart_meta['sso_last_trigger'] = _sso_action.trigger
+                                    pos._smart_meta['sso_last_reason'] = _sso_action.reason
+                                    # Track multilevel progress
+                                    _sso_lvl = extract_sso_level_from_reason(_sso_action.reason)
+                                    if _sso_lvl:
+                                        _done = pos._smart_meta.get('sso_levels_done', [])
+                                        if _sso_lvl not in _done:
+                                            _done.append(_sso_lvl)
+                                        pos._smart_meta['sso_levels_done'] = _done
+                                    self._persist_smart_meta(pos)
+                                    # Re-place SL/TP with reduced qty (or skip if fully closed)
+                                    if pos.qty > 0:
+                                        self.update_sl_tp(symbol, pos.side, new_sl=pos.sl_price, new_tp=pos.tp_price)
+                                    print(f"[Futures/SSO] {symbol} {pos.side}: {_sso_action.trigger} "
+                                          f"close {_sso_close_pct*100:.0f}% qty={_sso_qty_aligned:.6f} "
+                                          f"PnL=${_sso_pnl:.2f} | {_sso_action.detail}")
+                                    closed.append({"symbol": symbol, "side": pos.side,
+                                                   "reason": _sso_action.reason, "pnl": _sso_pnl,
+                                                   "partial": _sso_close_pct < 1.0,
+                                                   "sso_trigger": _sso_action.trigger})
+                                    if pos.qty <= 0 or _sso_close_pct >= 1.0:
+                                        # Fully closed via SSO — use close_long/close_short for remaining
+                                        if pos.qty > 0:
+                                            _close_fn = self.close_long if pos.side == "LONG" else self.close_short
+                                            _close_fn(symbol, reason=_sso_action.reason)
+                                        else:
+                                            pos.closed = True
+                                            pos.exit_price = price
+                                            pos.closed_at = datetime.now(timezone.utc)
+                                        continue  # move to next position
+                    except Exception as _sso_exc:
+                        print(f"[Futures/SSO] {symbol} evaluation error: {_sso_exc}")
 
                 # ── 0c. PV2: Momentum reversal close — close remaining after peak drawback ─
                 _mr_enabled = getattr(settings, 'futures_momentum_reversal_enabled', True) if settings else True
@@ -2296,5 +2377,7 @@ class FuturesClient:
                 "scale_out_done":   bool(pos._smart_meta.get('scale_out_done', False)),
                 "scale_out_pnl":    round(float(pos._smart_meta.get('scale_out_pnl', 0)), 4),
                 "peak_pnl_pct":     round(float(pos._smart_meta.get('peak_pnl_pct', 0)) * 100, 2),
+                "sso_levels_done":  pos._smart_meta.get('sso_levels_done', []),
+                "sso_last_trigger": pos._smart_meta.get('sso_last_trigger', ''),
             })
         return result

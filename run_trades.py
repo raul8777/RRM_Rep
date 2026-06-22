@@ -1185,6 +1185,124 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                     except Exception as _pe:
                         print(f"[PredEval] {symbol}: prediction check failed: {_pe}")
 
+                # ── SSO: Smart Scale-Out (SPOT) ──────────────────────────────
+                _sso_enabled_spot = getattr(settings, 'sso_enabled', True)
+                if close_reason is None and _sso_enabled_spot and pnl_pct > 0:
+                    try:
+                        from smart_scale_out import SmartScaleOut, SSOPositionData, compute_pnl_velocity, extract_sso_level_from_reason
+                        _sso_spot = SmartScaleOut(settings)
+                        metadata = getattr(pos, 'metadata', {}) or {}
+                        # Velocity tracking
+                        _sso_s_snap = metadata.get('sso_pnl_snapshot')
+                        _sso_s_vel, _sso_s_new_snap = compute_pnl_velocity(pnl_pct, _sso_s_snap)
+                        if _sso_s_new_snap != _sso_s_snap:
+                            metadata['sso_pnl_snapshot'] = _sso_s_new_snap
+                            try:
+                                position_manager.update_position_metadata(pos.position_id, metadata)
+                            except Exception:
+                                pass
+                        # ATR 4h
+                        _sso_s_atr = None
+                        try:
+                            _kl4h = client.client.get_klines(symbol=symbol, interval='4h', limit=15)
+                            if _kl4h and len(_kl4h) >= 15:
+                                _tr4h = []
+                                for _i4 in range(1, len(_kl4h)):
+                                    _h4 = float(_kl4h[_i4][2])
+                                    _l4 = float(_kl4h[_i4][3])
+                                    _pc4 = float(_kl4h[_i4-1][4])
+                                    _tr4h.append(max(_h4 - _l4, abs(_h4 - _pc4), abs(_l4 - _pc4)))
+                                _atr4 = sum(_tr4h[-14:]) / 14
+                                _sso_s_atr = _atr4 / current_price if current_price > 0 else None
+                        except Exception:
+                            pass
+                        # RSI / vol_spike from cached signal data
+                        _sso_s_rsi = None
+                        _sso_s_vol = None
+                        try:
+                            from autonomous_signals import AutonomousSignalGenerator
+                            _sso_s_sg = AutonomousSignalGenerator(client)
+                            _sso_s_sig = _sso_s_sg.analyze_symbol(symbol, interval='1h', use_multi_timeframe=True)
+                            _sso_s_ind = _sso_s_sig.get("indicators", {}) if _sso_s_sig else {}
+                            _sso_s_rsi = float(_sso_s_ind.get("rsi", 50))
+                            _sso_s_vol = float(_sso_s_ind.get("vol_spike") or _sso_s_ind.get("volume_ratio") or 1.0)
+                        except Exception:
+                            pass
+                        # Build position data
+                        _sso_s_opened = getattr(pos, 'entry_time', None)
+                        if _sso_s_opened and isinstance(_sso_s_opened, str):
+                            try:
+                                _sso_s_opened = datetime.fromisoformat(_sso_s_opened.replace('Z', '+00:00'))
+                            except Exception:
+                                _sso_s_opened = None
+                        if _sso_s_opened and _sso_s_opened.tzinfo is None:
+                            _sso_s_opened = _sso_s_opened.replace(tzinfo=timezone.utc)
+                        _sso_s_pos = SSOPositionData(
+                            symbol=symbol,
+                            side="BUY",
+                            pnl_pct=pnl_pct,
+                            pnl_usdt=(current_price - entry_price) * float(pos.quantity),
+                            position_size_usdt=entry_price * float(pos.quantity),
+                            entry_price=entry_price,
+                            current_price=current_price,
+                            opened_at=_sso_s_opened,
+                            peak_pnl_pct=float(metadata.get('trailing_peak', entry_price) - entry_price) / entry_price if entry_price > 0 else 0,
+                            last_pnl_snapshot=_sso_s_snap,
+                            pnl_velocity_1h=_sso_s_vel,
+                            sso_levels_done=metadata.get('sso_levels_done', []),
+                            rsi_1h=_sso_s_rsi,
+                            vol_spike=_sso_s_vol,
+                            atr_4h_pct=_sso_s_atr,
+                            today_realized_pnl=0.0,  # will be enriched from dashboard cache
+                            daily_target=getattr(settings, 'sso_target_daily_usd', 40.0),
+                            trade_type="spot",
+                        )
+                        _sso_s_action = _sso_spot.evaluate(_sso_s_pos)
+                        if _sso_s_action.should_close:
+                            if _sso_s_action.close_pct >= 1.0:
+                                close_reason = f"{_sso_s_action.reason} ({pnl_pct*100:.2f}%)"
+                                print(f"[SSO/SPOT] {symbol}: {_sso_s_action.trigger} CLOSE 100% | {_sso_s_action.detail}")
+                            else:
+                                # Partial close for SPOT
+                                try:
+                                    from trade_utils import get_symbol_filters, align_quantity_to_step, is_quantity_valid
+                                    _sso_s_filters = get_symbol_filters(client, symbol)
+                                    _sso_s_full_qty = float(pos.quantity)
+                                    _sso_s_sell_qty = align_quantity_to_step(
+                                        _sso_s_full_qty * _sso_s_action.close_pct, _sso_s_filters["step"])
+                                    _sso_s_valid, _ = is_quantity_valid(_sso_s_sell_qty, current_price, _sso_s_filters)
+                                    if _sso_s_valid and _sso_s_sell_qty > 0:
+                                        _sso_s_order = client.create_market_order(symbol=symbol, side="SELL", quantity=_sso_s_sell_qty)
+                                        _sso_s_remaining = align_quantity_to_step(
+                                            _sso_s_full_qty - _sso_s_sell_qty, _sso_s_filters["step"])
+                                        # Update metadata
+                                        metadata['sso_last_trigger'] = _sso_s_action.trigger
+                                        metadata['sso_last_reason'] = _sso_s_action.reason
+                                        metadata['scale_out_done'] = True
+                                        _sso_s_lvl = extract_sso_level_from_reason(_sso_s_action.reason)
+                                        if _sso_s_lvl:
+                                            _sso_s_done = metadata.get('sso_levels_done', [])
+                                            if _sso_s_lvl not in _sso_s_done:
+                                                _sso_s_done.append(_sso_s_lvl)
+                                            metadata['sso_levels_done'] = _sso_s_done
+                                        try:
+                                            position_manager.update_position_metadata(pos.position_id, metadata)
+                                            position_manager.update_position_sl(pos.position_id, round(entry_price, 8))
+                                            position_manager.update_position_quantity(pos.position_id, _sso_s_remaining)
+                                        except Exception:
+                                            pass
+                                        print(f"[SSO/SPOT] {symbol}: {_sso_s_action.trigger} "
+                                              f"SCALE {_sso_s_action.close_pct*100:.0f}% "
+                                              f"qty={_sso_s_sell_qty} | {_sso_s_action.detail}")
+                                        closed.append({"symbol": symbol, "reason": _sso_s_action.reason,
+                                                       "price": current_price, "order": _sso_s_order,
+                                                       "sso_trigger": _sso_s_action.trigger})
+                                        continue  # partial done, move to next position
+                                except Exception as _sso_s_err:
+                                    print(f"[SSO/SPOT] {symbol} partial close error: {_sso_s_err}")
+                    except Exception as _sso_s_exc:
+                        print(f"[SSO/SPOT] {symbol} evaluation error: {_sso_s_exc}")
+
                 # ── Stop-Loss ──────────────────────────────────────────────
                 # Fix 1: use effective SL = max(category floor, saved pos.stop_loss)
                 # Prevents SL from retreating when SmartTP EXTEND or Scale-Out moved it forward

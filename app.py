@@ -1505,6 +1505,8 @@ async def get_dashboard_summary() -> Dict:
                     "scale_out_pnl": fp.get("scale_out_pnl", 0.0),
                     "peak_pnl_pct": fp.get("peak_pnl_pct", 0.0),
                     "dynamic_trail_dist_pct": fp.get("dynamic_trail_dist_pct"),
+                    "sso_levels_done": fp.get("sso_levels_done", []),
+                    "sso_last_trigger": fp.get("sso_last_trigger", ""),
                 })
         except Exception as e:
             # If futures client fails, continue with spot positions only

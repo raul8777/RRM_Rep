@@ -129,6 +129,29 @@ class Settings(BaseSettings):
     futures_momentum_reversal_enabled: bool = Field(default=True, env="FUTURES_MOMENTUM_REVERSAL_ENABLED")
     futures_momentum_reversal_min_peak: float = Field(default=2.0, env="FUTURES_MOMENTUM_REVERSAL_MIN_PEAK")  # peak must reach 2%+
     futures_momentum_reversal_drawback: float = Field(default=0.8, env="FUTURES_MOMENTUM_REVERSAL_DRAWBACK")  # close if given back 0.8% from peak
+    # SSO (Smart Scale-Out) — adaptive multi-signal exit system
+    sso_enabled: bool = Field(default=True, env="SSO_ENABLED")
+    sso_stagnant_min_profit_factor: float = Field(default=0.02, env="SSO_STAGNANT_MIN_PROFIT_FACTOR")
+    sso_stagnant_min_profit_floor: float = Field(default=3.0, env="SSO_STAGNANT_MIN_PROFIT_FLOOR")
+    sso_stagnant_min_hours: float = Field(default=2.0, env="SSO_STAGNANT_MIN_HOURS")
+    sso_stagnant_velocity_window_min: int = Field(default=60, env="SSO_STAGNANT_VELOCITY_WINDOW_MIN")
+    sso_momentum_rsi_overbought: float = Field(default=70.0, env="SSO_MOMENTUM_RSI_OVERBOUGHT")
+    sso_momentum_rsi_oversold: float = Field(default=30.0, env="SSO_MOMENTUM_RSI_OVERSOLD")
+    sso_momentum_min_pnl_pct_futures: float = Field(default=1.0, env="SSO_MOMENTUM_MIN_PNL_PCT_FUTURES")
+    sso_momentum_min_pnl_pct_spot: float = Field(default=1.5, env="SSO_MOMENTUM_MIN_PNL_PCT_SPOT")
+    sso_momentum_vol_dying_threshold: float = Field(default=0.5, env="SSO_MOMENTUM_VOL_DYING_THRESHOLD")
+    sso_multilevel_enabled: bool = Field(default=True, env="SSO_MULTILEVEL_ENABLED")
+    sso_multilevel_l1_atr_mult: float = Field(default=1.0, env="SSO_MULTILEVEL_L1_ATR_MULT")
+    sso_multilevel_l2_atr_mult: float = Field(default=2.0, env="SSO_MULTILEVEL_L2_ATR_MULT")
+    sso_multilevel_l3_atr_mult: float = Field(default=3.5, env="SSO_MULTILEVEL_L3_ATR_MULT")
+    sso_multilevel_l1_close_pct: float = Field(default=0.30, env="SSO_MULTILEVEL_L1_CLOSE_PCT")
+    sso_multilevel_l2_close_pct: float = Field(default=0.30, env="SSO_MULTILEVEL_L2_CLOSE_PCT")
+    sso_multilevel_l3_close_pct: float = Field(default=0.25, env="SSO_MULTILEVEL_L3_CLOSE_PCT")
+    sso_target_contribution_pct: float = Field(default=0.15, env="SSO_TARGET_CONTRIBUTION_PCT")
+    sso_target_daily_usd: float = Field(default=40.0, env="SSO_TARGET_DAILY_USD")
+    sso_target_min_hours: float = Field(default=1.0, env="SSO_TARGET_MIN_HOURS")
+    sso_reentry_min_strength_diff: float = Field(default=0.3, env="SSO_REENTRY_MIN_STRENGTH_DIFF")
+    sso_reentry_min_ev_multiplier: float = Field(default=1.5, env="SSO_REENTRY_MIN_EV_MULTIPLIER")
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True, env="WR_SCREENER_ENABLED")
     wr_screener_consecutive_sl_block: int = Field(default=3, env="WR_SCREENER_CONSECUTIVE_SL_BLOCK")  # block after N consecutive SL

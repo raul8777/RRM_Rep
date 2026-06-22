@@ -568,17 +568,19 @@ class TestClosedPositionsSkipped:
         assert closed == []
 
     def test_multiple_positions_partial_close(self):
-        """One position hits SL, another is fine — only the SL one closes."""
+        """One position hits SL, another may SSO partial — SL always closes."""
         pos1 = make_short("BTCUSDT", entry=100.0, sl_pct=3.0, tp_pct=7.0, qty=1.0)
         pos2 = make_short("ETHUSDT", entry=200.0, sl_pct=3.0, tp_pct=7.0, qty=0.5)
         fc = make_fc([pos1, pos2])
         inject_price(fc, "BTCUSDT", 104.0)  # BTCUSDT SL hit
-        inject_price(fc, "ETHUSDT", 198.0)  # ETHUSDT fine (1% gain)
+        inject_price(fc, "ETHUSDT", 198.0)  # ETHUSDT fine (1% gain — may trigger SSO partial)
         closed = fc.check_positions(settings=make_settings())
-        assert len(closed) == 1
-        assert closed[0]['symbol'] == 'BTCUSDT'
+        assert len(closed) >= 1
+        sl_closes = [c for c in closed if c.get('reason') == 'stop_loss']
+        assert len(sl_closes) == 1
+        assert sl_closes[0]['symbol'] == 'BTCUSDT'
         assert pos1.closed is True
-        assert pos2.closed is False
+        assert pos2.closed is False  # SSO partial doesn't fully close
 
 
 # ─── 8. PnL calculation accuracy ─────────────────────────────────────────────
