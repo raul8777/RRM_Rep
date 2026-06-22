@@ -80,6 +80,34 @@ class BinanceClient:
         except (BinanceAPIException, BinanceRequestException) as exc:
             raise RuntimeError(f"Binance order status error: {exc}") from exc
 
+    def verify_order_filled(self, order_result: dict, label: str = "") -> bool:
+        """Verify a market order was actually filled by Binance.
+        Returns True if confirmed filled, False otherwise."""
+        if not order_result:
+            print(f"[Verify] {label}: order_result is None/empty — NOT filled")
+            return False
+        if order_result.get("simulated"):
+            return True
+        status = order_result.get("status", "")
+        sym = order_result.get("symbol", label)
+        if status == "FILLED":
+            return True
+        fills = order_result.get("fills", [])
+        if fills and len(fills) > 0:
+            return True
+        oid = order_result.get("orderId")
+        if oid and sym:
+            try:
+                real = self.get_order_status(sym, int(oid))
+                if real.get("status") == "FILLED":
+                    return True
+                print(f"[Verify] {sym} {label}: order {oid} status={real.get('status')} — NOT filled")
+                return False
+            except Exception as e:
+                print(f"[Verify] {sym} {label}: status check failed: {e}")
+        print(f"[Verify] {sym} {label}: could not confirm fill (status={status})")
+        return False
+
     def get_symbol_price(self, symbol: str, use_cache: bool = True) -> float:
         now = time.monotonic()
         if use_cache and symbol in self._price_cache:

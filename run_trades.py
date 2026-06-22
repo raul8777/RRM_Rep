@@ -575,6 +575,9 @@ def _try_replace_weakest_position(
                 print(f"[Replace] {_worst_sym}: invalid qty — {_reason}")
                 return False
             _order = client.create_market_order(symbol=_worst_sym, side="SELL", quantity=_qty)
+            if not client.verify_order_filled(_order, f"Replace SELL {_worst_sym}"):
+                print(f"[WARN] Replace SELL {_worst_sym}: order NOT confirmed filled — aborting replacement")
+                return False
             _exit_price = client.get_symbol_price(_worst_sym)
             commission_rate = getattr(settings, 'binance_commission_rate', 0.001)
             position_manager.close_all_positions_for_symbol(_worst_sym, _exit_price, "active_replacement", commission_rate)
@@ -1278,6 +1281,9 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                     _sso_s_valid, _ = is_quantity_valid(_sso_s_sell_qty, current_price, _sso_s_filters)
                                     if _sso_s_valid and _sso_s_sell_qty > 0:
                                         _sso_s_order = client.create_market_order(symbol=symbol, side="SELL", quantity=_sso_s_sell_qty)
+                                        if not client.verify_order_filled(_sso_s_order, f"SSO/SPOT SELL {symbol}"):
+                                            print(f"[WARN] SSO/SPOT SELL {symbol}: order NOT confirmed filled — skipping")
+                                            continue
                                         _sso_s_remaining = align_quantity_to_step(
                                             _sso_s_full_qty - _sso_s_sell_qty, _sso_s_filters["step"])
                                         # Update metadata
@@ -1494,6 +1500,9 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                     valid, reason = is_quantity_valid(sell_qty, current_price, filters)
                                     if valid:
                                         order = client.create_market_order(symbol=symbol, side="SELL", quantity=sell_qty)
+                                        if not client.verify_order_filled(order, f"SCALE-OUT SELL {symbol}"):
+                                            print(f"[WARN] SCALE-OUT SELL {symbol}: order NOT confirmed filled — skipping")
+                                            continue
                                         remaining_qty = align_quantity_to_step(full_qty - sell_qty, filters["step"])
                                         print(f"SCALE-OUT {symbol}: sold {sell_qty} ({_scale_pct*100:.0f}%) @ {current_price:.4f}, remaining={remaining_qty}, SL→breakeven={entry_price:.4f}")
                                         _tp_decisions = metadata.get('tp_decisions', [])
@@ -1544,6 +1553,9 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             print(f"SL/TP: cannot sell {symbol}: {reason}")
                             continue
                         order = client.create_market_order(symbol=symbol, side="SELL", quantity=qty)
+                        if not client.verify_order_filled(order, f"SL/TP SELL {symbol}"):
+                            print(f"[WARN] SL/TP SELL {symbol}: order NOT confirmed filled — skipping close record")
+                            continue
                         print(f"SL/TP EXIT {symbol}: {close_reason} @ {current_price:.4f}")
                         ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
                                      f"SL/TP exit {symbol}: {close_reason} @ {current_price:.4f}")
@@ -1644,6 +1656,9 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
         try:
             print(f"[Cleanup] Selling orphan {symbol}: {qty} units @ {price:.6f} (no PM record)")
             order = client.create_market_order(symbol=symbol, side="SELL", quantity=qty)
+            if not client.verify_order_filled(order, f"Cleanup SELL {symbol}"):
+                print(f"[WARN] Cleanup SELL {symbol}: order NOT confirmed filled")
+                continue
             orders.append({"symbol": symbol, "side": "SELL", "quantity": qty, "order": order})
             _overflow_positions.discard(symbol)
             _cleanup_count += 1
@@ -2582,6 +2597,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 _set_cooldown(symbol, 'narrative', _NARRATIVE_BUY_COOLDOWN_HOURS)
 
             order = client.create_market_order(symbol=symbol, side="BUY", quantity=qty)
+            if not client.verify_order_filled(order, f"BUY {symbol}"):
+                print(f"[WARN] BUY {symbol}: order NOT confirmed filled — skipping position record")
+                continue
             _record_order_success()  # R5: reset circuit breaker on success
             orders.append({"symbol": symbol, "side": "BUY", "quantity": qty, "order": order})
             usdt_liquid_now = max(0.0, usdt_liquid_now - qty * price)  # BUG-E5: local deduction, avoids re-fetch
@@ -2881,6 +2899,9 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
                     print(f"[SlotPressure] {sym}: invalid qty {qty} — {reason}")
                     continue
                 order = client.create_market_order(symbol=sym, side="SELL", quantity=qty)
+                if not client.verify_order_filled(order, f"SlotPressure SELL {sym}"):
+                    print(f"[WARN] SlotPressure SELL {sym}: order NOT confirmed filled — skipping")
+                    continue
                 exit_price_sp = float((order.get("fills") or [{}])[0].get("price", 0) or exit_price_sp)
                 for pos in position_manager.get_all_positions().get(sym, []):
                     ep = float(pos.entry_price)
@@ -3024,6 +3045,9 @@ def execute_once(monitor_only: bool = False):
                         if not _valid_excl:
                             continue
                         _ord_excl = client.create_market_order(symbol=_excl_sym, side='SELL', quantity=_qty_sell)
+                        if not client.verify_order_filled(_ord_excl, f"Excluded SELL {_excl_sym}"):
+                            print(f"[WARN] Excluded SELL {_excl_sym}: order NOT confirmed filled")
+                            continue
                         _exit_p = float((_ord_excl.get('fills') or [{}])[0].get('price', 0) or _price_excl)
                         if position_manager:
                             position_manager.close_all_positions_for_symbol(_excl_sym, _exit_p, 'excluded_symbol_cleanup')
@@ -3154,6 +3178,9 @@ def execute_once(monitor_only: bool = False):
                                         print(f"[B2] {_b2_sym}: invalid qty {_b2_qty} — {_b2_reason}")
                                         continue
                                     _b2_order = client.create_market_order(symbol=_b2_sym, side="SELL", quantity=_b2_qty)
+                                    if not client.verify_order_filled(_b2_order, f"B2 SELL {_b2_sym}"):
+                                        print(f"[WARN] B2 SELL {_b2_sym}: order NOT confirmed filled — skipping")
+                                        continue
                                     _b2_exit = float(((_b2_order.get("fills") or [{}])[0]).get("price", 0) or _b2_price)
                                     position_manager.close_all_positions_for_symbol(_b2_sym, _b2_exit, "regime_futures_short_spot_cleanup", _commission_rate_b2)
                                     _overflow_positions.discard(_b2_sym)

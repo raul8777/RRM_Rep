@@ -1327,6 +1327,8 @@ class FuturesClient:
                 "symbol": symbol, "side": "SELL", "type": "MARKET",
                 "quantity": str(qty), "positionSide": "SHORT",
             })
+            if entry_order.get("status") not in ("FILLED", "NEW", None):
+                print(f"[Futures/WARN] SHORT {symbol}: entry order status={entry_order.get('status')} — may not have filled")
             order_id    = str(entry_order.get("orderId", "?"))
             filled_price = float(entry_order.get("avgPrice", price)) or price
 
@@ -1462,6 +1464,8 @@ class FuturesClient:
                 "symbol": symbol, "side": "BUY", "type": "MARKET",
                 "quantity": str(qty), "positionSide": "LONG",
             })
+            if entry_order.get("status") not in ("FILLED", "NEW", None):
+                print(f"[Futures/WARN] LONG {symbol}: entry order status={entry_order.get('status')} — may not have filled")
             order_id    = str(entry_order.get("orderId", "?"))
             filled_price = float(entry_order.get("avgPrice", price)) or price
 
