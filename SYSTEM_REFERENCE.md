@@ -2008,4 +2008,47 @@ Cada posición genera un log `[SSO/F]` (futures) o `[SSO/S]` (spot) mostrando:
 
 ---
 
+## BINANCE ORDER VERIFICATION (jun 22 2026 — sesión 19f)
+
+> **Purpose**: Garantizar que toda acción enviada a Binance (compra, venta, cierre)
+> se confirme como ejecutada antes de registrarla internamente. Prevenir phantom trades.
+
+### Nuevos métodos:
+- **`BinanceClient.verify_order_filled(order_result, label)`** → `bool`
+  - Verifica `status=="FILLED"` → `fills[]` → `get_order_status()` fallback
+  - Usado en SPOT para todas las órdenes de mercado
+- **`FuturesClient._verify_position_closed(symbol, side)`** → `bool`
+  - Query `/fapi/v2/positionRisk` confirma qty=0 en Binance
+  - Usado después de close_long, close_short, SSO full close
+
+### Cobertura SPOT (run_trades.py) — 9 paths:
+| Path | Acción si no confirma |
+|------|-----------------------|
+| SL/TP sell | `continue` (no cierra en PM) |
+| SSO partial sell | `continue` |
+| Scale-out sell | `continue` |
+| Replacement sell | `return False` |
+| BUY entry | `continue` (no registra posición) |
+| Cleanup sell | `continue` |
+| SlotPressure sell | `continue` |
+| Excluded cleanup | `continue` |
+| B2 regime cleanup | `continue` |
+
+### Cobertura FUTURES (futures_client.py) — 4 paths:
+| Path | Verificación |
+|------|-------------|
+| close_long/close_short | `_verify_position_closed` post-close |
+| SSO 100% close | verify + cancel SL/TP + `_save_futures_closed` |
+| open_short/open_long | status check en entry order |
+
+### SSO Close DB Persist Fix:
+- SSO 100% close ahora llama `_save_futures_closed()` con qty restaurado
+- Cancela SL/TP algo orders huérfanas en Binance
+- Bug previo: solo flags en memoria, nunca persistía a `trades_closed`
+
+### Tests: 98 passed, 0 failures
+### Files: binance_client.py, futures_client.py, run_trades.py
+
+---
+
 *Revisar este archivo al inicio de cada sesión de análisis o implementación.*
