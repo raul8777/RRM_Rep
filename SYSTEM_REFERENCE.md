@@ -1877,4 +1877,53 @@ SSO_TARGET_CONTRIBUTION_PCT=0.15
 
 ---
 
+## SL OPTIMIZATION — SSO ERA (jun 22 2026 — sesión 19b)
+
+> **Purpose**: Widen Stop-Loss to reduce premature exits, leveraging SSO's adaptive profit-taking.
+> SL only matters in the first 30min of a position; after that breakeven/SSO/trailing protect.
+
+### Data-driven decision (171 trades analyzed):
+- 35 SL hits = -$120.91 (53% de todas las pérdidas)
+- SPOT SL avg: -$3.76 / -2.64% move (26 hits) — muchos son wicks normales
+- FUTURES SL avg: -$2.58 / -1.14% move (9 hits) — breakeven ya movía SL
+- Win rate: 21.6% — expectativa negativa, necesitamos que más positions sobrevivan a SSO
+
+### Changes applied:
+
+| Setting | Before | After | Rationale |
+|---------|--------|-------|-----------|
+| **SPOT stop_loss_pct** (global default) | 1.8% | **2.5%** | Reduce wick stops |
+| **LARGE_CAP SL** | 1.8% | **2.5%** | 1.4×ATR avg |
+| **MIDCAP_ALT SL** | 1.8% | **2.5%** | Same |
+| **NARRATIVE SL** | 3.5% | **3.5%** | Already appropriate |
+| **MEME SL** | 2.0% | **2.5%** | Align with others |
+| **ATR SL min floor** | 1.0% | **1.5%** | Prevent micro-stops |
+| **FUTURES_SL_PCT** | 5.0% | **7.0%** | Align with TP (7%), SSO/BE protect early |
+| **FUTURES trailing activation** | 2.5% | **2.0%** | Earlier trailing compensates wider SL |
+
+### Safety net chain (unchanged):
+```
+0-30min:  Hard SL only protection (wider = slightly more risk here)
+1%+:      Breakeven → SL moves to entry → ZERO RISK
+1×ATR+:   SSO-3 L1 → 30% profit locked
+2%+:      Trailing activates → ATR-scaled protection
+2h+:      SSO-1 stagnant check → close if velocity=0
+```
+
+### Projected impact:
+- ~6 fewer stops/week × $3.76 = **-$16/week saved**
+- More positions survive to SSO → **+$20/week profits**
+- Net: **+$36/week** estimated
+
+### Files modified:
+- `config.py`: stop_loss_pct, category_thresholds, atr_sl_min_pct, futures_sl_pct, futures_trailing_activation_pct
+- `docker-compose.yml`: FUTURES_SL_PCT=7.0, FUTURES_TRAILING_ACTIVATION_PCT=2.0, STOP_LOSS_PCT=2.5, ATR_SL_MIN_PCT=0.015
+
+### 🔍 ANÁLISIS PENDIENTE:
+- **24h check**: ¿Se reduce la frecuencia de SL hits con el nuevo 2.5%?
+- **48h check**: ¿Las posiciones que sobreviven generan más SSO profits?
+- **Risk check**: ¿El avg SL loss sube mucho? (esperado: de -$3.76 a ~-$4.50)
+
+---
+
 *Revisar este archivo al inicio de cada sesión de análisis o implementación.*

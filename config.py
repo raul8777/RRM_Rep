@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     futures_smart_tp_extension_pct: float = Field(default=2.0, env="FUTURES_SMART_TP_EXTENSION_PCT")  # extend TP by 2% of current price
     # Futures trailing stop: protect unrealized gains during position lifecycle
     futures_trailing_enabled: bool = Field(default=True, env="FUTURES_TRAILING_ENABLED")
-    futures_trailing_activation_pct: float = Field(default=1.5, env="FUTURES_TRAILING_ACTIVATION_PCT")  # H-FIX: 3.0→1.5 (trailing más temprano, protege ganancias acumuladas)
+    futures_trailing_activation_pct: float = Field(default=2.0, env="FUTURES_TRAILING_ACTIVATION_PCT")  # SL-OPT: 1.5→2.0 (earlier trailing compensates wider SL)
     futures_trailing_distance_pct: float = Field(default=1.5, env="FUTURES_TRAILING_DISTANCE_PCT")      # FIX-F4: trail SL/TP 1.5% from best price (was 1.0 — avoids premature exits on volatility)
     # ATR-scaled trailing: trail_dist = max(floor, min(ceiling, ATR_5m * multiplier))
     # This prevents stops from triggering on normal volatility wicks
@@ -203,7 +203,7 @@ class Settings(BaseSettings):
     enable_prediction_based_closing: bool = Field(default=True, env="ENABLE_PREDICTION_BASED_CLOSING")
 
     # Stop-Loss / Take-Profit configuration
-    stop_loss_pct: float = Field(default=1.8, env="STOP_LOSS_PCT")       # % below entry price
+    stop_loss_pct: float = Field(default=2.5, env="STOP_LOSS_PCT")       # % below entry price (SL-OPT: 1.8→2.5 — SSO era, reduce wick stops)
     take_profit_pct: float = Field(default=3.5, env="TAKE_PROFIT_PCT")   # % above entry price
     trailing_stop_enabled: bool = Field(default=True, env="TRAILING_STOP_ENABLED")
     trailing_stop_activation_pct: float = Field(default=2.0, env="TRAILING_STOP_ACTIVATION_PCT")  # activate trailing after +2%
@@ -222,7 +222,7 @@ class Settings(BaseSettings):
     atr_sl_enabled: bool = Field(default=True, env="ATR_SL_ENABLED")           # enable ATR-based SL calculation
     atr_sl_multiplier: float = Field(default=1.5, env="ATR_SL_MULTIPLIER")     # SL = max(category_sl, atr_mult × ATR14)
     atr_sl_max_pct: float = Field(default=0.08, env="ATR_SL_MAX_PCT")          # cap ATR SL at 8% to avoid monster stops
-    atr_sl_min_pct: float = Field(default=0.01, env="ATR_SL_MIN_PCT")          # floor ATR SL at 1% to always have a stop
+    atr_sl_min_pct: float = Field(default=0.015, env="ATR_SL_MIN_PCT")         # floor ATR SL at 1.5% (SL-OPT: 1%→1.5% — prevent micro-stops on volatile tokens)
     # M3: Kelly conviction multiplier — scale position size by signal strength
     kelly_conviction_enabled: bool = Field(default=True, env="KELLY_CONVICTION_ENABLED")
     kelly_conviction_vol2x: float = Field(default=1.5, env="KELLY_CONVICTION_VOL2X")   # vol 2-3x → 1.5x sizing
@@ -365,10 +365,10 @@ class Settings(BaseSettings):
     # min_volspike: VolSpike mínimo para confirmar señal (informativo, no enforcement aquí)
     # MEJO-A: NARRATIVE trailing aumentado (8%/3%) para capturar breakouts +15-30% completos
     category_thresholds: dict = Field(default={
-        "LARGE_CAP":  {"min_prob": 0.55, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.8, "tp_extension_pct": 1.5},
-        "MIDCAP_ALT": {"min_prob": 0.50, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 1.8, "take_profit_pct": 3.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.8, "tp_extension_pct": 2.0},
-        "NARRATIVE":  {"min_prob": 0.45, "min_pnl": -1.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 2.0, "tp_extension_pct": 3.0},  # V4: trail tighter (8/3→5/2) to lock breakout profits
-        "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.0, "take_profit_pct": 4.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.0, "tp_extension_pct": 2.5},
+        "LARGE_CAP":  {"min_prob": 0.55, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 2.5, "take_profit_pct": 3.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.8, "tp_extension_pct": 1.5},  # SL-OPT: 1.8→2.5
+        "MIDCAP_ALT": {"min_prob": 0.50, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 2.5, "take_profit_pct": 3.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.8, "tp_extension_pct": 2.0},  # SL-OPT: 1.8→2.5
+        "NARRATIVE":  {"min_prob": 0.45, "min_pnl": -1.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 2.0, "tp_extension_pct": 3.0},  # V4: trail tighter (8/3→5/2) — SL stays 3.5%
+        "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.5, "take_profit_pct": 4.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.0, "tp_extension_pct": 2.5},  # SL-OPT: 2.0→2.5
     }, env="CATEGORY_THRESHOLDS")
     
     # ── Predicción con prioridad absoluta (jun 17 2026) ──────────────────────
@@ -391,7 +391,7 @@ class Settings(BaseSettings):
     futures_max_shorts: int = Field(default=5, env="FUTURES_MAX_SHORTS")       # max simultaneous shorts
     futures_max_largecap_shorts: int = Field(default=5, env="FUTURES_MAX_LARGECAP_SHORTS")  # max LARGE_CAP shorts simultaneously (diversification guard — raise MAX_SHORTS but keep this at 5 to force MID-CAP slots)
     futures_usdt_per_trade: float = Field(default=50.0, env="FUTURES_USDT_PER_TRADE")  # PB4: 20→50 minimum margin floor per short
-    futures_sl_pct: float = Field(default=2.5, env="FUTURES_SL_PCT")           # SL % above entry (A4: 2.5%)
+    futures_sl_pct: float = Field(default=7.0, env="FUTURES_SL_PCT")           # SL % above entry (SL-OPT: 2.5→7.0 — align with TP, SSO/breakeven protect early)
     futures_tp_pct: float = Field(default=7.0, env="FUTURES_TP_PCT")           # TP % below entry (A4+v4: 7.0%, EV +1.40%/trade)
     futures_min_btc_7d_drop: float = Field(default=-7.0, env="FUTURES_MIN_BTC_7D_DROP")  # only short in bear
     futures_symbols: list = Field(default=[
