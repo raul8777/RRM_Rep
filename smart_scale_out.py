@@ -133,15 +133,31 @@ class SmartScaleOut:
         if age_hours < self.stagnant_min_hours:
             return None
 
+        # SSO-1b: Profit Decay — position actively giving back gains
+        # More urgent than stagnation: fires when confirmed decay from peak
+        _decay_threshold = self._cfg('sso_decay_threshold_pct', 0.004)
+        _decay_min_profit = self._cfg('sso_decay_min_profit_usd', 2.0)
+        _decay_min_hours = self._cfg('sso_decay_min_hours', 1.5)
+        decay_pct = pos.peak_pnl_pct - pos.pnl_pct
+        if (decay_pct >= _decay_threshold
+                and pos.pnl_usdt >= _decay_min_profit
+                and age_hours >= _decay_min_hours):
+            return SSOAction(
+                should_close=True,
+                close_pct=1.0,
+                reason="sso_profit_decay",
+                detail=f"Decay: peak={pos.peak_pnl_pct*100:.2f}% \u2192 {pos.pnl_pct*100:.2f}% "
+                       f"(gave back {decay_pct*100:.2f}%, ${pos.pnl_usdt:.2f} remaining, "
+                       f"age={age_hours:.1f}h)",
+                trigger="SSO-1",
+                priority=1,
+            )
+
         # Velocity check: PnL not advancing
         if pos.pnl_velocity_1h is None:
             return None
         if pos.pnl_velocity_1h > 0.001:  # still advancing (>0.1% per hour)
             return None
-
-        # Not in active reversal (peak - current < 0.3%)
-        if (pos.peak_pnl_pct - pos.pnl_pct) >= 0.003:
-            return None  # PV2 momentum reversal should handle this instead
 
         return SSOAction(
             should_close=True,

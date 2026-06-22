@@ -1926,4 +1926,46 @@ SSO_TARGET_CONTRIBUTION_PCT=0.15
 
 ---
 
+## SSO-1b PROFIT DECAY (jun 22 2026 — sesión 19c)
+
+> **Purpose**: Detectar y cerrar posiciones que están devolviendo ganancias activamente,
+> liberando capital para re-entry con señal fresca.
+
+### Problema resuelto:
+- SUIUSDT: peak $5.04 (1.9%) → cayendo a $4.15 (1.47%) en 20min, ningún trigger cerraba
+- SSO-1 original necesita velocity=0 (snapshot viejo daba positivo)
+- PV2 necesita drawback ≥ 0.8% + `scale_out_done=True` (nunca se alcanza)
+- **Gap 0.3%-0.8% donde nadie cerraba** → SSO-1b lo resuelve
+
+### Mecanismo:
+```
+SSO-1b evalúa en cada ciclo (4min):
+  ¿peak_pnl - current_pnl >= 0.4%?  (decay activo)
+  ¿pnl_usdt >= $2?                  (profit worth closing)
+  ¿age >= 1.5h?                     (no cerrar recién abiertas)
+  → Si las 3 = TRUE → CLOSE 100%
+```
+
+### Config:
+| Setting | Default | Env |
+|---------|---------|-----|
+| `sso_decay_threshold_pct` | 0.004 (0.4%) | `SSO_DECAY_THRESHOLD_PCT` |
+| `sso_decay_min_profit_usd` | 2.0 | `SSO_DECAY_MIN_PROFIT_USD` |
+| `sso_decay_min_hours` | 1.5 | `SSO_DECAY_MIN_HOURS` |
+| `sso_stagnant_velocity_window_min` | 30 (was 60) | `SSO_STAGNANT_VELOCITY_WINDOW_MIN` |
+
+### Cambios adicionales:
+- **Removido guard PV2** en SSO-1 (línea 143-144 de smart_scale_out.py) — creaba zona muerta
+- **Velocity window 60→30min** — snapshots más frescos para SSO-1 stagnant original
+
+### Files: smart_scale_out.py, config.py, docker-compose.yml, tests/test_futures_smart_exits.py
+### Tests: 90 passed, 0 failures
+
+### 🔍 MONITOR (24h):
+- ¿SSO-1b dispara en posiciones con decay ≥ 0.4%?
+- ¿Capital liberado se re-invierte exitosamente?
+- ¿No hay over-closure (posiciones cerradas que luego habrían subido)?
+
+---
+
 *Revisar este archivo al inicio de cada sesión de análisis o implementación.*

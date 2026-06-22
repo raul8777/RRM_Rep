@@ -642,7 +642,7 @@ class TestConfigParams:
         assert self._get('futures_trailing_enabled') is True
 
     def test_futures_trailing_activation_pct(self):
-        assert self._get('futures_trailing_activation_pct') == pytest.approx(2.5)
+        assert self._get('futures_trailing_activation_pct') == pytest.approx(2.0)  # SL-OPT: was 2.5
 
     def test_futures_trailing_distance_pct(self):
         assert self._get('futures_trailing_distance_pct') == pytest.approx(1.5)
@@ -764,3 +764,90 @@ class TestEdgeCases:
         inject_price(fc, pos.symbol, 104.0)  # SL hit
         closed = fc.check_positions(settings=None)
         assert len(closed) == 1
+
+
+# ─── 11. SSO-1b Profit Decay tests ──────────────────────────────────────────
+
+class TestSSOProfitDecay:
+    """SSO-1b: Profit Decay trigger unit tests."""
+
+    def test_decay_fires_when_conditions_met(self):
+        """Position with 0.5% decay, $4 profit, 3h age → should close."""
+        from datetime import timedelta
+        from smart_scale_out import SmartScaleOut, SSOPositionData
+        sso = SmartScaleOut(make_settings())
+        pos = SSOPositionData(
+            symbol="SUIUSDT", side="SHORT",
+            pnl_pct=0.015, pnl_usdt=4.0,
+            position_size_usdt=100.0,
+            entry_price=0.73, current_price=0.719,
+            opened_at=datetime.now(timezone.utc) - timedelta(hours=3),
+            peak_pnl_pct=0.020,
+            pnl_velocity_1h=0.002,
+            sso_levels_done=[],
+            atr_4h_pct=0.02,
+            trade_type="futures",
+        )
+        action = sso.evaluate(pos)
+        assert action.should_close is True
+        assert "sso_profit_decay" in action.reason
+
+    def test_decay_does_not_fire_small_decay(self):
+        """Decay < 0.4% → should NOT fire sso_profit_decay."""
+        from datetime import timedelta
+        from smart_scale_out import SmartScaleOut, SSOPositionData
+        sso = SmartScaleOut(make_settings())
+        pos = SSOPositionData(
+            symbol="ETHUSDT", side="SHORT",
+            pnl_pct=0.018, pnl_usdt=3.5,
+            position_size_usdt=100.0,
+            entry_price=1762.0, current_price=1730.0,
+            opened_at=datetime.now(timezone.utc) - timedelta(hours=3),
+            peak_pnl_pct=0.020,
+            pnl_velocity_1h=0.001,
+            sso_levels_done=[],
+            atr_4h_pct=0.015,
+            trade_type="futures",
+        )
+        action = sso.evaluate(pos)
+        assert "sso_profit_decay" not in (action.reason or "")
+
+    def test_decay_does_not_fire_low_profit(self):
+        """Profit < $2 → should NOT fire even with large decay."""
+        from datetime import timedelta
+        from smart_scale_out import SmartScaleOut, SSOPositionData
+        sso = SmartScaleOut(make_settings())
+        pos = SSOPositionData(
+            symbol="BTCUSDT", side="SHORT",
+            pnl_pct=0.005, pnl_usdt=1.5,
+            position_size_usdt=100.0,
+            entry_price=64000.0, current_price=63700.0,
+            opened_at=datetime.now(timezone.utc) - timedelta(hours=4),
+            peak_pnl_pct=0.015,
+            pnl_velocity_1h=-0.001,
+            sso_levels_done=[],
+            atr_4h_pct=0.01,
+            trade_type="futures",
+        )
+        action = sso.evaluate(pos)
+        assert "sso_profit_decay" not in (action.reason or "")
+
+    def test_decay_does_not_fire_too_young(self):
+        """Age < 1.5h → should NOT fire."""
+        from datetime import timedelta
+        from smart_scale_out import SmartScaleOut, SSOPositionData
+        sso = SmartScaleOut(make_settings())
+        pos = SSOPositionData(
+            symbol="AVAXUSDT", side="SHORT",
+            pnl_pct=0.010, pnl_usdt=3.0,
+            position_size_usdt=100.0,
+            entry_price=6.4, current_price=6.33,
+            opened_at=datetime.now(timezone.utc) - timedelta(minutes=45),
+            peak_pnl_pct=0.018,
+            pnl_velocity_1h=0.001,
+            sso_levels_done=[],
+            atr_4h_pct=0.02,
+            trade_type="futures",
+        )
+        action = sso.evaluate(pos)
+        assert "sso_profit_decay" not in (action.reason or "")

@@ -95,6 +95,11 @@ services:
       # SL-OPT sesion 19 jun22 2026 — wider SL + SSO adaptive exits
       - STOP_LOSS_PCT=2.5
       - ATR_SL_MIN_PCT=0.015
+      # SSO-1b Profit Decay (jun 22 2026) — close decaying positions faster
+      - SSO_STAGNANT_VELOCITY_WINDOW_MIN=30
+      - SSO_DECAY_THRESHOLD_PCT=0.004
+      - SSO_DECAY_MIN_PROFIT_USD=2.0
+      - SSO_DECAY_MIN_HOURS=1.5
       - FUTURES_BREAKEVEN_ACTIVATION_PCT=1.0
       - FUTURES_SMART_TP_EXTEND_SCORE_THRESHOLD=2
       - FUTURES_PROTECT_PROFIT_USDT=-5.0

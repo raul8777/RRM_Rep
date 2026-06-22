@@ -134,7 +134,11 @@ class Settings(BaseSettings):
     sso_stagnant_min_profit_factor: float = Field(default=0.02, env="SSO_STAGNANT_MIN_PROFIT_FACTOR")
     sso_stagnant_min_profit_floor: float = Field(default=3.0, env="SSO_STAGNANT_MIN_PROFIT_FLOOR")
     sso_stagnant_min_hours: float = Field(default=2.0, env="SSO_STAGNANT_MIN_HOURS")
-    sso_stagnant_velocity_window_min: int = Field(default=60, env="SSO_STAGNANT_VELOCITY_WINDOW_MIN")
+    sso_stagnant_velocity_window_min: int = Field(default=30, env="SSO_STAGNANT_VELOCITY_WINDOW_MIN")  # SL-OPT: 60→30 — detect decay faster
+    # SSO-1b: Profit Decay — close when position is actively giving back gains
+    sso_decay_threshold_pct: float = Field(default=0.004, env="SSO_DECAY_THRESHOLD_PCT")     # 0.4% drawback from peak triggers close
+    sso_decay_min_profit_usd: float = Field(default=2.0, env="SSO_DECAY_MIN_PROFIT_USD")     # min $2 unrealized to bother closing
+    sso_decay_min_hours: float = Field(default=1.5, env="SSO_DECAY_MIN_HOURS")               # min 1.5h holding before decay check
     sso_momentum_rsi_overbought: float = Field(default=70.0, env="SSO_MOMENTUM_RSI_OVERBOUGHT")
     sso_momentum_rsi_oversold: float = Field(default=30.0, env="SSO_MOMENTUM_RSI_OVERSOLD")
     sso_momentum_min_pnl_pct_futures: float = Field(default=1.0, env="SSO_MOMENTUM_MIN_PNL_PCT_FUTURES")
