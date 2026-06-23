@@ -123,7 +123,7 @@ services:
       - FUTURES_PROTECT_PROFIT_USDT=-5.0
       - MIN_CYCLES_BEFORE_CLOSE_SHORTS=5
       - CYCLE_FUTURES_SHORT=4
-      - FUTURES_MIN_INJECT_STRENGTH=0.30
+      - FUTURES_MIN_INJECT_STRENGTH=0.40
       # PV (Profit Velocity) sesion 17 jun21 2026 — scale-out + momentum reversal
       - FUTURES_SCALE_OUT_PCT=1.5
       - FUTURES_SCALE_OUT_FRACTION=0.5
