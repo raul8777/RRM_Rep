@@ -424,6 +424,11 @@ class Settings(BaseSettings):
     # Capital Bridge: bidirectional autonomous spot↔futures transfer
     futures_capital_bridge_enabled: bool = Field(default=True, env="FUTURES_CAPITAL_BRIDGE_ENABLED")
     futures_capital_bridge_min_transfer: float = Field(default=10.0, env="FUTURES_CAPITAL_BRIDGE_MIN_TRANSFER")  # min USDT to trigger transfer
+    # Unified Portfolio Manager: PortfolioManager as capital director for both SPOT and Futures
+    use_unified_portfolio_manager: bool = Field(default=False, env="USE_UNIFIED_PORTFOLIO_MANAGER")  # feature flag — false = legacy behavior
+    futures_kelly_base_usdt: float = Field(default=100.0, env="FUTURES_KELLY_BASE_USDT")  # Kelly floor for Futures (vs kelly_base_usdt for SPOT)
+    futures_kelly_max_usdt: float = Field(default=500.0, env="FUTURES_KELLY_MAX_USDT")    # Kelly ceiling for Futures (vs kelly_max_usdt for SPOT)
+    futures_kelly_max_pct_liquid: float = Field(default=0.55, env="FUTURES_KELLY_MAX_PCT_LIQUID")  # liquid cap for Futures Kelly (vs kelly_max_pct_liquid=0.28 for SPOT)
 
     # ── Dynamic pair screener ─────────────────────────────────────────────────
     screener_enabled: bool = Field(default=True, env="SCREENER_ENABLED")

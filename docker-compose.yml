@@ -82,6 +82,11 @@ services:
       - FUTURES_KELLY_CAP_PCT=0.20
       - FUTURES_CAPITAL_BRIDGE_ENABLED=true
       - FUTURES_CAPITAL_BRIDGE_MIN_TRANSFER=10.0
+      # Unified Portfolio Manager (jun 23 2026) — PortfolioManager as capital director
+      - USE_UNIFIED_PORTFOLIO_MANAGER=true
+      - FUTURES_KELLY_BASE_USDT=100.0
+      - FUTURES_KELLY_MAX_USDT=500.0
+      - FUTURES_KELLY_MAX_PCT_LIQUID=0.55
       # PB (Profit Boost) sesion 16 jun21 2026
       - FUTURES_SL_COOLDOWN_HOURS=4.0
       - FUTURES_MAX_NEW_PER_CYCLE=3
@@ -89,7 +94,7 @@ services:
       - FUTURES_MASS_SL_COOLDOWN_HOURS=4.0
       - FUTURES_CONFIRM_RED_CANDLE=true
       - FUTURES_NO_SHORT_BTC_3H_THRESHOLD=1.0
-      - FUTURES_USDT_PER_TRADE=50.0
+      - FUTURES_USDT_PER_TRADE=100.0
       # H-FIXES sesion 8 jun21 2026
       - FUTURES_TRAILING_ACTIVATION_PCT=2.0
       # SL-OPT sesion 19 jun22 2026 — wider SL + SSO adaptive exits

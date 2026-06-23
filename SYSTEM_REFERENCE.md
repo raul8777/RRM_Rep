@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 21 2026 20:40 UTC-6 | Sesión 16: Profit Boost $40/day — entry decorrelation, mass SL breaker, position sizing — tag v0.16-profit-boost
+> Última actualización: jun 23 2026 08:38 UTC-6 | Sesión 21: Unified Portfolio Manager — PortfolioManager como director de fondos SPOT+Futures, Kelly por wallet, feature flag rollback
 
 ---
 
@@ -2091,6 +2091,82 @@ git checkout safepoint-v1-jun22-2026 -- docker-compose.yml && docker-compose up 
 - FUTURES_MAX_SHORTS: 9 → 12
 - Overflow simplificado: removidos vol_spike + BTC 4h gates (redundantes con filtros de entrada)
 - Resultado: sistema pasó de 8/9 → 12/12 shorts en primer ciclo
+
+---
+
+## 🧠 UNIFIED PORTFOLIO MANAGER — DIRECTOR DE FONDOS (jun 23 2026, Sesión 21)
+
+> **PortfolioManager es ahora el director de capital de todo el sistema.** Lee ambos wallets (SPOT + Futures) y provee la referencia correcta de capital a cada tipo de trade.
+
+### Problema Resuelto
+`_kelly_position_size` usaba `usdt_liquid = SPOT USDT` para calcular trades Futures.  
+Con $1,737 SPOT y $194 Futures: Kelly calculaba $104 pero el F4 cap (`max($50, $194×20%)=$50`) lo aplastaba a $65.  
+La raíz: Kelly usaba el capital incorrecto como referencia — el wallet SPOT en vez del wallet Futures.
+
+### Solución Implementada
+
+#### `portfolio_manager.py` — nuevo método `get_unified_balance(futures_client)`
+```python
+result = {
+    "usdt_available":    SPOT_USDT,       # referencia para SPOT Kelly (sin cambio)
+    "futures_available": FUTURES_FREE,    # referencia para Futures Kelly (nuevo)
+    "futures_total":     FUTURES_WALLET,  # incluye margen locked
+    "total_usdt":        SPOT + FUTURES,  # sistema completo
+}
+```
+`get_total_balance()` intacto — todos los callers SPOT no cambian.
+
+#### `_kelly_position_size` — 3 nuevos params opcionales
+```python
+_kelly_position_size(..., base_override=None, max_override=None, cap_pct_override=None)
+```
+Si son `None` → comportamiento SPOT idéntico al anterior.
+
+#### `run_trades.py` — 3 puntos de cambio (todos wrapeados en feature flag)
+- **Futures SHORTs**: usa `futures_available` + Futures Kelly params
+- **Futures LONGs** (SPOT_BULL): mismo patrón
+- **CapBridge** `kelly_margin`: usa `futures_available` para cálculo de shortfall
+
+### Env Vars Activos (docker-compose.yml)
+| Variable | Valor | Propósito |
+|----------|-------|-----------|
+| `USE_UNIFIED_PORTFOLIO_MANAGER` | `true` | Feature flag — `false` = rollback instantáneo |
+| `FUTURES_KELLY_BASE_USDT` | `100.0` | Floor Futures Kelly (SPOT usa `KELLY_BASE_USDT=40`) |
+| `FUTURES_KELLY_MAX_USDT` | `500.0` | Techo Futures Kelly (SPOT usa `KELLY_MAX_USDT=350`) |
+| `FUTURES_KELLY_MAX_PCT_LIQUID` | `0.55` | Cap líquido Futures (SPOT usa `KELLY_MAX_PCT_LIQUID=0.28`) |
+| `FUTURES_USDT_PER_TRADE` | `100.0` | F4 floor (era 50.0) — dobla el cap mínimo del F4 |
+
+### Sizing Verificado en Producción (futures_avail=$194.78)
+| Tier | Prob/Strength | Antes | Ahora | Notional (2x) |
+|------|-------------|-------|-------|--------------|
+| BASE | 0.52 / 0.50 | $65 | $65 | $130 |
+| MEDIA | 0.57 / 0.58 | $65 | **$130** | **$260** |
+| ALTA | 0.62 / 0.72 | $65 | **$130** | **$260** |
+| FUERTE | 0.67 / 0.82 | $65 | **$130** | **$260** |
+
+> Escala automáticamente: cuando SSO libera capital + CapBridge recarga → `futures_avail` sube → F4 cap sube → trades más grandes.
+
+### Todo lo Que NO Cambió
+- `get_total_balance()` — todos los callers SPOT iguales
+- SL% / TP% / Leverage 2x / SSO / Circuit breakers / Filtros de entrada
+- `_pre_entry_checks` margin guard (`available < usdt_amount`)
+- FIX-F3 `avail_net` hard cap activo
+
+### Rollback Instantáneo
+```bash
+# En docker-compose.yml: cambiar USE_UNIFIED_PORTFOLIO_MANAGER=false
+docker-compose up -d --force-recreate app
+```
+
+### Archivos Modificados
+- `config.py` — 4 nuevos `Field()` en Settings
+- `portfolio_manager.py` — método `get_unified_balance(futures_client)`
+- `run_trades.py` — `_kelly_position_size` signature + 3 call sites
+- `docker-compose.yml` — 5 nuevas env vars
+
+### Tests Post-Implementación
+- 217 passed, 12 skipped, 0 nuevos failures
+- Pre-existing failures: `test_integration.py` (import), `test_position_manager.py` (API), `test_webhook.py` (401) — sin relación con estos cambios
 
 ---
 

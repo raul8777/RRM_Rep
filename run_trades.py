@@ -1669,7 +1669,10 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
 
 def _kelly_position_size(settings, strength: float, prediction: dict,
                          usdt_liquid: float, sl_pct: float = 0.015,
-                         tp_pct: float = 0.025) -> float:
+                         tp_pct: float = 0.025,
+                         base_override: float = None,
+                         max_override: float = None,
+                         cap_pct_override: float = None) -> float:
     """
     Half-Kelly position sizing scaled by signal quality.
 
@@ -1681,18 +1684,20 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
 
     Fallback (kelly disabled): max_per_trade_usdt.
     Hard cap: kelly_max_pct_liquid of available USDT.
+    base_override / max_override: optional per-call overrides (used by Unified Portfolio Manager
+    to supply Futures-specific floors/ceilings without changing SPOT Kelly behavior).
     """
     if not getattr(settings, "kelly_enabled", True):
         return getattr(settings, "max_per_trade_usdt", 50.0)
 
-    fixed_base = getattr(settings, "kelly_base_usdt", 60.0)
+    fixed_base = base_override if base_override is not None else getattr(settings, "kelly_base_usdt", 60.0)
     dyn_pct = getattr(settings, "kelly_dynamic_base_pct", 0.15)
     base = max(fixed_base, usdt_liquid * dyn_pct)
     # Smart Kelly: max scales with liquid capital instead of fixed cap
-    max_usdt_floor = getattr(settings, "kelly_max_usdt", 350.0)
+    max_usdt_floor = max_override if max_override is not None else getattr(settings, "kelly_max_usdt", 350.0)
     max_usdt_pct_cap = getattr(settings, "kelly_max_pct_cap", 0.25)
     max_usdt = max(max_usdt_floor, usdt_liquid * max_usdt_pct_cap)
-    cap_pct = getattr(settings, "kelly_max_pct_liquid", 0.40)
+    cap_pct = cap_pct_override if cap_pct_override is not None else getattr(settings, "kelly_max_pct_liquid", 0.40)
 
     prob = float((prediction or {}).get("success_probability", 0.50))
     r = tp_pct / sl_pct if sl_pct > 0 else 1.67
@@ -1965,13 +1970,31 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 _f_real_prob = float(_f_sig_meta.get('success_probability', float(_f_sig_meta.get('strength', 0.45))))
                 _f_real_prob = max(0.45, min(0.75, _f_real_prob))
                 _f_pred = _f_prediction or {'success_probability': _f_real_prob, 'expected_pnl': 1.0}
+                # UnifiedPM: use futures wallet as Kelly reference when enabled
+                _f_base_ov = _f_max_ov = _f_cap_ov = _f_kelly_liquid = None
+                if getattr(settings, 'use_unified_portfolio_manager', False) and portfolio_manager:
+                    try:
+                        _unified_short = portfolio_manager.get_unified_balance(_fc)
+                        _f_kelly_liquid = _unified_short.get('futures_available', usdt_liquid)
+                        _f_base_ov = getattr(settings, 'futures_kelly_base_usdt', None)
+                        _f_max_ov  = getattr(settings, 'futures_kelly_max_usdt', None)
+                        _f_cap_ov  = getattr(settings, 'futures_kelly_max_pct_liquid', None)
+                        print(f"[UnifiedPM] Futures SHORT Kelly: futures_avail=${_f_kelly_liquid:.2f} "
+                              f"base=${_f_base_ov} max=${_f_max_ov} cap_pct={_f_cap_ov}")
+                    except Exception as _upm_err:
+                        print(f"[UnifiedPM] fallback to spot usdt_liquid ({_upm_err})")
+                        _f_kelly_liquid = usdt_liquid
+                else:
+                    _f_kelly_liquid = usdt_liquid
                 _f_usdt  = _kelly_position_size(
                     settings, strength=float(_f_sig_meta.get('strength', 0.5)),
-                    prediction=_f_pred, usdt_liquid=usdt_liquid,
-                    sl_pct=_f_sl * _f_lev / 100, tp_pct=_f_tp * _f_lev / 100)
+                    prediction=_f_pred, usdt_liquid=_f_kelly_liquid,
+                    sl_pct=_f_sl * _f_lev / 100, tp_pct=_f_tp * _f_lev / 100,
+                    base_override=_f_base_ov, max_override=_f_max_ov,
+                    cap_pct_override=_f_cap_ov)
                 # F4: Dynamic cap — max(per_trade_floor, futures_margin × kelly_cap_pct)
                 _futures_kelly_cap = getattr(settings, 'futures_kelly_cap_pct', 0.15)
-                _futures_margin_avail = _fc.get_available_usdt() if not _fc.dry_run else usdt_liquid * 0.3
+                _futures_margin_avail = _fc.get_available_usdt() if not _fc.dry_run else _f_kelly_liquid * 0.3
                 _f_usdt_cap = max(
                     getattr(settings, 'futures_usdt_per_trade', 20.0),
                     _futures_margin_avail * _futures_kelly_cap
@@ -2292,10 +2315,25 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     _l_lev  = getattr(settings, 'futures_leverage', 2)
                     # MEJO-D: Kelly sizing para LONG (igual que SHORT), cap futures_usdt_per_trade
                     _l_pred_sb = {'success_probability': 0.55}  # oversold en uptrend = mayor prob
+                    # UnifiedPM: use futures wallet as Kelly reference when enabled
+                    _l_base_ov = _l_max_ov = _l_cap_ov = None
+                    if getattr(settings, 'use_unified_portfolio_manager', False) and portfolio_manager:
+                        try:
+                            _unified_long = portfolio_manager.get_unified_balance(_fc_sb)
+                            _l_kelly_liq = _unified_long.get('futures_available', usdt_liquid)
+                            _l_base_ov = getattr(settings, 'futures_kelly_base_usdt', None)
+                            _l_max_ov  = getattr(settings, 'futures_kelly_max_usdt', None)
+                            _l_cap_ov  = getattr(settings, 'futures_kelly_max_pct_liquid', None)
+                        except Exception:
+                            _l_kelly_liq = usdt_liquid
+                    else:
+                        _l_kelly_liq = usdt_liquid
                     _l_usdt = _kelly_position_size(
                         settings, strength=float(signal_meta.get(symbol, {}).get('strength', 0.5)),
-                        prediction=_l_pred_sb, usdt_liquid=usdt_liquid,
-                        sl_pct=_l_sl * _l_lev / 100, tp_pct=_l_tp * _l_lev / 100)
+                        prediction=_l_pred_sb, usdt_liquid=_l_kelly_liq,
+                        sl_pct=_l_sl * _l_lev / 100, tp_pct=_l_tp * _l_lev / 100,
+                        base_override=_l_base_ov, max_override=_l_max_ov,
+                        cap_pct_override=_l_cap_ov)
                     _l_usdt = min(_l_usdt, getattr(settings, 'futures_usdt_per_trade', 20.0))
                     # Apply F&G boost (oversold + Fear = strong conviction entry)
                     _l_usdt = _apply_fng_kelly_boost(_l_usdt, _fng_value, settings)
@@ -3073,9 +3111,18 @@ def execute_once(monitor_only: bool = False):
                     _cb_open_shorts = sum(1 for p in _fc._open_positions.values() if not p.closed and p.side == 'SHORT')
                     _cb_max_shorts  = getattr(settings, 'futures_max_shorts', 5)
                     _cb_open_spots  = len(position_manager.get_all_positions()) if position_manager else 0
+                    # UnifiedPM: use futures_available from unified balance for more accurate kelly_margin
+                    if getattr(settings, 'use_unified_portfolio_manager', False) and portfolio_manager:
+                        try:
+                            _unified_cb = portfolio_manager.get_unified_balance(_fc)
+                            _cb_futures_avail = _unified_cb.get('futures_available', _fc.get_available_usdt())
+                        except Exception:
+                            _cb_futures_avail = _fc.get_available_usdt()
+                    else:
+                        _cb_futures_avail = _fc.get_available_usdt()
                     _cb_kelly_margin = max(
-                        getattr(settings, 'futures_usdt_per_trade', 20.0),
-                        _fc.get_available_usdt() * getattr(settings, 'futures_kelly_cap_pct', 0.15)
+                        getattr(settings, 'futures_usdt_per_trade', 50.0),
+                        _cb_futures_avail * getattr(settings, 'futures_kelly_cap_pct', 0.20)
                     )
                     _cb_kelly_spot  = getattr(settings, 'kelly_base_usdt', 60.0)
                     _cb_min_tx      = getattr(settings, 'futures_capital_bridge_min_transfer', 10.0)

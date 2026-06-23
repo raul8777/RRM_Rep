@@ -129,6 +129,40 @@ class PortfolioManager:
                 "timestamp": datetime.utcnow().isoformat()
             }
     
+    def get_unified_balance(self, futures_client=None) -> dict:
+        """
+        Returns combined SPOT + Futures balance for Unified Portfolio Manager sizing.
+        Provides separate 'usdt_available' (SPOT) and 'futures_available' (Futures free margin)
+        so each trading mode can use its own wallet as Kelly reference.
+
+        Falls back gracefully to get_total_balance() if futures_client is None or fails.
+        Does NOT replace get_total_balance() — all existing SPOT callers are unaffected.
+        """
+        spot = self.get_total_balance()
+        if futures_client is None:
+            return spot
+        try:
+            futures_total = futures_client.get_total_wallet_usdt()
+            futures_avail = futures_client.get_available_usdt()
+            spot_usdt     = spot["usdt_available"]
+            combined_total = spot["total_usdt"] + futures_total
+            result = {
+                "usdt_available":    spot_usdt,
+                "futures_available": futures_avail,
+                "futures_total":     futures_total,
+                "total_usdt":        combined_total,
+                "allocation_usdt":   combined_total * self.allocation_pct,
+                "timestamp":         spot.get("timestamp", datetime.utcnow().isoformat()),
+            }
+            logger.debug(
+                f"[UnifiedPM] spot=${spot_usdt:.2f} futures_avail=${futures_avail:.2f} "
+                f"futures_total=${futures_total:.2f} combined=${combined_total:.2f}"
+            )
+            return result
+        except Exception as e:
+            logger.warning(f"[UnifiedPM] futures balance error ({e}) — falling back to spot-only")
+            return spot
+
     def rank_pairs(
         self,
         signals: Dict[str, float],
