@@ -1009,3 +1009,41 @@ class TestSSOSlowCrawl:
         action = sso.evaluate(pos)
         assert action.diagnosis != ""
         assert "SSO-1" in action.diagnosis
+
+
+# ─── 13. SSO Dynamic Gates tests ─────────────────────────────────────────────
+
+class TestSSODynamicGates:
+    """Verify dynamic USD gate calculation from wallet balance (futures_total / spot_total)."""
+
+    def test_futures_dynamic_gates_calculated(self):
+        """futures_total=2864 → gates are % of wallet, not config defaults."""
+        from smart_scale_out import SmartScaleOut
+        sso = SmartScaleOut(make_settings(), futures_total=2864.0)
+        assert sso.stagnant_min_profit_floor == round(2864.0 * 0.003, 2)   # $8.59
+        assert sso.target_daily_usd == round(2864.0 * 0.05, 2)             # $143.20
+        assert sso._dyn_decay_min_profit == round(2864.0 * 0.002, 2)       # $5.73
+        assert sso._dyn_slow_min_profit == round(2864.0 * 0.001, 2)        # $2.86
+
+    def test_spot_dynamic_gates_calculated(self):
+        """spot_total=400 → gates are % of spot wallet."""
+        from smart_scale_out import SmartScaleOut
+        sso = SmartScaleOut(make_settings(), spot_total=400.0)
+        assert sso.stagnant_min_profit_floor == round(400.0 * 0.003, 2)    # $1.20
+        assert sso.target_daily_usd == round(400.0 * 0.05, 2)              # $20.0
+        assert sso._dyn_decay_min_profit == round(400.0 * 0.002, 2)        # $0.80
+
+    def test_futures_overrides_spot_when_both_passed(self):
+        """futures_total takes priority over spot_total."""
+        from smart_scale_out import SmartScaleOut
+        sso = SmartScaleOut(make_settings(), futures_total=2864.0, spot_total=400.0)
+        assert sso.target_daily_usd == round(2864.0 * 0.05, 2)
+
+    def test_fallback_to_config_when_no_capital_passed(self):
+        """No futures_total nor spot_total → falls back to config/default values."""
+        from smart_scale_out import SmartScaleOut
+        sso = SmartScaleOut(make_settings())
+        assert sso.stagnant_min_profit_floor == 3.0   # config default
+        assert sso.target_daily_usd == 40.0            # config default
+        assert sso._dyn_decay_min_profit is None
+        assert sso._dyn_slow_min_profit is None

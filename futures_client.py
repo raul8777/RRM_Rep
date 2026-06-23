@@ -1932,7 +1932,8 @@ class FuturesClient:
                 if _sso_enabled and pnl_pct > 0:
                     try:
                         from smart_scale_out import SmartScaleOut, SSOPositionData, compute_pnl_velocity, extract_sso_level_from_reason
-                        _sso = SmartScaleOut(settings)
+                        _sso_fut_total = self.get_total_wallet_usdt()
+                        _sso = SmartScaleOut(settings, futures_total=_sso_fut_total)
                         # Compute velocity
                         _sso_snap = pos._smart_meta.get('sso_pnl_snapshot')
                         _sso_vel, _sso_new_snap = compute_pnl_velocity(pnl_pct, _sso_snap)

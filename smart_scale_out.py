@@ -65,22 +65,32 @@ class SSOPositionData:
 class SmartScaleOut:
     """Evaluates all 5 SSO triggers and returns the highest-priority action."""
 
-    # TODO FASE-FUTURA: SSO USD gates dinámicos por balance del wallet
-    # En lugar de leer valores fijos del config, calcular en __init__ a partir de
-    # futures_wallet_total (vía portfolio_manager.get_unified_balance(futures_client)):
-    #   sso_decay_min_profit_usd    = futures_total * 0.002   (0.2% del wallet)
-    #   sso_stagnant_min_profit_floor = futures_total * 0.003 (0.3%)
-    #   sso_slow_min_profit_usd     = futures_total * 0.001   (0.1%)
-    #   sso_target_daily_usd        = futures_total * 0.05    (5% del wallet como meta diaria)
-    # Pasar portfolio_manager y futures_client como params opcionales de __init__().
-    # Si no disponibles, usar los valores del config como fallback (backward compatible).
-    # Esto evita recalibrar manualmente cada vez que cambie el balance.
+    # Dynamic USD gates: se calculan automáticamente desde el balance del portfolio.
+    # futures_total y spot_total se pasan en runtime por cada call site.
+    # Fórmulas: decay=0.2%, stagnant=0.3%, slow=0.1%, daily_target=5% del wallet.
+    # Fallback a env vars / defaults si no se pasan (SPOT usa spot_total, FUTURES usa futures_total).
 
-    def __init__(self, settings=None):
+    def __init__(self, settings=None, futures_total: float = None, spot_total: float = None):
         self._s = settings
+
+        # ── Dynamic USD gates por tipo de portfolio ───────────────────────────
+        # Selecciona el capital de referencia según el tipo de portfolio disponible
+        _ref_capital = futures_total or spot_total  # futures tiene prioridad si ambos presentes
+        if _ref_capital and _ref_capital > 0:
+            _dyn_decay    = round(_ref_capital * 0.002, 2)   # 0.2% del wallet
+            _dyn_stagnant = round(_ref_capital * 0.003, 2)   # 0.3% del wallet
+            _dyn_slow     = round(_ref_capital * 0.001, 2)   # 0.1% del wallet
+            _dyn_daily    = round(_ref_capital * 0.05,  2)   # 5%   del wallet (meta diaria)
+            _portfolio_tag = "futures" if futures_total else "spot"
+            print(f"[SSO] dynamic gates ({_portfolio_tag} capital={_ref_capital:.0f}): "
+                  f"decay=${_dyn_decay} stagnant=${_dyn_stagnant} "
+                  f"slow=${_dyn_slow} daily=${_dyn_daily}")
+        else:
+            _dyn_decay = _dyn_stagnant = _dyn_slow = _dyn_daily = None
+
         # SSO-1: Stagnant Profit
         self.stagnant_min_profit_factor = self._cfg('sso_stagnant_min_profit_factor', 0.02)
-        self.stagnant_min_profit_floor = self._cfg('sso_stagnant_min_profit_floor', 3.0)
+        self.stagnant_min_profit_floor = _dyn_stagnant if _dyn_stagnant else self._cfg('sso_stagnant_min_profit_floor', 3.0)
         self.stagnant_min_hours = self._cfg('sso_stagnant_min_hours', 2.0)
         self.stagnant_velocity_window_min = self._cfg('sso_stagnant_velocity_window_min', 60)
         # SSO-2: Momentum Exhausted
@@ -99,11 +109,14 @@ class SmartScaleOut:
         self.ml_l3_close = self._cfg('sso_multilevel_l3_close_pct', 0.25)
         # SSO-4: Target Contribution
         self.target_contribution_pct = self._cfg('sso_target_contribution_pct', 0.15)
-        self.target_daily_usd = self._cfg('sso_target_daily_usd', 40.0)
+        self.target_daily_usd = _dyn_daily if _dyn_daily else self._cfg('sso_target_daily_usd', 40.0)
         self.target_min_hours = self._cfg('sso_target_min_hours', 1.0)
         # SSO-5: Re-entry Upgrade
         self.reentry_min_strength_diff = self._cfg('sso_reentry_min_strength_diff', 0.3)
         self.reentry_min_ev_multiplier = self._cfg('sso_reentry_min_ev_multiplier', 1.5)
+        # Store dynamic overrides for SSO-1b and SSO-1c (read inside _check_sso1_stagnant)
+        self._dyn_decay_min_profit = _dyn_decay
+        self._dyn_slow_min_profit = _dyn_slow
 
     def _cfg(self, key: str, default):
         """Read config from settings or return default."""
@@ -150,7 +163,7 @@ class SmartScaleOut:
 
         # ── SSO-1b: Profit Decay — giving back gains ──────────────────────────
         _decay_threshold = self._cfg('sso_decay_threshold_pct', 0.004)
-        _decay_min_profit = self._cfg('sso_decay_min_profit_usd', 2.0)
+        _decay_min_profit = self._dyn_decay_min_profit if self._dyn_decay_min_profit else self._cfg('sso_decay_min_profit_usd', 2.0)
         _decay_min_hours = self._cfg('sso_decay_min_hours', 1.5)
         decay_pct = pos.peak_pnl_pct - pos.pnl_pct
         _1b_reasons = []
@@ -173,7 +186,7 @@ class SmartScaleOut:
 
         # ── SSO-1c: Slow Crawl — lifetime + snapshot velocity ─────────────────
         _slow_vel_base = self._cfg('sso_slow_velocity_threshold', 0.001)  # 0.1%/h
-        _slow_min_profit = self._cfg('sso_slow_min_profit_usd', 1.0)
+        _slow_min_profit = self._dyn_slow_min_profit if self._dyn_slow_min_profit else self._cfg('sso_slow_min_profit_usd', 1.0)
         _slow_min_hours = self._cfg('sso_slow_min_hours', 2.0)
         _slow_t2 = self._cfg('sso_slow_tier2_hours', 4.0)
         _slow_t3 = self._cfg('sso_slow_tier3_hours', 6.0)

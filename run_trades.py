@@ -1186,7 +1186,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 if close_reason is None and _sso_enabled_spot and pnl_pct > 0:
                     try:
                         from smart_scale_out import SmartScaleOut, SSOPositionData, compute_pnl_velocity, extract_sso_level_from_reason
-                        _sso_spot = SmartScaleOut(settings)
+                        _sso_spot_total = float(client.get_account_balance().get("USDT", 0)) if client else None
+                        _sso_spot = SmartScaleOut(settings, spot_total=_sso_spot_total)
                         metadata = getattr(pos, 'metadata', {}) or {}
                         # Velocity tracking
                         _sso_s_snap = metadata.get('sso_pnl_snapshot')
