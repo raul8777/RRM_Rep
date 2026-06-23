@@ -1186,9 +1186,13 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 if close_reason is None and _sso_enabled_spot and pnl_pct > 0:
                     try:
                         from smart_scale_out import SmartScaleOut, SSOPositionData, compute_pnl_velocity, extract_sso_level_from_reason
-                        _sso_spot_total = float(client.get_account_balance().get("USDT", 0)) if client else None
-                        _sso_spot = SmartScaleOut(settings, spot_total=_sso_spot_total)
                         metadata = getattr(pos, 'metadata', {}) or {}
+                        _sso_spot_at_open = metadata.get('spot_total_at_open')
+                        _sso_spot_live = float(client.get_account_balance().get("USDT", 0)) if client else None
+                        _sso_spot_total = _sso_spot_at_open or _sso_spot_live
+                        if _sso_spot_at_open and _sso_spot_live and abs(_sso_spot_live - _sso_spot_at_open) > 20:
+                            print(f"[SSO/S] {symbol} using spot_total_at_open=${_sso_spot_at_open:.0f} (current=${_sso_spot_live:.0f}) — balance changed")
+                        _sso_spot = SmartScaleOut(settings, spot_total=_sso_spot_total)
                         # Velocity tracking
                         _sso_s_snap = metadata.get('sso_pnl_snapshot')
                         _sso_s_vel, _sso_s_new_snap = compute_pnl_velocity(pnl_pct, _sso_s_snap)
@@ -2705,6 +2709,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "entry_pred_prob": float(prediction.get('success_probability', 0)) if prediction else None,
                         "entry_type": "prediction_add" if _is_pred_add else "normal",
                         "reevaluation_count": 0,
+                        "spot_total_at_open": usdt_liquid_now,  # SSO gate anchor — protects position from balance changes
                     }
                     if prediction:
                         metadata['pnl_prediction'] = prediction
