@@ -1392,6 +1392,7 @@ class FuturesClient:
                 pnl_prediction=pnl_prediction,
                 indicators_at_entry=indicators_at_entry,
             )
+            pos._smart_meta['fut_total_at_open'] = self.get_total_wallet_usdt()  # SSO gate anchor
             self._open_positions[self._pos_key(symbol, "SHORT")] = pos
             self._save_futures_open(pos)  # FIX-G+P2: persist to DB with prediction
             print(f"[Futures] SHORT {symbol} OPEN: entry={filled_price:.4f}, "
@@ -1514,6 +1515,7 @@ class FuturesClient:
                 entry_price=filled_price, sl_price=sl_price, tp_price=tp_price,
                 order_id=order_id, sl_order_id=sl_order_id, tp_order_id=tp_order_id,
             )
+            pos._smart_meta['fut_total_at_open'] = self.get_total_wallet_usdt()  # SSO gate anchor
             self._open_positions[self._pos_key(symbol, "LONG")] = pos
             self._save_futures_open(pos)  # FIX-G: persist to DB
             print(f"[Futures] LONG {symbol} OPEN: entry={filled_price:.4f}, "
@@ -1932,7 +1934,12 @@ class FuturesClient:
                 if _sso_enabled and pnl_pct > 0:
                     try:
                         from smart_scale_out import SmartScaleOut, SSOPositionData, compute_pnl_velocity, extract_sso_level_from_reason
-                        _sso_fut_total = self.get_total_wallet_usdt()
+                        _sso_fut_total_at_open = pos._smart_meta.get('fut_total_at_open')
+                        _sso_fut_total = _sso_fut_total_at_open or self.get_total_wallet_usdt()
+                        if _sso_fut_total_at_open:
+                            _sso_cur = self.get_total_wallet_usdt()
+                            if abs(_sso_cur - _sso_fut_total_at_open) > 50:
+                                print(f"[SSO] {symbol} using fut_total_at_open=${_sso_fut_total_at_open:.0f} (current=${_sso_cur:.0f}) — transfer occurred")
                         _sso = SmartScaleOut(settings, futures_total=_sso_fut_total)
                         # Compute velocity
                         _sso_snap = pos._smart_meta.get('sso_pnl_snapshot')
