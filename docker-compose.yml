@@ -101,12 +101,19 @@ services:
       - STOP_LOSS_PCT=2.5
       - ATR_SL_MIN_PCT=0.015
       # SSO-1 Capital Velocity (jun 22 2026) — close decaying/slow positions faster
+      # RECALIBRADO jun 23 2026: gates USD escalados al nuevo tamaño de posición (~$330 margin post-transfer $1,390 SPOT->FUT)
+      # TODO FASE-FUTURA: hacer estos valores dinámicos en función de futures_wallet_total
+      #   lógica sugerida: SSO_DECAY_MIN_PROFIT_USD = futures_total * 0.002 (0.2% del wallet)
+      #   SSO_STAGNANT_MIN_PROFIT_FLOOR = futures_total * 0.003
+      #   SSO_SLOW_MIN_PROFIT_USD = futures_total * 0.001
+      #   SSO_TARGET_DAILY_USD = futures_total * 0.05  (5% del wallet como meta diaria)
+      #   Implementar en SmartScaleOut.__init__() leyendo get_unified_balance() si portfolio_manager disponible
       - SSO_STAGNANT_VELOCITY_WINDOW_MIN=30
       - SSO_DECAY_THRESHOLD_PCT=0.004
-      - SSO_DECAY_MIN_PROFIT_USD=2.0
+      - SSO_DECAY_MIN_PROFIT_USD=5.0
       - SSO_DECAY_MIN_HOURS=1.5
       - SSO_SLOW_VELOCITY_THRESHOLD=0.001
-      - SSO_SLOW_MIN_PROFIT_USD=1.0
+      - SSO_SLOW_MIN_PROFIT_USD=3.0
       - SSO_SLOW_MIN_HOURS=2.0
       - SSO_SLOW_TIER2_HOURS=4.0
       - SSO_SLOW_TIER3_HOURS=6.0
@@ -126,14 +133,14 @@ services:
       # SSO (Smart Scale-Out) sesion 19 jun22 2026
       - SSO_ENABLED=true
       - SSO_STAGNANT_MIN_HOURS=2.0
-      - SSO_STAGNANT_MIN_PROFIT_FLOOR=3.0
+      - SSO_STAGNANT_MIN_PROFIT_FLOOR=7.0
       - SSO_MOMENTUM_RSI_OVERBOUGHT=70
       - SSO_MULTILEVEL_ENABLED=true
       - SSO_MULTILEVEL_L1_ATR_MULT=1.0
       - SSO_MULTILEVEL_L2_ATR_MULT=2.0
       - SSO_MULTILEVEL_L3_ATR_MULT=3.5
-      - SSO_TARGET_DAILY_USD=40.0
-      - SSO_TARGET_CONTRIBUTION_PCT=0.15
+      - SSO_TARGET_DAILY_USD=120.0
+      - SSO_TARGET_CONTRIBUTION_PCT=0.12
     ports:
       - "8000:8000"
     depends_on:

@@ -915,6 +915,9 @@ function renderOpenPositions(d) {
     if (_filter === 'spot') visiblePositions = _allPos.filter(p => p.trade_type !== 'futures');
     else if (_filter === 'fut') visiblePositions = _allPos.filter(p => p.trade_type === 'futures');
 
+    // Ordenar por Edad ascendente (más reciente primero)
+    visiblePositions = [...visiblePositions].sort((a, b) => parseFloat(a.hours_held || 0) - parseFloat(b.hours_held || 0));
+
     if (visiblePositions.length === 0) {
         el.innerHTML = _allPos.length === 0
             ? '<p class="loading">Sin posiciones abiertas</p>'

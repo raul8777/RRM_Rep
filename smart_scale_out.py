@@ -65,6 +65,17 @@ class SSOPositionData:
 class SmartScaleOut:
     """Evaluates all 5 SSO triggers and returns the highest-priority action."""
 
+    # TODO FASE-FUTURA: SSO USD gates dinámicos por balance del wallet
+    # En lugar de leer valores fijos del config, calcular en __init__ a partir de
+    # futures_wallet_total (vía portfolio_manager.get_unified_balance(futures_client)):
+    #   sso_decay_min_profit_usd    = futures_total * 0.002   (0.2% del wallet)
+    #   sso_stagnant_min_profit_floor = futures_total * 0.003 (0.3%)
+    #   sso_slow_min_profit_usd     = futures_total * 0.001   (0.1%)
+    #   sso_target_daily_usd        = futures_total * 0.05    (5% del wallet como meta diaria)
+    # Pasar portfolio_manager y futures_client como params opcionales de __init__().
+    # Si no disponibles, usar los valores del config como fallback (backward compatible).
+    # Esto evita recalibrar manualmente cada vez que cambie el balance.
+
     def __init__(self, settings=None):
         self._s = settings
         # SSO-1: Stagnant Profit
