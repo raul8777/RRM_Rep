@@ -1,7 +1,13 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 23 2026 08:38 UTC-6 | Sesión 21: Unified Portfolio Manager — PortfolioManager como director de fondos SPOT+Futures, Kelly por wallet, feature flag rollback
+> Última actualización: jun 23 2026 12:38 UTC-6 | Sesión 21 (cont.): SSO per-position anchors SPOT+FUT, FUTURES_MIN_INJECT_STRENGTH 0.40→0.30 (en observación)
+
+> ⚠️ **MARCA DE OBSERVACIÓN** — jun 23 2026 12:38 UTC-6  
+> `FUTURES_MIN_INJECT_STRENGTH` cambiado de **0.40 → 0.30** (commit `d3dced6`).  
+> **Primer ciclo post-cambio**: abrió UNIUSDT + FILUSDT SHORT (strength=0.33). Pares HOLD (BTC/ETH/BNB strength=0.21-0.25) siguen excluidos — el AND-condition del código los filtra correctamente.  
+> **Si en próximas 48h se observan**: más SL de lo normal, posiciones abiertas con señal débil fallando, o WR cae por debajo de 80% → revertir a **0.40** con `docker-compose up -d --force-recreate app`.  
+> **Rollback**: `FUTURES_MIN_INJECT_STRENGTH=0.40` en `docker-compose.yml` línea 126.
 
 ---
 
