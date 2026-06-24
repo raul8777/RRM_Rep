@@ -387,6 +387,86 @@ async def health_check() -> Dict:
     return orchestrator.get_health_status()
 
 
+@app.get("/performance/commissions")
+async def get_commission_summary(hours: int = 24) -> Dict:
+    """Commission and net PnL breakdown for the last N hours (default 24h), split by SPOT and FUTURES."""
+    try:
+        comp = get_components()
+        if not comp.db_client:
+            raise HTTPException(status_code=503, detail="DB not available")
+        from datetime import datetime, timezone, timedelta
+        import json as _json
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        rows = comp.db_client.execute_query(
+            """SELECT symbol, quantity, entry_price, exit_price, pnl,
+                      entry_commission, exit_commission, metadata
+               FROM trades_closed WHERE exit_time > %s""",
+            (cutoff,)
+        )
+        spot_gross = spot_comm = spot_trades = 0.0
+        fut_gross  = fut_comm  = fut_trades  = 0.0
+        _spot_rate = getattr(settings, 'binance_commission_rate', 0.001)
+        _fut_rate  = getattr(settings, 'futures_commission_rate', 0.0004)
+        for r in rows:
+            meta = r.get('metadata') or {}
+            if isinstance(meta, str):
+                try: meta = _json.loads(meta)
+                except: meta = {}
+            ttype = meta.get('trade_type', 'spot')
+            pnl  = float(r.get('pnl') or 0)
+            qty  = float(r.get('quantity') or 0)
+            ep   = float(r.get('entry_price') or 0)
+            xp   = float(r.get('exit_price') or ep)
+            ec   = r.get('entry_commission')
+            xc   = r.get('exit_commission')
+            if ttype == 'futures':
+                fut_trades += 1
+                fut_gross  += pnl
+                if ec is not None and xc is not None:
+                    fut_comm += float(ec) + float(xc)
+                else:
+                    fut_comm += (ep * qty + xp * qty) * _fut_rate
+            else:
+                spot_trades += 1
+                spot_gross  += pnl
+                if ec is not None and xc is not None:
+                    spot_comm += float(ec) + float(xc)
+                else:
+                    spot_comm += (ep * qty + xp * qty) * _spot_rate
+        total_gross = spot_gross + fut_gross
+        total_comm  = spot_comm + fut_comm
+        net_pnl     = total_gross - total_comm
+        return {
+            "window_hours": hours,
+            "futures": {
+                "trades": int(fut_trades),
+                "gross_pnl": round(fut_gross, 4),
+                "estimated_commissions": round(fut_comm, 4),
+                "net_pnl": round(fut_gross - fut_comm, 4),
+                "commission_rate_used": _fut_rate,
+            },
+            "spot": {
+                "trades": int(spot_trades),
+                "gross_pnl": round(spot_gross, 4),
+                "estimated_commissions": round(spot_comm, 4),
+                "net_pnl": round(spot_gross - spot_comm, 4),
+                "commission_rate_used": _spot_rate,
+            },
+            "total": {
+                "trades": int(fut_trades + spot_trades),
+                "gross_pnl": round(total_gross, 4),
+                "estimated_commissions": round(total_comm, 4),
+                "net_pnl": round(net_pnl, 4),
+                "commission_pct_of_gross": round(total_comm / total_gross * 100, 2) if total_gross != 0 else 0.0,
+            },
+            "timestamp": to_mexico_time(datetime.utcnow()).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class PortfolioConfigRequest(BaseModel):
     portfolio_allocation_pct: Optional[float] = None
     min_pair_confidence_score: Optional[float] = None

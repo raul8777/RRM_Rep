@@ -171,7 +171,16 @@ class FuturesClient:
             else:
                 gross_pnl = (exit_price - pos.entry_price) * pos.qty
                 pnl_pct   = round((exit_price - pos.entry_price) / pos.entry_price * 100, 4)
-            pnl = pos.pnl if pos.pnl is not None else gross_pnl
+            # Commission accounting — futures taker rate (0.04% per side)
+            _f_comm_rate = getattr(self.settings, 'futures_commission_rate', 0.0004)
+            _entry_comm  = round(pos.entry_price * pos.qty * _f_comm_rate, 6)
+            _exit_comm   = round(exit_price * pos.qty * _f_comm_rate, 6)
+            if pos.pnl is not None:
+                # Binance realizedPnl (SL/TP/trailing closes) — already net, do NOT deduct again
+                pnl = pos.pnl
+            else:
+                # Local SSO market-order close — gross, must deduct both sides
+                pnl = gross_pnl - _entry_comm - _exit_comm
             meta = json.dumps({
                 'trade_type': 'futures',
                 'order_id': pos.order_id,
@@ -192,8 +201,9 @@ class FuturesClient:
                 INSERT INTO trades_closed
                     (symbol, side, quantity, entry_price, exit_price, pnl, pnl_percentage,
                      close_reason, entry_time, exit_time, metadata, data_version,
-                     pnl_prediction, indicators_at_entry, prediction_accuracy, learning_eligible)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     pnl_prediction, indicators_at_entry, prediction_accuracy, learning_eligible,
+                     entry_commission, exit_commission)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     pos.symbol,
@@ -212,6 +222,8 @@ class FuturesClient:
                     _ind_json,
                     _pred_accuracy,
                     True,
+                    _entry_comm,
+                    _exit_comm,
                 )
             )
             # Remove from trades_open by symbol+entry_time
@@ -219,7 +231,7 @@ class FuturesClient:
                 "DELETE FROM trades_open WHERE symbol = %s AND price = %s AND metadata->>'trade_type' = 'futures'",
                 (pos.symbol, pos.entry_price)
             )
-            print(f'[Futures/DB] {pos.symbol} {pos.side} CLOSED ({reason}) pnl=${pnl:.2f} saved to trades_closed')
+            print(f'[Futures/DB] {pos.symbol} {pos.side} CLOSED ({reason}) pnl=${pnl:.2f} (comm=${_entry_comm+_exit_comm:.4f}) saved to trades_closed')
         except Exception as e:
             print(f'[Futures/DB] save_closed {pos.symbol} failed: {e}')
 

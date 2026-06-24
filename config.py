@@ -472,8 +472,9 @@ class Settings(BaseSettings):
     preservation_max_rsi: float = Field(default=65.0, env="PRESERVATION_MAX_RSI")
 
     # Binance commission configuration
-    binance_commission_rate: float = Field(default=0.001, env="BINANCE_COMMISSION_RATE")  # 0.1% default
+    binance_commission_rate: float = Field(default=0.001, env="BINANCE_COMMISSION_RATE")  # 0.1% SPOT default
     use_bnb_for_commission: bool = Field(default=False, env="USE_BNB_FOR_COMMISSION")  # 0.05% if True
+    futures_commission_rate: float = Field(default=0.0004, env="FUTURES_COMMISSION_RATE")  # 0.04% futures taker (0.02% with BNB)
     
     # Currency conversion configuration
     usd_to_mxn_rate: float = Field(default=17.0, env="USD_TO_MXN_RATE")  # Default USD to MXN exchange rate
