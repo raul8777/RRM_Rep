@@ -1,12 +1,20 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 23 2026 12:38 UTC-6 | Sesión 21 (cont.): SSO per-position anchors SPOT+FUT, FUTURES_MIN_INJECT_STRENGTH 0.40→0.30 (en observación)
+> Última actualización: jun 24 2026 09:18 UTC-6 | Sesión 22: Auditoría comisiones SPOT+FUTURES (commit 23c43ae), análisis AAVEUSDT
 
 > ✅ **OBSERVACIÓN CERRADA** — jun 23 2026 14:08 UTC-6  
 > `FUTURES_MIN_INJECT_STRENGTH` probado en **0.30** (commit `d3dced6`) → **revertido a 0.40** (commit actual).  
 > **Resultado**: llenó 2 slots (UNIUSDT + FILUSDT, strength=0.33) pero FIL entró en rebote parcial (-1.43%). Sin señales ≥0.40 disponibles en espera — el cambio no aportó valor neto.  
 > **Lección**: con 0.30 se arriesga entrar en rebotes. Con 0.40 el sistema espera señales con mejor timing. **Mantener 0.40 como valor base.**
+
+> ⚠️ **CASO DE ESTUDIO — AAVEUSDT SHORT** — jun 24 2026 09:18 UTC-6  
+> Entró @ `$71.71` el 23 jun 17:49 UTC — **dentro de la ventana `strength=0.30`** (mismo experimento que FIL).  
+> Estado: precio `$76.24` → PnL **-$23.56 USDT** (-5.88%). SL automático Binance @ `$79.24` (solo $3 / 3.9% de margen).  
+> RSI 1h=64.9 ↑ | RSI 4h=56.5 ↑ acelerando | BB 1h %B=92.9% (techo de banda).  
+> **Diagnóstico**: entró al inicio de un rebote alcísta sostenido, no en continuación bajista.  
+> **Acción**: No mover SL. Dejar que Binance lo gestione.  
+> **Lección reforzada**: en 48h, strength=0.30 generó 2 entradas en rebotes (FIL -1.43%, AAVE -5.88%). **strength=0.40 es el mínimo correcto — no bajar.**
 
 ---
 
@@ -57,7 +65,7 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 21 2026 17:39 UTC-6 |
+| Fecha última actualización | jun 24 2026 09:18 UTC-6 |
 | Capital total | ~$2,810 USDT |
 | Capital spot líquido | ~$1,771 USDT |
 | Capital invertido spot | $0 (sin posiciones spot) |
@@ -85,6 +93,10 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 | CapBridge | ✅ ACTIVO — transferencia autónoma bidireccional spot↔futuros (jun 18 2026) |
 | B2 auto-close spots bear | ✅ ACTIVO — cierra spot LONGs +0.3% PnL en FUTURES_SHORT regime |
 | Docker | live, sin errores |
+| FUTURES_COMMISSION_RATE | **0.0004** (0.04% taker) — corregido jun 24 2026 |
+| PnL Futures 48h bruto | $83.69 USDT |
+| PnL Futures 48h neto | **$74.75 USDT** (fees=$8.94 / 10.7% del bruto) |
+| Endpoint comisiones | `GET /performance/commissions?hours=N` — nuevo jun 24 |
 | dry_run | False |
 | allow_real_trading | True |
 | Ciclo activo | **4 min** (FUTURES_SHORT — H-FIX A3 sesión 8) |
@@ -251,6 +263,29 @@ Efecto: omite PnL predictor, entra directamente
 > V4 (jun 21): trail distances ahora son ATR-scaled en runtime (los valores de tabla son config base/fallback).
 > Fórmula: `trail_dist = max(floor, min(ceiling, ATR_5m × mult))`. Ver sección "TRAILING STOP DESIGN PRINCIPLES".
 > Fuente: `config.py:category_thresholds` + `run_trades.py:_compute_spot_trail_distance()`
+
+---
+
+## 5b. COMISIONES — CONTABILIDAD Y AUDITORÍA
+
+| Tipo | Rate config | PnL en DB | Estado |
+|------|-------------|-----------|--------|
+| SPOT | `binance_commission_rate=0.001` (0.1%) | **Neto** — `_calc_close()` descuenta entrada+salida | ✅ Correcto |
+| FUTURES SSO closes (`sso_slow_crawl`, `sso_profit_decay`, etc.) | `futures_commission_rate=0.0004` (0.04%) | **Neto desde jun 24** — commit `23c43ae` | ✅ Corregido |
+| FUTURES Binance closes (`stop_loss_binance`, `trailing_sl_binance`) | 0.04% | Neto — Binance `realizedPnl` ya lo descuenta | ✅ Siempre correcto |
+
+### Impacto real medido (48h, 60 trades futures)
+```
+gross_pnl = $83.69 USDT
+fees      = $8.94 USDT  (0.04% x 2 lados x notional)
+net_pnl   = $74.75 USDT  <- valor real desde jun 24
+fees %    = 10.7% del PnL bruto
+```
+
+### Columnas DB
+- `entry_commission` + `exit_commission` en `trades_closed` — siempre populadas para futuros desde jun 24
+- SPOT: `entry_commission` llega NULL en ~155/165 trades históricos (bug pre-jun 24); salida siempre calculada
+
 
 ---
 
