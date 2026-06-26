@@ -1090,9 +1090,15 @@ class TestSSO6BounceRescue:
             sso_reentry_min_strength_diff=0.3,
             sso_reentry_min_ev_multiplier=1.5,
             rescue_smart_gate_enabled=True,
-            rescue_stay_strength_min=0.40,
-            rescue_stay_ev_multiplier=2.0,
+            rescue_stay_strength_min=0.50,
+            rescue_stay_ev_multiplier=3.0,
             rescue_velocity_min_pct=0.003,
+            rescue_gate_min_concurrent=2,
+            rescue_gate_g1_min_pct=0.005,
+            rescue_gate_g1_spot_min_pct=0.003,
+            rescue_gate_vol_min_spike=1.5,
+            rescue_gate_max_blocks=3,
+            rescue_gate_min_pnl_improvement=0.005,
         )
         for k, v in overrides.items():
             setattr(s, k, v)
@@ -1168,14 +1174,16 @@ class TestSSO6BounceRescue:
         assert "pnl_positive" in action.diagnosis
 
     def test_gate_blocked_when_favorable_signal_with_vol(self):
-        """Smart Gate G2: rescue must be blocked when signal is favorable + vol confirmed + strength >= 0.40."""
+        """Smart Gate G2+G4: rescue blocked when signal favorable + vol + velocity (>=2 concurrent)."""
         sso = self._make_sso()
         pos = self._make_pos(
-            pnl_usdt=-0.30, pnl_pct=-0.002, bounce_entry=True,
+            pnl_usdt=-0.30, pnl_pct=0.001, bounce_entry=True,  # pnl_pct>0 but <g1_min -> G1 not alone
             side="SHORT",
-            rescue_signal="SELL", rescue_signal_strength=0.55,
-            vol_spike=1.8,
-            rescue_prediction_ev=None,
+            rescue_signal="SELL", rescue_signal_strength=0.55,  # G2 active
+            vol_spike=1.8,                                       # vol >= 1.5
+            rescue_prediction_ev=0.20,                          # G3 inactive
+            pnl_velocity_1h=0.006,                              # G4 active (vel>0.003)
+            peak_pnl_pct=0.0,                                   # pnl_pct(0.001) > 0*0.5=0 -> G4 ok
         )
         action = sso._check_sso6_bounce_rescue(pos)
         assert action.should_close is False
@@ -1183,19 +1191,21 @@ class TestSSO6BounceRescue:
         assert "signal_favorable" in action.diagnosis
 
     def test_gate_blocked_when_prediction_ev_high(self):
-        """Smart Gate G3: rescue must be blocked when prediction EV > 2 × |target_pnl|."""
+        """Smart Gate G3+G4: rescue blocked when EV > 3×|target_pnl| + velocity (>=2 concurrent)."""
         sso = self._make_sso()
-        # target_pnl = -0.50 → ev_thresh = 0.50 * 2.0 = 1.0
+        # target_pnl = -0.50 → ev_thresh = 0.50 * 3.0 = 1.50; ev=1.60 > 1.50 -> G3 active
         pos = self._make_pos(
-            pnl_usdt=-0.40, pnl_pct=-0.003, bounce_entry=True,
-            rescue_signal="HOLD", rescue_signal_strength=0.0,
-            rescue_prediction_ev=1.50,  # > 1.0 threshold
+            pnl_usdt=-0.40, pnl_pct=0.001, bounce_entry=True,  # pnl_pct<g1_min -> G1 not alone
+            rescue_signal="HOLD", rescue_signal_strength=0.0,   # G2 inactive
+            rescue_prediction_ev=1.60,                          # G3 active (1.60 > 1.50)
             vol_spike=0.5,
+            pnl_velocity_1h=0.006,                              # G4 active
+            peak_pnl_pct=0.0,                                   # pnl_pct(0.001)>0 -> G4 ok
         )
         action = sso._check_sso6_bounce_rescue(pos)
         assert action.should_close is False
         assert "GATE_BLOCKED" in action.diagnosis
-        assert "pred_ev" in action.diagnosis
+        assert "G3" in action.diagnosis  # G3+G4 concurrent block uses AND-partial diagnosis
 
     def test_gate_fires_when_all_gates_pass(self):
         """Smart Gate: rescue must execute when no gate blocks it (no favorable signal, low EV, pnl<0)."""
@@ -1216,16 +1226,134 @@ class TestSSO6BounceRescue:
         assert action.trigger == "SSO-6"
 
     def test_gate_blocked_spot_favorable_signal(self):
-        """Smart Gate G2 SPOT: rescue blocked when SPOT BUY position has BUY signal + vol."""
+        """Smart Gate G2+G3 SPOT: rescue blocked when BUY signal + vol + EV (>=2 concurrent)."""
         sso = self._make_sso()
+        # SPOT target_pnl=-0.30 -> ev_thresh = 0.30*3.0=0.90; ev=1.00 > 0.90 -> G3 active
         pos = self._make_pos(
             pnl_usdt=-0.25, pnl_pct=-0.002, bounce_entry=True,
             side="BUY", trade_type="spot",
-            rescue_signal="BUY", rescue_signal_strength=0.65,
-            vol_spike=1.5,
-            rescue_prediction_ev=None,
+            rescue_signal="BUY", rescue_signal_strength=0.65,  # G2 active
+            vol_spike=1.6,                                      # vol >= 1.5
+            rescue_prediction_ev=1.00,                         # G3 active for SPOT
         )
         action = sso._check_sso6_bounce_rescue(pos)
         assert action.should_close is False
         assert "GATE_BLOCKED" in action.diagnosis
         assert "signal_favorable" in action.diagnosis
+
+    # ── AND-partial + G1 threshold + expiry tests ─────────────────────────────
+
+    def test_g4_alone_does_not_block(self):
+        """AND-partial: G4 (velocity) active alone must NOT block (needs >=2 concurrent)."""
+        sso = self._make_sso()
+        pos = self._make_pos(
+            pnl_usdt=-0.40, pnl_pct=-0.002, bounce_entry=True,
+            side="SHORT",
+            rescue_signal="HOLD", rescue_signal_strength=0.0,
+            rescue_prediction_ev=0.10,  # below EV threshold
+            vol_spike=0.5,
+            pnl_velocity_1h=0.006,  # G4 active (vel > 0.003)
+            peak_pnl_pct=0.001,     # pnl_pct (-0.002) < peak*0.5 (0.0005) is False -> need check
+        )
+        # G4 condition: vel > thresh AND pnl_pct > peak * 0.5
+        # pnl_pct=-0.002 > 0.001*0.5=0.0005 is False -> G4 inactive anyway
+        # Force G4 active via peak_pnl_pct=0 so pnl_pct(-0.002) > 0*0.5=0
+        pos2 = self._make_pos(
+            pnl_usdt=-0.40, pnl_pct=-0.002, bounce_entry=True,
+            side="SHORT",
+            rescue_signal="HOLD", rescue_signal_strength=0.0,
+            rescue_prediction_ev=0.10,
+            vol_spike=0.5,
+            pnl_velocity_1h=0.006,  # G4 active
+            peak_pnl_pct=0.0,       # ensures pnl_pct > peak*0.5
+        )
+        action = sso._check_sso6_bounce_rescue(pos2)
+        # G4 alone (concurrent=1 < min_concurrent=2) -> should NOT block
+        assert action.should_close is True  # rescue executes
+        assert action.reason == "sso_bounce_rescue"
+
+    def test_g2_g4_concurrent_blocks(self):
+        """AND-partial: G2+G4 concurrent (>=2) MUST block rescue."""
+        sso = self._make_sso()
+        # G4 condition: vel > thresh AND pnl_pct > peak*0.5
+        # Use pnl_pct=0.001 (positive, above 0*0.5=0) to satisfy G4 recovery condition
+        pos = self._make_pos(
+            pnl_usdt=-0.30, pnl_pct=0.001, bounce_entry=True,  # pnl_pct<g1_min -> G1 not alone
+            side="SHORT",
+            rescue_signal="SELL", rescue_signal_strength=0.55,  # G2 active
+            vol_spike=1.6,           # vol >= 1.5 -> G2 confirmed
+            rescue_prediction_ev=0.50,  # below EV threshold (3.0 * 0.50 = 1.50) -> G3 inactive
+            pnl_velocity_1h=0.006,  # G4 active (vel > 0.003)
+            peak_pnl_pct=0.0,       # pnl_pct(0.001) > 0*0.5=0 -> G4 condition met
+        )
+        action = sso._check_sso6_bounce_rescue(pos)
+        assert action.should_close is False
+        assert "GATE_BLOCKED" in action.diagnosis
+        assert "signal_favorable" in action.diagnosis
+        assert "G2" in action.diagnosis
+
+    def test_g1_below_threshold_does_not_block_alone(self):
+        """AND-partial: G1 tick (pnl_pct=+0.001%) below threshold must NOT block alone."""
+        sso = self._make_sso()  # g1_min_pct=0.005 (0.5%)
+        pos = self._make_pos(
+            pnl_usdt=0.05, pnl_pct=0.001,  # only +0.1% — below 0.5% threshold
+            bounce_entry=True, side="SHORT",
+            rescue_signal="HOLD", rescue_signal_strength=0.0,
+            rescue_prediction_ev=0.10,
+            vol_spike=0.5,
+            pnl_velocity_1h=0.001,
+            peak_pnl_pct=0.0,
+        )
+        action = sso._check_sso6_bounce_rescue(pos)
+        # G1 below threshold + no other gate active -> rescue fires
+        assert action.should_close is True
+        assert action.reason == "sso_bounce_rescue"
+
+    def test_g1_above_threshold_blocks_alone(self):
+        """AND-partial: G1 strong (pnl_pct=+0.7%) above threshold blocks alone."""
+        sso = self._make_sso()  # g1_min_pct=0.005
+        pos = self._make_pos(
+            pnl_usdt=1.20, pnl_pct=0.007,  # +0.7% >= 0.5% threshold
+            bounce_entry=True, side="SHORT",
+            rescue_signal=None, rescue_signal_strength=0.0,
+            rescue_prediction_ev=None, vol_spike=0.5,
+        )
+        action = sso._check_sso6_bounce_rescue(pos)
+        assert action.should_close is False
+        assert "GATE_BLOCKED" in action.diagnosis
+        assert "pnl_positive" in action.diagnosis
+
+    def test_gate_expiry_forces_rescue_after_max_blocks(self):
+        """Expiry: after rescue_gate_max_blocks blocks without pnl improvement, rescue must fire."""
+        sso = self._make_sso(rescue_gate_max_blocks=3, rescue_gate_min_pnl_improvement=0.005)
+        pos = self._make_pos(
+            pnl_usdt=-0.30, pnl_pct=-0.002, bounce_entry=True,
+            side="SHORT",
+            rescue_signal="SELL", rescue_signal_strength=0.55,
+            vol_spike=1.6,
+            rescue_prediction_ev=0.50,
+            pnl_velocity_1h=0.006,
+            peak_pnl_pct=0.0,
+            # Simulate 3 blocks already done, no improvement
+            _gate_block_count=3,
+            _gate_last_pnl_pct=-0.0025,  # was worse before, improvement = -0.002 - (-0.0025) = 0.0005 < 0.005
+        )
+        action = sso._check_sso6_bounce_rescue(pos)
+        # Gate would block (G2+G4 concurrent) BUT expiry fires rescue
+        assert action.should_close is True
+        assert action.reason == "sso_bounce_rescue"
+
+    def test_gate_spot_uses_different_g1_threshold(self):
+        """AND-partial SPOT: G1 uses g1_spot_min_pct=0.003 (0.3%), not futures 0.5%."""
+        sso = self._make_sso()  # g1_spot_min_pct=0.003
+        # pnl_pct=+0.004 (0.4%) >= 0.3% SPOT threshold -> should block
+        pos = self._make_pos(
+            pnl_usdt=0.80, pnl_pct=0.004,
+            bounce_entry=True, side="BUY", trade_type="spot",
+            rescue_signal=None, rescue_signal_strength=0.0,
+            rescue_prediction_ev=None, vol_spike=0.5,
+        )
+        action = sso._check_sso6_bounce_rescue(pos)
+        assert action.should_close is False
+        assert "GATE_BLOCKED" in action.diagnosis
+        assert "pnl_positive" in action.diagnosis

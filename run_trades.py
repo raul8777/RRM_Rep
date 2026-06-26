@@ -1333,6 +1333,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             rescue_prediction_ev=_sp_rescue_pred_ev,
                             rescue_signal=_sp_rescue_signal,
                             rescue_signal_strength=_sp_rescue_signal_str,
+                            _gate_block_count=metadata.get('bounce_gate_blocked_count') if _spot_bounce_entry_flag else None,
+                            _gate_last_pnl_pct=metadata.get('bounce_gate_first_pnl_pct') if _spot_bounce_entry_flag else None,
                         )
                         _sso_s_action = _sso_spot.evaluate(_sso_s_pos)
                         # Full SSO visibility — always log evaluation result
@@ -1344,35 +1346,51 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         # SSO-6 Smart Gate SPOT: persist bounce_gate_* state to metadata + audit
                         if _spot_bounce_entry_flag:
                             _sp_diag = _sso_s_action.diagnosis or ""
-                            _sp_gate_blocked = "GATE_BLOCKED" in _sp_diag
+                            _sp_gate_blocked_now = "GATE_BLOCKED" in _sp_diag
+                            _sp_gate_expired_now = "gate_expired" in _sp_diag and _sso_s_action.should_close
                             _sp_now_iso = datetime.now(timezone.utc).isoformat()
                             _sp_meta_changed = False
-                            if _sp_gate_blocked:
+                            if _sp_gate_blocked_now:
                                 _sp_block_count = metadata.get('bounce_gate_blocked_count', 0) + 1
-                                _sp_prev_reason = metadata.get('bounce_gate_blocked_reason', '')
-                                if _sp_block_count != metadata.get('bounce_gate_blocked_count') or _sp_prev_reason != _sp_diag:
-                                    metadata['bounce_gate_blocked_count'] = _sp_block_count
-                                    metadata['bounce_gate_last_eval'] = _sp_now_iso
-                                    metadata['bounce_gate_blocked_reason'] = _sp_diag
-                                    metadata['bounce_gate_last_signal'] = _sp_rescue_signal
-                                    metadata['bounce_gate_last_signal_strength'] = _sp_rescue_signal_str
-                                    metadata['bounce_gate_last_ev'] = _sp_rescue_pred_ev
-                                    metadata['bounce_gate_last_velocity'] = _sso_s_vel
-                                    if 'bounce_gate_first_qualified_at' not in metadata and _sp_pnl_usdt >= _sp_rescue_target:
-                                        metadata['bounce_gate_first_qualified_at'] = _sp_now_iso
-                                    _sp_meta_changed = True
-                                    try:
-                                        position_manager._audit(symbol, 'bounce_gate_blocked', {
-                                            'side': 'BUY', 'pnl_usdt': round(_sp_pnl_usdt, 4),
-                                            'gate_blocked_by': _sp_diag,
-                                            'signal': _sp_rescue_signal, 'signal_strength': _sp_rescue_signal_str,
-                                            'rescue_ev': _sp_rescue_pred_ev, 'velocity': _sso_s_vel,
-                                            'block_count_so_far': _sp_block_count,
-                                        })
-                                    except Exception:
-                                        pass
-                                    print(f"[SSO-6/Gate/SPOT] {symbol}: BLOCKED (#{_sp_block_count}) — {_sp_diag}")
-                            elif _sso_s_action.should_close and 'sso_bounce_rescue' in (_sso_s_action.reason or ''):
+                                metadata['bounce_gate_blocked_count'] = _sp_block_count
+                                metadata['bounce_gate_last_eval'] = _sp_now_iso
+                                metadata['bounce_gate_blocked_reason'] = _sp_diag
+                                metadata['bounce_gate_last_signal'] = _sp_rescue_signal
+                                metadata['bounce_gate_last_signal_strength'] = _sp_rescue_signal_str
+                                metadata['bounce_gate_last_ev'] = _sp_rescue_pred_ev
+                                metadata['bounce_gate_last_velocity'] = _sso_s_vel
+                                if 'bounce_gate_first_qualified_at' not in metadata and _sp_pnl_usdt >= _sp_rescue_target:
+                                    metadata['bounce_gate_first_qualified_at'] = _sp_now_iso
+                                if 'bounce_gate_first_pnl_pct' not in metadata:
+                                    metadata['bounce_gate_first_pnl_pct'] = _sso_sym_pnl_pct
+                                _sp_meta_changed = True
+                                try:
+                                    position_manager._audit(symbol, 'bounce_gate_blocked', {
+                                        'side': 'BUY', 'pnl_usdt': round(_sp_pnl_usdt, 4),
+                                        'gate_blocked_by': _sp_diag,
+                                        'signal': _sp_rescue_signal, 'signal_strength': _sp_rescue_signal_str,
+                                        'rescue_ev': _sp_rescue_pred_ev, 'velocity': _sso_s_vel,
+                                        'block_count_so_far': _sp_block_count, 'and_partial': True,
+                                    })
+                                except Exception:
+                                    pass
+                                print(f"[SSO-6/Gate/SPOT] {symbol}: BLOCKED (#{_sp_block_count}) — {_sp_diag}")
+                            elif not _sp_gate_blocked_now and metadata.get('bounce_gate_blocked_count', 0) > 0:
+                                # Gate cleared without close — reset expiry counter
+                                metadata['bounce_gate_blocked_count'] = 0
+                                metadata.pop('bounce_gate_first_pnl_pct', None)
+                                _sp_meta_changed = True
+                            if _sp_gate_expired_now:
+                                _sp_block_count = metadata.get('bounce_gate_blocked_count', 0)
+                                try:
+                                    position_manager._audit(symbol, 'bounce_gate_expired', {
+                                        'side': 'BUY', 'pnl_usdt': round(_sp_pnl_usdt, 4),
+                                        'total_blocks': _sp_block_count, 'reason': _sp_diag,
+                                    })
+                                except Exception:
+                                    pass
+                                print(f"[SSO-6/Gate/SPOT] {symbol}: EXPIRY — rescue forzado tras {_sp_block_count} bloqueos")
+                            if _sso_s_action.should_close and 'sso_bounce_rescue' in (_sso_s_action.reason or ''):
                                 _sp_block_count = metadata.get('bounce_gate_blocked_count', 0)
                                 _sp_first_q = metadata.get('bounce_gate_first_qualified_at')
                                 _sp_held_min = 0
@@ -1389,6 +1407,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                         'gate_held_minutes': _sp_held_min,
                                         'final_signal': _sp_rescue_signal, 'final_ev': _sp_rescue_pred_ev,
                                         'rescue_reason': 'sso_bounce_rescue',
+                                        'expired': _sp_gate_expired_now,
                                     })
                                 except Exception:
                                     pass

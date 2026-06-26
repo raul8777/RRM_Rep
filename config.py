@@ -173,10 +173,17 @@ class Settings(BaseSettings):
     spot_bounce_rescue_min_hours: float = Field(default=8.0, env="SPOT_BOUNCE_RESCUE_MIN_HOURS")               # SPOT: wait 8h before activating
     spot_bounce_rescue_target_pnl: float = Field(default=-0.30, env="SPOT_BOUNCE_RESCUE_TARGET_PNL")           # SPOT: close when pnl >= -$0.30
     # SSO-6: Bounce Rescue Smart Gate — block rescue when position is already recovering
+    # AND-partial logic: G1_strong alone OR COUNT(G2,G3,G4) >= rescue_gate_min_concurrent
     rescue_smart_gate_enabled: bool = Field(default=True, env="RESCUE_SMART_GATE_ENABLED")
-    rescue_stay_strength_min: float = Field(default=0.40, env="RESCUE_STAY_STRENGTH_MIN")      # min signal strength to block rescue
-    rescue_stay_ev_multiplier: float = Field(default=2.0, env="RESCUE_STAY_EV_MULTIPLIER")     # if pred EV > N×|target_pnl|, hold
-    rescue_velocity_min_pct: float = Field(default=0.003, env="RESCUE_VELOCITY_MIN_PCT")       # min pnl velocity/h to block (0.3%/h)
+    rescue_stay_strength_min: float = Field(default=0.50, env="RESCUE_STAY_STRENGTH_MIN")      # min signal strength for G2 (raised from 0.40)
+    rescue_stay_ev_multiplier: float = Field(default=3.0, env="RESCUE_STAY_EV_MULTIPLIER")     # G3: pred EV > N×|target_pnl| (raised from 2.0, compensates predictor bias)
+    rescue_velocity_min_pct: float = Field(default=0.003, env="RESCUE_VELOCITY_MIN_PCT")       # G4: min pnl velocity/h (0.3%/h) — G4 never blocks alone
+    rescue_gate_min_concurrent: int = Field(default=2, env="RESCUE_GATE_MIN_CONCURRENT")       # min simultaneous gates from {G2,G3,G4} to block
+    rescue_gate_g1_min_pct: float = Field(default=0.005, env="RESCUE_GATE_G1_MIN_PCT")         # G1 alone only blocks if pnl_pct >= +0.5% (FUTURES)
+    rescue_gate_g1_spot_min_pct: float = Field(default=0.003, env="RESCUE_GATE_G1_SPOT_MIN_PCT")  # G1 alone SPOT: pnl_pct >= +0.3%
+    rescue_gate_vol_min_spike: float = Field(default=1.5, env="RESCUE_GATE_VOL_MIN_SPIKE")     # G2: min vol_spike to confirm signal (raised from 1.0)
+    rescue_gate_max_blocks: int = Field(default=3, env="RESCUE_GATE_MAX_BLOCKS")               # expiry: force rescue after N blocks without pnl improvement
+    rescue_gate_min_pnl_improvement: float = Field(default=0.005, env="RESCUE_GATE_MIN_PNL_IMPROVEMENT")  # expiry: min pnl_pct improvement between blocks to reset counter
     # FIX-7: Throttle Binance algo order verification every N check_positions cycles
     futures_binance_verify_interval_cycles: int = Field(default=3, env="FUTURES_BINANCE_VERIFY_INTERVAL_CYCLES")
     # WR Screener: block buys on pairs with N consecutive stop_loss closes

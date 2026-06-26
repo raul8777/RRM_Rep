@@ -65,6 +65,9 @@ class SSOPositionData:
     rescue_prediction_ev: Optional[float] = None   # updated EV from predictor at rescue check time
     rescue_signal: Optional[str] = None            # current signal (BUY/SELL/HOLD) at rescue check
     rescue_signal_strength: float = 0.0            # current signal strength at rescue check
+    # Gate expiry tracking (injected from smart_meta / metadata)
+    _gate_block_count: Optional[int] = None        # how many consecutive cycles this gate has blocked
+    _gate_last_pnl_pct: Optional[float] = None     # pnl_pct when gate first blocked (for improvement check)
 
 
 class SmartScaleOut:
@@ -205,47 +208,95 @@ class SmartScaleOut:
             )
 
         # ── SMART GATE: block rescue if position is already recovering ──────
+        # AND-partial logic:
+        #   G1_strong alone  OR  COUNT(G2,G3,G4) >= rescue_gate_min_concurrent
+        # Expiry: force rescue after N blocks without sufficient pnl improvement.
         _gate_enabled = self._cfg('rescue_smart_gate_enabled', True)
-        _gate_reasons = []  # reasons that block the rescue
+        _gate_blocked = False
+        _gate_reasons = []
+        _gate_diag = []  # full diagnosis including non-blocking gates
+
         if _gate_enabled:
-            # Gate 1: position already in profit — let SSO-1/2 manage it
-            if pos.pnl_pct > 0:
-                _gate_reasons.append(f"pnl_positive({pos.pnl_pct*100:.2f}%)")
-
-            # Gate 2: favorable signal with vol confirmation
-            # SHORT benefits from SELL signal; LONG/BUY benefits from BUY signal
-            _sig = pos.rescue_signal or ""
-            _sig_str = pos.rescue_signal_strength or 0.0
-            _str_thresh = self._cfg('rescue_stay_strength_min', 0.40)
-            _is_favorable = (
-                (pos.side in ("SHORT", "SELL") and _sig == "SELL") or
-                (pos.side in ("LONG", "BUY") and _sig == "BUY")
-            )
-            _vol_ok = (pos.vol_spike is not None and pos.vol_spike >= 1.0)
-            if _is_favorable and _sig_str >= _str_thresh and _vol_ok:
-                _gate_reasons.append(f"signal_favorable({_sig} str={_sig_str:.2f})")
-            elif _is_favorable and _sig_str >= _str_thresh:
-                # favorable signal even without vol spike if strength is strong
-                if _sig_str >= 0.60:
-                    _gate_reasons.append(f"signal_strong({_sig} str={_sig_str:.2f})")
-
-            # Gate 3: updated prediction EV is substantially positive
-            _ev = pos.rescue_prediction_ev
-            _ev_thresh = abs(_target_pnl) * self._cfg('rescue_stay_ev_multiplier', 2.0)
-            if _ev is not None and _ev > _ev_thresh:
-                _gate_reasons.append(f"pred_ev=${_ev:.2f}>${_ev_thresh:.2f}")
-
-            # Gate 4: sustained positive PnL velocity
-            _vel = pos.pnl_velocity_1h or 0.0
+            _is_spot = pos.trade_type == 'spot'
+            _min_concurrent = int(self._cfg('rescue_gate_min_concurrent', 2))
+            _g1_min = self._cfg('rescue_gate_g1_spot_min_pct', 0.003) if _is_spot else self._cfg('rescue_gate_g1_min_pct', 0.005)
+            _str_thresh = self._cfg('rescue_stay_strength_min', 0.50)
+            _vol_min = self._cfg('rescue_gate_vol_min_spike', 1.5)
+            _ev_mult = self._cfg('rescue_stay_ev_multiplier', 3.0)
             _vel_thresh = self._cfg('rescue_velocity_min_pct', 0.003)
-            # Only block if velocity is positive AND position is recovering (pnl improving)
-            if _vel > _vel_thresh and pos.pnl_pct > pos.peak_pnl_pct * 0.5:
-                _gate_reasons.append(f"vel_positive({_vel*100:.3f}%/h)")
+            _max_blocks = int(self._cfg('rescue_gate_max_blocks', 3))
+            _min_improvement = self._cfg('rescue_gate_min_pnl_improvement', 0.005)
 
-        if _gate_reasons:
+            # ── Gate 1 (G1): position strongly in profit ──────────────────────
+            # Blocks ALONE only if pnl_pct >= threshold (avoids single-tick false positives)
+            _g1_active = pos.pnl_pct >= _g1_min
+            if _g1_active:
+                _gate_reasons.append(f"pnl_positive({pos.pnl_pct*100:.2f}%>={_g1_min*100:.1f}%)")
+                _gate_blocked = True
+                _gate_diag.append(f"G1=BLOCK({pos.pnl_pct*100:.2f}%)")
+            else:
+                _gate_diag.append(f"G1=pass({pos.pnl_pct*100:.3f}%<{_g1_min*100:.1f}%)")
+
+            if not _gate_blocked:
+                # ── Gate 2 (G2): favorable signal + vol confirmation ──────────
+                _sig = pos.rescue_signal or ""
+                _sig_str = pos.rescue_signal_strength or 0.0
+                _is_favorable = (
+                    (pos.side in ("SHORT", "SELL") and _sig == "SELL") or
+                    (pos.side in ("LONG", "BUY") and _sig == "BUY")
+                )
+                _vol_ok = (pos.vol_spike is not None and pos.vol_spike >= _vol_min)
+                _g2_active = _is_favorable and _sig_str >= _str_thresh and _vol_ok
+                if _g2_active:
+                    _gate_diag.append(f"G2=YES({_sig} str={_sig_str:.2f} vol={pos.vol_spike:.1f})")
+                else:
+                    _gate_diag.append(f"G2=no(fav={_is_favorable} str={_sig_str:.2f}<{_str_thresh} vol={pos.vol_spike})")
+
+                # ── Gate 3 (G3): prediction EV substantially positive ─────────
+                _ev = pos.rescue_prediction_ev
+                _ev_thresh = abs(_target_pnl) * _ev_mult
+                _g3_active = _ev is not None and _ev > _ev_thresh
+                if _g3_active:
+                    _gate_diag.append(f"G3=YES(ev=${_ev:.2f}>{_ev_thresh:.2f})")
+                else:
+                    _ev_str = f"${_ev:.2f}" if _ev is not None else "None"
+                    _gate_diag.append(f"G3=no(ev={_ev_str}<={_ev_thresh:.2f})")
+
+                # ── Gate 4 (G4): sustained pnl velocity — NEVER blocks alone ──
+                _vel = pos.pnl_velocity_1h or 0.0
+                _g4_active = _vel > _vel_thresh and pos.pnl_pct > pos.peak_pnl_pct * 0.5
+                if _g4_active:
+                    _gate_diag.append(f"G4=YES(vel={_vel*100:.3f}%/h)")
+                else:
+                    _gate_diag.append(f"G4=no(vel={_vel*100:.3f}%/h)")
+
+                # ── AND-partial: count concurrent gates {G2,G3,G4} ───────────
+                _concurrent = sum([_g2_active, _g3_active, _g4_active])
+                if _concurrent >= _min_concurrent:
+                    _active = [n for n, a in [("G2", _g2_active), ("G3", _g3_active), ("G4", _g4_active)] if a]
+                    _gate_reasons.append(f"signal_favorable({'+'.join(_active)} concurrent={_concurrent}/{_min_concurrent})")
+                    _gate_blocked = True
+
+            # ── Expiry check: force rescue after max_blocks without improvement ─
+            if _gate_blocked and _max_blocks > 0:
+                _block_count = getattr(pos, '_gate_block_count', None)
+                _last_pnl = getattr(pos, '_gate_last_pnl_pct', None)
+                if _block_count is None:
+                    # first block — expiry not triggered yet
+                    pass
+                elif _block_count >= _max_blocks:
+                    # check if pnl has improved enough since first block
+                    _improvement = pos.pnl_pct - (_last_pnl or pos.pnl_pct)
+                    if _improvement < _min_improvement:
+                        # EXPIRY: override the block and force rescue
+                        _gate_blocked = False
+                        _gate_reasons = [f"gate_expired(blocks={_block_count}>={_max_blocks},improvement={_improvement*100:.3f}%<{_min_improvement*100:.1f}%)"]
+                        _gate_diag.append(f"EXPIRY=FORCE_RESCUE(blocks={_block_count})")
+
+        if _gate_blocked and _gate_reasons:
             return SSOAction(
                 diagnosis=(f"SSO-6:GATE_BLOCKED({', '.join(_gate_reasons)}) — "
-                           f"pnl=${pos.pnl_usdt:.2f} age={age_hours:.1f}h")
+                           f"pnl=${pos.pnl_usdt:.2f} age={age_hours:.1f}h | {' '.join(_gate_diag)}")
             )
 
         # No gate blocked — execute rescue

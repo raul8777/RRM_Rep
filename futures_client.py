@@ -2298,6 +2298,8 @@ class FuturesClient:
                             rescue_prediction_ev=_rescue_pred_ev,
                             rescue_signal=_rescue_signal,
                             rescue_signal_strength=_rescue_signal_str,
+                            _gate_block_count=pos._smart_meta.get('bounce_gate_blocked_count') if _bounce_entry_flag else None,
+                            _gate_last_pnl_pct=pos._smart_meta.get('bounce_gate_first_pnl_pct') if _bounce_entry_flag else None,
                         )
                         _sso_action = _sso.evaluate(_sso_pos)
                         # Full SSO visibility — always log evaluation result
@@ -2309,33 +2311,49 @@ class FuturesClient:
                         # SSO-6 Smart Gate: persist bounce_gate_* state to smart_meta + audit
                         if _bounce_entry_flag:
                             _diag = _sso_action.diagnosis or ""
-                            _gate_blocked = "GATE_BLOCKED" in _diag
+                            _gate_blocked_now = "GATE_BLOCKED" in _diag
+                            _gate_expired_now = "gate_expired" in _diag and _sso_action.should_close
                             _now_iso = datetime.now(timezone.utc).isoformat()
                             _gate_changed = False
-                            if _gate_blocked:
+                            if _gate_blocked_now:
                                 _block_count = pos._smart_meta.get('bounce_gate_blocked_count', 0) + 1
                                 _prev_reason = pos._smart_meta.get('bounce_gate_blocked_reason', '')
                                 _new_reason = _diag
-                                if _block_count != pos._smart_meta.get('bounce_gate_blocked_count') or _prev_reason != _new_reason:
-                                    pos._smart_meta['bounce_gate_blocked_count'] = _block_count
-                                    pos._smart_meta['bounce_gate_last_eval'] = _now_iso
-                                    pos._smart_meta['bounce_gate_blocked_reason'] = _new_reason
-                                    pos._smart_meta['bounce_gate_last_signal'] = _rescue_signal
-                                    pos._smart_meta['bounce_gate_last_signal_strength'] = _rescue_signal_str
-                                    pos._smart_meta['bounce_gate_last_ev'] = _rescue_pred_ev
-                                    pos._smart_meta['bounce_gate_last_velocity'] = _sso_vel
-                                    if 'bounce_gate_first_qualified_at' not in pos._smart_meta and unr >= _rescue_target_pnl:
-                                        pos._smart_meta['bounce_gate_first_qualified_at'] = _now_iso
-                                    _gate_changed = True
-                                    self._audit(symbol, 'bounce_gate_blocked', {
-                                        'side': pos.side, 'pnl_usdt': round(unr, 4),
-                                        'gate_blocked_by': _new_reason,
-                                        'signal': _rescue_signal, 'signal_strength': _rescue_signal_str,
-                                        'rescue_ev': _rescue_pred_ev, 'velocity': _sso_vel,
-                                        'block_count_so_far': _block_count,
-                                    })
-                                    print(f"[SSO-6/Gate] {symbol}: BLOCKED (#{_block_count}) — {_new_reason}")
-                            elif _sso_action.should_close and _sso_action.reason == 'sso_bounce_rescue':
+                                pos._smart_meta['bounce_gate_blocked_count'] = _block_count
+                                pos._smart_meta['bounce_gate_last_eval'] = _now_iso
+                                pos._smart_meta['bounce_gate_blocked_reason'] = _new_reason
+                                pos._smart_meta['bounce_gate_last_signal'] = _rescue_signal
+                                pos._smart_meta['bounce_gate_last_signal_strength'] = _rescue_signal_str
+                                pos._smart_meta['bounce_gate_last_ev'] = _rescue_pred_ev
+                                pos._smart_meta['bounce_gate_last_velocity'] = _sso_vel
+                                if 'bounce_gate_first_qualified_at' not in pos._smart_meta and unr >= _rescue_target_pnl:
+                                    pos._smart_meta['bounce_gate_first_qualified_at'] = _now_iso
+                                # Store pnl_pct at first block for expiry improvement check
+                                if 'bounce_gate_first_pnl_pct' not in pos._smart_meta:
+                                    pos._smart_meta['bounce_gate_first_pnl_pct'] = pnl_pct
+                                _gate_changed = True
+                                self._audit(symbol, 'bounce_gate_blocked', {
+                                    'side': pos.side, 'pnl_usdt': round(unr, 4),
+                                    'gate_blocked_by': _new_reason,
+                                    'signal': _rescue_signal, 'signal_strength': _rescue_signal_str,
+                                    'rescue_ev': _rescue_pred_ev, 'velocity': _sso_vel,
+                                    'block_count_so_far': _block_count,
+                                    'and_partial': True,
+                                })
+                                print(f"[SSO-6/Gate] {symbol}: BLOCKED (#{_block_count}) — {_new_reason}")
+                            elif not _gate_blocked_now and pos._smart_meta.get('bounce_gate_blocked_count', 0) > 0:
+                                # Gate cleared without close (pnl moved away from target) — reset expiry counter
+                                pos._smart_meta['bounce_gate_blocked_count'] = 0
+                                pos._smart_meta.pop('bounce_gate_first_pnl_pct', None)
+                                _gate_changed = True
+                            if _gate_expired_now:
+                                _block_count = pos._smart_meta.get('bounce_gate_blocked_count', 0)
+                                self._audit(symbol, 'bounce_gate_expired', {
+                                    'side': pos.side, 'pnl_usdt': round(unr, 4),
+                                    'total_blocks': _block_count, 'reason': _diag,
+                                })
+                                print(f"[SSO-6/Gate] {symbol}: EXPIRY — rescue forzado tras {_block_count} bloqueos")
+                            if _sso_action.should_close and _sso_action.reason == 'sso_bounce_rescue':
                                 _block_count = pos._smart_meta.get('bounce_gate_blocked_count', 0)
                                 _first_q = pos._smart_meta.get('bounce_gate_first_qualified_at')
                                 _held_min = 0
@@ -2351,6 +2369,7 @@ class FuturesClient:
                                     'gate_held_minutes': _held_min,
                                     'final_signal': _rescue_signal, 'final_ev': _rescue_pred_ev,
                                     'rescue_reason': 'sso_bounce_rescue',
+                                    'expired': _gate_expired_now,
                                 })
                             if _gate_changed:
                                 self._persist_smart_meta(pos)
