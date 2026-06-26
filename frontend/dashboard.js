@@ -163,6 +163,7 @@ const _CLOSE_REASON_MAP = {
     'sso_multilevel_l3':           ['📊 SSO Nivel 3',            'reason-tp'],
     'sso_target_contribution':     ['🎯 SSO Target',             'reason-tp'],
     'sso_reentry_upgrade':         ['🔄 SSO Upgrade',            'reason-tp'],
+    'sso_bounce_rescue':           ['🔄 Bounce Rescue',          'reason-rescue'],
 };
 
 // VIS-3: SL/TP lifecycle helpers
@@ -191,6 +192,16 @@ function fmtSlTpBadges(p) {
     if (p.sso_levels_done && p.sso_levels_done.length > 0) {
         const lvls = p.sso_levels_done.join(',');
         badges += `<span class="sl-badge sso" title="SSO Levels: ${lvls} | ${p.sso_last_trigger || ''}">🎯L${lvls}</span>`;
+    }
+    if (p.bounce_entry) {
+        const btcChg = p.btc_chg_since_entry_pct != null ? ` | BTC: ${p.btc_chg_since_entry_pct >= 0 ? '+' : ''}${p.btc_chg_since_entry_pct.toFixed(1)}% desde entrada` : '';
+        const _gBlocked = (p.bounce_gate_blocked_count || 0) > 0;
+        const _gSig = p.bounce_gate_last_signal ? ` | Señal: ${p.bounce_gate_last_signal} ${p.bounce_gate_last_signal_strength != null ? '(' + (p.bounce_gate_last_signal_strength * 100).toFixed(0) + '%)' : ''}` : '';
+        const _gEv = p.bounce_gate_last_ev != null ? ` | EV: ${p.bounce_gate_last_ev >= 0 ? '+' : ''}$${p.bounce_gate_last_ev.toFixed(2)}` : '';
+        const _gVel = p.bounce_gate_last_velocity != null ? ` | vel: ${(p.bounce_gate_last_velocity * 100).toFixed(3)}%/h` : '';
+        const _gCount = _gBlocked ? ` | Bloqueado ${p.bounce_gate_blocked_count}x` : '';
+        const _gTip = `Rescue Mode${_gBlocked ? ' ⏸️GATE ACTIVO' : ''} — cierra al acercarse a breakeven${btcChg}${_gSig}${_gEv}${_gVel}${_gCount}`;
+        badges += `<span class="sl-badge bounce${_gBlocked ? ' bounce-gated' : ''}" title="${_gTip}">🔄RESCUE${_gBlocked ? '⏸️' : ''}</span>`;
     }
     return badges || '<span class="sl-badge none">—</span>';
 }
@@ -525,26 +536,48 @@ function renderKPIRow(data) {
     if (kpiCycleSub)kpiCycleSub.textContent = `${mode} · ${cycleMins}min`;
 }
 
-// ── Inner tab state & switcher ────────────────────────────────────────────────
+// ── Ops unified card state ────────────────────────────────────────────────────
 let _currentOpenFilter   = 'all';
 let _currentClosedFilter = 'all';
 let _lastOpenData   = null;
 let _lastClosedData = null;
+let _opsMainTab = 'open';  // 'open' | 'closed'
+let _opsSubFilter = 'all'; // 'all' | 'spot' | 'fut'
 
-function switchInnerTab(card, filter) {
-    if (card === 'open') {
-        _currentOpenFilter = filter;
-        document.querySelectorAll('[data-inner-tab^="open-"]').forEach(b => {
-            b.classList.toggle('active', b.dataset.innerTab === `open-${filter}`);
-        });
+function switchOpsMainTab(main) {
+    _opsMainTab = main;
+    // Level-1 button state
+    document.getElementById('opsTabOpen')  ?.classList.toggle('active', main === 'open');
+    document.getElementById('opsTabClosed')?.classList.toggle('active', main === 'closed');
+    // Panel visibility
+    const openPanel   = document.getElementById('openPositionsData');
+    const closedPanel = document.getElementById('closedPositionsData');
+    if (openPanel)   { openPanel.classList.toggle('active-panel', main === 'open');   openPanel.style.display   = main === 'open'   ? '' : 'none'; }
+    if (closedPanel) { closedPanel.classList.toggle('active-panel', main === 'closed'); closedPanel.style.display = main === 'closed' ? '' : 'none'; }
+    // Sync sub-tab filter to the active main tab
+    if (main === 'open')   { _currentOpenFilter   = _opsSubFilter; if (_lastOpenData)   renderOpenPositions(_lastOpenData); }
+    if (main === 'closed') { _currentClosedFilter = _opsSubFilter; if (_lastClosedData) renderClosedPositions(_lastClosedData); }
+}
+
+function switchOpsSubTab(sub) {
+    _opsSubFilter = sub;
+    // Level-2 button state
+    document.querySelectorAll('[data-inner-tab^="ops-"]').forEach(b => {
+        b.classList.toggle('active', b.dataset.innerTab === `ops-${sub}`);
+    });
+    if (_opsMainTab === 'open') {
+        _currentOpenFilter = sub;
         if (_lastOpenData) renderOpenPositions(_lastOpenData);
     } else {
-        _currentClosedFilter = filter;
-        document.querySelectorAll('[data-inner-tab^="closed-"]').forEach(b => {
-            b.classList.toggle('active', b.dataset.innerTab === `closed-${filter}`);
-        });
+        _currentClosedFilter = sub;
         if (_lastClosedData) renderClosedPositions(_lastClosedData);
     }
+}
+
+// Legacy wrapper kept for any inline onclick references from old inner-tabs
+function switchInnerTab(card, filter) {
+    if (card === 'open')   { _opsMainTab = 'open';   switchOpsSubTab(filter); }
+    else                   { _opsMainTab = 'closed';  switchOpsSubTab(filter); }
 }
 
 // ── Render functions (pure – no fetch) ───────────────────────────────────────
@@ -685,7 +718,7 @@ function renderBalance(d) {
         <div class="data-item"><span class="data-label">USD/MXN</span><span class="data-value">${fmt(d.usd_to_mxn_rate)}</span></div>
         ${walletHtml}
         <div class="balances-breakdown">
-            <h3>Desglose por Activo:</h3>
+            <h3>💼 SPOT — Activos:</h3>
             <div class="balances-scroll">
             ${Object.entries(d.balances_usdt || {}).filter(([a, v]) => parseFloat(v) >= 5).map(([a, v]) => `
                 <div class="data-item">
@@ -694,6 +727,30 @@ function renderBalance(d) {
                 </div>`).join('')}
             </div>
         </div>
+        ${_cachedFuturesPositions.length > 0 ? `
+        <div class="balances-breakdown" style="margin-top:10px">
+            <h3>⚡ FUTUROS — Posiciones abiertas:</h3>
+            <div class="balances-scroll">
+            ${_cachedFuturesPositions.map(p => {
+                const pnl = parseFloat(p.unrealized_pnl || 0);
+                const pnlCls = pnl >= 0 ? 'positive' : 'negative';
+                const pnlSign = pnl >= 0 ? '+' : '';
+                const sym = (p.symbol || '').replace('USDT', '');
+                const side = p.side || '';
+                const sideColor = side === 'SHORT' ? '#e74c3c' : '#4ecca3';
+                const qty = parseFloat(p.qty || 0);
+                const ep = parseFloat(p.entry_price || 0);
+                const exposure = qty * ep;
+                return `<div class="data-item">
+                    <span class="data-label"><span style="color:${sideColor};font-weight:700">${sym} ${side}</span></span>
+                    <span class="data-value">
+                        ${fmt(qty,3)} @ $${fmt(ep)} = $${fmt(exposure)}
+                        &nbsp;<span class="${pnlCls}" style="font-weight:700">${pnlSign}${fmt(pnl)} USDT</span>
+                    </span>
+                </div>`;
+            }).join('')}
+            </div>
+        </div>` : ''}
     `;
 }
 
@@ -895,6 +952,39 @@ function renderProfitTracker(d) {
     `;
 }
 
+// ── Set of expanded symbols in open positions table ───────────────────────────
+const _expandedSymbols = new Set();
+
+// Helper: format entry_time legibly — shows date if position is >24h old
+function fmtEntryTime(isoStr, hoursHeld) {
+    if (!isoStr) return '—';
+    try {
+        const d = new Date(isoStr);
+        if (hoursHeld >= 24) {
+            return d.toLocaleString('es-MX', {
+                timeZone: 'America/Mexico_City',
+                day: '2-digit', month: 'short',
+                hour: '2-digit', minute: '2-digit', hour12: false
+            });
+        }
+        return d.toLocaleString('es-MX', {
+            timeZone: 'America/Mexico_City',
+            hour: '2-digit', minute: '2-digit', hour12: false
+        });
+    } catch(e) { return isoStr.substring(11, 16) || isoStr; }
+}
+
+function toggleEscRow(symbol) {
+    if (_expandedSymbols.has(symbol)) {
+        _expandedSymbols.delete(symbol);
+    } else {
+        _expandedSymbols.add(symbol);
+    }
+    // Re-render only the tbody rows without full re-fetch
+    const el = document.getElementById('openPositionsData');
+    if (_lastOpenData) renderOpenPositions(_lastOpenData);
+}
+
 function renderOpenPositions(d) {
     if (!d) return;
     _lastOpenData = d;  // FIX-L6c: cache for sub-tab re-render
@@ -904,9 +994,9 @@ function renderOpenPositions(d) {
     const _allPos = d.positions || [];
     const _spotC = d.spot_count    ?? _allPos.filter(p => p.trade_type !== 'futures').length;
     const _futC  = d.futures_count ?? _allPos.filter(p => p.trade_type === 'futures').length;
-    const _titleEl = document.getElementById('openPosCardTitle');
-    if (_titleEl) {
-        _titleEl.innerHTML = `📂 Posiciones Abiertas <span class="pos-count-badge">Spot: ${_spotC} | Fut: ${_futC}</span>`;
+    const _titleEl = document.getElementById('unifiedPosCardTitle');
+    if (_titleEl && _opsMainTab === 'open') {
+        _titleEl.innerHTML = `📂 Operaciones — Abiertas <span class="pos-count-badge">Spot: ${_spotC} | Fut: ${_futC}</span>`;
     }
 
     // FIX-D4: filter by active inner sub-tab
@@ -915,8 +1005,12 @@ function renderOpenPositions(d) {
     if (_filter === 'spot') visiblePositions = _allPos.filter(p => p.trade_type !== 'futures');
     else if (_filter === 'fut') visiblePositions = _allPos.filter(p => p.trade_type === 'futures');
 
-    // Ordenar por Edad ascendente (más reciente primero)
-    visiblePositions = [...visiblePositions].sort((a, b) => parseFloat(a.hours_held || 0) - parseFloat(b.hours_held || 0));
+    // Ordenar por Edad descendente (más antigua primero — edad real desde primera apertura)
+    visiblePositions = [...visiblePositions].sort((a, b) => {
+        const aHrs = a.entries?.length > 0 ? Math.max(...a.entries.map(e => e.age_h || 0)) : parseFloat(a.hours_held || 0);
+        const bHrs = b.entries?.length > 0 ? Math.max(...b.entries.map(e => e.age_h || 0)) : parseFloat(b.hours_held || 0);
+        return bHrs - aHrs;
+    });
 
     if (visiblePositions.length === 0) {
         el.innerHTML = _allPos.length === 0
@@ -925,17 +1019,14 @@ function renderOpenPositions(d) {
         return;
     }
 
-    const showMxn = document.getElementById('toggleMxn') && document.getElementById('toggleMxn').checked;
     const totalUnreal = visiblePositions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
     const totalInvested = visiblePositions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
-    
-    // Calcular accuracy global del predictor en posiciones visibles
+
     const predPositions = visiblePositions.filter(p => p.pnl_prediction && p.pnl_prediction.expected_pnl);
-    const avgAccuracy = predPositions.length > 0 
-        ? predPositions.reduce((s, p) => s + (parseFloat(p.unrealized_pnl || 0) / parseFloat(p.pnl_prediction.expected_pnl || 1)), 0) / predPositions.length 
+    const avgAccuracy = predPositions.length > 0
+        ? predPositions.reduce((s, p) => s + (parseFloat(p.unrealized_pnl || 0) / parseFloat(p.pnl_prediction.expected_pnl || 1)), 0) / predPositions.length
         : 0;
 
-    // SL Global: worst-case PnL if every position hits its stop loss
     const slGlobalPnl = visiblePositions.reduce((s, p) => {
         const sl = parseFloat(p.stop_loss || 0);
         const entry = parseFloat(p.entry_price || 0);
@@ -944,6 +1035,107 @@ function renderOpenPositions(d) {
         const isShort = (p.side || '').toUpperCase() === 'SHORT' || (p.side || '').toUpperCase() === 'SELL';
         return s + (isShort ? (entry - sl) * qty : (sl - entry) * qty);
     }, 0);
+
+    const rows = [];
+    for (const p of visiblePositions) {
+        const _isBounce = !!p.bounce_entry;
+        const rowCls = _isBounce ? 'row-bounce' : parseFloat(p.unrealized_pnl||0) > 0 ? 'row-pnl-pos' : parseFloat(p.unrealized_pnl||0) < -0.01 ? 'row-pnl-neg' : '';
+        const curP   = parseFloat(p.current_price || 0);
+        const entryP = parseFloat(p.entry_price || 0);
+        const _escEntries = p.entries || [];
+        // B1: edad real = mayor age_h entre escalamientos, o hours_held del campo
+        const realHrs = _escEntries.length > 0
+            ? Math.max(..._escEntries.map(e => e.age_h || 0))
+            : parseFloat(p.hours_held || 0);
+        const ageCls = realHrs < 2 ? 'age-fresh' : realHrs < 8 ? 'age-mid' : 'age-old';
+        const ageStr = realHrs < 1 ? '<1h' : realHrs < 24 ? realHrs.toFixed(0) + 'h' : (realHrs/24).toFixed(1) + 'd';
+
+        const overflowBadge = p.is_overflow ? ' <span class="badge-overflow" title="Posición extra por señal excepcional">⚡OVF</span>' : '';
+        const _btcTip = p.btc_chg_since_entry_pct != null ? ` BTC ${p.btc_chg_since_entry_pct >= 0 ? '+' : ''}${p.btc_chg_since_entry_pct.toFixed(1)}% desde entrada` : '';
+        const _bGateBlocked = _isBounce && (p.bounce_gate_blocked_count || 0) > 0;
+        const _bGateSig = p.bounce_gate_last_signal ? ` Señal: ${p.bounce_gate_last_signal}` : '';
+        const _bGateEv = p.bounce_gate_last_ev != null ? ` EV: ${p.bounce_gate_last_ev >= 0 ? '+' : ''}$${p.bounce_gate_last_ev.toFixed(2)}` : '';
+        const _bGateVel = p.bounce_gate_last_velocity != null ? ` vel: ${(p.bounce_gate_last_velocity * 100).toFixed(3)}%/h` : '';
+        const _bGateTip = _isBounce ? `Entrada en rebote — Rescue Mode${_bGateBlocked ? ' ⏸️GATE BLOQUEADO (' + p.bounce_gate_blocked_count + 'x)' : ' activo'}. Target: pnl ≥ -$0.50${_btcTip}${_bGateSig}${_bGateEv}${_bGateVel}` : '';
+        const bounceBadge = _isBounce ? ` <span class="badge-bounce${_bGateBlocked ? ' badge-bounce-gated' : ''}" title="${_bGateTip}">🔄 REBOTE${_bGateBlocked ? '⏸️' : ''}</span>` : '';
+        const typeBadge = p.trade_type === 'futures' ? '<span class="badge-futures">FUT</span>' : '<span class="badge-spot">SPOT</span>';
+        const _escN = p.escalamientos || 0;
+        // Max escalonamiento_index from entries (may be >1 even if only 1 entry remains after sync)
+        const _maxEscIdx = _escEntries.length > 0
+            ? Math.max(..._escEntries.map(e => e.escalonamiento_index || 1))
+            : _escN;
+        const _showEscBadge = _escN > 1 || _maxEscIdx >= 2;
+        const isExpanded = _expandedSymbols.has(p.symbol);
+        const escBadge = _showEscBadge
+            ? ` <span class="badge-esc" style="cursor:pointer" onclick="event.stopPropagation();toggleEscRow('${p.symbol}')" title="Click para ver/ocultar entradas (${_escN} registradas, idx máx ${_maxEscIdx})">📊×${_maxEscIdx} ${isExpanded ? '▲' : '▼'}</span>`
+            : '';
+
+        const tp = parseFloat(p.take_profit || 0);
+        let progressHtml = '—';
+        if (tp && entryP) progressHtml = fmtProgressBar(curP, entryP, tp, true);
+
+        // B7: entry_time legible con fecha si >24h
+        const firstEntry = _escEntries.length > 0
+            ? _escEntries.reduce((a, b) => (a.age_h||0) > (b.age_h||0) ? a : b)
+            : null;
+        const entryTimeStr = firstEntry
+            ? fmtEntryTime(firstEntry.opened_at, realHrs)
+            : fmtEntryTime(p.entry_time, realHrs);
+
+        rows.push(`
+        <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id}', 'open')" style="cursor:pointer" data-symbol="${p.symbol}">
+            <td>${typeBadge} <strong>${p.symbol}</strong>${overflowBadge}${escBadge}${bounceBadge}</td>
+            <td>$${fmt(entryP)}<br><small class="entry-time">${entryTimeStr}</small></td>
+            <td class="sl-tp-cell">${fmtSlTpCell(p)}</td>
+            <td class="sl-tp-badges">${fmtSlTpBadges(p)}</td>
+            <td>${progressHtml}</td>
+            <td class="${pnlClass(p.unrealized_pnl)}">${fmt(p.unrealized_pnl)} USDT</td>
+            <td class="${ageCls}">${ageStr}</td>
+        </tr>`);
+
+        // Sub-filas de escalamiento expandibles
+        // Mostrar incluso con 1 entrada si escalonamiento_index >= 2 (Esc1 purgado por sync)
+        if (_showEscBadge && isExpanded) {
+            // Si hay entradas faltantes (idx > posición en array), mostrar placeholder
+            const _knownIndices = new Set(_escEntries.map(e => e.escalonamiento_index || 1));
+            for (let _idx = 1; _idx < _maxEscIdx; _idx++) {
+                if (!_knownIndices.has(_idx)) {
+                    rows.push(`
+        <tr class="esc-sub-row" style="opacity:0.45">
+            <td style="padding-left:28px;font-size:12px">
+                <span style="color:#9b59b6">↳</span>
+                <span style="color:#888;font-weight:600">Esc${_idx}</span>
+                <small style="color:#555;font-style:italic">&nbsp;(entrada anterior — no disponible tras reinicio)</small>
+            </td>
+            <td colspan="6" style="color:#555;font-size:11px;font-style:italic">Datos no recuperables: posición promediada por Binance al sincronizar</td>
+        </tr>`);
+                }
+            }
+            for (const esc of _escEntries) {
+                const escPnl = parseFloat(esc.pnl_usdt || 0);
+                const escPct = parseFloat(esc.pnl_pct || 0);
+                const escAge = parseFloat(esc.age_h || 0);
+                const escAgeStr = escAge < 1 ? '<1h' : escAge < 24 ? escAge.toFixed(0) + 'h' : (escAge/24).toFixed(1) + 'd';
+                const escEntryFmt = fmtEntryTime(esc.opened_at, escAge);
+                const escCost = round2(parseFloat(esc.entry_price||0) * parseFloat(esc.qty||0));
+                rows.push(`
+        <tr class="esc-sub-row ${escPnl >= 0 ? 'row-pnl-pos' : 'row-pnl-neg'}">
+            <td style="padding-left:28px;color:#aaa;font-size:12px">
+                <span style="color:#9b59b6">↳</span>
+                <span style="color:#f39c12;font-weight:600">Esc${esc.escalonamiento_index}</span>
+                &nbsp;$${fmt(esc.entry_price)} × ${fmt(esc.qty,4)}
+                <small style="color:#666">(~$${fmt(escCost)})</small>
+            </td>
+            <td><small class="entry-time">${escEntryFmt}</small></td>
+            <td colspan="3" style="color:#888;font-size:12px">
+                PnL entrada: <span class="${escPnl>=0?'positive':'negative'}" style="font-weight:600">${escPnl>=0?'+':''}${fmt(escPnl)} USDT (${escPct>=0?'+':''}${fmt(escPct)}%)</span>
+            </td>
+            <td class="${escPnl>=0?'positive':'negative'}" style="font-weight:600">${escPnl>=0?'+':''}${fmt(escPnl)}</td>
+            <td style="color:#888;font-size:12px">${escAgeStr}</td>
+        </tr>`);
+            }
+        }
+    }
 
     el.innerHTML = `
         <div class="table-scroll-10">
@@ -959,39 +1151,12 @@ function renderOpenPositions(d) {
                     <th>Edad</th>
                 </tr>
             </thead>
-            <tbody>
-                ${visiblePositions.map(p => {
-                    const rowCls = parseFloat(p.unrealized_pnl||0) > 0 ? 'row-pnl-pos' : parseFloat(p.unrealized_pnl||0) < -0.01 ? 'row-pnl-neg' : '';
-                    const curP = parseFloat(p.current_price || 0);
-                    const entryP = parseFloat(p.entry_price || 0);
-                    const hrs = parseFloat(p.hours_held || 0);
-                    const ageCls = hrs < 2 ? 'age-fresh' : hrs < 8 ? 'age-mid' : 'age-old';
-                    const overflowBadge = p.is_overflow ? ' <span class="badge-overflow" title="Posición extra por señal excepcional">⚡OVF</span>' : '';
-                    const typeBadge = p.trade_type === 'futures' ? '<span class="badge-futures">FUT</span>' : '<span class="badge-spot">SPOT</span>';
-
-                    const tp = parseFloat(p.take_profit || 0);
-                    const sl = parseFloat(p.stop_loss || 0);
-                    let progressHtml = '—';
-                    if (tp && entryP) {
-                        progressHtml = fmtProgressBar(curP, entryP, tp, true);
-                    }
-
-                    return `
-                    <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id}', 'open')" style="cursor:pointer">
-                        <td>${typeBadge} <strong>${p.symbol}</strong>${overflowBadge}</td>
-                        <td>$${fmt(entryP)}<br><small class="entry-time">${p.entry_time ? p.entry_time.split(' ')[1]?.substring(0,5) : ''}</small></td>
-                        <td class="sl-tp-cell">${fmtSlTpCell(p)}</td>
-                        <td class="sl-tp-badges">${fmtSlTpBadges(p)}</td>
-                        <td>${progressHtml}</td>
-                        <td class="${pnlClass(p.unrealized_pnl)}">${fmt(p.unrealized_pnl)} USDT</td>
-                        <td class="${ageCls}">${hrs < 1 ? '<1h' : hrs.toFixed(0) + 'h'}</td>
-                    </tr>`;
-                }).join('')}
-            </tbody>
+            <tbody>${rows.join('')}</tbody>
         </table>
         </div>
         <div class="positions-summary">
-            ${visiblePositions.length} posiciones${_allPos.length !== visiblePositions.length ? ` (de ${_allPos.length} total)` : ''} &nbsp;|&nbsp;
+            ${visiblePositions.length} posiciones${_allPos.length !== visiblePositions.length ? ` (de ${_allPos.length} total)` : ''}
+            ${(()=>{const _bc=visiblePositions.filter(p=>p.bounce_entry).length;return _bc>0?`&nbsp;|&nbsp;<span style="color:#e67e22;font-weight:700">⚠️ ${_bc} en rebote — Rescue Mode activo</span>`:'';})()} &nbsp;|&nbsp;
             Invertido: <strong>$${fmt(totalInvested)} USDT</strong>
             &nbsp;|&nbsp;
             PnL No Realizado:
@@ -1007,20 +1172,24 @@ function renderOpenPositions(d) {
     `;
 }
 
+function round2(x) { return Math.round(x * 100) / 100; }
+
 function renderClosedPositions(d) {
     if (!d) return;
     _lastClosedData = d;  // FIX-L6c: cache for sub-tab re-render
     const el = document.getElementById('closedPositionsData');
-    const periodDays = d.period_days || 3;
+    const periodDays = d.period_days || 7;
 
     // FIX-L6c: update card header with live counts
     const _allClosed = d.positions || [];
     const _clSpotC = d.spot_count    ?? _allClosed.filter(p => p.trade_type !== 'futures').length;
     const _clFutC  = d.futures_count ?? _allClosed.filter(p => p.trade_type === 'futures').length;
-    const _clTitleEl = document.getElementById('closedPosCardTitle');
-    if (_clTitleEl) {
-        _clTitleEl.innerHTML = `✅ Trades Cerrados <span class="card-sub">últimos ${periodDays} días</span> <span class="pos-count-badge">${_allClosed.length} total · Spot: ${_clSpotC} | Fut: ${_clFutC}</span>`;
+    const _clTitleEl = document.getElementById('unifiedPosCardTitle');
+    if (_clTitleEl && _opsMainTab === 'closed') {
+        _clTitleEl.innerHTML = `✅ Operaciones — Cerradas <span class="pos-count-badge">${_allClosed.length} total · Spot: ${_clSpotC} | Fut: ${_clFutC}</span>`;
     }
+    const _daysLabel = document.getElementById('closedDaysLabel');
+    if (_daysLabel) _daysLabel.textContent = `${periodDays}d`;
 
     // FIX-D4: filter by active inner sub-tab
     const _clFilter = _currentClosedFilter;
@@ -1086,7 +1255,8 @@ function renderClosedPositions(d) {
             <tbody>
                 ${sortedPositions.map(p => {
                     const actualPnl = parseFloat(p.pnl || 0);
-                    const rowCls = actualPnl > 0 ? 'row-pnl-pos' : actualPnl < -0.01 ? 'row-pnl-neg' : '';
+                    const _clIsBounce = !!p.bounce_entry || p.close_reason === 'sso_bounce_rescue';
+                    const rowCls = _clIsBounce ? 'row-bounce-closed' : actualPnl > 0 ? 'row-pnl-pos' : actualPnl < -0.01 ? 'row-pnl-neg' : '';
                     const typeBadge = tradeTypeBadge(p.trade_type);
                     const exitTimeFmt = fmtDateLocal(p.exit_time);
 
@@ -1100,6 +1270,21 @@ function renderClosedPositions(d) {
                     }
                     if (p.peak_pnl_pct > 0) lifecycleBadges += `<span class="sl-badge peak" title="Peak PnL: ${fmt(p.peak_pnl_pct, 1)}%">📊${fmt(p.peak_pnl_pct, 1)}%</span>`;
                     if (p.close_reason === 'momentum_reversal') lifecycleBadges += '<span class="sl-badge mr" title="Cerrado por momentum reversal">⚡MR</span>';
+                    // Escalamiento badge for closed positions
+                    const _cMeta = p.metadata || {};
+                    const _cEscIdx = _cMeta.escalonamiento_index;
+                    const _cEscTotal = _cMeta.total_escalonamientos;
+                    const _cCgid = _cMeta.close_group_id;
+                    if (_cEscTotal > 1 && _cEscIdx) {
+                        lifecycleBadges += `<span class="sl-badge esc" title="Escalonamiento ${_cEscIdx}/${_cEscTotal}${_cCgid ? ' grp:' + _cCgid.substring(0,8) : ''}">📊${_cEscIdx}/${_cEscTotal}</span>`;
+                    }
+                    if (_clIsBounce) {
+                        const _clMeta2 = typeof p.metadata === 'object' ? (p.metadata || {}) : {};
+                        const _clBlockCount = _clMeta2.bounce_gate_blocked_count || 0;
+                        const _clHeldMin = _clMeta2.bounce_gate_held_minutes || 0;
+                        const _clBrTip = `Bounce Rescue${_clBlockCount > 0 ? ' — Gate bloqueó ' + _clBlockCount + 'x' : ''}${_clHeldMin > 0 ? ', mantuvo ' + _clHeldMin + ' min' : ''}`;
+                        lifecycleBadges += `<span class="sl-badge bounce" title="${_clBrTip}">🔄BR${_clBlockCount > 0 ? '(' + _clBlockCount + ')' : ''}</span>`;
+                    }
                     if (!lifecycleBadges) lifecycleBadges = '<span class="sl-badge none">—</span>';
 
                     return `
@@ -1200,8 +1385,14 @@ function renderExpectativaVsRealidad(data) {
                             progressBar = '<span class="badge-closed">✓ Cerrado</span>';
                         }
                         
+                        const _evMeta = p.metadata || {};
+                        const _evEscIdx = _evMeta.escalonamiento_index;
+                        const _evEscTotal = _evMeta.total_escalonamientos;
+                        const _evEscBadge = (_evEscIdx > 1)
+                            ? ` <span class="badge-esc" title="Escalamiento ${_evEscIdx}/${_evEscTotal || _evEscIdx}">+${_evEscIdx}</span>`
+                            : '';
                         return `<tr>
-                            <td><strong>${p.symbol}</strong> <small class="status-${p.status}">${p.status === 'open' ? '🟢' : '⚫'}</small></td>
+                            <td><strong>${p.symbol}</strong>${_evEscBadge} <small class="status-${p.status}">${p.status === 'open' ? '🟢' : '⚫'}</small></td>
                             <td class="${expected >= 0 ? 'positive' : 'negative'}">${expected >= 0 ? '+' : ''}${fmt(expected)}</td>
                             <td>${progressBar}</td>
                             <td class="${actual >= 0 ? 'positive' : 'negative'}">${actual >= 0 ? '+' : ''}${fmt(actual)}</td>
@@ -1341,6 +1532,81 @@ function showPositionDetailModal(symbol, positionId, status) {
     const actualPnl = parseFloat(position.unrealized_pnl || position.pnl || 0);
     const diff = actualPnl - expectedPnl;
     
+    // Helper: format ISO date in a readable local format for modal
+    const fmtModalDate = (isoStr) => {
+        if (!isoStr) return '—';
+        try {
+            return new Date(isoStr).toLocaleString('es-MX', {
+                timeZone: 'America/Mexico_City',
+                day: '2-digit', month: 'short', year: 'numeric',
+                hour: '2-digit', minute: '2-digit', hour12: false
+            });
+        } catch(e) { return isoStr; }
+    };
+
+    // Build escalamientos table if entries exist
+    const _modalEntries = position.entries || [];
+    const _modalMaxIdx = _modalEntries.length > 0
+        ? Math.max(..._modalEntries.map(e => e.escalonamiento_index || 1)) : 1;
+    const _showEscTable = _modalEntries.length > 1 || _modalMaxIdx >= 2;
+    const _escTableHtml = _showEscTable ? (() => {
+        const _knownModalIdx = new Set(_modalEntries.map(e => e.escalonamiento_index || 1));
+        const totalCost = _modalEntries.reduce((s, e) => s + parseFloat(e.entry_price||0)*parseFloat(e.qty||0), 0);
+        const totalPnlEsc = _modalEntries.reduce((s, e) => s + parseFloat(e.pnl_usdt||0), 0);
+        // Rows: placeholder for missing indices + real entries
+        let rows = '';
+        for (let _mi = 1; _mi < _modalMaxIdx; _mi++) {
+            if (!_knownModalIdx.has(_mi)) {
+                rows += `<tr style="opacity:0.4">
+                <td style="color:#888;font-weight:600">Esc ${_mi}</td>
+                <td colspan="7" style="color:#555;font-style:italic;font-size:11px">Entrada anterior — no disponible tras reinicio (Binance promedia posición)</td>
+            </tr>`;
+            }
+        }
+        rows += _modalEntries.map(e => {
+            const ep = parseFloat(e.entry_price||0), qty = parseFloat(e.qty||0);
+            const cost = ep * qty;
+            const pnl = parseFloat(e.pnl_usdt||0);
+            const pct = parseFloat(e.pnl_pct||0);
+            const age = parseFloat(e.age_h||0);
+            const ageStr = age < 1 ? '<1h' : age < 24 ? age.toFixed(0)+'h' : (age/24).toFixed(1)+'d';
+            return `<tr>
+                <td style="color:#f39c12;font-weight:600">Esc ${e.escalonamiento_index}</td>
+                <td>$${fmt(ep)}</td>
+                <td>${fmt(qty,4)}</td>
+                <td style="color:#888">~$${fmt(cost)}</td>
+                <td class="${pnl>=0?'positive':'negative'}" style="font-weight:600">${pnl>=0?'+':''}${fmt(pnl)}</td>
+                <td class="${pct>=0?'positive':'negative'}">${pct>=0?'+':''}${fmt(pct)}%</td>
+                <td style="color:#888;font-size:11px">${fmtEntryTime(e.opened_at, age)}</td>
+                <td style="color:#888">${ageStr}</td>
+            </tr>`;
+        }).join('');
+        return `<div class="modal-section">
+            <h4>📊 ESCALAMIENTOS (${_modalEntries.length} activas, idx máx ${_modalMaxIdx})</h4>
+            <div style="overflow-x:auto">
+            <table style="width:100%;font-size:12px;border-collapse:collapse">
+                <thead><tr style="color:#888;border-bottom:1px solid #333">
+                    <th style="text-align:left;padding:4px 6px">Entrada</th>
+                    <th style="text-align:left;padding:4px 6px">Precio</th>
+                    <th style="text-align:left;padding:4px 6px">Qty</th>
+                    <th style="text-align:left;padding:4px 6px">Costo</th>
+                    <th style="text-align:left;padding:4px 6px">PnL USDT</th>
+                    <th style="text-align:left;padding:4px 6px">PnL %</th>
+                    <th style="text-align:left;padding:4px 6px">Apertura</th>
+                    <th style="text-align:left;padding:4px 6px">Edad</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+                <tfoot><tr style="border-top:1px solid #444;font-weight:600;color:#ccc">
+                    <td colspan="3" style="padding:4px 6px">TOTAL (entradas disponibles)</td>
+                    <td style="padding:4px 6px;color:#888">~$${fmt(totalCost)}</td>
+                    <td style="padding:4px 6px" class="${totalPnlEsc>=0?'positive':'negative'}">${totalPnlEsc>=0?'+':''}${fmt(totalPnlEsc)}</td>
+                    <td colspan="3"></td>
+                </tr></tfoot>
+            </table>
+            </div>
+        </div>`;
+    })() : '';
+
     modal.innerHTML = `
         <div class="modal-overlay" onclick="closePositionDetailModal()">
             <div class="modal-content" onclick="event.stopPropagation()">
@@ -1355,9 +1621,10 @@ function showPositionDetailModal(symbol, positionId, status) {
                             <div><label>Precio:</label><span>$${fmt(position.entry_price)}</span></div>
                             <div><label>Cantidad:</label><span>${fmt(position.quantity, 4)}</span></div>
                             <div><label>Invertido:</label><span>$${fmt(position.invested_usdt || (position.entry_price * position.quantity))} USDT</span></div>
-                            <div><label>Fecha:</label><span>${position.entry_time || '—'}</span></div>
+                            <div><label>Apertura:</label><span>${fmtModalDate(position.entry_time)}</span></div>
                         </div>
                     </div>
+                    ${_escTableHtml}
                     
                     <div class="modal-section">
                         <h4>🎯 PREDICCIÓN AL ENTRAR</h4>
@@ -1420,12 +1687,27 @@ function showPositionDetailModal(symbol, positionId, status) {
                         </div>
                     </div>
                     
+                    ${position.bounce_entry ? `
+                    <div class="modal-section modal-bounce-rescue">
+                        <h4>🔄 BOUNCE RESCUE STATUS</h4>
+                        <div class="detail-grid">
+                            ${ (position.bounce_gate_blocked_count || 0) > 0
+                                ? `<div><label>Estado Gate:</label><span style="color:#e67e22;font-weight:700">⏸️ BLOQUEADO (${position.bounce_gate_blocked_count}x)</span></div>`
+                                : `<div><label>Estado Gate:</label><span style="color:#2ecc71">✅ Listo para rescue</span></div>` }
+                            ${ position.bounce_gate_last_signal ? `<div><label>Última señal:</label><span>${position.bounce_gate_last_signal}${ position.bounce_gate_last_signal_strength != null ? ' — ' + (position.bounce_gate_last_signal_strength * 100).toFixed(0) + '%' : ''}</span></div>` : '' }
+                            ${ position.bounce_gate_last_ev != null ? `<div><label>EV predicción:</label><span class="${ position.bounce_gate_last_ev >= 0 ? 'positive' : 'negative'}">${position.bounce_gate_last_ev >= 0 ? '+' : ''}$${position.bounce_gate_last_ev.toFixed(2)} USDT</span></div>` : '' }
+                            ${ position.bounce_gate_last_velocity != null ? `<div><label>Velocidad PnL:</label><span>${(position.bounce_gate_last_velocity * 100).toFixed(3)}%/h</span></div>` : '' }
+                            ${ position.bounce_gate_first_qualified_at ? `<div><label>Primer calificado:</label><span>${fmtModalDate(position.bounce_gate_first_qualified_at)}</span></div>` : '' }
+                            ${ position.bounce_gate_blocked_reason ? `<div style="grid-column:1/-1"><label>Motivo bloqueo:</label><span style="font-size:11px;color:#aaa">${position.bounce_gate_blocked_reason}</span></div>` : '' }
+                        </div>
+                    </div>
+                    ` : ''}
                     ${status === 'closed' ? `
                     <div class="modal-section">
                         <h4>🔚 CIERRE</h4>
                         <div class="detail-grid">
                             <div><label>Razón:</label><span>${position.close_reason || '—'}</span></div>
-                            <div><label>Fecha salida:</label><span>${position.exit_time || '—'}</span></div>
+                            <div><label>Fecha salida:</label><span>${fmtModalDate(position.exit_time)}</span></div>
                         </div>
                     </div>
                     ` : ''}
@@ -1460,7 +1742,8 @@ function showPositionDetailModal(symbol, positionId, status) {
                 const _sc = buildPriceRangeChart(
                     position.entry_price,
                     position.exit_price,
-                    position.stop_loss, position.take_profit, position.side || 'LONG');
+                    position.stop_loss, position.take_profit, position.side || 'LONG',
+                    position.entries || []);
                 chartWrap.innerHTML = _sc.html;
                 attachChartHover(_sc.uid, _sc.entry, _sc.isShort, _sc.rangeMin, _sc.rangeSpan, _sc.chartL, _sc.chartW, position.quantity);
             }
@@ -1470,7 +1753,8 @@ function showPositionDetailModal(symbol, positionId, status) {
         const _sc = buildPriceRangeChart(
             position.entry_price,
             status === 'open' ? position.current_price : position.exit_price,
-            position.stop_loss, position.take_profit, position.side || 'LONG');
+            position.stop_loss, position.take_profit, position.side || 'LONG',
+            position.entries || []);
         if (chartWrap && _sc.html) {
             chartWrap.innerHTML = _sc.html;
             attachChartHover(_sc.uid, _sc.entry, _sc.isShort, _sc.rangeMin, _sc.rangeSpan, _sc.chartL, _sc.chartW, position.quantity);
@@ -1778,7 +2062,7 @@ function attachChartHover(uid, entry, isShort, rangeMin, rangeSpan, cL, cW, qty)
     });
 }
 
-function buildPriceRangeChart(entry, current, sl, tp, side) {
+function buildPriceRangeChart(entry, current, sl, tp, side, entries = []) {
     entry   = parseFloat(entry)   || 0;
     current = parseFloat(current) || 0;
     sl      = parseFloat(sl)      || 0;
@@ -1786,20 +2070,25 @@ function buildPriceRangeChart(entry, current, sl, tp, side) {
     if (!entry || !sl || !tp) return { html: '', uid: 0 };
 
     const isShort = side === 'SHORT';
-    const lo  = isShort ? Math.min(tp, sl, entry, current) : Math.min(sl, tp, entry, current);
-    const hi  = isShort ? Math.max(tp, sl, entry, current) : Math.max(sl, tp, entry, current);
+    // Include escalamiento prices in range calculation
+    const _escPrices = entries.map(e => parseFloat(e.entry_price || 0)).filter(p => p > 0);
+    const lo  = Math.min(...[sl, tp, entry, current, ..._escPrices].filter(v => v > 0));
+    const hi  = Math.max(...[sl, tp, entry, current, ..._escPrices]);
     const span = hi - lo || 1;
-    const pad  = span * 0.08;
+    const pad  = span * 0.10;
     const rangeMin = lo - pad;
     const rangeMax = hi + pad;
     const rangeSpan = rangeMax - rangeMin;
 
-    const W = 620, H = 110;  // extra height for tooltip row
+    const hasEsc = entries.length > 0 && (entries.length > 1 || (entries[0] && (entries[0].escalonamiento_index || 1) >= 2));
+    const W = 620;
+    // Increase height when escalamientos are present to fit labels
+    const H = hasEsc ? 148 : 110;
     const chartL = 16, chartR = W - 16;
     const chartW = chartR - chartL;
-    const trackY  = 38;
-    const labelY  = 58;
-    const priceY  = 72;
+    const trackY  = hasEsc ? 58 : 38;   // push track down to make room for Esc labels above
+    const labelY  = trackY + 20;
+    const priceY  = trackY + 34;
 
     function xOf(price) {
         return chartL + ((price - rangeMin) / rangeSpan) * chartW;
@@ -1834,10 +2123,39 @@ function buildPriceRangeChart(entry, current, sl, tp, side) {
     const tipId  = `prc-tip-${uid}`;
     const lineId = `prc-ln-${uid}`;
 
+    // Escalamiento markers — one per entry, sorted by escalonamiento_index
+    const _escColors = ['#f39c12','#e67e22','#d35400','#c0392b','#8e44ad'];
+    const _sortedEntries = [...entries].sort((a, b) => (a.escalonamiento_index||1) - (b.escalonamiento_index||1));
+    const escMarkersHtml = _sortedEntries.map((e, i) => {
+        const ep = parseFloat(e.entry_price || 0);
+        if (!ep) return '';
+        const xE = xOf(ep);
+        const col = _escColors[i % _escColors.length];
+        const idx = e.escalonamiento_index || (i + 1);
+        const labelAbove = trackY - 10;
+        const pnl = parseFloat(e.pnl_usdt || 0);
+        const pnlSign = pnl >= 0 ? '+' : '';
+        const pnlTip = `Esc${idx}: $${fmtP(ep)} | PnL: ${pnlSign}${pnl.toFixed(2)} USDT`;
+        return `
+  <line x1="${xE.toFixed(1)}" y1="${trackY - 12}" x2="${xE.toFixed(1)}" y2="${trackY + 12}"
+        stroke="${col}" stroke-width="1.5" stroke-dasharray="3,2" opacity="0.9"/>
+  <circle cx="${xE.toFixed(1)}" cy="${trackY}" r="4" fill="${col}" stroke="#1a1a2e" stroke-width="1">
+    <title>${pnlTip}</title>
+  </circle>
+  <text x="${xE.toFixed(1)}" y="${(trackY - 16).toFixed(1)}" text-anchor="middle"
+        fill="${col}" font-size="9" font-weight="700">Esc${idx}</text>
+  <text x="${xE.toFixed(1)}" y="${(trackY - 26).toFixed(1)}" text-anchor="middle"
+        fill="${col}" font-size="8" opacity="0.8">${fmtP(ep)}</text>`;
+    }).join('');
+
+    // Entry label: show "Entrada (avg)" when multiple escalamientos exist
+    const entryLabel = hasEsc ? 'Avg' : 'Entrada';
+
     const html = `<div style="position:relative">
 <svg id="${svgId}" class="modal-chart-svg" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="cursor:crosshair">
   <line x1="${chartL}" y1="${trackY}" x2="${chartR}" y2="${trackY}" stroke="#333" stroke-width="3" stroke-linecap="round"/>
   <rect x="${fillX1}" y="${trackY - 6}" width="${fillX2 - fillX1}" height="12" fill="${fillColor}" rx="3"/>
+  ${escMarkersHtml}
   <line x1="${xSL}" y1="${trackY - 10}" x2="${xSL}" y2="${trackY + 10}" stroke="#e74c3c" stroke-width="2"/>
   <circle cx="${xSL}" cy="${trackY}" r="6" fill="#e74c3c"/>
   <text x="${xSL}" y="${labelY}" text-anchor="${slAnchor}" fill="#e74c3c" font-size="10" font-weight="600">SL</text>
@@ -1848,13 +2166,13 @@ function buildPriceRangeChart(entry, current, sl, tp, side) {
   <text x="${xTP}" y="${priceY}" text-anchor="${tpAnchor}" fill="#4ecca3" font-size="9">${fmtP(tp)}</text>
   <line x1="${xEnt}" y1="${trackY - 13}" x2="${xEnt}" y2="${trackY + 13}" stroke="#ffffff" stroke-width="2" stroke-dasharray="3,2"/>
   <circle cx="${xEnt}" cy="${trackY}" r="5" fill="#fff" stroke="#888" stroke-width="1"/>
-  <text x="${xEnt}" y="${labelY}" text-anchor="middle" fill="#ccc" font-size="10" font-weight="600">Entrada</text>
+  <text x="${xEnt}" y="${labelY}" text-anchor="middle" fill="#ccc" font-size="10" font-weight="600">${entryLabel}</text>
   <text x="${xEnt}" y="${priceY}" text-anchor="middle" fill="#ccc" font-size="9">${fmtP(entry)}</text>
   <circle cx="${xCur}" cy="${trackY}" r="7" fill="${curColor}" stroke="#1a1a2e" stroke-width="2"/>
   <text x="${xCur}" y="${trackY - 16}" text-anchor="middle" fill="${curColor}" font-size="10" font-weight="700">▼ Actual</text>
   <text x="${xCur}" y="${priceY}" text-anchor="middle" fill="${curColor}" font-size="9" font-weight="600">${fmtP(current)}</text>
   <line id="${lineId}" x1="0" y1="${trackY - 14}" x2="0" y2="${trackY + 14}" stroke="rgba(255,255,255,0.25)" stroke-width="1" stroke-dasharray="3,2" style="display:none"/>
-  <text x="${W/2}" y="${H - 6}" text-anchor="middle" fill="#444" font-size="9">Mueve el mouse sobre la barra para ver PnL estimado</text>
+  <text x="${W/2}" y="${H - 4}" text-anchor="middle" fill="#444" font-size="9">Mueve el mouse sobre la barra para ver PnL estimado</text>
 </svg>
 <div id="${tipId}" style="display:none;position:fixed;background:#1e1e2e;border:1px solid #4ecca3;border-radius:6px;padding:5px 9px;font-size:12px;pointer-events:none;z-index:9999;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,0.5)"></div>
 </div>`;
@@ -1942,7 +2260,7 @@ function showFuturesDetailModal(symbol, side) {
     modal.style.display = 'block';
     document.body.style.overflow = 'hidden';
     // Attach chart hover AFTER innerHTML is set
-    const _fc = buildPriceRangeChart(pos.entry_price, pos.current_price, pos.sl_price, pos.tp_price, side);
+    const _fc = buildPriceRangeChart(pos.entry_price, pos.current_price, pos.sl_price, pos.tp_price, side, pos.entries || []);
     const _fw = document.getElementById('futChartWrap');
     if (_fw && _fc.html) {
         _fw.innerHTML = _fc.html;
@@ -2233,6 +2551,16 @@ function renderHealthChecks(data) {
                 ` | inv: $${c.invested_usdt ?? '?'} | liq: $${c.liquid_usdt ?? '?'}` +
                 `<div style="margin-top:3px;height:4px;background:#333;border-radius:2px;width:100px;display:inline-block;vertical-align:middle;margin-left:6px">` +
                 `<div style="height:4px;width:${barWidth}%;background:${expColor};border-radius:2px"></div></div>`;
+        }
+        if (key === 'disk_storage') {
+            const usedPct = c.used_pct ?? 0;
+            const freePct = 100 - usedPct;
+            const diskColor = c.status === 'critical' ? '#e74c3c' : c.status === 'warning' ? '#f39c12' : '#4ecca3';
+            const barW = Math.min(100, usedPct).toFixed(0);
+            detail = `💾 ${c.used_gb ?? '?'} / ${c.total_gb ?? '?'} GB usado` +
+                ` — libre: <span style="color:${diskColor};font-weight:700">${c.free_gb ?? '?'} GB (${freePct.toFixed(1)}%)</span>` +
+                `<div style="margin-top:3px;height:4px;background:#333;border-radius:2px;width:120px;display:inline-block;vertical-align:middle;margin-left:6px">` +
+                `<div style="height:4px;width:${barW}%;background:${diskColor};border-radius:2px"></div></div>`;
         }
         return `<div class="data-item">
             <span class="data-label">${_healthIcon(c.status || c.health)} ${key}</span>
@@ -2543,7 +2871,7 @@ function renderMonteCarlo(mc) {
     const el = document.getElementById('monteCarloData');
     if (!el || !mc) return;
 
-    const cap0      = mc.initial_capital  || 3080.0;
+    const cap0      = mc.initial_capital  || 0;
     const nTrades   = mc.n_trades_used    ?? 0;
     const nNormal   = mc.n_normal_trades  ?? '?';
     const genAt     = mc.generated_at     ?? '—';
@@ -2772,8 +3100,11 @@ async function renderFuturesPositions() {
                 const sideLabel = isLong
                     ? `<span style="color:#27ae60">▲ LONG</span>`
                     : `<span style="color:#9b59b6">▼ SHORT</span>`;
+                const _fEsc = p.escalamientos || 0;
+                const _fEscTip = (_fEsc > 1 && p.entries) ? p.entries.map(e => `Esc${e.escalonamiento_index}: $${fmt(e.entry_price)} \u00d7 ${e.qty} (${e.age_h}h)`).join('&#10;') : '';
+                const _fEscBadge = _fEsc > 1 ? ` <span class="badge-esc" title="${_fEscTip}">\u{1F4CA}\u00d7${_fEsc}</span>` : '';
                 return `<tr style="cursor:pointer" onclick="showFuturesDetailModal('${p.symbol}','${p.side}')">
-                    <td style="color:#9b59b6;font-weight:600">${p.symbol}</td>
+                    <td style="color:#9b59b6;font-weight:600">${p.symbol}${_fEscBadge}</td>
                     <td>${sideLabel}</td>
                     <td>${parseFloat(p.qty || 0).toFixed(4)}</td>
                     <td>$${fmt(p.entry_price)}</td>
@@ -2806,7 +3137,7 @@ async function renderFuturesClosed() {
     if (!el) return;
 
     try {
-        const res = await fetch(`${API_BASE}/futures/closed`, { headers: _authHeaders() });
+        const res = await fetch(`${API_BASE}/futures/closed?days=7`, { headers: _authHeaders() });
         if (!res.ok) {
             el.innerHTML = '<p class="loading">No disponible</p>';
             if (card) card.style.display = 'none';
@@ -2819,7 +3150,7 @@ async function renderFuturesClosed() {
             return;
         }
 
-        const periodDays = d.period_days || 3;
+        const periodDays = d.period_days || 7;
 
         if (!d.positions || d.positions.length === 0) {
             el.innerHTML = `<p class="loading" style="color:#9b59b6">Sin futuros cerrados recientes (últimos ${periodDays} días)</p>`;
@@ -2863,8 +3194,15 @@ async function renderFuturesClosed() {
             ${d.positions.map((p, i) => {
                 const pnlCls = (p.pnl || 0) >= 0 ? 'positive' : 'negative';
                 const closedAt = fmtDateLocal(p.closed_at || p.opened_at);
+                const _fcMeta = p.metadata || {};
+                const _fcEscIdx = _fcMeta.escalonamiento_index;
+                const _fcEscTotal = _fcMeta.total_escalonamientos;
+                const _fcCgid = _fcMeta.close_group_id;
+                const _fcEscBadge = (_fcEscTotal > 1 && _fcEscIdx)
+                    ? ` <span class="sl-badge esc" title="Escalonamiento ${_fcEscIdx}/${_fcEscTotal}${_fcCgid ? ' grp:' + _fcCgid.substring(0,8) : ''}">📊${_fcEscIdx}/${_fcEscTotal}</span>`
+                    : '';
                 return `<tr style="cursor:pointer" onclick="showFuturesClosedDetailModal('${p.symbol}','${p.side}',${i})">
-                    <td><span class="badge-futures">FUT</span> <strong style="color:#9b59b6">${p.symbol}</strong></td>
+                    <td><span class="badge-futures">FUT</span> <strong style="color:#9b59b6">${p.symbol}</strong>${_fcEscBadge}</td>
                     <td><span style="color:#9b59b6">${p.side === 'SHORT' ? '▼ SHORT' : '▲ LONG'}</span></td>
                     <td>$${fmt(p.entry_price)} → $${fmt(p.exit_price)}</td>
                     <td class="${pnlCls}">${p.pnl >= 0 ? '+' : ''}${fmt(p.pnl, 4)} USDT</td>
@@ -3124,6 +3462,7 @@ async function updateDashboard() {
     renderPairScanner(data.pair_screener);
     renderPredEvalMarket(data.open_positions);
     renderSignalsMarket(data.signals);
+    renderMarketHeatmap(data.daily_ticker);
     renderPnlSvgChart('pnlChartSvg', data.pnl_history);
     renderPnlSvgChart('pnlFullChart', data.pnl_history);
     renderPredVsRealChart('predVsRealChart', data.expectativa_vs_realidad);
@@ -3133,6 +3472,9 @@ async function updateDashboard() {
         const sp = await fetch(`${API_BASE}/strategy/params`);
         if (sp.ok) renderOptimizedParams(await sp.json());
     } catch (e) { /* silent */ }
+
+    // Futures closed card: refresh every cycle alongside the rest of the dashboard
+    renderFuturesClosed();
 }
 
 // ── Countdown ticker (local – no API call) ────────────────────────────────────
@@ -3164,7 +3506,7 @@ async function controlAction(path) {
     } catch (e) { console.error('Control error:', e); }
 }
 
-// ── SVG PnL Chart ─────────────────────────────────────────────────────────────
+// ── SVG PnL Chart (with hover tooltip + crosshair) ────────────────────────────
 function renderPnlSvgChart(containerId, pnlHistory) {
     const container = document.getElementById(containerId);
     if (!container) return;
@@ -3184,7 +3526,7 @@ function renderPnlSvgChart(containerId, pnlHistory) {
     const points = days.map((d, i) => {
         const v = parseFloat(d.pnl ?? d.total_pnl ?? 0);
         cum += v;
-        return { x: i, y: cum, v };
+        return { x: i, y: cum, v, date: d.date || String(i) };
     });
 
     const minY = Math.min(0, ...points.map(p => p.y));
@@ -3203,7 +3545,6 @@ function renderPnlSvgChart(containerId, pnlHistory) {
 
     const lastY = points[points.length-1]?.y ?? 0;
     const lineColor = lastY >= 0 ? '#4ecca3' : '#e74c3c';
-    const fillColor = lastY >= 0 ? 'rgba(78,204,163,0.15)' : 'rgba(231,76,60,0.15)';
 
     // Y-axis labels
     const yTicks = 3;
@@ -3214,23 +3555,81 @@ function renderPnlSvgChart(containerId, pnlHistory) {
 
     // X-axis labels (every ~7 days)
     const xLabels = points.filter((_, i) => i % 7 === 0 || i === points.length-1).map(p => {
-        const d2 = days[p.x]; const label = d2?.date ? d2.date.slice(5) : p.x;
+        const label = p.date ? p.date.slice(5) : p.x;
         return `<text x="${toX(p.x).toFixed(1)}" y="${H-6}" text-anchor="middle" fill="#555" font-size="9">${label}</text>`;
     }).join('');
 
-    container.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-        <defs>
-            <linearGradient id="pnlGrad${containerId}" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stop-color="${lineColor}" stop-opacity="0.4"/>
-                <stop offset="100%" stop-color="${lineColor}" stop-opacity="0.02"/>
-            </linearGradient>
-        </defs>
-        <line x1="${PAD.l}" y1="${zeroY.toFixed(1)}" x2="${W-PAD.r}" y2="${zeroY.toFixed(1)}" stroke="#333" stroke-width="1" stroke-dasharray="3,3"/>
-        <path d="${fillPts}" fill="url(#pnlGrad${containerId})"/>
-        <path d="${pts}" fill="none" stroke="${lineColor}" stroke-width="1.5" stroke-linejoin="round"/>
-        ${yLabels}
-        ${xLabels}
-    </svg>`;
+    // Invisible hit circles for hover
+    const hitCircles = points.map((p, i) =>
+        `<circle cx="${toX(i).toFixed(1)}" cy="${toY(p.y).toFixed(1)}" r="6" fill="transparent" class="pnl-hit-dot" data-i="${i}"/>`
+    ).join('');
+
+    const svgId = `pnl-svg-${containerId}`;
+    const crossId = `pnl-cross-${containerId}`;
+    const tipId = `pnl-tip-${containerId}`;
+    const dotId = `pnl-dot-${containerId}`;
+
+    container.innerHTML = `<div style="position:relative">
+<svg id="${svgId}" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="cursor:crosshair;display:block">
+    <defs>
+        <linearGradient id="pnlGrad${containerId}" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="${lineColor}" stop-opacity="0.4"/>
+            <stop offset="100%" stop-color="${lineColor}" stop-opacity="0.02"/>
+        </linearGradient>
+    </defs>
+    <line x1="${PAD.l}" y1="${zeroY.toFixed(1)}" x2="${W-PAD.r}" y2="${zeroY.toFixed(1)}" stroke="#333" stroke-width="1" stroke-dasharray="3,3"/>
+    <path d="${fillPts}" fill="url(#pnlGrad${containerId})"/>
+    <path d="${pts}" fill="none" stroke="${lineColor}" stroke-width="1.5" stroke-linejoin="round"/>
+    ${yLabels}
+    ${xLabels}
+    <line id="${crossId}" x1="0" y1="${PAD.t}" x2="0" y2="${H-PAD.b}" stroke="rgba(255,255,255,0.25)" stroke-width="1" stroke-dasharray="3,2" style="display:none;pointer-events:none"/>
+    <circle id="${dotId}" cx="0" cy="0" r="4" fill="${lineColor}" stroke="#1a1a2e" stroke-width="2" style="display:none;pointer-events:none"/>
+    ${hitCircles}
+</svg>
+<div id="${tipId}" style="display:none;position:absolute;top:8px;left:60px;background:#1e1e2e;border:1px solid ${lineColor};border-radius:6px;padding:5px 10px;font-size:12px;pointer-events:none;z-index:50;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,0.5)"></div>
+</div>`;
+
+    // Attach hover events
+    const svg = document.getElementById(svgId);
+    const cross = document.getElementById(crossId);
+    const tipEl = document.getElementById(tipId);
+    const dotEl = document.getElementById(dotId);
+    if (!svg) return;
+
+    svg.addEventListener('mousemove', (e) => {
+        const rect = svg.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        // Find nearest point
+        let best = 0, bestDist = Infinity;
+        points.forEach((p, i) => {
+            const px = toX(i);
+            const d = Math.abs(mx - px);
+            if (d < bestDist) { bestDist = d; best = i; }
+        });
+        const p = points[best];
+        const px = toX(best), py = toY(p.y);
+        cross.setAttribute('x1', px); cross.setAttribute('x2', px);
+        cross.style.display = 'block';
+        dotEl.setAttribute('cx', px); dotEl.setAttribute('cy', py);
+        dotEl.style.display = 'block';
+        const dateStr = p.date ? p.date.slice(5) : `Día ${best+1}`;
+        const daySign = p.v >= 0 ? '+' : '';
+        const cumSign = p.y >= 0 ? '+' : '';
+        const dayColor = p.v >= 0 ? '#4ecca3' : '#e74c3c';
+        const cumColor = p.y >= 0 ? '#4ecca3' : '#e74c3c';
+        tipEl.innerHTML = `<span style="color:#888;font-size:11px">${dateStr}</span><br>
+            Día: <span style="color:${dayColor};font-weight:700">${daySign}${p.v.toFixed(2)} USDT</span><br>
+            Acum: <span style="color:${cumColor};font-weight:700">${cumSign}${p.y.toFixed(2)} USDT</span>`;
+        // Position tip to not overflow right edge
+        const tipLeft = px + 10 > W - 120 ? px - 130 : px + 10;
+        tipEl.style.left = tipLeft + 'px';
+        tipEl.style.display = 'block';
+    });
+    svg.addEventListener('mouseleave', () => {
+        cross.style.display = 'none';
+        dotEl.style.display = 'none';
+        tipEl.style.display = 'none';
+    });
 }
 
 // ── BTC Context render ────────────────────────────────────────────────────────
@@ -3342,6 +3741,38 @@ function renderPredEvalMarket(openPositions) {
     }).join('');
 }
 
+// ── Market Heatmap (cambio 24h de todos los pares del ticker) ─────────────────
+function renderMarketHeatmap(tickerItems) {
+    const el = document.getElementById('marketHeatmapData');
+    if (!el) return;
+    const items = Array.isArray(tickerItems) ? tickerItems : [];
+    if (!items.length) {
+        el.innerHTML = '<div class="loading">Sin datos del ticker</div>';
+        return;
+    }
+    // Sort by change_pct desc
+    const sorted = [...items].sort((a, b) => parseFloat(b.change_pct || 0) - parseFloat(a.change_pct || 0));
+    const cells = sorted.map(t => {
+        const sym = (t.symbol || '').replace('USDT', '');
+        const chg = parseFloat(t.change_pct || 0);
+        const vol = parseFloat(t.volume_usdt || t.volume || 0);
+        const volStr = vol > 1e9 ? `${(vol/1e9).toFixed(1)}B` : vol > 1e6 ? `${(vol/1e6).toFixed(0)}M` : '';
+        let cls;
+        if (chg >= 3)       cls = 'heatmap-strong-up';
+        else if (chg >= 0.5) cls = 'heatmap-mild-up';
+        else if (chg > -0.5) cls = 'heatmap-flat';
+        else if (chg > -3)   cls = 'heatmap-mild-down';
+        else                  cls = 'heatmap-strong-down';
+        const sign = chg >= 0 ? '+' : '';
+        return `<div class="heatmap-cell ${cls}" title="${t.symbol}: ${sign}${chg.toFixed(2)}%${volStr ? ' | Vol '+volStr : ''}">
+            <span class="heatmap-symbol">${sym}</span>
+            <span class="heatmap-chg">${sign}${chg.toFixed(2)}%</span>
+            ${volStr ? `<span class="heatmap-vol">${volStr}</span>` : ''}
+        </div>`;
+    }).join('');
+    el.innerHTML = `<div class="heatmap-grid">${cells}</div>`;
+}
+
 // ── Signals mirror for Market tab ─────────────────────────────────────────────
 function renderSignalsMarket(d) {
     const targetId = 'signalsDataMarket';
@@ -3351,7 +3782,7 @@ function renderSignalsMarket(d) {
     if (elMain) elM.innerHTML = elMain.innerHTML;
 }
 
-// ── Performance SVG: Expectativa vs Realidad scatter ─────────────────────────
+// ── Performance SVG: Expectativa vs Realidad scatter (with hover tooltip) ─────
 function renderPredVsRealChart(containerId, expectativaData) {
     const container = document.getElementById(containerId);
     if (!container) return;
@@ -3361,38 +3792,109 @@ function renderPredVsRealChart(containerId, expectativaData) {
         container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:200px;color:#444;font-size:12px">Sin datos de predicción</div>';
         return;
     }
-    const W = container.clientWidth || 400, H = 200;
-    const PAD = 36;
+    const W = container.clientWidth || 400, H = 220;
+    const PAD = 40;
     const chartW = W - PAD*2, chartH = H - PAD*2;
 
     const xs = items.map(d => parseFloat(d.prediction_pnl));
     const ys = items.map(d => parseFloat(d.actual_pnl));
     const minX = Math.min(...xs), maxX = Math.max(...xs);
     const minY = Math.min(...ys), maxY = Math.max(...ys);
-    const rx = maxX - minX || 1, ry = maxY - minY || 1;
-    const toX = v => PAD + (v - minX) / rx * chartW;
-    const toY = v => PAD + chartH - (v - minY) / ry * chartH;
+    const padR = Math.max(Math.abs(maxX - minX), Math.abs(maxY - minY)) * 0.08 || 0.5;
+    const rx = (maxX - minX + padR*2) || 1, ry = (maxY - minY + padR*2) || 1;
+    const toX = v => PAD + (v - (minX - padR)) / rx * chartW;
+    const toY = v => PAD + chartH - (v - (minY - padR)) / ry * chartH;
 
     // Diagonal (perfect prediction line)
-    const dx1 = Math.min(minX, minY), dx2 = Math.max(maxX, maxY);
+    const dx1 = Math.min(minX, minY) - padR, dx2 = Math.max(maxX, maxY) + padR;
     const diag = `M${toX(dx1).toFixed(1)},${toY(dx1).toFixed(1)} L${toX(dx2).toFixed(1)},${toY(dx2).toFixed(1)}`;
 
-    const dots = items.map(d => {
+    // Y axis labels
+    const yTicks = 4;
+    const yLabels = Array.from({length: yTicks+1}, (_, i) => {
+        const v = (minY - padR) + (ry / yTicks) * i;
+        return `<text x="${PAD-5}" y="${toY(v).toFixed(1)}" text-anchor="end" fill="#444" font-size="9" dominant-baseline="middle">${v>=0?'+':''}${v.toFixed(1)}</text>`;
+    }).join('');
+    const xTicks = 4;
+    const xLabels = Array.from({length: xTicks+1}, (_, i) => {
+        const v = (minX - padR) + (rx / xTicks) * i;
+        return `<text x="${toX(v).toFixed(1)}" y="${H-PAD+12}" text-anchor="middle" fill="#444" font-size="9">${v>=0?'+':''}${v.toFixed(1)}</text>`;
+    }).join('');
+
+    // Zero axis lines
+    const zeroX = toX(0), zeroY2 = toY(0);
+    const zeroLines = `
+        <line x1="${zeroX.toFixed(1)}" y1="${PAD}" x2="${zeroX.toFixed(1)}" y2="${H-PAD}" stroke="#2a2a40" stroke-width="1"/>
+        <line x1="${PAD}" y1="${zeroY2.toFixed(1)}" x2="${W-PAD}" y2="${zeroY2.toFixed(1)}" stroke="#2a2a40" stroke-width="1"/>`;
+
+    const scatterSvgId = `scatter-svg-${containerId}`;
+    const scatterTipId = `scatter-tip-${containerId}`;
+
+    // Dots with data attributes for hover
+    const dots = items.map((d, idx) => {
         const cx = toX(parseFloat(d.prediction_pnl)).toFixed(1);
         const cy = toY(parseFloat(d.actual_pnl)).toFixed(1);
         const win = parseFloat(d.actual_pnl) >= 0;
         const color = win ? '#4ecca3' : '#e74c3c';
-        return `<circle cx="${cx}" cy="${cy}" r="4" fill="${color}" fill-opacity="0.7" stroke="${color}" stroke-width="1"/>`;
+        const sym = d.symbol || '?';
+        const pred = parseFloat(d.prediction_pnl).toFixed(2);
+        const real = parseFloat(d.actual_pnl).toFixed(2);
+        const acc = d.prediction_accuracy != null ? parseFloat(d.prediction_accuracy).toFixed(0) + '%' : '—';
+        const side = d.side || '';
+        return `<circle cx="${cx}" cy="${cy}" r="5" fill="${color}" fill-opacity="0.8" stroke="${color}" stroke-width="1"
+            class="scatter-dot" style="cursor:pointer"
+            data-sym="${sym}" data-pred="${pred}" data-real="${real}" data-acc="${acc}" data-side="${side}" data-idx="${idx}"/>`;
     }).join('');
 
-    container.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-        <line x1="${PAD}" y1="${PAD}" x2="${PAD}" y2="${H-PAD}" stroke="#333" stroke-width="1"/>
-        <line x1="${PAD}" y1="${H-PAD}" x2="${W-PAD}" y2="${H-PAD}" stroke="#333" stroke-width="1"/>
-        <path d="${diag}" stroke="#444" stroke-width="1" stroke-dasharray="4,4" fill="none"/>
-        ${dots}
-        <text x="${PAD}" y="${H-4}" font-size="9" fill="#555">Predicción USDT</text>
-        <text x="4" y="${H/2}" font-size="9" fill="#555" transform="rotate(-90,4,${H/2})">Real USDT</text>
-    </svg>`;
+    container.innerHTML = `<div style="position:relative">
+<svg id="${scatterSvgId}" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block">
+    <line x1="${PAD}" y1="${PAD}" x2="${PAD}" y2="${H-PAD}" stroke="#333" stroke-width="1"/>
+    <line x1="${PAD}" y1="${H-PAD}" x2="${W-PAD}" y2="${H-PAD}" stroke="#333" stroke-width="1"/>
+    ${zeroLines}
+    <path d="${diag}" stroke="#2a3a50" stroke-width="1.5" stroke-dasharray="4,4" fill="none" opacity="0.8"/>
+    ${yLabels}
+    ${xLabels}
+    ${dots}
+    <text x="${W/2}" y="${H-2}" text-anchor="middle" font-size="9" fill="#444">← Predicción USDT →</text>
+    <text x="10" y="${H/2}" font-size="9" fill="#444" transform="rotate(-90,10,${H/2})">← Real USDT →</text>
+    <text x="${W-PAD+2}" y="${PAD-8}" font-size="8" fill="#444" text-anchor="end">línea ideal ↗</text>
+</svg>
+<div id="${scatterTipId}" style="display:none;position:absolute;background:#1e1e2e;border:1px solid #4ecca3;border-radius:6px;padding:6px 10px;font-size:12px;pointer-events:none;z-index:50;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,0.6)"></div>
+</div>`;
+
+    // Hover events on dots
+    const svgEl = document.getElementById(scatterSvgId);
+    const tipEl = document.getElementById(scatterTipId);
+    if (!svgEl || !tipEl) return;
+
+    svgEl.querySelectorAll('.scatter-dot').forEach(dot => {
+        dot.addEventListener('mouseenter', (e) => {
+            const sym  = dot.dataset.sym;
+            const pred = parseFloat(dot.dataset.pred);
+            const real = parseFloat(dot.dataset.real);
+            const acc  = dot.dataset.acc;
+            const side = dot.dataset.side ? ` <span style="color:#888">${dot.dataset.side}</span>` : '';
+            const realColor = real >= 0 ? '#4ecca3' : '#e74c3c';
+            const predColor = pred >= 0 ? '#4ecca3' : '#e74c3c';
+            tipEl.innerHTML = `<strong style="color:#ddd">${sym}${side}</strong><br>
+                Predicción: <span style="color:${predColor};font-weight:700">${pred>=0?'+':''}${pred} USDT</span><br>
+                Real: <span style="color:${realColor};font-weight:700">${real>=0?'+':''}${real} USDT</span><br>
+                Accuracy: <span style="color:#f39c12">${acc}</span>`;
+            const rect = svgEl.getBoundingClientRect();
+            const dx = e.clientX - rect.left;
+            const dy = e.clientY - rect.top;
+            tipEl.style.left = (dx + 12 > W - 160 ? dx - 170 : dx + 12) + 'px';
+            tipEl.style.top  = (dy - 10) + 'px';
+            tipEl.style.display = 'block';
+            dot.setAttribute('r', '7');
+            dot.style.fillOpacity = '1';
+        });
+        dot.addEventListener('mouseleave', () => {
+            tipEl.style.display = 'none';
+            dot.setAttribute('r', '5');
+            dot.style.fillOpacity = '0.8';
+        });
+    });
 }
 
 document.addEventListener('DOMContentLoaded', () => {

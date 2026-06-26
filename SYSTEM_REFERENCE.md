@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 24 2026 09:18 UTC-6 | Sesión 22: Auditoría comisiones SPOT+FUTURES (commit 23c43ae), análisis AAVEUSDT
+> Última actualización: jun 26 2026 13:31 UTC-6 | Sesión 24: SSO-6 Smart Gate + Dashboard Bounce Rescue + trazabilidad BD (Fix 12)
 
 > ✅ **OBSERVACIÓN CERRADA** — jun 23 2026 14:08 UTC-6  
 > `FUTURES_MIN_INJECT_STRENGTH` probado en **0.30** (commit `d3dced6`) → **revertido a 0.40** (commit actual).  
@@ -59,6 +59,12 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 
 > Ante cualquier propuesta de cambio: evaluar impacto desde **todos** los roles antes de implementar.
 
+> **⚠️ REGLA UNIVERSAL SPOT+FUTURES — jun 24 2026**  
+> Toda implementación, análisis o mejora debe evaluarse explícitamente para **AMBOS** tipos de trading (SPOT y FUTURES) antes de aprobarse.  
+> Si aplica a uno, documentar por qué no aplica al otro, o implementar en ambos.  
+> El objetivo es maximizar ganancias del sistema completo, no solo de un modo.  
+> Ejemplo: escalamientos, SSO, ghost detection, comisiones, dashboard badges — todos aplican a SPOT y FUTURES.
+
 ---
 
 ## 1. ESTADO DEL SISTEMA
@@ -85,6 +91,8 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 | Dashboard Sesión 9 (FIX-P1/P2/P3) | ✅ jun 21 2026 — predictor real futuros, pnl_prediction persistido en DB, prediction_accuracy futuros |
 | Dashboard Sesión 10 (FIX-L1/L2/L3/D1/L6/D3/D4/D5) | ✅ jun 20 2026 23h — dashboard unificado 2 cards, sub-tabs SPOT\|FUT, conteos reales, datos en vivo |
 | Dashboard Bugs B1-B3 | ✅ jun 19 2026 (sesión 2) — tooltip script fix, SOL entry_price math, balance walletBalance |
+| **Dashboard Sesión 23 (Fix 1-10)** | ✅ **jun 25 2026** — sticky bars, tab Ops unificado jerárquico, heatmap mercado, futuros en portfolio, disk storage, closed 7d, Monte Carlo fix, hover charts |
+| **SSO-6 Smart Gate (Fix 12)** | ✅ **jun 26 2026** — rescue bloqueado si posición se recupera (G1 pnl>0, G2 señal favorable, G3 EV>2×target, G4 velocidad); trazabilidad completa en `smart_meta`+`trades_audit`; badge `🔄RESCUE⏸️` + modal Bounce Rescue Status; paridad SPOT/FUTURES; 9/9 tests PASS |
 | Futuros monitoring | ✅ check_positions() corre cada ciclo independiente de régimen |
 | Shorts protección ganancia | ✅ futures_protect_profit_usdt=1.0 — solo cierra shorts en pérdida al cambiar régimen |
 | Futuros SHORTs activos | **9/9** — FIL, DOT, ETH, SUI, XRP, LINK, BTC, SOL, BNB — slots llenos |
@@ -151,6 +159,103 @@ Total unrealized PnL: **~$38 USDT**. 7/9 posiciones con trailing activo.
 - Monitorear trailing SL en todas las posiciones — verificar que SL se aprieta con cada nuevo low
 - Refactor `_evaluate_short_momentum` para usar `pnl_service.predict_for_symbol` (pendiente)
 - Evaluar si breakeven_activation_pct=2.0% es óptimo o bajar a 1.5%
+
+### 🖼️ Dashboard Sesión 23 — Refactor Completo — jun 25 2026 13:52 UTC-6
+
+**Todos los fixes del plan `dashboard-refactor-863057.md` implementados.**
+
+#### Archivos modificados
+| Archivo | Cambios |
+|---------|---------|
+| `frontend/styles.css` | Sticky bars, ops-main-tabs, table-scroll height, heatmap grid, quitó overflow-y:auto del tab-content |
+| `frontend/index.html` | Tab Ops unificado → `#unifiedPosCard`, Tab Mercado rediseñado 2 filas, cache-bust v23 |
+| `frontend/dashboard.js` | switchOpsMainTab/Sub, renderMarketHeatmap, renderPnlSvgChart hover, renderPredVsRealChart hover, renderBalance futuros, renderHealthChecks disk, closed 7d, Monte Carlo fix |
+| `app.py` | disk_storage en health check vía shutil.disk_usage('/app') |
+
+#### Fix 1 — Sticky bars
+- `.ticker-bar`: `sticky top:52px z-index:99`
+- `.status-bar`: `sticky top:92px z-index:98`
+- `.tab-nav`: `sticky top:128px z-index:97`
+- Removido `overflow-y:auto` de `.tab-content` (bloqueaba sticky del documento)
+
+#### Fix 2 — Tab Operaciones unificado jerárquico
+- 2 cards separadas → 1 `#unifiedPosCard` con 2 niveles:
+  - **Nivel 1**: `ops-main-tabs` → botones Abiertas / Cerradas (con label `7d`)
+  - **Nivel 2**: `inner-tab-bar` → Todas / SPOT / FUTUROS (filtro compartido)
+- Funciones JS: `switchOpsMainTab(main)`, `switchOpsSubTab(sub)`, legacy `switchInnerTab()` mantenida
+- `table-scroll` → `max-height:calc(100vh - 420px)` para ver más filas
+
+#### Fix 3+4 — Hover tooltips en charts (Rendimiento)
+- `renderPnlSvgChart()`: crosshair vertical + dot flotante + tooltip con fecha / PnL día / PnL acumulado
+- `renderPredVsRealChart()`: puntos con `data-*`, tooltip mouseenter/leave con símbolo/predicción/real/accuracy
+
+#### Fix 5 — Monte Carlo capital hardcodeado
+- `initial_capital` fallback `3080.0` → `0` (usa el valor real del backend)
+
+#### Fix 6 — Portfolio muestra futuros individuales
+- `renderBalance()` añade sección "⚡ FUTUROS — Posiciones abiertas" usando `_cachedFuturesPositions`
+- Muestra: símbolo, side, qty @ entry_price = exposure, PnL en color
+
+#### Fix 8 — Tab Mercado rediseñado
+- **Layout**: 2 filas — fila 1 (3 cols: col-A régimen+BTC+F&G, col-B scanner protagonista, col-C heatmap+PredEval), fila 2 (señales full-width)
+- **Heatmap 24h** — nuevo elemento `#marketHeatmapData`:
+  - Grid `auto-fill minmax(68px,1fr)` con celdas coloreadas por cambio %
+  - 5 clases: `heatmap-strong-up/mild-up/flat/mild-down/strong-down`
+  - Datos desde `data.daily_ticker` (mismo endpoint del ticker bar)
+- **Función**: `renderMarketHeatmap(tickerItems)` — sort desc por change_pct
+
+#### Fix 9 — Disk storage en Sistema
+- `app.py`: `shutil.disk_usage('/app')` → `checks["disk_storage"]` con total/used/free GB + used_pct + status ok/warning/critical
+- `dashboard.js`: `renderHealthChecks()` renderiza barra visual de uso + GB libre en color
+
+#### Fix 10 — Closed positions 7 días
+- `fetch('/futures/closed?days=7')` — backend ya aceptaba el param
+
+#### Pendientes conocidos
+- Verificar en browser con datos reales de producción
+- `renderMarketHeatmap` necesita que `daily_ticker` sea array de objetos `{symbol, change_pct, volume_usdt}` — revisar shape del backend si aparece "Sin datos del ticker"
+
+---
+
+### 🤖 Sesión 24 — SSO-6 Smart Gate + Trazabilidad BD — jun 26 2026 13:31 UTC-6
+
+**Objetivo:** El rescue del rebote ya no cierra posiciones ciegamente — evalúa en tiempo real si la posición se recupera sola antes de ejecutar el cierre.
+
+#### Fix 12 — SSO-6 Bounce Rescue Smart Gate
+
+**Problema resuelto:** SSO-6 rescataba posiciones en el momento en que `pnl >= target_pnl`, sin verificar si la posición ya se comportaba positivamente. Resultado: cierres prematuros dejando ganancias sobre la mesa.
+
+**4 compuertas (bloquean el rescue si alguna aplica):**
+
+| Gate | Condición | Configuración |
+|------|-----------|---------------|
+| **G1** | `pnl_pct > 0` — posición ya en ganancia | Hardcoded |
+| **G2** | Señal técnica favorable (SHORT+SELL o LONG/BUY+BUY) + `strength ≥ 0.40` + vol confirmado | `rescue_stay_strength_min=0.40` |
+| **G3** | Predicción EV actualizada > 2× `|target_pnl|` | `rescue_stay_ev_multiplier=2.0` |
+| **G4** | `pnl_velocity_1h > 0.3%/h` y acelerando | `rescue_velocity_min_pct=0.003` |
+
+**Paridad SPOT/FUTURES:** Idéntica lógica. FUTURES en `futures_client.py`, SPOT en `run_trades.py`. Mismos config params aplican a ambos.
+
+#### Archivos modificados
+
+| Archivo | Cambio |
+|---------|--------|
+| `config.py` | 4 nuevos params: `rescue_smart_gate_enabled`, `rescue_stay_strength_min`, `rescue_stay_ev_multiplier`, `rescue_velocity_min_pct` |
+| `smart_scale_out.py` | `SSOPositionData` +3 campos (`rescue_prediction_ev`, `rescue_signal`, `rescue_signal_strength`); Smart Gate en `_check_sso6_bounce_rescue()` |
+| `futures_client.py` | Inyecta EV+signal desde `pnl_service`; persiste `bounce_gate_*` en `smart_meta`; `_audit()` eventos `bounce_gate_blocked`/`bounce_gate_fired`; expone 7 campos `bounce_gate_*` en `get_open_positions_summary()` |
+| `run_trades.py` | Mismo patrón SPOT; elimina bloque de rescue directo (ahora dentro de SSO evaluate) |
+| `app.py` | Expone `bounce_gate_*` en `open_list` para SPOT (~L1566) y FUTURES (~L1726) |
+| `frontend/dashboard.js` | Badge `🔄RESCUE⏸️` con tooltip EV/señal/vel; modal sección "🔄 BOUNCE RESCUE STATUS"; cerradas `🔄BR(N)` con gate info |
+
+#### Trazabilidad BD completa
+
+- **`trades_open.metadata.smart_meta`**: `bounce_gate_blocked_count`, `bounce_gate_first_qualified_at`, `bounce_gate_last_signal`, `bounce_gate_last_signal_strength`, `bounce_gate_last_ev`, `bounce_gate_last_velocity`, `bounce_gate_blocked_reason`, `bounce_gate_last_eval` — persiste por `_persist_smart_meta()` solo cuando hay cambio
+- **`trades_audit`**: eventos `bounce_gate_blocked` (con `gate_blocked_by`, `signal`, `rescue_ev`, `velocity`, `block_count_so_far`) y `bounce_gate_fired` (con `total_blocks_before`, `gate_held_minutes`, `final_signal`, `final_ev`)
+
+#### Tests
+- **9/9 PASS** `TestSSO6BounceRescue` — 4 originales + 5 nuevos Smart Gate (G1, G2, G3, gate-fires, G2-SPOT)
+
+---
 
 ### 🖼️ Dashboard UX — jun 19 2026 08:33 UTC-6
 - **D1**: `futures_client.get_recent_trades()` — `entry_price` calculado desde mem o fórmula math

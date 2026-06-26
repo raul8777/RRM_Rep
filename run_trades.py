@@ -17,6 +17,11 @@ import pnl_service
 
 # Symbols confirmed invalid on Binance (delisted) — skip without API call
 _INVALID_SYMBOLS: set = {"EONUSDT", "ADDUSDT", "MEETONEUSDT", "ATDUSDT", "EOPUSDT", "ETHWUSDT"}
+# Stablecoins/non-tradeable confirmed invalid on Binance Futures — never short these
+_INVALID_FUTURES_SYMBOLS: set = {
+    "USD1USDT", "PAXGUSDT", "XAUTUSDT", "RLUSDUSDT", "USDCUSDT", "BUSDUSDT",
+    "TUSDUSDT", "FDUSDUSDT", "DAIUSDT", "USDDUSDT", "GUSDUSDT", "UUSDUSDT",
+}
 
 # VolSpike override cooldown: {symbol: datetime_of_last_override_entry}
 # Prevents re-entering the same narrative token breakout every 5min cycle
@@ -1181,12 +1186,57 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                     except Exception as _pe:
                         print(f"[PredEval] {symbol}: prediction check failed: {_pe}")
 
+                # ── SSO-6 SPOT: Bounce rescue hook ──────────────────────────
+                # Auto-tag SPOT positions stuck in a downtrend bounce + run rescue close
+                _spot_bounce_rescue = getattr(settings, 'spot_bounce_rescue_enabled', True)
+                _spot_meta = getattr(pos, 'metadata', {}) or {}
+                _spot_bounce_entry_flag = _spot_meta.get('bounce_entry', False)
+                if close_reason is None and _spot_bounce_rescue and not _spot_bounce_entry_flag:
+                    try:
+                        _sp_opened = getattr(pos, 'entry_time', None)
+                        if _sp_opened:
+                            if isinstance(_sp_opened, str):
+                                _sp_opened = datetime.fromisoformat(_sp_opened.replace('Z', '+00:00'))
+                            if _sp_opened.tzinfo is None:
+                                _sp_opened = _sp_opened.replace(tzinfo=timezone.utc)
+                            _sp_age_h = (datetime.now(timezone.utc) - _sp_opened).total_seconds() / 3600
+                            _sp_max_peak = getattr(settings, 'spot_bounce_rescue_max_peak_pct', 0.8) / 100.0
+                            _sp_min_h = getattr(settings, 'spot_bounce_rescue_min_hours', 8.0)
+                            _sp_peak = float(_spot_meta.get('trailing_peak', 0) or 0)
+                            _sp_peak_pct = (_sp_peak - entry_price) / entry_price if entry_price > 0 and _sp_peak > 0 else 0.0
+                            if _sp_age_h >= _sp_min_h and _sp_peak_pct < _sp_max_peak:
+                                _spot_meta['bounce_entry'] = True
+                                _spot_bounce_entry_flag = True
+                                try:
+                                    position_manager.update_position_metadata(pos.position_id, _spot_meta)
+                                except Exception:
+                                    pass
+                                print(f"[SSO-6/SPOT] {symbol}: TAGGED bounce_entry "
+                                      f"(peak={_sp_peak_pct*100:.2f}%<{_sp_max_peak*100:.1f}%, age={_sp_age_h:.1f}h)")
+                    except Exception:
+                        pass
+                # NOTE: SPOT SSO-6 rescue is now handled inside the SSO evaluate() block below
+                # (SSOPositionData.bounce_entry=True + rescue_prediction_ev/signal fed in).
+
                 # ── SSO: Smart Scale-Out (SPOT) ──────────────────────────────
                 _sso_enabled_spot = getattr(settings, 'sso_enabled', True)
-                if close_reason is None and _sso_enabled_spot and pnl_pct > 0:
+                if close_reason is None and _sso_enabled_spot and (pnl_pct > 0 or _spot_bounce_entry_flag):
                     try:
                         from smart_scale_out import SmartScaleOut, SSOPositionData, compute_pnl_velocity, extract_sso_level_from_reason
                         metadata = getattr(pos, 'metadata', {}) or {}
+                        # ── SSO-AGG: Aggregate PnL across ALL entries for this symbol ──
+                        # When symbol has N entries (escalamiento), SSO-4 must see combined
+                        # PnL so Target Contribution threshold fires correctly.
+                        _sso_sym_all = pos_list  # all entries for this symbol (outer loop variable)
+                        _sso_sym_cost = sum(float(p.entry_price) * float(p.quantity) for p in _sso_sym_all)
+                        _sso_sym_qty  = sum(float(p.quantity) for p in _sso_sym_all)
+                        _sso_sym_avg_entry = _sso_sym_cost / _sso_sym_qty if _sso_sym_qty > 0 else entry_price
+                        _sso_sym_pnl_usdt  = (current_price - _sso_sym_avg_entry) * _sso_sym_qty
+                        _sso_sym_pnl_pct   = (_sso_sym_pnl_usdt / _sso_sym_cost) if _sso_sym_cost > 0 else pnl_pct
+                        if len(_sso_sym_all) > 1:
+                            print(f"[SSO/S] {symbol}: {len(_sso_sym_all)} entradas escaladas — "
+                                  f"PnL combinado=${_sso_sym_pnl_usdt:.2f} ({_sso_sym_pnl_pct*100:.2f}%) "
+                                  f"vs individual=${(current_price - entry_price)*float(pos.quantity):.2f}")
                         _sso_spot_at_open = metadata.get('spot_total_at_open')
                         _sso_spot_live = float(client.get_account_balance().get("USDT", 0)) if client else None
                         _sso_spot_total = _sso_spot_at_open or _sso_spot_live
@@ -1220,6 +1270,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         # RSI / vol_spike from cached signal data
                         _sso_s_rsi = None
                         _sso_s_vol = None
+                        _sso_s_sig = None
                         try:
                             from autonomous_signals import AutonomousSignalGenerator
                             _sso_s_sg = AutonomousSignalGenerator(client)
@@ -1229,6 +1280,27 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             _sso_s_vol = float(_sso_s_ind.get("vol_spike") or _sso_s_ind.get("volume_ratio") or 1.0)
                         except Exception:
                             pass
+                        # SSO-6 Smart Gate SPOT: compute rescue_prediction_ev + signal
+                        _sp_rescue_pred_ev = None
+                        _sp_rescue_signal = None
+                        _sp_rescue_signal_str = 0.0
+                        _sp_rescue_target = getattr(settings, 'spot_bounce_rescue_target_pnl', -0.30)
+                        _sp_pnl_usdt = (current_price - entry_price) * float(pos.quantity)
+                        if _spot_bounce_entry_flag and _sp_pnl_usdt >= _sp_rescue_target:
+                            try:
+                                import pnl_service as _sp_pnl_svc
+                                _sp_gate_pred, _ = _sp_pnl_svc.predict_for_symbol(
+                                    symbol=symbol, client=client, settings=settings,
+                                    position_size_usdt=round(_sso_sym_cost, 2),
+                                    precomputed_signal=_sso_s_sig,
+                                )
+                                if _sp_gate_pred:
+                                    _sp_rescue_pred_ev = float(_sp_gate_pred.get('expected_pnl', 0.0))
+                            except Exception:
+                                pass
+                            if _sso_s_sig:
+                                _sp_rescue_signal = _sso_s_sig.get('signal')
+                                _sp_rescue_signal_str = float(_sso_s_sig.get('strength', 0.0))
                         # Build position data
                         _sso_s_opened = getattr(pos, 'entry_time', None)
                         if _sso_s_opened and isinstance(_sso_s_opened, str):
@@ -1241,10 +1313,10 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         _sso_s_pos = SSOPositionData(
                             symbol=symbol,
                             side="BUY",
-                            pnl_pct=pnl_pct,
-                            pnl_usdt=(current_price - entry_price) * float(pos.quantity),
-                            position_size_usdt=entry_price * float(pos.quantity),
-                            entry_price=entry_price,
+                            pnl_pct=_sso_sym_pnl_pct,
+                            pnl_usdt=_sso_sym_pnl_usdt,
+                            position_size_usdt=_sso_sym_cost,
+                            entry_price=_sso_sym_avg_entry,
                             current_price=current_price,
                             opened_at=_sso_s_opened,
                             peak_pnl_pct=float(metadata.get('trailing_peak', entry_price) - entry_price) / entry_price if entry_price > 0 else 0,
@@ -1257,6 +1329,10 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             today_realized_pnl=0.0,  # will be enriched from dashboard cache
                             daily_target=getattr(settings, 'sso_target_daily_usd', 40.0),
                             trade_type="spot",
+                            bounce_entry=_spot_bounce_entry_flag,
+                            rescue_prediction_ev=_sp_rescue_pred_ev,
+                            rescue_signal=_sp_rescue_signal,
+                            rescue_signal_strength=_sp_rescue_signal_str,
                         )
                         _sso_s_action = _sso_spot.evaluate(_sso_s_pos)
                         # Full SSO visibility — always log evaluation result
@@ -1265,6 +1341,62 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                   f"{_sso_s_action.reason} | {_sso_s_action.detail}")
                         else:
                             print(f"[SSO/S] {symbol}: NO ACTION | {_sso_s_action.diagnosis}")
+                        # SSO-6 Smart Gate SPOT: persist bounce_gate_* state to metadata + audit
+                        if _spot_bounce_entry_flag:
+                            _sp_diag = _sso_s_action.diagnosis or ""
+                            _sp_gate_blocked = "GATE_BLOCKED" in _sp_diag
+                            _sp_now_iso = datetime.now(timezone.utc).isoformat()
+                            _sp_meta_changed = False
+                            if _sp_gate_blocked:
+                                _sp_block_count = metadata.get('bounce_gate_blocked_count', 0) + 1
+                                _sp_prev_reason = metadata.get('bounce_gate_blocked_reason', '')
+                                if _sp_block_count != metadata.get('bounce_gate_blocked_count') or _sp_prev_reason != _sp_diag:
+                                    metadata['bounce_gate_blocked_count'] = _sp_block_count
+                                    metadata['bounce_gate_last_eval'] = _sp_now_iso
+                                    metadata['bounce_gate_blocked_reason'] = _sp_diag
+                                    metadata['bounce_gate_last_signal'] = _sp_rescue_signal
+                                    metadata['bounce_gate_last_signal_strength'] = _sp_rescue_signal_str
+                                    metadata['bounce_gate_last_ev'] = _sp_rescue_pred_ev
+                                    metadata['bounce_gate_last_velocity'] = _sso_s_vel
+                                    if 'bounce_gate_first_qualified_at' not in metadata and _sp_pnl_usdt >= _sp_rescue_target:
+                                        metadata['bounce_gate_first_qualified_at'] = _sp_now_iso
+                                    _sp_meta_changed = True
+                                    try:
+                                        position_manager._audit(symbol, 'bounce_gate_blocked', {
+                                            'side': 'BUY', 'pnl_usdt': round(_sp_pnl_usdt, 4),
+                                            'gate_blocked_by': _sp_diag,
+                                            'signal': _sp_rescue_signal, 'signal_strength': _sp_rescue_signal_str,
+                                            'rescue_ev': _sp_rescue_pred_ev, 'velocity': _sso_s_vel,
+                                            'block_count_so_far': _sp_block_count,
+                                        })
+                                    except Exception:
+                                        pass
+                                    print(f"[SSO-6/Gate/SPOT] {symbol}: BLOCKED (#{_sp_block_count}) — {_sp_diag}")
+                            elif _sso_s_action.should_close and 'sso_bounce_rescue' in (_sso_s_action.reason or ''):
+                                _sp_block_count = metadata.get('bounce_gate_blocked_count', 0)
+                                _sp_first_q = metadata.get('bounce_gate_first_qualified_at')
+                                _sp_held_min = 0
+                                if _sp_first_q:
+                                    try:
+                                        _sp_fq_dt = datetime.fromisoformat(_sp_first_q)
+                                        _sp_held_min = int((datetime.now(timezone.utc) - _sp_fq_dt).total_seconds() / 60)
+                                    except Exception:
+                                        pass
+                                try:
+                                    position_manager._audit(symbol, 'bounce_gate_fired', {
+                                        'side': 'BUY', 'pnl_usdt': round(_sp_pnl_usdt, 4),
+                                        'total_blocks_before': _sp_block_count,
+                                        'gate_held_minutes': _sp_held_min,
+                                        'final_signal': _sp_rescue_signal, 'final_ev': _sp_rescue_pred_ev,
+                                        'rescue_reason': 'sso_bounce_rescue',
+                                    })
+                                except Exception:
+                                    pass
+                            if _sp_meta_changed:
+                                try:
+                                    position_manager.update_position_metadata(pos.position_id, metadata)
+                                except Exception:
+                                    pass
                         if _sso_s_action.should_close:
                             if _sso_s_action.close_pct >= 1.0:
                                 close_reason = f"{_sso_s_action.reason} ({pnl_pct*100:.2f}%)"
@@ -1895,6 +2027,10 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         _futures_symbols = list(dict.fromkeys(_futures_symbols + get_screened_pairs(settings=settings).get("futures", [])))
                     except Exception:
                         pass
+                if symbol in _INVALID_FUTURES_SYMBOLS:
+                    print(f"[Futures] {symbol} in _INVALID_FUTURES_SYMBOLS (stablecoin/invalid) — skipping")
+                    update_signal_decision(symbol, "rejected", "INVALID_FUTURES_SYM")
+                    continue
                 if symbol not in _futures_symbols:
                     print(f"[Futures] {symbol} not in futures_symbols — skipping short, no spot entry in FUTURES_SHORT mode")
                     update_signal_decision(symbol, "rejected", "NOT_FUTURES_SYM")
@@ -1928,6 +2064,24 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         print(f"[Futures] {symbol} SKIPPED: large-cap slots {_open_largecap}/{_max_largecap} full — prioritizing MIDs")
                         update_signal_decision(symbol, "rejected", "LARGECAP_CAP")
                         continue
+                # Escalamiento guard — limit entries per symbol to avoid concentration risk
+                _max_esc = getattr(settings, 'futures_max_escalamientos', 2)
+                if _max_esc > 0 and _fc.db_client:
+                    try:
+                        _sym_db_side = 'SELL'  # futures SHORTs are stored as SELL
+                        _esc_rows = _fc.db_client.execute_query(
+                            "SELECT COUNT(*) as cnt FROM trades_open WHERE symbol = %s AND side = %s "
+                            "AND metadata->>'trade_type' = 'futures'",
+                            (symbol, _sym_db_side)
+                        )
+                        _esc_count = int((_esc_rows[0]['cnt'] if _esc_rows else 0) or 0)
+                        if _esc_count >= _max_esc:
+                            print(f"[Futures] SHORT {symbol} SKIPPED: escalamiento cap {_esc_count}/{_max_esc} — max entries per symbol reached")
+                            update_signal_decision(symbol, "rejected", "MAX_ESCALAMIENTOS")
+                            continue
+                    except Exception as _esc_err:
+                        print(f"[Futures] Escalamiento check error for {symbol}: {_esc_err}")
+
                 if _open_shorts >= _max_shorts:
                     # Try overflow: open extra slot only if signal is exceptional
                     _ovfl_meta     = signal_meta.get(symbol, {})
@@ -2094,6 +2248,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                     "qty": _pos.qty, "entry_price": _pos.entry_price,
                                     "sl": _pos.sl_price, "tp": _pos.tp_price})
                     update_signal_decision(symbol, "executed", "FUTURES_SHORT")
+                elif _pos is None and "-1121" in str(getattr(_fc, '_last_error', '')):
+                    # Auto-learn: symbol invalid on Binance Futures — block permanently this session
+                    _INVALID_FUTURES_SYMBOLS.add(symbol)
+                    print(f"[Futures] {symbol}: auto-added to _INVALID_FUTURES_SYMBOLS (-1121)")
+                    update_signal_decision(symbol, "rejected", "INVALID_FUTURES_SYM")
                 else:
                     update_signal_decision(symbol, "rejected", "FUTURES_BLOCKED")
                 continue  # skip spot buy logic
@@ -2637,6 +2796,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 print(f"[WARN] BUY {symbol}: order NOT confirmed filled — skipping position record")
                 continue
             _record_order_success()  # R5: reset circuit breaker on success
+            # FIX-8: use real executed qty from Binance fill (net of fees) for accurate tracking
+            _executed_qty = float(order.get('executedQty') or order.get('origQty') or qty)
+            if _executed_qty > 0 and abs(_executed_qty - qty) / qty > 0.01:
+                print(f"[FIX-8] BUY {symbol}: requested={qty} executed={_executed_qty} (using executed)")
+                qty = _executed_qty
             orders.append({"symbol": symbol, "side": "BUY", "quantity": qty, "order": order})
             usdt_liquid_now = max(0.0, usdt_liquid_now - qty * price)  # BUG-E5: local deduction, avoids re-fetch
             print(f"Bought {qty} {symbol}")
@@ -2710,6 +2874,12 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "entry_type": "prediction_add" if _is_pred_add else "normal",
                         "reevaluation_count": 0,
                         "spot_total_at_open": usdt_liquid_now,  # SSO gate anchor — protects position from balance changes
+                        "btc_price_at_entry": client.get_symbol_price('BTCUSDT') if client else None,  # SSO-6: BTC ref for bounce detection
+                        # FIX-8: trazabilidad Binance para SPOT
+                        "entry_order_id": str(order.get("orderId", "")),
+                        "entry_filled_qty": float(order.get('executedQty') or qty),
+                        "entry_avg_price": float((order.get('fills') or [{}])[0].get('price', price) if order.get('fills') else price),
+                        "binance_entry_confirmed": order.get('status') in ('FILLED',),
                     }
                     if prediction:
                         metadata['pnl_prediction'] = prediction

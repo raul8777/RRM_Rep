@@ -90,6 +90,19 @@ class PositionManager:
         if self.db_client:
             self._load_positions_from_db()
     
+    def _audit(self, symbol: str, event: str, detail: dict, binance_confirmed: bool = False) -> None:
+        """FIX-9: Write a traceability record to trades_audit for SPOT events."""
+        if not self.db_client:
+            return
+        try:
+            self.db_client.execute_update(
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (symbol, 'spot', event, json.dumps(detail), binance_confirmed)
+            )
+        except Exception:
+            pass  # audit failure must never interrupt trading logic
+
     def _load_positions_from_db(self) -> None:
         """Load open positions from database."""
         try:
@@ -177,6 +190,27 @@ class PositionManager:
         """
         if position.symbol not in self._open_positions:
             self._open_positions[position.symbol] = []
+        # ── SPOT Escalamiento tracking ──────────────────────────────────────
+        _esc_idx = len(self._open_positions[position.symbol]) + 1
+        if position.metadata is None:
+            position.metadata = {}
+        position.metadata['escalonamiento_index'] = _esc_idx
+        position.metadata['es_escalonamiento'] = (_esc_idx > 1)
+        # Update total_escalonamientos on all existing entries for this symbol
+        if _esc_idx > 1:
+            for _prev in self._open_positions[position.symbol]:
+                if isinstance(_prev.metadata, dict):
+                    _prev.metadata['total_escalonamientos'] = _esc_idx
+                    if self.db_client and getattr(_prev, 'db_id', None):
+                        try:
+                            import json as _j
+                            self.db_client.execute_update(
+                                "UPDATE trades_open SET metadata = metadata || %s::jsonb WHERE id = %s",
+                                (_j.dumps({'total_escalonamientos': _esc_idx}), _prev.db_id)
+                            )
+                        except Exception:
+                            pass
+        position.metadata['total_escalonamientos'] = _esc_idx
         self._open_positions[position.symbol].append(position)
         
         if self.db_client:
@@ -210,7 +244,14 @@ class PositionManager:
             except Exception as e:
                 logger.error(f"Failed to save position to database: {e}")
                 ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"Failed to save position {position.symbol}: {e}")
-        
+        _pos_meta = position.metadata if isinstance(position.metadata, dict) else {}
+        self._audit(position.symbol, 'open', {
+            'side': position.side, 'qty': float(position.quantity), 'price': float(position.entry_price),
+            'sl': float(position.stop_loss or 0), 'tp': float(position.take_profit or 0),
+            'esc_index': _esc_idx,
+            'order_id': str(_pos_meta.get('entry_order_id', _pos_meta.get('order_id', ''))),
+            'binance_confirmed': bool(_pos_meta.get('binance_entry_confirmed', False)),
+        }, binance_confirmed=bool(_pos_meta.get('binance_entry_confirmed', False)))
         logger.info(f"Position opened: {position.symbol} {position.side} {position.quantity} @ {position.entry_price}")
     
     def get_position(self, symbol: str) -> Optional[List[Position]]:
@@ -515,6 +556,14 @@ class PositionManager:
                 logger.error(f"Failed to close position in database: {e}")
                 ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"Failed to close position {symbol} in DB: {e}")
 
+        _cp_meta = closed_position.metadata if isinstance(closed_position.metadata, dict) else {}
+        self._audit(symbol, 'close', {
+            'side': closed_position.side, 'qty': float(closed_position.quantity or 0),
+            'entry_price': float(closed_position.entry_price or 0),
+            'exit_price': float(closed_position.exit_price or 0),
+            'pnl': round(float(pnl), 4), 'reason': close_reason,
+            'bounce_entry': bool(_cp_meta.get('bounce_entry', False)),
+        }, binance_confirmed=False)
         logger.info(f"Position closed: {symbol} PnL={pnl:.2f} ({pnl_pct:.2f}%) reason={close_reason}")
         return closed_position
 
@@ -532,8 +581,17 @@ class PositionManager:
             List of ClosedPosition objects
         """
         positions = list(self._open_positions.get(symbol, []))
+        # ── SPOT Escalamiento: assign shared close_group_id when closing N entries ──
+        _close_group = str(uuid.uuid4()) if len(positions) > 1 else None
         results = []
-        for pos in positions:
+        for _i, pos in enumerate(positions):
+            # Inject close_group_id + escalonamiento metadata into the position before closing
+            if _close_group:
+                if not isinstance(pos.metadata, dict):
+                    pos.metadata = {}
+                pos.metadata['close_group_id'] = _close_group
+                pos.metadata['escalonamiento_index'] = pos.metadata.get('escalonamiento_index', _i + 1)
+                pos.metadata['total_escalonamientos'] = len(positions)
             closed = self.close_position(symbol, exit_price, close_reason, commission_rate, position_id=pos.position_id)
             if closed:
                 results.append(closed)
@@ -546,6 +604,20 @@ class PositionManager:
 
         def _safe_float(v):
             return float(v) if v is not None else None
+
+        # FIX-4: Ensure bounce_entry is in root of metadata for easy lookup in closed endpoints
+        _meta = closed_position.metadata
+        if isinstance(_meta, str):
+            try:
+                _meta = json.loads(_meta)
+            except Exception:
+                _meta = {}
+        if isinstance(_meta, dict) and _meta.get('bounce_entry') is None:
+            # Propagate from position metadata if available
+            _pos_meta = position.metadata if isinstance(position.metadata, dict) else {}
+            if _pos_meta.get('bounce_entry'):
+                _meta['bounce_entry'] = True
+        _meta_json = json.dumps(_meta) if isinstance(_meta, dict) else _to_json(_meta)
 
         insert_query = """
             INSERT INTO trades_closed 
@@ -568,7 +640,7 @@ class PositionManager:
                 _safe_float(closed_position.pnl),
                 _safe_float(closed_position.pnl_percentage),
                 closed_position.close_reason,
-                _to_json(closed_position.metadata),
+                _meta_json,
                 _safe_float(closed_position.entry_commission),
                 _safe_float(closed_position.exit_commission),
                 _to_json(closed_position.pnl_prediction),

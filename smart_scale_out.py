@@ -60,6 +60,11 @@ class SSOPositionData:
     current_strength: float = 0.5
     best_available_ev: float = 0.0
     all_slots_full: bool = False
+    # For SSO-6: Bounce Rescue
+    bounce_entry: bool = False          # True when position is trapped in BTC bounce
+    rescue_prediction_ev: Optional[float] = None   # updated EV from predictor at rescue check time
+    rescue_signal: Optional[str] = None            # current signal (BUY/SELL/HOLD) at rescue check
+    rescue_signal_strength: float = 0.0            # current signal strength at rescue check
 
 
 class SmartScaleOut:
@@ -114,6 +119,11 @@ class SmartScaleOut:
         # SSO-5: Re-entry Upgrade
         self.reentry_min_strength_diff = self._cfg('sso_reentry_min_strength_diff', 0.3)
         self.reentry_min_ev_multiplier = self._cfg('sso_reentry_min_ev_multiplier', 1.5)
+        # SSO-6: Bounce Rescue Mode
+        self.bounce_rescue_enabled = self._cfg('futures_bounce_rescue_enabled', True)
+        self.bounce_rescue_max_peak_pct = self._cfg('futures_bounce_rescue_max_peak_pct', 0.5) / 100.0
+        self.bounce_rescue_min_hours = self._cfg('futures_bounce_rescue_min_hours', 4.0)
+        self.bounce_rescue_target_pnl = self._cfg('futures_bounce_rescue_target_pnl', -0.50)
         # Store dynamic overrides for SSO-1b and SSO-1c (read inside _check_sso1_stagnant)
         self._dyn_decay_min_profit = _dyn_decay
         self._dyn_slow_min_profit = _dyn_slow
@@ -132,6 +142,7 @@ class SmartScaleOut:
         """
         _diag_parts = []
         checks = [
+            ("SSO-6", self._check_sso6_bounce_rescue),
             ("SSO-1", self._check_sso1_stagnant),
             ("SSO-2", self._check_sso2_momentum_exhausted),
             ("SSO-3", self._check_sso3_multilevel),
@@ -149,6 +160,102 @@ class SmartScaleOut:
         no_action = SSOAction()
         no_action.diagnosis = " | ".join(_diag_parts)
         return no_action
+
+    # ── SSO-6: Bounce Rescue Mode — close trapped bounce entries near breakeven ──
+    def _check_sso6_bounce_rescue(self, pos: SSOPositionData) -> SSOAction:
+        """Close 100% when a bounce-trapped position approaches breakeven.
+        Activates when peak_pnl is very low after min_hours OR bounce_entry flag set.
+        Target: close as soon as pnl_usdt >= rescue_target_pnl (default -$0.50).
+        Smart Gate: blocks rescue when position is already recovering (signal/EV/velocity).
+        Applies to both FUTURES and SPOT trade types."""
+        _enabled = self.bounce_rescue_enabled
+        if pos.trade_type == 'spot':
+            _enabled = self._cfg('spot_bounce_rescue_enabled', True)
+        if not _enabled:
+            return SSOAction(diagnosis="SSO-6:disabled")
+        if not pos.opened_at:
+            return SSOAction(diagnosis="SSO-6:skip(no opened_at)")
+
+        age_hours = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
+
+        # Use per-type thresholds
+        _max_peak = self.bounce_rescue_max_peak_pct
+        _min_hours = self.bounce_rescue_min_hours
+        _target_pnl = self.bounce_rescue_target_pnl
+        if pos.trade_type == 'spot':
+            _max_peak = self._cfg('spot_bounce_rescue_max_peak_pct', 0.8) / 100.0
+            _min_hours = self._cfg('spot_bounce_rescue_min_hours', 8.0)
+            _target_pnl = self._cfg('spot_bounce_rescue_target_pnl', -0.30)
+
+        # Determine if this position qualifies as a bounce entry
+        _is_bounce = pos.bounce_entry
+        if not _is_bounce:
+            # Inline detection: peak too low after enough time
+            if age_hours >= _min_hours and pos.peak_pnl_pct < _max_peak:
+                _is_bounce = True
+
+        if not _is_bounce:
+            return SSOAction(diagnosis=f"SSO-6:no(peak={pos.peak_pnl_pct*100:.2f}%>={_max_peak*100:.1f}% or age={age_hours:.1f}h<{_min_hours:.1f}h)")
+
+        # Bounce confirmed — check if we're near enough to breakeven to close
+        if pos.pnl_usdt < _target_pnl:
+            return SSOAction(
+                diagnosis=(f"SSO-6:wait(bounce=True,pnl=${pos.pnl_usdt:.2f}<${_target_pnl:.2f},"
+                           f"age={age_hours:.1f}h)")
+            )
+
+        # ── SMART GATE: block rescue if position is already recovering ──────
+        _gate_enabled = self._cfg('rescue_smart_gate_enabled', True)
+        _gate_reasons = []  # reasons that block the rescue
+        if _gate_enabled:
+            # Gate 1: position already in profit — let SSO-1/2 manage it
+            if pos.pnl_pct > 0:
+                _gate_reasons.append(f"pnl_positive({pos.pnl_pct*100:.2f}%)")
+
+            # Gate 2: favorable signal with vol confirmation
+            # SHORT benefits from SELL signal; LONG/BUY benefits from BUY signal
+            _sig = pos.rescue_signal or ""
+            _sig_str = pos.rescue_signal_strength or 0.0
+            _str_thresh = self._cfg('rescue_stay_strength_min', 0.40)
+            _is_favorable = (
+                (pos.side in ("SHORT", "SELL") and _sig == "SELL") or
+                (pos.side in ("LONG", "BUY") and _sig == "BUY")
+            )
+            _vol_ok = (pos.vol_spike is not None and pos.vol_spike >= 1.0)
+            if _is_favorable and _sig_str >= _str_thresh and _vol_ok:
+                _gate_reasons.append(f"signal_favorable({_sig} str={_sig_str:.2f})")
+            elif _is_favorable and _sig_str >= _str_thresh:
+                # favorable signal even without vol spike if strength is strong
+                if _sig_str >= 0.60:
+                    _gate_reasons.append(f"signal_strong({_sig} str={_sig_str:.2f})")
+
+            # Gate 3: updated prediction EV is substantially positive
+            _ev = pos.rescue_prediction_ev
+            _ev_thresh = abs(_target_pnl) * self._cfg('rescue_stay_ev_multiplier', 2.0)
+            if _ev is not None and _ev > _ev_thresh:
+                _gate_reasons.append(f"pred_ev=${_ev:.2f}>${_ev_thresh:.2f}")
+
+            # Gate 4: sustained positive PnL velocity
+            _vel = pos.pnl_velocity_1h or 0.0
+            _vel_thresh = self._cfg('rescue_velocity_min_pct', 0.003)
+            # Only block if velocity is positive AND position is recovering (pnl improving)
+            if _vel > _vel_thresh and pos.pnl_pct > pos.peak_pnl_pct * 0.5:
+                _gate_reasons.append(f"vel_positive({_vel*100:.3f}%/h)")
+
+        if _gate_reasons:
+            return SSOAction(
+                diagnosis=(f"SSO-6:GATE_BLOCKED({', '.join(_gate_reasons)}) — "
+                           f"pnl=${pos.pnl_usdt:.2f} age={age_hours:.1f}h")
+            )
+
+        # No gate blocked — execute rescue
+        return SSOAction(
+            should_close=True, close_pct=1.0,
+            reason="sso_bounce_rescue",
+            detail=(f"Bounce rescue: pnl=${pos.pnl_usdt:.2f}>=${_target_pnl:.2f} "
+                    f"gate=clear (peak={pos.peak_pnl_pct*100:.2f}%, age={age_hours:.1f}h)"),
+            trigger="SSO-6", priority=0,
+        )
 
     # ── SSO-1: Capital Velocity — decay / slow / stagnant ───────────────────────
     def _check_sso1_stagnant(self, pos: SSOPositionData) -> Optional[SSOAction]:

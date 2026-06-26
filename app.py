@@ -97,6 +97,26 @@ def to_mexico_time_str(utc_iso: str) -> str:
         return utc_iso
 
 
+def _enrich_entries(entries: list, current_price: float, side: str) -> list:
+    """Enrich escalamiento entries with per-entry PnL given current price."""
+    result = []
+    is_short = str(side).upper() in ('SHORT', 'SELL')
+    for e in entries:
+        ep = float(e.get('entry_price', 0) or 0)
+        qty = float(e.get('qty', 0) or 0)
+        if ep > 0 and qty > 0:
+            if is_short:
+                pnl = round((ep - current_price) * qty, 4)
+            else:
+                pnl = round((current_price - ep) * qty, 4)
+            pnl_pct = round((pnl / (ep * qty)) * 100, 2) if ep * qty > 0 else 0.0
+        else:
+            pnl = 0.0
+            pnl_pct = 0.0
+        result.append({**e, "pnl_usdt": pnl, "pnl_pct": pnl_pct})
+    return result
+
+
 @app.on_event("startup")
 def startup_event():
     # Set RUNNING state FIRST so cycles can execute on first iteration
@@ -740,7 +760,8 @@ async def get_closed_positions(limit: int = 20) -> Dict:
                 "exit_time": to_mexico_time_str(pos.exit_time),
                 "close_reason": pos.close_reason,
                 "entry_commission": pos.entry_commission,
-                "exit_commission": pos.exit_commission
+                "exit_commission": pos.exit_commission,
+                "bounce_entry": (getattr(pos, 'metadata', None) or {}).get('bounce_entry', False),
             })
         
         return {
@@ -1411,97 +1432,187 @@ async def get_dashboard_summary() -> Dict:
                 current_price_sym = float(binance_client.get_symbol_price(symbol))
             except Exception:
                 current_price_sym = None
-            for entry_num, position in enumerate(pos_list, start=1):
+
+            _cat_map = getattr(settings, "token_categories", {})
+            _sym_cat = _cat_map.get(symbol, {})
+
+            # ESC-AGG-B: Build ONE parent row per symbol (WAP + total qty + total PnL)
+            # Use oldest position for metadata (SL/TP/prediction from first entry)
+            _sp_first = pos_list[0]
+            _sp_cp = current_price_sym if current_price_sym is not None else float(_sp_first.entry_price)
+            _sp_side = _sp_first.side.upper()
+            _sp_is_short = _sp_side in ("SELL", "SHORT")
+
+            # Aggregate across all entries
+            _sp_entries_raw = []
+            _sp_total_cost = 0.0
+            _sp_total_qty  = 0.0
+            _sp_total_pnl  = 0.0
+            _sp_max_age_h  = 0.0
+            _sp_first_entry_time = ""
+            _sp_pred = None
+            _sp_meta_last = {}
+            now_dt = to_mexico_time(datetime.utcnow())
+            for _pos_i, position in enumerate(pos_list):
                 try:
-                    entry_p = float(position.entry_price)
-                    qty_f   = float(position.quantity)
-                    cp = current_price_sym if current_price_sym is not None else entry_p
-                    if position.side.upper() == "BUY":
-                        unrealized_pnl = round((cp - entry_p) * qty_f, 4)
-                    else:
-                        unrealized_pnl = round((entry_p - cp) * qty_f, 4)
+                    _ep = float(position.entry_price)
+                    _qty = float(position.quantity)
                 except Exception:
-                    entry_p = float(position.entry_price)
-                    qty_f   = float(position.quantity)
-                    cp = entry_p
-                    unrealized_pnl = 0.0
-
-                entry_time_str = ""
+                    continue
+                _cost = _ep * _qty
+                _sp_total_cost += _cost
+                _sp_total_qty  += _qty
+                if _sp_is_short:
+                    _sp_total_pnl += (_ep - _sp_cp) * _qty
+                else:
+                    _sp_total_pnl += (_sp_cp - _ep) * _qty
+                # Age
                 try:
-                    entry_time_str = to_mexico_time_str(position.entry_time) if position.entry_time else ""
-                    now_dt = to_mexico_time(datetime.utcnow())
-                    entry_dt = datetime.fromisoformat(entry_time_str) if entry_time_str else now_dt
-                    hours_held = (now_dt - entry_dt).total_seconds() / 3600
+                    _et_str = to_mexico_time_str(position.entry_time) if position.entry_time else ""
+                    _et_dt  = datetime.fromisoformat(_et_str) if _et_str else now_dt
+                    _age_h  = (now_dt - _et_dt).total_seconds() / 3600
                 except Exception:
-                    hours_held = 0.0
-
-                invested_usdt      = round(entry_p * qty_f, 4)
-                current_value_usdt = round(cp * qty_f, 4)
-                _cat_map = getattr(settings, "token_categories", {})
-                _sym_cat = _cat_map.get(symbol, {})
-                # FIX-PR1: backfill pnl_prediction on-demand if missing in DB
-                _pred_for_pos = position.pnl_prediction
-                if _pred_for_pos is None:
-                    try:
-                        import pnl_service as _pnl_svc
-                        _pred_for_pos, _ = _pnl_svc.predict_for_symbol(
-                            symbol=symbol, client=binance_client, settings=settings,
-                            position_size_usdt=invested_usdt or 50.0
-                        )
-                        if _pred_for_pos and position.db_id:
-                            import json as _json
-                            db_client.execute_update(
-                                "UPDATE trades_open SET pnl_prediction = %s::jsonb WHERE id = %s",
-                                (_json.dumps(_pred_for_pos), position.db_id)
-                            )
-                    except Exception:
-                        _pred_for_pos = None
-
-                # VIS-2a: SL/TP lifecycle metadata from position.metadata
-                _meta_vis = getattr(position, 'metadata', {}) or {}
-                _sl_f = float(position.stop_loss) if position.stop_loss else None
-                _tp_f = float(position.take_profit) if position.take_profit else None
-                _sl_dist = round((_sl_f - entry_p) / entry_p * 100, 2) if _sl_f and entry_p > 0 else None
-                _tp_dist = round((_tp_f - entry_p) / entry_p * 100, 2) if _tp_f and entry_p > 0 else None
-                _trail_peak = float(_meta_vis.get('trailing_peak', 0)) if _meta_vis.get('trailing_peak') else None
-
-                open_list.append({
-                    "symbol": symbol,
-                    "position_id": position.position_id,
-                    "entry_number": entry_num,
-                    "side": position.side,
-                    "category": _sym_cat.get("market_behavior", "MIDCAP_ALT"),
-                    "origin": _sym_cat.get("origin", ""),
-                    "quantity": qty_f,
-                    "entry_price": entry_p,
-                    "current_price": cp,
-                    "invested_usdt": invested_usdt,
-                    "invested_mxn": round(invested_usdt * _usd_mxn, 2),
-                    "current_value_mxn": round(current_value_usdt * _usd_mxn, 2),
-                    "unrealized_pnl": unrealized_pnl,
-                    "unrealized_pnl_mxn": round(unrealized_pnl * _usd_mxn, 2),
-                    "entry_time": entry_time_str,
-                    "hours_held": round(hours_held, 1),
-                    "entry_commission": float(position.entry_commission) if position.entry_commission else 0.0,
-                    "stop_loss": _sl_f,
-                    "take_profit": _tp_f,
-                    "pnl_prediction": _pred_for_pos,
-                    "is_overflow": symbol in _ov_positions,
+                    _et_str = ""
+                    _age_h  = 0.0
+                if _age_h > _sp_max_age_h:
+                    _sp_max_age_h = _age_h
+                    _sp_first_entry_time = _et_str
+                # Prediction: use first available
+                if _sp_pred is None and position.pnl_prediction:
+                    _sp_pred = position.pnl_prediction
+                # Metadata from last (most recent) entry for SL/TP lifecycle
+                _sp_meta_last = getattr(position, 'metadata', {}) or {}
+                # Build sub-entry for entries[] list
+                _sp_meta_i = getattr(position, 'metadata', {}) or {}
+                _sp_entries_raw.append({
+                    "entry_price": _ep,
+                    "qty": _qty,
+                    "age_h": round(_age_h, 2),
+                    "escalonamiento_index": _sp_meta_i.get('escalonamiento_index', _pos_i + 1),
+                    "es_escalonamiento": _sp_meta_i.get('es_escalonamiento', _pos_i > 0),
                     "trade_type": "spot",
-                    "sl_dist_pct": _sl_dist,
-                    "tp_dist_pct": _tp_dist,
-                    "trailing_peak": _trail_peak,
-                    "trailing_active": _trail_peak is not None and _trail_peak > 0,
-                    "breakeven_done": False,
-                    "tp_extensions": int(_meta_vis.get('tp_extensions_count', 0)),
-                    "tp_decisions": _meta_vis.get('tp_decisions', []),
-                    "scale_out_done": bool(_meta_vis.get('scale_out_done', False)),
+                    "opened_at": _et_str,
+                    "pnl_usdt": 0.0,
+                    "pnl_pct": 0.0,
                 })
+
+            if _sp_total_qty <= 0:
+                continue
+            _sp_wap = _sp_total_cost / _sp_total_qty
+            _sp_total_pnl = round(_sp_total_pnl, 4)
+            _sp_total_qty = round(_sp_total_qty, 8)
+            _sp_wap       = round(_sp_wap, 8)
+            _sp_total_cost = round(_sp_total_cost, 4)
+            _sp_esc_n = len(pos_list)
+
+            # Backfill prediction if still None
+            if _sp_pred is None:
+                try:
+                    import pnl_service as _pnl_svc
+                    _sp_pred, _ = _pnl_svc.predict_for_symbol(
+                        symbol=symbol, client=binance_client, settings=settings,
+                        position_size_usdt=_sp_total_cost or 50.0
+                    )
+                    if _sp_pred and _sp_first.db_id:
+                        import json as _json
+                        db_client.execute_update(
+                            "UPDATE trades_open SET pnl_prediction = %s::jsonb WHERE id = %s",
+                            (_json.dumps(_sp_pred), _sp_first.db_id)
+                        )
+                except Exception:
+                    _sp_pred = None
+
+            # SL/TP from first (oldest) entry — that's the one the system manages
+            _sl_f = float(_sp_first.stop_loss) if _sp_first.stop_loss else None
+            _tp_f = float(_sp_first.take_profit) if _sp_first.take_profit else None
+            _sl_dist = round((_sl_f - _sp_wap) / _sp_wap * 100, 2) if _sl_f and _sp_wap > 0 else None
+            _tp_dist = round((_tp_f - _sp_wap) / _sp_wap * 100, 2) if _tp_f and _sp_wap > 0 else None
+            _trail_peak = float(_sp_meta_last.get('trailing_peak', 0)) if _sp_meta_last.get('trailing_peak') else None
+
+            open_list.append({
+                "symbol": symbol,
+                "position_id": _sp_first.position_id,
+                "entry_number": 1,
+                "side": _sp_first.side,
+                "category": _sym_cat.get("market_behavior", "MIDCAP_ALT"),
+                "origin": _sym_cat.get("origin", ""),
+                "quantity": _sp_total_qty,
+                "entry_price": _sp_wap,
+                "current_price": _sp_cp,
+                "invested_usdt": _sp_total_cost,
+                "invested_mxn": round(_sp_total_cost * _usd_mxn, 2),
+                "current_value_mxn": round(_sp_cp * _sp_total_qty * _usd_mxn, 2),
+                "unrealized_pnl": _sp_total_pnl,
+                "unrealized_pnl_mxn": round(_sp_total_pnl * _usd_mxn, 2),
+                "entry_time": _sp_first_entry_time,
+                "hours_held": round(_sp_max_age_h, 1),
+                "entry_commission": float(_sp_first.entry_commission) if _sp_first.entry_commission else 0.0,
+                "stop_loss": _sl_f,
+                "take_profit": _tp_f,
+                "pnl_prediction": _sp_pred,
+                "is_overflow": symbol in _ov_positions,
+                "trade_type": "spot",
+                "sl_dist_pct": _sl_dist,
+                "tp_dist_pct": _tp_dist,
+                "trailing_peak": _trail_peak,
+                "trailing_active": _trail_peak is not None and _trail_peak > 0,
+                "breakeven_done": False,
+                "tp_extensions": int(_sp_meta_last.get('tp_extensions_count', 0)),
+                "tp_decisions": _sp_meta_last.get('tp_decisions', []),
+                "scale_out_done": bool(_sp_meta_last.get('scale_out_done', False)),
+                "escalamientos": _sp_esc_n,
+                "entries": _enrich_entries(_sp_entries_raw, _sp_cp, _sp_first.side),
+                "bounce_entry": bool(_sp_meta_last.get('bounce_entry', False)),
+                "bounce_gate_blocked_count": int(_sp_meta_last.get('bounce_gate_blocked_count', 0)),
+                "bounce_gate_blocked_reason": _sp_meta_last.get('bounce_gate_blocked_reason'),
+                "bounce_gate_last_signal": _sp_meta_last.get('bounce_gate_last_signal'),
+                "bounce_gate_last_signal_strength": _sp_meta_last.get('bounce_gate_last_signal_strength'),
+                "bounce_gate_last_ev": _sp_meta_last.get('bounce_gate_last_ev'),
+                "bounce_gate_last_velocity": _sp_meta_last.get('bounce_gate_last_velocity'),
+                "bounce_gate_first_qualified_at": _sp_meta_last.get('bounce_gate_first_qualified_at'),
+                "btc_chg_since_entry_pct": None,
+            })
         # Add futures positions to the dashboard
         try:
             from run_trades import _get_futures_client
             fc = _get_futures_client(settings)
             futures_positions = fc.get_open_positions_summary()
+            # Pre-load escalamiento entries from DB for badge enrichment
+            _dash_esc_map: dict = {}
+            try:
+                import json as _jesc
+                _esc_rows = db_client.execute_query(
+                    "SELECT symbol, quantity, price, entry_time, metadata "
+                    "FROM trades_open "
+                    "ORDER BY symbol, entry_time ASC", ()
+                ) if db_client else []
+                from datetime import timezone as _tz_esc
+                _now_esc2 = datetime.utcnow().replace(tzinfo=_tz_esc.utc)
+                for _er in _esc_rows:
+                    _em = _er.get('metadata') or {}
+                    if isinstance(_em, str):
+                        try: _em = _jesc.loads(_em)
+                        except: _em = {}
+                    _et2 = _er.get('entry_time')
+                    _age2 = 0.0
+                    _et2a = None
+                    if _et2:
+                        _et2a = _et2 if (hasattr(_et2,'tzinfo') and _et2.tzinfo) else _et2.replace(tzinfo=_tz_esc.utc) if hasattr(_et2,'replace') else None
+                        if _et2a: _age2 = round((_now_esc2 - _et2a).total_seconds() / 3600, 2)
+                    _esc_opened_str = to_mexico_time_str(_et2a) if _et2a else ""
+                    _dash_esc_map.setdefault(_er['symbol'], []).append({
+                        "entry_price": float(_er['price']),
+                        "qty": float(_er['quantity']),
+                        "age_h": _age2,
+                        "escalonamiento_index": _em.get('escalonamiento_index', 1),
+                        "es_escalonamiento": _em.get('es_escalonamiento', False),
+                        "trade_type": _em.get('trade_type', 'spot'),
+                        "opened_at": _esc_opened_str,
+                        "pnl_usdt": 0.0,
+                        "pnl_pct": 0.0,
+                    })
+            except Exception as _eme:
+                pass
             
             for fp in futures_positions:
                 # FIX-D1: calculate real hours_held and inject pnl_prediction from summary
@@ -1510,7 +1621,7 @@ async def get_dashboard_summary() -> Dict:
                 try:
                     if _fp_opened:
                         from datetime import datetime as _dt2
-                        _fp_dt = _dt2.fromisoformat(str(_fp_opened).replace('Z', '+00:00'))
+                        _fp_dt = _dt2.fromisoformat(str(_fp_opened).replace(' ', 'T', 1).replace('Z', '+00:00'))
                         _fp_dt_naive = _fp_dt.replace(tzinfo=None) if _fp_dt.tzinfo else _fp_dt
                         _fp_hours = round((_dt2.utcnow() - _fp_dt_naive).total_seconds() / 3600, 1)
                 except Exception:
@@ -1543,9 +1654,33 @@ async def get_dashboard_summary() -> Dict:
                         _fp_pred = None
 
                 # VIS-2b: SL/TP lifecycle fields for futures
-                _fp_entry = fp["entry_price"]
                 _fp_sl = fp["sl_price"]
                 _fp_tp = fp["tp_price"]
+
+                # ESC-AGG-A: Aggregate entry_price (WAP), qty, PnL from DB entries when >1 escalamiento
+                _fp_cur = fp["current_price"]
+                _fp_db_entries = [e for e in _dash_esc_map.get(fp["symbol"], [])
+                                  if e.get('trade_type', 'spot') == 'futures']
+                _is_short = fp["side"] == "SHORT"
+                if len(_fp_db_entries) > 1:
+                    _fp_total_qty = sum(float(e['qty']) for e in _fp_db_entries)
+                    _fp_total_cost = sum(float(e['entry_price']) * float(e['qty']) for e in _fp_db_entries)
+                    _fp_wap = _fp_total_cost / _fp_total_qty if _fp_total_qty > 0 else fp["entry_price"]
+                    _fp_total_upnl = sum(
+                        (float(e['entry_price']) - _fp_cur) * float(e['qty']) if _is_short
+                        else (_fp_cur - float(e['entry_price'])) * float(e['qty'])
+                        for e in _fp_db_entries
+                    )
+                    _fp_entry  = round(_fp_wap, 8)
+                    _fp_qty    = round(_fp_total_qty, 8)
+                    _fp_upnl   = round(_fp_total_upnl, 4)
+                    _fp_invested = round(_fp_total_cost, 4)
+                else:
+                    _fp_entry  = fp["entry_price"]
+                    _fp_qty    = fp["qty"]
+                    _fp_upnl   = fp["unrealized_pnl"]
+                    _fp_invested = round(_fp_entry * _fp_qty, 4)
+
                 _fp_sl_dist = round((_fp_sl - _fp_entry) / _fp_entry * 100, 2) if _fp_entry > 0 else None
                 _fp_tp_dist = round((_fp_tp - _fp_entry) / _fp_entry * 100, 2) if _fp_entry > 0 else None
 
@@ -1556,16 +1691,16 @@ async def get_dashboard_summary() -> Dict:
                     "side": fp["side"],
                     "category": "FUTURES",
                     "origin": "",
-                    "quantity": fp["qty"],
+                    "quantity": _fp_qty,
                     "entry_price": _fp_entry,
-                    "current_price": fp["current_price"],
-                    "invested_usdt": round(_fp_entry * fp["qty"], 4),
-                    "margin_usdt": round(_fp_entry * fp["qty"] / 2, 4),
-                    "invested_mxn": round(_fp_entry * fp["qty"] * _usd_mxn, 2),
-                    "current_value_usdt": round(fp["current_price"] * fp["qty"], 4),
-                    "current_value_mxn": round(fp["current_price"] * fp["qty"] * _usd_mxn, 2),
-                    "unrealized_pnl": fp["unrealized_pnl"],
-                    "unrealized_pnl_mxn": round(fp["unrealized_pnl"] * _usd_mxn, 2),
+                    "current_price": _fp_cur,
+                    "invested_usdt": _fp_invested,
+                    "margin_usdt": round(_fp_invested / 2, 4),
+                    "invested_mxn": round(_fp_invested * _usd_mxn, 2),
+                    "current_value_usdt": round(_fp_cur * _fp_qty, 4),
+                    "current_value_mxn": round(_fp_cur * _fp_qty * _usd_mxn, 2),
+                    "unrealized_pnl": _fp_upnl,
+                    "unrealized_pnl_mxn": round(_fp_upnl * _usd_mxn, 2),
                     "entry_time": _fp_entry_time_str,
                     "hours_held": _fp_hours,
                     "entry_commission": 0.0,
@@ -1587,11 +1722,23 @@ async def get_dashboard_summary() -> Dict:
                     "dynamic_trail_dist_pct": fp.get("dynamic_trail_dist_pct"),
                     "sso_levels_done": fp.get("sso_levels_done", []),
                     "sso_last_trigger": fp.get("sso_last_trigger", ""),
+                    "bounce_entry": fp.get("bounce_entry", False),
+                    "bounce_gate_blocked_count": fp.get("bounce_gate_blocked_count", 0),
+                    "bounce_gate_blocked_reason": fp.get("bounce_gate_blocked_reason"),
+                    "bounce_gate_last_signal": fp.get("bounce_gate_last_signal"),
+                    "bounce_gate_last_signal_strength": fp.get("bounce_gate_last_signal_strength"),
+                    "bounce_gate_last_ev": fp.get("bounce_gate_last_ev"),
+                    "bounce_gate_last_velocity": fp.get("bounce_gate_last_velocity"),
+                    "bounce_gate_first_qualified_at": fp.get("bounce_gate_first_qualified_at"),
+                    "btc_chg_since_entry_pct": fp.get("btc_chg_since_entry_pct"),
+                    "escalamientos": max(len(_dash_esc_map.get(fp["symbol"], [])), max((e.get('escalonamiento_index', 1) for e in _dash_esc_map.get(fp["symbol"], [])), default=1)),
+                    "entries": _enrich_entries(_dash_esc_map.get(fp["symbol"], []), fp["current_price"], fp["side"]),
                 })
         except Exception as e:
             # If futures client fails, continue with spot positions only
             print(f"Warning: Could not fetch futures positions for dashboard: {e}")
-        
+
+
         _spot_count = sum(1 for p in open_list if p.get('trade_type') != 'futures')
         _fut_count  = sum(1 for p in open_list if p.get('trade_type') == 'futures')
         result["open_positions"] = {
@@ -1603,17 +1750,17 @@ async def get_dashboard_summary() -> Dict:
     except Exception as e:
         result["open_positions"] = {"positions": [], "count": 0, "error": str(e)}
 
-    # Closed Positions (with pnl_prediction & prediction_accuracy) - Last 3 days only
+    # Closed Positions (with pnl_prediction & prediction_accuracy) - Last 7 days
     try:
-        three_days_ago = datetime.utcnow() - timedelta(days=3)
-        closed_positions = position_manager.get_closed_positions_since(since=three_days_ago, limit=50)
-        closed_list = []
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        closed_positions = position_manager.get_closed_positions_since(since=seven_days_ago, limit=100)
         _cat_map_cl = getattr(settings, "token_categories", {})
+        # Build flat list first
+        _cl_flat = []
         for pos in closed_positions:
             _cl_cat = _cat_map_cl.get(pos.symbol, {})
-            # VIS-2c: extract SL/TP lifecycle from metadata
             _cl_meta = pos.metadata if isinstance(pos.metadata, dict) else {}
-            closed_list.append({
+            _cl_flat.append({
                 "symbol": pos.symbol,
                 "side": pos.side,
                 "category": _cl_cat.get("market_behavior", "MIDCAP_ALT"),
@@ -1636,7 +1783,51 @@ async def get_dashboard_summary() -> Dict:
                 "scale_out_pnl": round(float(_cl_meta.get('scale_out_pnl', 0) or 0), 4),
                 "peak_pnl_pct": round(float(_cl_meta.get('peak_pnl_pct', 0) or 0) * 100, 2),
                 "tp_extensions": int(_cl_meta.get('tp_extensions_count', 0)),
+                "metadata": _cl_meta,
+                "bounce_entry": bool(_cl_meta.get('bounce_entry', False)),
+                "_close_group_id": _cl_meta.get('close_group_id'),
             })
+        # ESC-AGG-C: Group rows with same close_group_id into one parent row
+        from collections import OrderedDict as _OD
+        _cl_groups: dict = _OD()
+        _cl_no_group = []
+        for _row in _cl_flat:
+            _cgid = _row.get('_close_group_id')
+            if _cgid:
+                _cl_groups.setdefault(_cgid, []).append(_row)
+            else:
+                _cl_no_group.append(_row)
+        closed_list = list(_cl_no_group)  # ungrouped first
+        for _cgid, _grp in _cl_groups.items():
+            if len(_grp) == 1:
+                closed_list.append(_grp[0])
+                continue
+            # Aggregate: WAP entry, sum qty, sum pnl, latest exit_time
+            _g_total_qty = sum(r['quantity'] for r in _grp)
+            _g_total_cost = sum(r['entry_price'] * r['quantity'] for r in _grp)
+            _g_wap = _g_total_cost / _g_total_qty if _g_total_qty > 0 else _grp[0]['entry_price']
+            _g_total_pnl = sum(r['pnl'] for r in _grp)
+            _g_exit_price = sum(r['exit_price'] * r['quantity'] for r in _grp) / _g_total_qty if _g_total_qty > 0 else _grp[0]['exit_price']
+            _g_pnl_pct = (_g_total_pnl / _g_total_cost * 100) if _g_total_cost > 0 else 0.0
+            _g_exit_time = max((r['exit_time'] for r in _grp if r['exit_time']), default=_grp[0]['exit_time'])
+            _g_entry_time = min((r['entry_time'] for r in _grp if r['entry_time']), default=_grp[0]['entry_time'])
+            _g_meta = dict(_grp[-1]['metadata'])  # use most recent metadata
+            _g_meta['total_escalonamientos'] = len(_grp)
+            _g_meta['close_group_id'] = _cgid
+            closed_list.append({
+                **_grp[0],
+                "quantity": round(_g_total_qty, 8),
+                "entry_price": round(_g_wap, 8),
+                "exit_price": round(_g_exit_price, 8),
+                "pnl": round(_g_total_pnl, 4),
+                "pnl_percentage": round(_g_pnl_pct, 4),
+                "entry_time": _g_entry_time,
+                "exit_time": _g_exit_time,
+                "metadata": _g_meta,
+            })
+        # Strip internal tracking field before exposing
+        for _cl in closed_list:
+            _cl.pop('_close_group_id', None)
         _cl_spot = sum(1 for p in closed_list if p.get('trade_type') != 'futures')
         _cl_fut  = sum(1 for p in closed_list if p.get('trade_type') == 'futures')
         result["closed_positions"] = {
@@ -1644,10 +1835,10 @@ async def get_dashboard_summary() -> Dict:
             "count": len(closed_list),
             "spot_count": _cl_spot,
             "futures_count": _cl_fut,
-            "period_days": 3,
+            "period_days": 7,
         }
     except Exception as e:
-        result["closed_positions"] = {"positions": [], "count": 0, "error": str(e), "period_days": 3}
+        result["closed_positions"] = {"positions": [], "count": 0, "error": str(e), "period_days": 7}
 
     # PnL by close reason (today + 7d)
     try:
@@ -2097,6 +2288,41 @@ async def get_futures_positions() -> Dict:
             if not _pos.closed and _key not in live_keys:
                 _pos.closed = True  # mark stale entry as closed
 
+        # Paso 5: Pre-load DB escalamiento entries per symbol for enrichment
+        _db_entries_map: dict = {}
+        try:
+            from init_components import get_components as _gc
+            _comps = _gc()
+            if _comps.db_client:
+                _db_esc_rows = _comps.db_client.execute_query(
+                    "SELECT symbol, quantity, price, entry_time, metadata "
+                    "FROM trades_open WHERE metadata->>'trade_type' = 'futures' "
+                    "ORDER BY symbol, entry_time ASC"
+                )
+                import json as _j
+                from datetime import timezone as _tz
+                _now_esc = datetime.utcnow().replace(tzinfo=_tz.utc)
+                for _er in _db_esc_rows:
+                    _emeta = _er.get('metadata') or {}
+                    if isinstance(_emeta, str):
+                        try: _emeta = _j.loads(_emeta)
+                        except: _emeta = {}
+                    _et = _er.get('entry_time')
+                    _age_h = 0.0
+                    if _et:
+                        _et_aware = _et if hasattr(_et, 'tzinfo') and _et.tzinfo else _et.replace(tzinfo=_tz.utc) if hasattr(_et, 'replace') else None
+                        if _et_aware:
+                            _age_h = round((_now_esc - _et_aware).total_seconds() / 3600, 2)
+                    _db_entries_map.setdefault(_er['symbol'], []).append({
+                        "entry_price": float(_er['price']),
+                        "qty": float(_er['quantity']),
+                        "age_h": _age_h,
+                        "escalonamiento_index": _emeta.get('escalonamiento_index', 1),
+                        "es_escalonamiento": _emeta.get('es_escalonamiento', False),
+                    })
+        except Exception as _dbe:
+            pass
+
         positions = []
         for lp in live_positions:
             sym   = lp.get("symbol", "")
@@ -2164,6 +2390,7 @@ async def get_futures_positions() -> Dict:
                 else:
                     _vis_dyn_trail = 1.5
 
+            _sym_entries = _db_entries_map.get(sym, [])
             positions.append({
                 "symbol":        sym,
                 "side":          side,
@@ -2181,6 +2408,8 @@ async def get_futures_positions() -> Dict:
                 "trail_best_price": _vis_trail_best,
                 "tp_extensions":   _vis_tp_ext,
                 "dynamic_trail_dist_pct": _vis_dyn_trail,
+                "escalamientos":   len(_sym_entries),
+                "entries":         _sym_entries,
             })
 
         return {"enabled": True, "positions": positions, "count": len(positions),
@@ -2262,7 +2491,7 @@ async def get_price_history(symbol: str, start_time: str, end_time: str):
         return {"error": str(e), "symbol": symbol, "data": []}
 
 @app.get("/futures/closed")
-async def get_futures_closed_positions(limit: int = 20, days: int = 3) -> Dict:
+async def get_futures_closed_positions(limit: int = 20, days: int = 7) -> Dict:
     """Return closed futures positions queried live from Binance userTrades (last N days).
     Survives container restarts — does not depend on in-memory tracking.
     """
@@ -2292,7 +2521,7 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 3) -> Dict:
             _since_str = (_dt3.utcnow() - _td3(days=days)).isoformat()
             _db_rows = db_client.execute_query(
                 """SELECT symbol, exit_price, entry_time, exit_time,
-                          close_reason, pnl_prediction, prediction_accuracy, pnl
+                          close_reason, pnl_prediction, prediction_accuracy, pnl, metadata
                    FROM trades_closed
                    WHERE metadata->>'trade_type' = 'futures'
                      AND exit_time >= %s
@@ -2337,6 +2566,13 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 3) -> Dict:
             _entry_time_raw = _db_e.get('entry_time') or opened_at_raw
             _exit_time_raw  = _db_e.get('exit_time') or closed_at_raw
 
+            _db_meta = _db_e.get('metadata') or {} if _db_e else {}
+            if isinstance(_db_meta, str):
+                try:
+                    import json as _jm2
+                    _db_meta = _jm2.loads(_db_meta)
+                except Exception:
+                    _db_meta = {}
             closed.append({
                 "symbol":              _sym,
                 "side":                t["side"],
@@ -2352,6 +2588,8 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 3) -> Dict:
                 "pnl_prediction":      _pnl_pred,
                 "prediction_accuracy": _pred_acc,
                 "trade_type":          "futures",
+                "metadata":            _db_meta,
+                "bounce_entry":        bool((_db_meta.get('smart_meta') or {}).get('bounce_entry', False)),
             })
 
         return {
@@ -2730,6 +2968,24 @@ async def get_health_status() -> Dict:
             overall = "warning"
     except Exception:
         checks["circuit_breaker"] = {"status": "ok", "consecutive_failures": 0}
+
+    # Disk storage
+    try:
+        import shutil as _shutil
+        _du = _shutil.disk_usage('/app')
+        _free_pct = _du.free / _du.total if _du.total > 0 else 1.0
+        _disk_status = "ok" if _free_pct > 0.20 else ("warning" if _free_pct > 0.10 else "critical")
+        checks["disk_storage"] = {
+            "status": _disk_status,
+            "total_gb": round(_du.total / 1e9, 1),
+            "used_gb":  round(_du.used  / 1e9, 1),
+            "free_gb":  round(_du.free  / 1e9, 1),
+            "used_pct": round(_du.used  / _du.total * 100, 1),
+        }
+        if _disk_status == "critical" and overall == "ok":
+            overall = "warning"
+    except Exception as _de:
+        checks["disk_storage"] = {"status": "error", "detail": str(_de)}
 
     return {
         "overall": overall,

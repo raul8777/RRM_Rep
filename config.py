@@ -163,6 +163,22 @@ class Settings(BaseSettings):
     sso_target_min_hours: float = Field(default=1.0, env="SSO_TARGET_MIN_HOURS")
     sso_reentry_min_strength_diff: float = Field(default=0.3, env="SSO_REENTRY_MIN_STRENGTH_DIFF")
     sso_reentry_min_ev_multiplier: float = Field(default=1.5, env="SSO_REENTRY_MIN_EV_MULTIPLIER")
+    # SSO-6: Bounce Rescue Mode — close positions trapped in BTC bounce as soon as they approach breakeven
+    futures_bounce_rescue_enabled: bool = Field(default=True, env="FUTURES_BOUNCE_RESCUE_ENABLED")
+    futures_bounce_rescue_max_peak_pct: float = Field(default=0.5, env="FUTURES_BOUNCE_RESCUE_MAX_PEAK_PCT")   # peak < 0.5% after min_hours = bounce detected
+    futures_bounce_rescue_min_hours: float = Field(default=4.0, env="FUTURES_BOUNCE_RESCUE_MIN_HOURS")         # must hold min 4h before tagging
+    futures_bounce_rescue_target_pnl: float = Field(default=-0.50, env="FUTURES_BOUNCE_RESCUE_TARGET_PNL")     # close when pnl >= -$0.50 (near breakeven)
+    spot_bounce_rescue_enabled: bool = Field(default=True, env="SPOT_BOUNCE_RESCUE_ENABLED")
+    spot_bounce_rescue_max_peak_pct: float = Field(default=0.8, env="SPOT_BOUNCE_RESCUE_MAX_PEAK_PCT")         # SPOT: wider peak threshold (no leverage)
+    spot_bounce_rescue_min_hours: float = Field(default=8.0, env="SPOT_BOUNCE_RESCUE_MIN_HOURS")               # SPOT: wait 8h before activating
+    spot_bounce_rescue_target_pnl: float = Field(default=-0.30, env="SPOT_BOUNCE_RESCUE_TARGET_PNL")           # SPOT: close when pnl >= -$0.30
+    # SSO-6: Bounce Rescue Smart Gate — block rescue when position is already recovering
+    rescue_smart_gate_enabled: bool = Field(default=True, env="RESCUE_SMART_GATE_ENABLED")
+    rescue_stay_strength_min: float = Field(default=0.40, env="RESCUE_STAY_STRENGTH_MIN")      # min signal strength to block rescue
+    rescue_stay_ev_multiplier: float = Field(default=2.0, env="RESCUE_STAY_EV_MULTIPLIER")     # if pred EV > N×|target_pnl|, hold
+    rescue_velocity_min_pct: float = Field(default=0.003, env="RESCUE_VELOCITY_MIN_PCT")       # min pnl velocity/h to block (0.3%/h)
+    # FIX-7: Throttle Binance algo order verification every N check_positions cycles
+    futures_binance_verify_interval_cycles: int = Field(default=3, env="FUTURES_BINANCE_VERIFY_INTERVAL_CYCLES")
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True, env="WR_SCREENER_ENABLED")
     wr_screener_consecutive_sl_block: int = Field(default=3, env="WR_SCREENER_CONSECUTIVE_SL_BLOCK")  # block after N consecutive SL
@@ -475,6 +491,7 @@ class Settings(BaseSettings):
     binance_commission_rate: float = Field(default=0.001, env="BINANCE_COMMISSION_RATE")  # 0.1% SPOT default
     use_bnb_for_commission: bool = Field(default=False, env="USE_BNB_FOR_COMMISSION")  # 0.05% if True
     futures_commission_rate: float = Field(default=0.0004, env="FUTURES_COMMISSION_RATE")  # 0.04% futures taker (0.02% with BNB)
+    futures_max_escalamientos: int = Field(default=2, env="FUTURES_MAX_ESCALAMIENTOS")  # max entries per symbol (escalamiento cap)
     
     # Currency conversion configuration
     usd_to_mxn_rate: float = Field(default=17.0, env="USD_TO_MXN_RATE")  # Default USD to MXN exchange rate

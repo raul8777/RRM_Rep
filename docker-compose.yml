@@ -125,6 +125,7 @@ services:
       - CYCLE_FUTURES_SHORT=4
       - FUTURES_MIN_INJECT_STRENGTH=0.40
       - FUTURES_COMMISSION_RATE=0.0004
+      - FUTURES_MAX_ESCALAMIENTOS=2
       # PV (Profit Velocity) sesion 17 jun21 2026 — scale-out + momentum reversal
       - FUTURES_SCALE_OUT_PCT=1.5
       - FUTURES_SCALE_OUT_FRACTION=0.5
@@ -142,6 +143,12 @@ services:
       - SSO_MULTILEVEL_L3_ATR_MULT=3.5
       - SSO_TARGET_DAILY_USD=40.0
       - SSO_TARGET_CONTRIBUTION_PCT=0.15
+      # SSO-6: Bounce Rescue Mode — sesion jun26 2026
+      - FUTURES_BOUNCE_RESCUE_ENABLED=true
+      - FUTURES_BOUNCE_RESCUE_TARGET_PNL=-0.50
+      - SPOT_BOUNCE_RESCUE_ENABLED=true
+      # FIX-7: Throttle Binance algo verification (every N check_positions cycles)
+      - FUTURES_BINANCE_VERIFY_INTERVAL_CYCLES=3
     ports:
       - "8000:8000"
     depends_on:

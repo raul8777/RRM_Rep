@@ -1047,3 +1047,185 @@ class TestSSODynamicGates:
         assert sso.target_daily_usd == 40.0            # config default
         assert sso._dyn_decay_min_profit is None
         assert sso._dyn_slow_min_profit is None
+
+
+# ─── 14. SSO-6 Bounce Rescue tests ───────────────────────────────────────────
+
+class TestSSO6BounceRescue:
+    """SSO-6: Bounce Rescue Mode — closes bounce-trapped positions near breakeven."""
+
+    def _make_sso(self, **overrides):
+        from smart_scale_out import SmartScaleOut
+        s = types.SimpleNamespace(
+            futures_bounce_rescue_enabled=True,
+            futures_bounce_rescue_max_peak_pct=0.5,
+            futures_bounce_rescue_min_hours=4.0,
+            futures_bounce_rescue_target_pnl=-0.50,
+            spot_bounce_rescue_enabled=True,
+            spot_bounce_rescue_max_peak_pct=0.8,
+            spot_bounce_rescue_min_hours=8.0,
+            spot_bounce_rescue_target_pnl=-0.30,
+            sso_stagnant_min_profit_factor=0.02,
+            sso_stagnant_min_profit_floor=3.0,
+            sso_stagnant_min_hours=2.0,
+            sso_stagnant_velocity_window_min=60,
+            sso_decay_threshold_pct=0.004,
+            sso_decay_min_profit_usd=2.0,
+            sso_decay_min_hours=1.5,
+            sso_slow_velocity_threshold=0.001,
+            sso_slow_min_profit_usd=1.0,
+            sso_slow_min_hours=2.0,
+            sso_slow_tier2_hours=4.0,
+            sso_slow_tier3_hours=6.0,
+            sso_slow_tier4_hours=8.0,
+            sso_momentum_rsi_overbought=70,
+            sso_momentum_rsi_oversold=30,
+            sso_momentum_min_pnl_pct_futures=1.0,
+            sso_momentum_min_pnl_pct_spot=1.5,
+            sso_momentum_vol_dying_threshold=0.5,
+            sso_multilevel_enabled=False,
+            sso_target_contribution_pct=0.15,
+            sso_target_daily_usd=40.0,
+            sso_target_min_hours=1.0,
+            sso_reentry_min_strength_diff=0.3,
+            sso_reentry_min_ev_multiplier=1.5,
+            rescue_smart_gate_enabled=True,
+            rescue_stay_strength_min=0.40,
+            rescue_stay_ev_multiplier=2.0,
+            rescue_velocity_min_pct=0.003,
+        )
+        for k, v in overrides.items():
+            setattr(s, k, v)
+        return SmartScaleOut(s)
+
+    def _make_pos(self, **overrides):
+        from smart_scale_out import SSOPositionData
+        defaults = dict(
+            symbol="ADAUSDT",
+            side="SHORT",
+            pnl_pct=-0.06,
+            pnl_usdt=-0.30,
+            position_size_usdt=150.0,
+            entry_price=0.1396,
+            current_price=0.148,
+            opened_at=datetime.now(timezone.utc).replace(hour=0, minute=0),
+            peak_pnl_pct=0.003,
+            trade_type="futures",
+            bounce_entry=True,
+        )
+        defaults.update(overrides)
+        return SSOPositionData(**defaults)
+
+    def test_fires_when_bounce_tagged_and_near_breakeven(self):
+        """SSO-6 must fire when bounce_entry=True and pnl >= target."""
+        sso = self._make_sso()
+        pos = self._make_pos(pnl_usdt=-0.30, bounce_entry=True)
+        action = sso._check_sso6_bounce_rescue(pos)
+        assert action.should_close is True
+        assert action.reason == "sso_bounce_rescue"
+        assert action.trigger == "SSO-6"
+
+    def test_does_not_fire_when_pnl_too_low(self):
+        """SSO-6 must NOT fire when pnl < target (still too deep in loss)."""
+        sso = self._make_sso()
+        pos = self._make_pos(pnl_usdt=-5.00, bounce_entry=True)
+        action = sso._check_sso6_bounce_rescue(pos)
+        assert action.should_close is False
+        assert "wait" in action.diagnosis
+
+    def test_does_not_fire_when_position_is_young(self):
+        """SSO-6 must NOT fire inline-detection on young position (<4h), no bounce_entry flag."""
+        from datetime import timedelta
+        sso = self._make_sso()
+        pos = self._make_pos(
+            bounce_entry=False,
+            peak_pnl_pct=0.002,
+            opened_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        )
+        action = sso._check_sso6_bounce_rescue(pos)
+        assert action.should_close is False
+
+    def test_does_not_fire_when_disabled(self):
+        """SSO-6 must respect futures_bounce_rescue_enabled=False."""
+        sso = self._make_sso(futures_bounce_rescue_enabled=False)
+        pos = self._make_pos(pnl_usdt=-0.10, bounce_entry=True)
+        action = sso._check_sso6_bounce_rescue(pos)
+        assert action.should_close is False
+        assert "disabled" in action.diagnosis
+
+    # ── Smart Gate tests ──────────────────────────────────────────────────────
+
+    def test_gate_blocked_when_pnl_positive(self):
+        """Smart Gate G1: rescue must be blocked when position is already in profit."""
+        sso = self._make_sso()
+        pos = self._make_pos(
+            pnl_usdt=0.80, pnl_pct=0.005, bounce_entry=True,
+            rescue_signal=None, rescue_signal_strength=0.0, rescue_prediction_ev=None,
+        )
+        action = sso._check_sso6_bounce_rescue(pos)
+        assert action.should_close is False
+        assert "GATE_BLOCKED" in action.diagnosis
+        assert "pnl_positive" in action.diagnosis
+
+    def test_gate_blocked_when_favorable_signal_with_vol(self):
+        """Smart Gate G2: rescue must be blocked when signal is favorable + vol confirmed + strength >= 0.40."""
+        sso = self._make_sso()
+        pos = self._make_pos(
+            pnl_usdt=-0.30, pnl_pct=-0.002, bounce_entry=True,
+            side="SHORT",
+            rescue_signal="SELL", rescue_signal_strength=0.55,
+            vol_spike=1.8,
+            rescue_prediction_ev=None,
+        )
+        action = sso._check_sso6_bounce_rescue(pos)
+        assert action.should_close is False
+        assert "GATE_BLOCKED" in action.diagnosis
+        assert "signal_favorable" in action.diagnosis
+
+    def test_gate_blocked_when_prediction_ev_high(self):
+        """Smart Gate G3: rescue must be blocked when prediction EV > 2 × |target_pnl|."""
+        sso = self._make_sso()
+        # target_pnl = -0.50 → ev_thresh = 0.50 * 2.0 = 1.0
+        pos = self._make_pos(
+            pnl_usdt=-0.40, pnl_pct=-0.003, bounce_entry=True,
+            rescue_signal="HOLD", rescue_signal_strength=0.0,
+            rescue_prediction_ev=1.50,  # > 1.0 threshold
+            vol_spike=0.5,
+        )
+        action = sso._check_sso6_bounce_rescue(pos)
+        assert action.should_close is False
+        assert "GATE_BLOCKED" in action.diagnosis
+        assert "pred_ev" in action.diagnosis
+
+    def test_gate_fires_when_all_gates_pass(self):
+        """Smart Gate: rescue must execute when no gate blocks it (no favorable signal, low EV, pnl<0)."""
+        sso = self._make_sso()
+        pos = self._make_pos(
+            pnl_usdt=-0.30, pnl_pct=-0.002, bounce_entry=True,
+            side="SHORT",
+            rescue_signal="BUY",     # unfavorable for SHORT
+            rescue_signal_strength=0.55,
+            rescue_prediction_ev=0.20,  # < 1.0 threshold
+            vol_spike=0.5,
+            pnl_velocity_1h=0.0,
+            peak_pnl_pct=0.001,
+        )
+        action = sso._check_sso6_bounce_rescue(pos)
+        assert action.should_close is True
+        assert action.reason == "sso_bounce_rescue"
+        assert action.trigger == "SSO-6"
+
+    def test_gate_blocked_spot_favorable_signal(self):
+        """Smart Gate G2 SPOT: rescue blocked when SPOT BUY position has BUY signal + vol."""
+        sso = self._make_sso()
+        pos = self._make_pos(
+            pnl_usdt=-0.25, pnl_pct=-0.002, bounce_entry=True,
+            side="BUY", trade_type="spot",
+            rescue_signal="BUY", rescue_signal_strength=0.65,
+            vol_spike=1.5,
+            rescue_prediction_ev=None,
+        )
+        action = sso._check_sso6_bounce_rescue(pos)
+        assert action.should_close is False
+        assert "GATE_BLOCKED" in action.diagnosis
+        assert "signal_favorable" in action.diagnosis

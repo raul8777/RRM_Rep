@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import urllib.request
 import urllib.parse
+import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timezone
@@ -100,11 +101,23 @@ class FuturesClient:
         if not self.db_client:
             return
         try:
+            # Paso 4: detect escalonamiento — count existing DB records for same symbol
+            _db_side = 'SELL' if pos.side == 'SHORT' else 'BUY'
+            _existing = self.db_client.execute_query(
+                "SELECT COUNT(*) as cnt FROM trades_open WHERE symbol = %s AND side = %s "
+                "AND metadata->>'trade_type' = 'futures'",
+                (pos.symbol, _db_side)
+            )
+            _existing_count = int((_existing[0]['cnt'] if _existing else 0) or 0)
+            _esc_index = _existing_count + 1
+            _es_esc = _existing_count > 0
             meta = json.dumps({
                 'trade_type': 'futures',
                 'order_id': pos.order_id,
                 'sl_order_id': pos.sl_order_id,
                 'tp_order_id': pos.tp_order_id,
+                'escalonamiento_index': _esc_index,
+                'es_escalonamiento': _es_esc,
             })
             _pnl_pred_json = json.dumps(pos.pnl_prediction) if pos.pnl_prediction else None
             _ind_json      = json.dumps(pos.indicators_at_entry) if pos.indicators_at_entry else None
@@ -129,7 +142,13 @@ class FuturesClient:
                 )
             )
             print(f'[Futures/DB] {pos.symbol} {pos.side} OPEN saved to trades_open '
-                  f'(pred={pos.pnl_prediction is not None})')
+                  f'(pred={pos.pnl_prediction is not None}, esc_idx={_esc_index})')
+            self._audit(pos.symbol, 'open', {
+                'side': pos.side, 'qty': pos.qty, 'price': pos.entry_price,
+                'sl': pos.sl_price, 'tp': pos.tp_price,
+                'order_id': pos.order_id, 'esc_index': _esc_index,
+                'binance_confirmed': pos._smart_meta.get('binance_entry_confirmed', False),
+            }, binance_confirmed=bool(pos._smart_meta.get('binance_entry_confirmed', False)))
         except Exception as e:
             print(f'[Futures/DB] save_open {pos.symbol} failed: {e}')
 
@@ -140,11 +159,13 @@ class FuturesClient:
             return
         try:
             _db_side = 'SELL' if pos.side == 'SHORT' else 'BUY'
-            # Read current metadata, merge smart_meta into it
+            # FIX-3: Order by proximity to entry_price to always pick the correct row
+            # when multiple escalamiento entries exist for the same symbol
             rows = self.db_client.execute_query(
                 "SELECT id, metadata FROM trades_open WHERE symbol = %s AND side = %s "
-                "AND metadata->>'trade_type' = 'futures' LIMIT 1",
-                (pos.symbol, _db_side)
+                "AND metadata->>'trade_type' = 'futures' "
+                "ORDER BY ABS(price::float - %s) ASC LIMIT 1",
+                (pos.symbol, _db_side, pos.entry_price)
             )
             if rows:
                 _row = rows[0]
@@ -159,8 +180,26 @@ class FuturesClient:
         except Exception as e:
             print(f'[Futures/DB] persist_smart_meta {pos.symbol} failed: {e}')
 
-    def _save_futures_closed(self, pos: 'FuturesPosition', reason: str) -> None:
-        """Persist a closed futures position to trades_closed and remove from trades_open."""
+    def _audit(self, symbol: str, event: str, detail: dict, binance_confirmed: bool = False) -> None:
+        """FIX-9: Write a traceability record to trades_audit for every critical event."""
+        if not self.db_client:
+            return
+        try:
+            self.db_client.execute_update(
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (symbol, 'futures', event, json.dumps(detail), binance_confirmed)
+            )
+        except Exception:
+            pass  # audit failure must never interrupt trading logic
+
+    def _save_futures_closed(self, pos: 'FuturesPosition', reason: str,
+                              close_group_id: Optional[str] = None,
+                              esc_index: int = 1, total_esc: int = 1,
+                              pnl_override: Optional[float] = None) -> None:
+        """Persist a closed futures position to trades_closed and remove from trades_open.
+        Supports proportional PnL across escalamiento entries (via pnl_override).
+        """
         if not self.db_client:
             return
         try:
@@ -172,21 +211,31 @@ class FuturesClient:
                 gross_pnl = (exit_price - pos.entry_price) * pos.qty
                 pnl_pct   = round((exit_price - pos.entry_price) / pos.entry_price * 100, 4)
             # Commission accounting — futures taker rate (0.04% per side)
-            _f_comm_rate = getattr(self.settings, 'futures_commission_rate', 0.0004)
+            _f_comm_rate = getattr(getattr(self, '_cached_settings', None), 'futures_commission_rate', 0.0004)
             _entry_comm  = round(pos.entry_price * pos.qty * _f_comm_rate, 6)
             _exit_comm   = round(exit_price * pos.qty * _f_comm_rate, 6)
-            if pos.pnl is not None:
+            if pnl_override is not None:
+                # Proportional PnL from multi-entry close
+                pnl = pnl_override
+            elif pos.pnl is not None:
                 # Binance realizedPnl (SL/TP/trailing closes) — already net, do NOT deduct again
                 pnl = pos.pnl
             else:
                 # Local SSO market-order close — gross, must deduct both sides
                 pnl = gross_pnl - _entry_comm - _exit_comm
+            _cgid = close_group_id or str(uuid.uuid4())
             meta = json.dumps({
                 'trade_type': 'futures',
                 'order_id': pos.order_id,
                 'sl_order_id': pos.sl_order_id,
                 'tp_order_id': pos.tp_order_id,
                 'smart_meta': pos._smart_meta,
+                'close_group_id': _cgid,
+                'escalonamiento_index': esc_index,
+                'total_escalonamientos': total_esc,
+                'es_escalonamiento': total_esc > 1,
+                'bounce_entry': bool(pos._smart_meta.get('bounce_entry', False)),  # FIX-4: root for easy lookup
+                'btc_at_entry': pos._smart_meta.get('btc_price_at_entry'),
             })
             _pnl_pred_json = json.dumps(pos.pnl_prediction) if pos.pnl_prediction else None
             _ind_json      = json.dumps(pos.indicators_at_entry) if pos.indicators_at_entry else None
@@ -226,12 +275,25 @@ class FuturesClient:
                     _exit_comm,
                 )
             )
-            # Remove from trades_open by symbol+entry_time
+            # Remove from trades_open — delete exactly one row (oldest matching) using ctid
+            _db_side_del = 'SELL' if pos.side == 'SHORT' else 'BUY'
             self.db_client.execute_update(
-                "DELETE FROM trades_open WHERE symbol = %s AND price = %s AND metadata->>'trade_type' = 'futures'",
-                (pos.symbol, pos.entry_price)
+                "DELETE FROM trades_open WHERE ctid = ("
+                "  SELECT ctid FROM trades_open WHERE symbol = %s AND price = %s AND side = %s "
+                "  AND metadata->>'trade_type' = 'futures' ORDER BY entry_time ASC LIMIT 1"
+                ")",
+                (pos.symbol, pos.entry_price, _db_side_del)
             )
-            print(f'[Futures/DB] {pos.symbol} {pos.side} CLOSED ({reason}) pnl=${pnl:.2f} (comm=${_entry_comm+_exit_comm:.4f}) saved to trades_closed')
+            print(f'[Futures/DB] {pos.symbol} {pos.side} CLOSED ({reason}) pnl=${pnl:.2f} '
+                  f'(comm=${_entry_comm+_exit_comm:.4f} esc={esc_index}/{total_esc} grp={_cgid[:8]}) saved')
+            _binance_close = reason in ('trailing_sl_binance', 'stop_loss_binance', 'take_profit_binance',
+                                         'stop_loss_binance_safety', 'binance_safety_close', 'binance_closed_untracked')
+            self._audit(pos.symbol, 'close', {
+                'side': pos.side, 'qty': pos.qty, 'entry_price': pos.entry_price,
+                'exit_price': exit_price, 'pnl': round(pnl, 4), 'reason': reason,
+                'bounce_entry': bool(pos._smart_meta.get('bounce_entry', False)),
+                'esc': f"{esc_index}/{total_esc}", 'group': _cgid[:8],
+            }, binance_confirmed=_binance_close)
         except Exception as e:
             print(f'[Futures/DB] save_closed {pos.symbol} failed: {e}')
 
@@ -714,8 +776,8 @@ class FuturesClient:
             if self.db_client and self._open_positions:
                 try:
                     _db_rows = self.db_client.execute_query(
-                        """SELECT id, symbol, side, price, metadata, pnl_prediction,
-                                  indicators_at_entry, entry_time
+                        """SELECT id, symbol, side, price, stop_loss, take_profit,
+                                  metadata, pnl_prediction, indicators_at_entry, entry_time
                            FROM trades_open
                            WHERE metadata->>'trade_type' = 'futures'
                            ORDER BY entry_time DESC"""
@@ -778,6 +840,25 @@ class FuturesClient:
                                     if isinstance(_et, str):
                                         _et = _dt.fromisoformat(_et.replace('Z', '+00:00'))
                                     _p.opened_at = _et
+                                except Exception:
+                                    pass
+                            # FIX-SL-RESTORE: Prefer software SL/TP from DB over Binance safety trigger
+                            # Binance algo order triggerPrice is wider (safety margin), not software SL
+                            _db_sl = _dbr.get('stop_loss')
+                            _db_tp = _dbr.get('take_profit')
+                            if _db_sl:
+                                try:
+                                    _db_sl_f = float(_db_sl)
+                                    if _db_sl_f > 0:
+                                        _p.sl_price = _db_sl_f
+                                        print(f"[Futures/Sync] {_p.symbol} {_p.side}: SL restored from DB={_db_sl_f:.4f} (overrides Binance trigger)")
+                                except Exception:
+                                    pass
+                            if _db_tp:
+                                try:
+                                    _db_tp_f = float(_db_tp)
+                                    if _db_tp_f > 0:
+                                        _p.tp_price = _db_tp_f
                                 except Exception:
                                     pass
                 except Exception as _dbe:
@@ -843,12 +924,14 @@ class FuturesClient:
                 except Exception as _gc_err:
                     print(f"[Futures/Sync] Ghost cleanup failed: {_gc_err}")
 
-            # FIX-S5: Deduplicate trades_open — when multiple records exist for same symbol+side,
-            # keep only the one whose price matches Binance entry_price
+            # FIX-S5 (updated): Deduplicate trades_open — only delete truly identical rows
+            # (price difference < 0.5%). Rows with >0.5% price difference are ALWAYS treated
+            # as legitimate escalamientos even without the es_escalonamiento flag (legacy entries
+            # opened before that field existed). NEVER delete rows with es_escalonamiento=True.
             if self.db_client and self._open_positions:
                 try:
                     _dedup_rows = self.db_client.execute_query(
-                        """SELECT id, symbol, side, price FROM trades_open
+                        """SELECT id, symbol, side, price, metadata FROM trades_open
                            WHERE metadata->>'trade_type' = 'futures'
                            ORDER BY entry_time DESC"""
                     )
@@ -860,6 +943,23 @@ class FuturesClient:
                     for _dk, _drows in _dedup_groups.items():
                         if len(_drows) <= 1:
                             continue
+                        # Check if any rows are intentional escalamientos (flag present)
+                        _has_escalamiento_flag = any(
+                            (json.loads(_dr['metadata']) if isinstance(_dr.get('metadata'), str) else (_dr.get('metadata') or {})).get('es_escalonamiento')
+                            or (json.loads(_dr['metadata']) if isinstance(_dr.get('metadata'), str) else (_dr.get('metadata') or {})).get('escalonamiento_index', 1) > 1
+                            for _dr in _drows
+                        )
+                        if _has_escalamiento_flag:
+                            print(f"[Futures/Sync] Dedup: SKIPPING {_drows[0]['symbol']} — has es_escalonamiento flag")
+                            continue
+                        # FIX-2: Also skip if all prices differ by >0.5% — legacy escalamientos without flag
+                        _prices = [float(_dr['price']) for _dr in _drows if _dr.get('price')]
+                        if len(_prices) >= 2:
+                            _max_p, _min_p = max(_prices), min(_prices)
+                            if _min_p > 0 and (_max_p - _min_p) / _min_p > 0.005:
+                                print(f"[Futures/Sync] Dedup: SKIPPING {_drows[0]['symbol']} — price spread {(_max_p-_min_p)/_min_p*100:.2f}% > 0.5% (legacy escalamiento)")
+                                continue
+                        # Only deduplicate truly identical rows (price within 0.5%)
                         _pos = self._open_positions.get(_dk)
                         _keep_id = None
                         if _pos:
@@ -874,7 +974,7 @@ class FuturesClient:
                                 self.db_client.execute_update(
                                     "DELETE FROM trades_open WHERE id = %s", (_dr['id'],)
                                 )
-                                print(f"[Futures/Sync] Dedup: deleted stale trades_open "
+                                print(f"[Futures/Sync] Dedup: deleted exact duplicate trades_open "
                                       f"id={_dr['id']} {_dr['symbol']} price={_dr['price']} "
                                       f"(keeping id={_keep_id})")
                 except Exception as _dd_err:
@@ -899,6 +999,37 @@ class FuturesClient:
                             print(f"[Futures/Sync] Created missing trades_open record for {_p.symbol} {_p.side}")
                 except Exception as _cr_err:
                     print(f"[Futures/Sync] Create missing records failed: {_cr_err}")
+
+            # FIX-5: Retro-tag bounce_entry on eligible positions at startup
+            # Any position already >= min_hours old with peak < threshold gets tagged immediately
+            # so SSO-6 can evaluate it on the very first cycle after restart
+            try:
+                _settings = getattr(self, '_cached_settings', None)  # set by check_positions if called first; None is fine
+                _br_max_peak = getattr(_settings, 'futures_bounce_rescue_max_peak_pct', 0.5) / 100.0 if _settings else 0.005
+                _br_min_h   = getattr(_settings, 'futures_bounce_rescue_min_hours', 4.0) if _settings else 4.0
+                _br_enabled = getattr(_settings, 'futures_bounce_rescue_enabled', True) if _settings else True
+                if _br_enabled:
+                    _retag_count = 0
+                    for _k, _p in self._open_positions.items():
+                        if _p.closed or _p._smart_meta.get('bounce_entry'):
+                            continue
+                        if not _p.opened_at:
+                            continue
+                        try:
+                            _age_h = (datetime.now(timezone.utc) - _p.opened_at).total_seconds() / 3600
+                            _peak  = _p._smart_meta.get('peak_pnl_pct', 0.0) or 0.0
+                            if _age_h >= _br_min_h and _peak < _br_max_peak:
+                                _p._smart_meta['bounce_entry'] = True
+                                self._persist_smart_meta(_p)
+                                print(f"[SSO-6/Startup] {_p.symbol} {_p.side}: RETRO-TAGGED bounce_entry "
+                                      f"(peak={_peak*100:.2f}%<{_br_max_peak*100:.1f}%, age={_age_h:.1f}h)")
+                                _retag_count += 1
+                        except Exception:
+                            pass
+                    if _retag_count:
+                        print(f"[SSO-6/Startup] Retro-tagged {_retag_count} position(s) as bounce_entry")
+            except Exception as _rtag_err:
+                print(f"[SSO-6/Startup] Retro-tag failed: {_rtag_err}")
 
             if self._open_positions:
                 print(f"[Futures] FuturesClient initialized — synced {len(self._open_positions)} open position(s)")
@@ -1405,6 +1536,15 @@ class FuturesClient:
                 indicators_at_entry=indicators_at_entry,
             )
             pos._smart_meta['fut_total_at_open'] = self.get_total_wallet_usdt()  # SSO gate anchor
+            try:
+                pos._smart_meta['btc_price_at_entry'] = self.get_price('BTCUSDT')  # SSO-6: BTC ref for bounce detection
+            except Exception:
+                pass
+            # FIX-6: trazabilidad — registrar datos del fill real de Binance
+            pos._smart_meta['entry_order_id'] = order_id
+            pos._smart_meta['entry_filled_qty'] = float(entry_order.get('executedQty', qty))
+            pos._smart_meta['entry_avg_price'] = filled_price
+            pos._smart_meta['binance_entry_confirmed'] = entry_order.get('status') in ('FILLED', 'NEW')
             self._open_positions[self._pos_key(symbol, "SHORT")] = pos
             self._save_futures_open(pos)  # FIX-G+P2: persist to DB with prediction
             print(f"[Futures] SHORT {symbol} OPEN: entry={filled_price:.4f}, "
@@ -1412,6 +1552,7 @@ class FuturesClient:
             return pos
 
         except Exception as e:
+            self._last_error = str(e)  # auto-learn: lets run_trades detect -1121
             print(f"[Futures] Failed to open SHORT {symbol}: {e}")
             return None
 
@@ -1528,6 +1669,15 @@ class FuturesClient:
                 order_id=order_id, sl_order_id=sl_order_id, tp_order_id=tp_order_id,
             )
             pos._smart_meta['fut_total_at_open'] = self.get_total_wallet_usdt()  # SSO gate anchor
+            try:
+                pos._smart_meta['btc_price_at_entry'] = self.get_price('BTCUSDT')  # SSO-6: BTC ref for bounce detection
+            except Exception:
+                pass
+            # FIX-6: trazabilidad — registrar datos del fill real de Binance
+            pos._smart_meta['entry_order_id'] = order_id
+            pos._smart_meta['entry_filled_qty'] = float(entry_order.get('executedQty', qty))
+            pos._smart_meta['entry_avg_price'] = filled_price
+            pos._smart_meta['binance_entry_confirmed'] = entry_order.get('status') in ('FILLED', 'NEW')
             self._open_positions[self._pos_key(symbol, "LONG")] = pos
             self._save_futures_open(pos)  # FIX-G: persist to DB
             print(f"[Futures] LONG {symbol} OPEN: entry={filled_price:.4f}, "
@@ -1835,11 +1985,14 @@ class FuturesClient:
         Returns list of closed positions dicts with keys: symbol, side, reason, pnl.
         """
         closed = []
+        if settings is not None:
+            self._cached_settings = settings  # FIX-5: persist for retro-tag on next startup
 
         # ── FIX-T4: Ghost detection — find positions closed by Binance SL/TP ──
         if not self.dry_run:
             try:
                 _binance_keys = set()
+                _binance_syms = set()
                 for p in self.get_positions():
                     _amt = float(p.get("positionAmt", 0))
                     _sym = p.get("symbol", "")
@@ -1847,11 +2000,14 @@ class FuturesClient:
                         continue
                     _side = "SHORT" if _amt < 0 else "LONG"
                     _binance_keys.add(self._pos_key(_sym, _side))
+                    _binance_syms.add(_sym)
+
+                # FIX-T4-L1 (original): memory _open_positions vs Binance
                 for _gk, _gp in list(self._open_positions.items()):
                     if _gp.closed:
                         continue
                     if _gk not in _binance_keys:
-                        print(f"[Futures/Ghost] {_gp.symbol} {_gp.side}: position gone from Binance — closed externally")
+                        print(f"[Futures/Ghost-L1] {_gp.symbol} {_gp.side}: position gone from Binance — closed externally")
                         _real = self._get_realized_pnl_from_trades(_gp.symbol, _gp.side)
                         _gp.closed = True
                         _gp.closed_at = datetime.now(timezone.utc)
@@ -1861,11 +2017,102 @@ class FuturesClient:
                         self._save_futures_closed(_gp, _close_reason)
                         closed.append({"symbol": _gp.symbol, "side": _gp.side,
                                        "reason": _close_reason, "pnl": _gp.pnl})
+
+                # FIX-T4-L2 (NEW): DB trades_open vs Binance — catches ghosts never in memory
+                # This handles records left after container restart when Binance closed externally
+                if self.db_client:
+                    try:
+                        _db_open = self.db_client.execute_query(
+                            "SELECT id, symbol, side, quantity, price, entry_time, stop_loss, "
+                            "take_profit, pnl_prediction, indicators_at_entry, metadata "
+                            "FROM trades_open WHERE metadata->>'trade_type' = 'futures'"
+                        )
+                        # Group by symbol to handle escalamientos
+                        _db_by_sym: dict = {}
+                        for _row in _db_open:
+                            _row_side = 'SHORT' if _row['side'] == 'SELL' else 'LONG'
+                            _db_by_sym.setdefault((_row['symbol'], _row_side), []).append(_row)
+
+                        for (_sym, _side), _db_rows in _db_by_sym.items():
+                            if _sym in _binance_syms:
+                                continue  # still active in Binance, skip
+                            if self._pos_key(_sym, _side) in self._open_positions:
+                                continue  # already handled by L1 above
+                            # Ghost: symbol not in Binance but has DB record(s)
+                            print(f"[Futures/Ghost-L2] {_sym} {_side}: {len(_db_rows)} DB record(s) not in Binance — cleaning up")
+                            _real = self._get_realized_pnl_from_trades(_sym, _side)
+                            _exit_p = _real.get('exit_price', 0)
+                            _total_pnl = float(_real.get('pnl', 0))
+                            _close_reason = _real.get('reason', 'binance_closed_untracked')
+                            _close_now = datetime.now(timezone.utc)
+                            _cgid = str(uuid.uuid4())
+                            # Calculate total notional for proportional PnL distribution
+                            _total_notional = sum(float(r['quantity']) * float(r['price']) for r in _db_rows)
+                            for _i, _row in enumerate(_db_rows):
+                                _qty = float(_row['quantity'])
+                                _ep = float(_row['price'])
+                                _notional = _qty * _ep
+                                _weight = _notional / _total_notional if _total_notional > 0 else 1.0 / len(_db_rows)
+                                _row_pnl = _total_pnl * _weight if _total_pnl else None
+                                # Build a minimal FuturesPosition to reuse _save_futures_closed
+                                _meta = _row.get('metadata') or {}
+                                if isinstance(_meta, str):
+                                    try: _meta = json.loads(_meta)
+                                    except: _meta = {}
+                                _ghost_pos = FuturesPosition(
+                                    symbol=_sym, side=_side, qty=_qty,
+                                    entry_price=_ep,
+                                    sl_price=float(_row.get('stop_loss') or _ep),
+                                    tp_price=float(_row.get('take_profit') or _ep),
+                                    order_id=_meta.get('order_id'),
+                                    sl_order_id=_meta.get('sl_order_id'),
+                                    tp_order_id=_meta.get('tp_order_id'),
+                                )
+                                _ghost_pos.closed = True
+                                _ghost_pos.closed_at = _close_now
+                                _ghost_pos.exit_price = _exit_p if _exit_p else _ep
+                                _ghost_pos.pnl = _row_pnl
+                                _ghost_pos._smart_meta = _meta.get('smart_meta', {})
+                                try:
+                                    _et = _row.get('entry_time')
+                                    if _et:
+                                        _ghost_pos.opened_at = _et if hasattr(_et, 'tzinfo') else datetime.fromisoformat(str(_et))
+                                        if _ghost_pos.opened_at.tzinfo is None:
+                                            _ghost_pos.opened_at = _ghost_pos.opened_at.replace(tzinfo=timezone.utc)
+                                except Exception:
+                                    pass
+                                # Load prediction/indicators from DB row
+                                try:
+                                    if _row.get('pnl_prediction'):
+                                        _ghost_pos.pnl_prediction = json.loads(_row['pnl_prediction']) if isinstance(_row['pnl_prediction'], str) else _row['pnl_prediction']
+                                    if _row.get('indicators_at_entry'):
+                                        _ghost_pos.indicators_at_entry = json.loads(_row['indicators_at_entry']) if isinstance(_row['indicators_at_entry'], str) else _row['indicators_at_entry']
+                                except Exception:
+                                    pass
+                                self._save_futures_closed(
+                                    _ghost_pos, _close_reason,
+                                    close_group_id=_cgid,
+                                    esc_index=_i + 1,
+                                    total_esc=len(_db_rows),
+                                    pnl_override=_row_pnl,
+                                )
+                                print(f"[Futures/Ghost-L2] {_sym}: inserted trades_closed esc={_i+1}/{len(_db_rows)} pnl={round(_row_pnl or 0, 2)}")
+                            if _total_pnl:
+                                closed.append({"symbol": _sym, "side": _side,
+                                               "reason": _close_reason, "pnl": _total_pnl})
+                    except Exception as _l2_err:
+                        print(f"[Futures/Ghost-L2] error: {_l2_err}")
+
             except Exception as _ge:
                 print(f"[Futures/Ghost] detection error: {_ge}")
 
+        # ── FIX-7: Throttle algo order sync to every N cycles to avoid rate limits ──
+        self._check_cycle_count = getattr(self, '_check_cycle_count', 0) + 1
+        _verify_interval = getattr(settings, 'futures_binance_verify_interval_cycles', 3) if settings else 3
+        _do_algo_sync = (self._check_cycle_count % _verify_interval == 1) or self._check_cycle_count == 1
+
         # ── FIX-T7b: Periodic Binance SL/TP sync — detect and fix drifts ──
-        if not self.dry_run:
+        if not self.dry_run and _do_algo_sync:
             try:
                 _all_algo = self._get("/fapi/v1/openAlgoOrders", signed=True)
                 _algo_list = _all_algo if isinstance(_all_algo, list) else _all_algo.get("orders", _all_algo.get("algoOrders", []))
@@ -1941,9 +2188,30 @@ class FuturesClient:
                     pos._smart_meta['peak_pnl_pct'] = pnl_pct
                     self._persist_smart_meta(pos)
 
+                # ── 0a2. SSO-6: Bounce entry auto-tagging ─────────────────────────
+                # Tag position as bounce if peak stayed too low for too long
+                if not pos._smart_meta.get('bounce_entry', False) and pos.opened_at:
+                    try:
+                        _br_age_h = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
+                        _br_max_peak = getattr(settings, 'futures_bounce_rescue_max_peak_pct', 0.5) / 100.0 if settings else 0.005
+                        _br_min_h = getattr(settings, 'futures_bounce_rescue_min_hours', 4.0) if settings else 4.0
+                        if _br_age_h >= _br_min_h and _prev_peak < _br_max_peak:
+                            pos._smart_meta['bounce_entry'] = True
+                            self._persist_smart_meta(pos)
+                            print(f"[SSO-6] {symbol} {pos.side}: TAGGED as bounce_entry "
+                                  f"(peak={_prev_peak*100:.2f}%<{_br_max_peak*100:.1f}%, age={_br_age_h:.1f}h)")
+                            self._audit(symbol, 'bounce_tag', {
+                                'side': pos.side, 'age_hours': round(_br_age_h, 1),
+                                'peak_pnl_pct': round(_prev_peak * 100, 3),
+                                'threshold_pct': round(_br_max_peak * 100, 1),
+                            })
+                    except Exception:
+                        pass
+
                 # ── 0b. SSO: Smart Scale-Out — replaces fixed PV1 with multi-signal system ─
                 _sso_enabled = getattr(settings, 'sso_enabled', True) if settings else True
-                if _sso_enabled and pnl_pct > 0:
+                _bounce_entry_flag = pos._smart_meta.get('bounce_entry', False)
+                if _sso_enabled and (pnl_pct > 0 or _bounce_entry_flag):  # SSO-6 also runs on losses
                     try:
                         from smart_scale_out import SmartScaleOut, SSOPositionData, compute_pnl_velocity, extract_sso_level_from_reason
                         _sso_fut_total_at_open = pos._smart_meta.get('fut_total_at_open')
@@ -1985,6 +2253,28 @@ class FuturesClient:
                             _sso_today_pnl = float(pos._smart_meta.get('sso_today_realized', 0))
                         except Exception:
                             pass
+                        # SSO-6 Smart Gate: compute rescue_prediction_ev + signal
+                        # Only when bounce_entry flag is set and pnl is near target (avoid unnecessary API call)
+                        _rescue_pred_ev = None
+                        _rescue_signal = None
+                        _rescue_signal_str = 0.0
+                        _rescue_target_pnl = getattr(settings, 'futures_bounce_rescue_target_pnl', -0.50) if settings else -0.50
+                        if _bounce_entry_flag and unr >= _rescue_target_pnl:
+                            try:
+                                import pnl_service as _pnl_svc_gate
+                                _gate_pred, _ = _pnl_svc_gate.predict_for_symbol(
+                                    symbol=symbol, client=getattr(self, '_binance_client_ref', None),
+                                    settings=settings,
+                                    position_size_usdt=round(entry * pos.qty, 2),
+                                    precomputed_signal=(_sso_sig if '_sso_sig' in dir() else None),
+                                )
+                                if _gate_pred:
+                                    _rescue_pred_ev = float(_gate_pred.get('expected_pnl', 0.0))
+                            except Exception:
+                                pass
+                            if _sso_sig:
+                                _rescue_signal = _sso_sig.get('signal')
+                                _rescue_signal_str = float(_sso_sig.get('strength', 0.0))
                         _sso_pos = SSOPositionData(
                             symbol=symbol,
                             side=pos.side,
@@ -2004,6 +2294,10 @@ class FuturesClient:
                             today_realized_pnl=_sso_today_pnl,
                             daily_target=getattr(settings, 'sso_target_daily_usd', 40.0) if settings else 40.0,
                             trade_type="futures",
+                            bounce_entry=_bounce_entry_flag,
+                            rescue_prediction_ev=_rescue_pred_ev,
+                            rescue_signal=_rescue_signal,
+                            rescue_signal_strength=_rescue_signal_str,
                         )
                         _sso_action = _sso.evaluate(_sso_pos)
                         # Full SSO visibility — always log evaluation result
@@ -2012,6 +2306,54 @@ class FuturesClient:
                                   f"{_sso_action.reason} | {_sso_action.detail}")
                         else:
                             print(f"[SSO/F] {symbol} {pos.side}: NO ACTION | {_sso_action.diagnosis}")
+                        # SSO-6 Smart Gate: persist bounce_gate_* state to smart_meta + audit
+                        if _bounce_entry_flag:
+                            _diag = _sso_action.diagnosis or ""
+                            _gate_blocked = "GATE_BLOCKED" in _diag
+                            _now_iso = datetime.now(timezone.utc).isoformat()
+                            _gate_changed = False
+                            if _gate_blocked:
+                                _block_count = pos._smart_meta.get('bounce_gate_blocked_count', 0) + 1
+                                _prev_reason = pos._smart_meta.get('bounce_gate_blocked_reason', '')
+                                _new_reason = _diag
+                                if _block_count != pos._smart_meta.get('bounce_gate_blocked_count') or _prev_reason != _new_reason:
+                                    pos._smart_meta['bounce_gate_blocked_count'] = _block_count
+                                    pos._smart_meta['bounce_gate_last_eval'] = _now_iso
+                                    pos._smart_meta['bounce_gate_blocked_reason'] = _new_reason
+                                    pos._smart_meta['bounce_gate_last_signal'] = _rescue_signal
+                                    pos._smart_meta['bounce_gate_last_signal_strength'] = _rescue_signal_str
+                                    pos._smart_meta['bounce_gate_last_ev'] = _rescue_pred_ev
+                                    pos._smart_meta['bounce_gate_last_velocity'] = _sso_vel
+                                    if 'bounce_gate_first_qualified_at' not in pos._smart_meta and unr >= _rescue_target_pnl:
+                                        pos._smart_meta['bounce_gate_first_qualified_at'] = _now_iso
+                                    _gate_changed = True
+                                    self._audit(symbol, 'bounce_gate_blocked', {
+                                        'side': pos.side, 'pnl_usdt': round(unr, 4),
+                                        'gate_blocked_by': _new_reason,
+                                        'signal': _rescue_signal, 'signal_strength': _rescue_signal_str,
+                                        'rescue_ev': _rescue_pred_ev, 'velocity': _sso_vel,
+                                        'block_count_so_far': _block_count,
+                                    })
+                                    print(f"[SSO-6/Gate] {symbol}: BLOCKED (#{_block_count}) — {_new_reason}")
+                            elif _sso_action.should_close and _sso_action.reason == 'sso_bounce_rescue':
+                                _block_count = pos._smart_meta.get('bounce_gate_blocked_count', 0)
+                                _first_q = pos._smart_meta.get('bounce_gate_first_qualified_at')
+                                _held_min = 0
+                                if _first_q:
+                                    try:
+                                        _fq_dt = datetime.fromisoformat(_first_q)
+                                        _held_min = int((datetime.now(timezone.utc) - _fq_dt).total_seconds() / 60)
+                                    except Exception:
+                                        pass
+                                self._audit(symbol, 'bounce_gate_fired', {
+                                    'side': pos.side, 'pnl_usdt': round(unr, 4),
+                                    'total_blocks_before': _block_count,
+                                    'gate_held_minutes': _held_min,
+                                    'final_signal': _rescue_signal, 'final_ev': _rescue_pred_ev,
+                                    'rescue_reason': 'sso_bounce_rescue',
+                                })
+                            if _gate_changed:
+                                self._persist_smart_meta(pos)
                         if _sso_action.should_close:
                             _sso_close_pct = _sso_action.close_pct
                             _sso_qty = pos.qty * _sso_close_pct
@@ -2397,8 +2739,11 @@ class FuturesClient:
                             _pnl_pred = None
                 if _db_row.get('entry_time'):
                     try:
-                        _et = str(_db_row['entry_time'])
-                        _opened_at = _et if _et else _opened_at
+                        _et = _db_row['entry_time']
+                        if hasattr(_et, 'isoformat'):
+                            _opened_at = _et.isoformat()   # datetime obj → proper ISO with T
+                        elif _et:
+                            _opened_at = str(_et).replace(' ', 'T', 1)  # string fallback
                     except Exception:
                         pass
 
@@ -2445,5 +2790,18 @@ class FuturesClient:
                 "peak_pnl_pct":     round(float(pos._smart_meta.get('peak_pnl_pct', 0)) * 100, 2),
                 "sso_levels_done":  pos._smart_meta.get('sso_levels_done', []),
                 "sso_last_trigger": pos._smart_meta.get('sso_last_trigger', ''),
+                "bounce_entry":     bool(pos._smart_meta.get('bounce_entry', False)),
+                "bounce_gate_blocked_count": int(pos._smart_meta.get('bounce_gate_blocked_count', 0)),
+                "bounce_gate_blocked_reason": pos._smart_meta.get('bounce_gate_blocked_reason'),
+                "bounce_gate_last_signal": pos._smart_meta.get('bounce_gate_last_signal'),
+                "bounce_gate_last_signal_strength": pos._smart_meta.get('bounce_gate_last_signal_strength'),
+                "bounce_gate_last_ev": pos._smart_meta.get('bounce_gate_last_ev'),
+                "bounce_gate_last_velocity": pos._smart_meta.get('bounce_gate_last_velocity'),
+                "bounce_gate_first_qualified_at": pos._smart_meta.get('bounce_gate_first_qualified_at'),
+                "btc_at_entry":     pos._smart_meta.get('btc_price_at_entry'),
+                "btc_chg_since_entry_pct": round(
+                    (self.get_price('BTCUSDT') - pos._smart_meta['btc_price_at_entry'])
+                    / pos._smart_meta['btc_price_at_entry'] * 100, 2
+                ) if pos._smart_meta.get('btc_price_at_entry') else None,
             })
         return result
