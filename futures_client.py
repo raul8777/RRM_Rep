@@ -726,6 +726,96 @@ class FuturesClient:
             self._hedge_mode = False
             return False
 
+    def _consolidate_futures_open_records(self) -> None:
+        """FIX-S7: Ensure trades_open exactly matches Binance positions.
+        
+        For each live Binance position, collapse any multiple DB rows
+        (escalonamiento / stale partial fills) into a single row whose
+        quantity and entry_price match Binance.  This keeps the in-memory
+        position and the database in sync so PnL, SL/TP and dashboard
+        entries are consistent with the exchange.
+        """
+        print(f"[Futures/Sync] _consolidate_futures_open_records called, db_client={self.db_client is not None}")
+        if not self.db_client:
+            return
+        # Fetch all existing futures DB rows
+        _all_db_rows = self.db_client.execute_query(
+            """SELECT id, symbol, side, quantity, price, stop_loss, take_profit,
+                      metadata, pnl_prediction, indicators_at_entry, entry_time
+               FROM trades_open
+               WHERE metadata->>'trade_type' = 'futures'
+               ORDER BY entry_time ASC"""
+        )
+        # Group by symbol+side
+        _db_groups: dict = {}
+        for _r in _all_db_rows:
+            _s = 'SHORT' if _r['side'] == 'SELL' else 'LONG'
+            _k = self._pos_key(_r['symbol'], _s)
+            _db_groups.setdefault(_k, []).append(_r)
+
+        for _key, _pos in self._open_positions.items():
+            if _pos.closed:
+                continue
+            _db_rows = _db_groups.get(_key, [])
+            if not _db_rows:
+                continue
+            _db_total_qty = sum(float(_r['quantity']) for _r in _db_rows)
+            _qty_match = abs(_db_total_qty - _pos.qty) < 1e-9
+            if len(_db_rows) == 1 and _qty_match:
+                continue  # already in sync
+
+            # Use Binance-reported entry price as the source of truth for the consolidated row
+            _avg_price = _pos.entry_price
+
+            # Preserve the newest metadata / pnl_prediction / indicators
+            _last = _db_rows[-1]
+            _meta = _last.get('metadata') or {}
+            if isinstance(_meta, str):
+                try:
+                    _meta = json.loads(_meta)
+                except Exception:
+                    _meta = {}
+            _meta['consolidated_at'] = datetime.now(timezone.utc).isoformat()
+            _meta['consolidated_from'] = len(_db_rows)
+            _meta['trade_type'] = 'futures'
+
+            # Insert consolidated row
+            _pnl_pred = _last.get('pnl_prediction')
+            _indicators = _last.get('indicators_at_entry')
+            if isinstance(_pnl_pred, dict):
+                _pnl_pred = json.dumps(_pnl_pred)
+            if isinstance(_indicators, dict):
+                _indicators = json.dumps(_indicators)
+            self.db_client.execute_update(
+                """INSERT INTO trades_open
+                    (symbol, side, quantity, price, stop_loss, take_profit, metadata,
+                     pnl_prediction, indicators_at_entry, entry_time)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    _pos.symbol,
+                    'SELL' if _pos.side == 'SHORT' else 'BUY',
+                    _pos.qty,
+                    _avg_price,
+                    _pos.sl_price,
+                    _pos.tp_price,
+                    json.dumps(_meta),
+                    _pnl_pred,
+                    _indicators,
+                    _last.get('entry_time'),
+                )
+            )
+            # Delete old rows
+            _old_ids = tuple(_r['id'] for _r in _db_rows)
+            if len(_old_ids) == 1:
+                self.db_client.execute_update("DELETE FROM trades_open WHERE id = %s", (_old_ids[0],))
+            else:
+                _placeholders = ','.join(['%s'] * len(_old_ids))
+                self.db_client.execute_update(
+                    f"DELETE FROM trades_open WHERE id IN ({_placeholders})", _old_ids
+                )
+            print(f"[Futures/Sync] Consolidated {_pos.symbol} {_pos.side}: "
+                  f"{len(_db_rows)} rows → 1, qty={_pos.qty}, avg_price={_avg_price:.4f}")
+
     def _sync_open_positions(self) -> None:
         """Rebuild _open_positions from Binance on startup (survives restarts)."""
         try:
@@ -787,6 +877,13 @@ class FuturesClient:
                 key = self._pos_key(sym, side)
                 self._open_positions[key] = pos
                 print(f"[Futures] Synced position: {side} {sym} qty={qty} entry={entry:.4f} (SL={sl_price:.4f}, TP={tp_price:.4f})")
+
+            # FIX-S7: Consolidate stale/escalamiento DB rows so trades_open matches Binance exactly
+            if self.db_client:
+                try:
+                    self._consolidate_futures_open_records()
+                except Exception as _cons_err:
+                    print(f"[Futures/Sync] Consolidation error: {_cons_err}")
 
             # FIX-S2+S6: Restore _smart_meta from trades_open DB for each synced position
             # Uses entry_price matching to pick correct row when duplicates exist

@@ -3,7 +3,8 @@ from fastapi import status as http_status
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, Optional
+from typing import Dict, List, Optional
+import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -212,17 +213,21 @@ def startup_event():
             if _restored:
                 print(f"Config restore: {_restored} kelly overrides re-applied from DB")
 
-        # 2. Restore category_thresholds
-        _ct_rows = db_client.execute_query(
-            "SELECT value FROM trading_runtime_state WHERE key='category_thresholds_override'"
-        )
-        if _ct_rows and _ct_rows[0].get('value'):
-            _ct = _ct_rows[0]['value']
-            if isinstance(_ct, str):
-                _ct = _json.loads(_ct)
-            if isinstance(_ct, dict):
-                setattr(_live_s, 'category_thresholds', _ct)
-                print(f"Config restore: category_thresholds re-applied ({list(_ct.keys())})")
+        # 2. Restore category_thresholds (SPOT and FUTURES)
+        for _ct_attr, _ct_state_key in (
+            ("category_thresholds", "category_thresholds_override"),
+            ("futures_category_thresholds", "futures_category_thresholds_override"),
+        ):
+            _ct_rows = db_client.execute_query(
+                "SELECT value FROM trading_runtime_state WHERE key=%s", (_ct_state_key,)
+            )
+            if _ct_rows and _ct_rows[0].get('value'):
+                _ct = _ct_rows[0]['value']
+                if isinstance(_ct, str):
+                    _ct = _json.loads(_ct)
+                if isinstance(_ct, dict):
+                    setattr(_live_s, _ct_attr, _ct)
+                    print(f"Config restore: {_ct_attr} re-applied ({list(_ct.keys())})")
     except Exception as _re:
         print(f"Config restore error (non-fatal): {_re}")
 
@@ -2090,23 +2095,61 @@ async def get_dashboard_summary() -> Dict:
     # Pair Screener — build from analysis_cache (per-symbol technical data)
     try:
         _all_cached = analysis_cache.get_all()
+        _regime_mode = result.get("market_regime", {}).get("mode", "SPOT_BULL")
         _screener_data = []
         for _sym, _cdata in _all_cached.items():
             _ind = _cdata.get("indicators", {}) if isinstance(_cdata, dict) else {}
-            _score = float(_cdata.get("technical_score", 0.5)) if isinstance(_cdata, dict) else 0.5
+            _score = float(_cdata.get("technical_score", 50.0)) if isinstance(_cdata, dict) else 50.0
+            _strength = _score / 100.0  # technical_score is strength * 100
             _rsi = float(_ind.get("rsi", 50.0)) if _ind else 50.0
             _vol = float(_ind.get("vol_spike", 0.5)) if _ind else 0.5
             _trend = _ind.get("trend_4h", "FLAT") if _ind else "FLAT"
+            _bb_lower = float(_ind.get("bb_lower", 0.0)) if _ind else 0.0
+            _bb_upper = float(_ind.get("bb_upper", 0.0)) if _ind else 0.0
+            _price = float(_ind.get("price", 0.0)) if _ind else 0.0
+            _bb_lower_touch = _bb_lower > 0 and _price > 0 and _price <= _bb_lower * 1.005
+            _bb_upper_touch = _bb_upper > 0 and _price > 0 and _price >= _bb_upper * 0.995
             _chg = float(_ind.get("change_24h", 0.0)) if _ind else 0.0
-            _bias = "LONG" if _score >= 0.6 else ("SHORT" if _score <= 0.35 else "NEUTRAL")
+            # Raw bias: technical signal only, fixed scale bug (strength is 0-1, not 0-100)
+            _raw_bias = "LONG" if _strength >= 0.6 else ("SHORT" if _strength <= 0.35 else "NEUTRAL")
+            # Regime-adjusted bias: context of current market regime
+            _regime_bias = _raw_bias
+            if _regime_mode == "FUTURES_SHORT":
+                # In bear regime, short the bounces inside downtrend, not oversold dumps
+                if _trend == "DOWN" and _rsi >= 45 and _rsi <= 65 and _chg > -3.0:
+                    _regime_bias = "SHORT"
+                elif _trend == "DOWN" and _rsi > 65 and _chg > 0:
+                    _regime_bias = "SHORT"
+                elif _bb_lower_touch and _rsi < 40:
+                    _regime_bias = "LONG"  # clear bounce at support
+                else:
+                    _regime_bias = "NEUTRAL"
+            elif _regime_mode == "SPOT_BULL":
+                if _raw_bias == "LONG" or (_trend == "UP" and _rsi < 65 and _chg > 0):
+                    _regime_bias = "LONG"
+                elif _trend == "DOWN" and _rsi > 65:
+                    _regime_bias = "SHORT"
+                else:
+                    _regime_bias = "NEUTRAL"
+            elif _regime_mode == "RANGE_SCALP":
+                if _bb_lower_touch and _rsi < 40:
+                    _regime_bias = "LONG"
+                elif _bb_upper_touch and _rsi > 65:
+                    _regime_bias = "SHORT"
+                else:
+                    _regime_bias = "NEUTRAL"
+            elif _regime_mode == "PRESERVATION":
+                _regime_bias = "NEUTRAL"
             _screener_data.append({
                 "symbol": _sym,
                 "composite_score": round(_score, 3),
+                "strength": round(_strength, 3),
                 "rsi_4h": round(_rsi, 1),
                 "vol_spike": round(_vol, 2),
                 "change_24h": round(_chg, 2),
                 "trend_4h": _trend,
-                "bias": _bias,
+                "bias": _raw_bias,
+                "regime_adjusted_bias": _regime_bias,
             })
         # Sort by composite score descending
         _screener_data.sort(key=lambda x: x["composite_score"], reverse=True)
@@ -2114,18 +2157,36 @@ async def get_dashboard_summary() -> Dict:
             # Last resort fallback: daily_ticker with basic metrics
             for t in result.get("daily_ticker", []):
                 _chg = t.get("change_pct", 0)
+                _trend = "DOWN" if _chg < -1 else ("UP" if _chg > 1 else "FLAT")
+                _raw_bias = "SHORT" if _chg < -1 else ("LONG" if _chg > 1 else "NEUTRAL")
+                _regime_bias = _raw_bias
+                if _regime_mode == "FUTURES_SHORT":
+                    _regime_bias = "SHORT" if _chg > 0 and _trend == "DOWN" else ("NEUTRAL" if _chg < -1 else _raw_bias)
                 _screener_data.append({
                     "symbol": t["symbol"],
-                    "composite_score": 0.5,
+                    "composite_score": 50.0,
+                    "strength": 0.5,
                     "rsi_4h": 50.0,
                     "vol_spike": 0.5,
                     "change_24h": round(_chg, 2),
-                    "trend_4h": "DOWN" if _chg < -1 else ("UP" if _chg > 1 else "FLAT"),
-                    "bias": "SHORT" if _chg < -1 else ("LONG" if _chg > 1 else "NEUTRAL"),
+                    "trend_4h": _trend,
+                    "bias": _raw_bias,
+                    "regime_adjusted_bias": _regime_bias,
                 })
-        result["pair_screener"] = _screener_data
+        result["pair_screener"] = {
+            "regime_mode": _regime_mode,
+            "scanner_note": (
+                "FUTURES_SHORT: bias ajustado = shortear rebotes en tendencia bajista, "
+                "no caídas sobreextendidas."
+                if _regime_mode == "FUTURES_SHORT"
+                else "SPOT_BULL: bias ajustado = priorizar pares alcistas."
+                if _regime_mode == "SPOT_BULL"
+                else "Régimen lateral: bias ajustado = comprar en soporte, vender en resistencia."
+            ),
+            "candidates": _screener_data,
+        }
     except Exception as _se:
-        result["pair_screener"] = []
+        result["pair_screener"] = {"regime_mode": "SPOT_BULL", "candidates": []}
 
     # Expectativa vs Realidad — build from closed positions with predictions
     try:
@@ -2717,6 +2778,68 @@ async def run_backtest(
     background_tasks.add_task(_do_backtest)
     return {"run_id": run_id, "status": "running",
             "message": f"Backtest started for {symbol} ({days_back}d)"}
+
+
+@app.post("/backtest/optimize")
+async def run_backtest_optimizer(
+    background_tasks: BackgroundTasks,
+    body: Dict,
+    _auth: None = Depends(_require_api_key),
+) -> Dict:
+    """Run the full backtest optimizer (LHS 1000 runs) in background."""
+    try:
+        import uuid
+        import subprocess
+        import os
+
+        _runs = int(body.get("runs", 1000))
+        _days = int(body.get("days", 20))
+        _auto_apply = bool(body.get("auto_apply", False))
+        _run_id = str(uuid.uuid4())
+        _backtest_tasks[_run_id] = {
+            "status": "running",
+            "type": "optimizer",
+            "runs": _runs,
+            "days": _days,
+            "started_at": datetime.utcnow().isoformat(),
+        }
+
+        _script_path = os.path.join(os.path.dirname(__file__), "Dev", "backtest_optimizer.py")
+
+        def _do_optimize():
+            try:
+                _cmd = [
+                    "python", _script_path,
+                    "--runs", str(_runs),
+                    "--days", str(_days),
+                ]
+                if _auto_apply:
+                    _cmd.append("--auto-apply")
+                _proc = subprocess.run(
+                    _cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+                _backtest_tasks[_run_id].update({
+                    "status": "completed" if _proc.returncode == 0 else "error",
+                    "returncode": _proc.returncode,
+                    "stdout": _proc.stdout[-2000:] if _proc.stdout else "",
+                    "stderr": _proc.stderr[-1000:] if _proc.stderr else "",
+                    "completed_at": datetime.utcnow().isoformat(),
+                })
+            except Exception as _e:
+                _backtest_tasks[_run_id].update({"status": "error", "error": str(_e)})
+
+        background_tasks.add_task(_do_optimize)
+        return {
+            "ok": True,
+            "run_id": _run_id,
+            "status": "running",
+            "message": f"Backtest optimizer started ({_runs} runs, {_days} days)",
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.get("/backtest/results")
@@ -3509,9 +3632,12 @@ _KELLY_EDITABLE_FIELDS = {
     "fng_extreme_fear_multiplier", "fng_extreme_greed_multiplier",
     "kelly_conviction_vol2x", "kelly_conviction_vol3x",
     "kelly_conviction_max_pct",
-    "stop_loss_pct", "smart_tp_max_pnl_pct",
+    "stop_loss_pct", "take_profit_pct", "smart_tp_max_pnl_pct",
     "futures_sl_pct", "futures_tp_pct",
     "min_signal_strength",
+    "vol_spike_min",
+    "futures_min_prob", "futures_vol_spike_min",
+    "hybrid_optimizer_enabled", "auto_apply_backtest", "backtest_safe_only",
 }
 
 
@@ -3530,31 +3656,39 @@ async def patch_kelly_config(body: Dict, _auth=Depends(_require_api_key)) -> Dic
         applied = {}
         rejected = {}
 
-        # Special handler: category_thresholds — partial merge per category/field
-        if "category_thresholds" in body:
-            _cat_patch = body.pop("category_thresholds")
-            if isinstance(_cat_patch, dict):
-                _current_ct = dict(getattr(_s, "category_thresholds", {}))
-                _merged = {}
-                _ALLOWED_CAT_FIELDS = {"min_prob", "min_pnl", "min_volspike",
-                                       "stop_loss_pct", "take_profit_pct",
-                                       "trailing_activation_pct", "trailing_distance_pct",
-                                       "tp_extension_pct"}
-                for cat, fields in _cat_patch.items():
-                    if not isinstance(fields, dict):
-                        rejected[f"category_thresholds.{cat}"] = "value must be a dict"
+        _ALLOWED_CAT_FIELDS = {"min_prob", "min_pnl", "min_volspike",
+                               "stop_loss_pct", "take_profit_pct",
+                               "trailing_activation_pct", "trailing_distance_pct",
+                               "tp_extension_pct"}
+
+        def _apply_category_thresholds(attr_name: str, cat_patch: Dict):
+            """Partial merge of category thresholds for SPOT or FUTURES."""
+            if not isinstance(cat_patch, dict):
+                rejected[attr_name] = "value must be a dict"
+                return
+            _current_ct = dict(getattr(_s, attr_name, {}))
+            _merged = {}
+            for cat, fields in cat_patch.items():
+                if not isinstance(fields, dict):
+                    rejected[f"{attr_name}.{cat}"] = "value must be a dict"
+                    continue
+                _cat_old = dict(_current_ct.get(cat, {}))
+                for cf, cv in fields.items():
+                    if cf not in _ALLOWED_CAT_FIELDS:
+                        rejected[f"{attr_name}.{cat}.{cf}"] = "field not allowed"
                         continue
-                    _cat_old = dict(_current_ct.get(cat, {}))
-                    for cf, cv in fields.items():
-                        if cf not in _ALLOWED_CAT_FIELDS:
-                            rejected[f"category_thresholds.{cat}.{cf}"] = "field not allowed"
-                            continue
-                        _cat_old[cf] = float(cv)
-                        _merged[f"{cat}.{cf}"] = {"old": _current_ct.get(cat, {}).get(cf), "new": float(cv)}
-                    _current_ct[cat] = _cat_old
-                if _merged:
-                    setattr(_s, "category_thresholds", _current_ct)
-                    applied["category_thresholds"] = {"merged": _merged}
+                    _cat_old[cf] = float(cv)
+                    _merged[f"{cat}.{cf}"] = {"old": _current_ct.get(cat, {}).get(cf), "new": float(cv)}
+                _current_ct[cat] = _cat_old
+            if _merged:
+                setattr(_s, attr_name, _current_ct)
+                applied[attr_name] = {"merged": _merged}
+
+        # Special handlers: category thresholds for SPOT and FUTURES
+        if "category_thresholds" in body:
+            _apply_category_thresholds("category_thresholds", body.pop("category_thresholds"))
+        if "futures_category_thresholds" in body:
+            _apply_category_thresholds("futures_category_thresholds", body.pop("futures_category_thresholds"))
 
         for field, value in body.items():
             if field not in _KELLY_EDITABLE_FIELDS:
@@ -3581,14 +3715,16 @@ async def patch_kelly_config(body: Dict, _auth=Depends(_require_api_key)) -> Dic
         )
 
         # Persist category_thresholds separately so it can be reloaded on restart
-        if "category_thresholds" in applied:
-            _ct_payload = _json.dumps(getattr(_s, "category_thresholds", {}))
-            db_client.execute_update(
-                "INSERT INTO trading_runtime_state (key, value, updated_at) "
-                "VALUES ('category_thresholds_override', %s, NOW()) "
-                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
-                (_ct_payload, _ct_payload)
-            )
+        for _ct_key in ("category_thresholds", "futures_category_thresholds"):
+            if _ct_key in applied:
+                _ct_payload = _json.dumps(getattr(_s, _ct_key, {}))
+                _state_key = f"{_ct_key}_override"
+                db_client.execute_update(
+                    "INSERT INTO trading_runtime_state (key, value, updated_at) "
+                    "VALUES (%s, %s, NOW()) "
+                    "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                    (_state_key, _ct_payload, _ct_payload)
+                )
 
         # Trazabilidad: trades_audit entry
         db_client.execute_update(
@@ -3767,62 +3903,83 @@ async def get_backtest_best(_auth=Depends(_require_api_key)) -> Dict:
                 diff[key] = {"baseline": bv, "optimal": ov, "delta": round(float(ov) - float(bv), 6)}
 
         # All params from diff become the full patch suggestion
-        # Mapping: backtest param name -> Settings field name + scale factor
+        # Mapping: backtest param name -> Settings field name + scale factor + safety rules
+        # min/max are in BACKTEST raw scale (decimal), not Settings scale
         _PARAM_MAP = {
-            "kelly_base_usdt":        {"field": "kelly_base_usdt",        "scale": 1.0},
-            "kelly_max_usdt":         {"field": "kelly_max_usdt",         "scale": 1.0},
-            "kelly_max_pct_liquid":   {"field": "kelly_max_pct_liquid",   "scale": 1.0},
-            "futures_kelly_max_usdt": {"field": "futures_kelly_max_usdt", "scale": 1.0},
-            "futures_sl_pct":         {"field": "futures_sl_pct",         "scale": 100.0},
-            "futures_tp_pct":         {"field": "futures_tp_pct",         "scale": 100.0},
-            "spot_sl_pct":            {"field": "stop_loss_pct",          "scale": 100.0},
-            "min_strength":           {"field": "min_signal_strength",    "scale": 1.0},
-            # min_prob / vol_spike_min: no direct Settings field — shown in diff but not patchable
+            "kelly_base_usdt":        {"field": "kelly_base_usdt",        "scale": 1.0,   "min": 50.0,   "max": 300.0},
+            "kelly_max_usdt":         {"field": "kelly_max_usdt",         "scale": 1.0,   "min": 200.0,  "max": 1200.0},
+            "kelly_max_pct_liquid":   {"field": "kelly_max_pct_liquid",   "scale": 1.0,   "min": 0.20,   "max": 0.90},
+            "futures_kelly_max_usdt": {"field": "futures_kelly_max_usdt", "scale": 1.0,   "min": 300.0,  "max": 2000.0},
+            "futures_sl_pct":         {"field": "futures_sl_pct",         "scale": 100.0, "min": 0.010,  "max": 0.050},
+            "futures_tp_pct":         {"field": "futures_tp_pct",         "scale": 100.0, "min": 0.020,  "max": 0.100},
+            "spot_sl_pct":            {"field": "stop_loss_pct",          "scale": 100.0, "min": 0.010,  "max": 0.040},
+            "spot_tp_pct":            {"field": "take_profit_pct",        "scale": 100.0, "min": 0.018,  "max": 0.080},
+            "min_strength":           {"field": "min_signal_strength",      "scale": 1.0,   "min": 0.40,   "max": 0.90},
+            "min_prob":               {"field": "min_prob",                 "scale": 1.0,   "min": 0.45,   "max": 0.80},
+            "vol_spike_min":          {"field": "vol_spike_min",            "scale": 1.0,   "min": 1.0,    "max": 3.0},
         }
-        # spot_tp_pct excluded — scale mismatch (decimal vs %, unclear mapping)
-        _UNSAFE = {"min_strength"}  # params that should be OFF by default
-        # vol_spike_min excluded — optimal 0.83 < 1.0 means below-average volume (unsafe by design)
-        _NEVER_AUTO = {"min_strength", "vol_spike_min"}  # also excluded from --auto-apply
+        # Safety: params that are locked from auto-apply unless optimal value is within safe range
+        _UNSAFE = {"min_strength", "vol_spike_min"}
+        _NEVER_AUTO = {"min_strength", "vol_spike_min"}
+
+        def _build_param_patch(bt_key: str, mapping: Dict) -> Dict:
+            if bt_key not in best_params:
+                return None
+            _raw = float(best_params[bt_key])
+            _scaled = round(_raw * mapping["scale"], 6)
+            _is_safe = mapping["min"] <= _raw <= mapping["max"]
+            return {
+                "field": mapping["field"],
+                "value": _scaled,
+                "raw": _raw,
+                "safe": _is_safe,
+                "unsafe": bt_key in _UNSAFE,
+                "auto_apply": bt_key not in _NEVER_AUTO and _is_safe,
+            }
 
         kelly_patch = {}
         for bt_key, mapping in _PARAM_MAP.items():
-            if bt_key in best_params:
-                kelly_patch[bt_key] = {
-                    "field":   mapping["field"],
-                    "value":   round(float(best_params[bt_key]) * mapping["scale"], 6),
-                    "raw":     float(best_params[bt_key]),
-                    "unsafe":  bt_key in _UNSAFE,
-                }
+            _patch = _build_param_patch(bt_key, mapping)
+            if _patch:
+                kelly_patch[bt_key] = _patch
 
-        # Build category_patch_suggestion from min_prob and spot_tp_pct
-        # min_prob optimal -> raise category min_prob where it's below optimal
-        # spot_tp_pct optimal -> raise take_profit_pct where it's below optimal
-        _opt_min_prob  = float(best_params.get("min_prob", 0))
-        _opt_spot_tp   = round(float(best_params.get("spot_tp_pct", 0)) * 100.0, 4)  # decimal->%
-        _CAT_NAMES = ["LARGE_CAP", "MIDCAP_ALT", "NARRATIVE", "MEME"]
-
-        # Load current category_thresholds from live settings
+        # Build category patch suggestions for SPOT and FUTURES
         from init_components import get_components as _gc
-        _live_ct = getattr(_gc().settings, "category_thresholds", {}) or {}
+        _live_s = _gc().settings
+        _opt_min_prob = float(best_params.get("min_prob", 0))
+        _opt_spot_tp  = round(float(best_params.get("spot_tp_pct", 0)) * 100.0, 4)
+        _opt_fut_tp   = round(float(best_params.get("futures_tp_pct", 0)) * 100.0, 4)
+        _opt_fut_sl   = round(float(best_params.get("futures_sl_pct", 0)) * 100.0, 4)
 
-        cat_patch = {}
-        for _cat in _CAT_NAMES:
-            _ct = _live_ct.get(_cat, {})
-            _changes = {}
-            if _opt_min_prob > 0 and float(_ct.get("min_prob", 0)) < _opt_min_prob:
-                _changes["min_prob"] = {
-                    "current": _ct.get("min_prob"),
-                    "optimal": round(_opt_min_prob, 4),
-                    "unsafe":  False,
-                }
-            if _opt_spot_tp > 0 and float(_ct.get("take_profit_pct", 0)) < _opt_spot_tp:
-                _changes["take_profit_pct"] = {
-                    "current": _ct.get("take_profit_pct"),
-                    "optimal": round(_opt_spot_tp, 4),
-                    "unsafe":  False,
-                }
-            if _changes:
-                cat_patch[_cat] = _changes
+        _ALLOWED_CAT_FIELDS = {"min_prob", "stop_loss_pct", "take_profit_pct",
+                               "trailing_activation_pct", "trailing_distance_pct"}
+
+        def _build_cat_patch(live_ct: Dict, cat_names: List[str], opt_min_prob: float,
+                             opt_tp: float, opt_sl: float = None) -> Dict:
+            patch = {}
+            for _cat in cat_names:
+                _ct = live_ct.get(_cat, {})
+                _changes = {}
+                if opt_min_prob > 0 and float(_ct.get("min_prob", 0)) < opt_min_prob and "min_prob" in _ALLOWED_CAT_FIELDS:
+                    _changes["min_prob"] = {"current": _ct.get("min_prob"), "optimal": round(opt_min_prob, 4)}
+                if opt_tp > 0 and float(_ct.get("take_profit_pct", 0)) < opt_tp and "take_profit_pct" in _ALLOWED_CAT_FIELDS:
+                    _changes["take_profit_pct"] = {"current": _ct.get("take_profit_pct"), "optimal": round(opt_tp, 4)}
+                if opt_sl is not None and opt_sl > 0 and float(_ct.get("stop_loss_pct", 0)) < opt_sl and "stop_loss_pct" in _ALLOWED_CAT_FIELDS:
+                    _changes["stop_loss_pct"] = {"current": _ct.get("stop_loss_pct"), "optimal": round(opt_sl, 4)}
+                if _changes:
+                    patch[_cat] = _changes
+            return patch
+
+        cat_patch = _build_cat_patch(
+            getattr(_live_s, "category_thresholds", {}) or {},
+            ["LARGE_CAP", "MIDCAP_ALT", "NARRATIVE", "MEME"],
+            _opt_min_prob, _opt_spot_tp
+        )
+        futures_cat_patch = _build_cat_patch(
+            getattr(_live_s, "futures_category_thresholds", {}) or {},
+            list(getattr(_live_s, "futures_category_thresholds", {}).keys()) or ["LARGE_CAP", "MIDCAP", "NARRATIVE"],
+            _opt_min_prob, _opt_fut_tp, _opt_fut_sl
+        )
 
         return {
             "ok": True,
@@ -3831,11 +3988,347 @@ async def get_backtest_best(_auth=Depends(_require_api_key)) -> Dict:
             "param_diff": diff,
             "kelly_patch_suggestion": kelly_patch,
             "category_patch_suggestion": cat_patch,
+            "futures_category_patch_suggestion": futures_cat_patch,
             "unsafe_params": list(_UNSAFE),
             "never_auto_apply": list(_NEVER_AUTO),
             "improvement_usdt": round(float(best[0]["pnl_total"]) - float(baseline[0]["pnl_total"]), 2),
             "improvement_pct":  round(float(best[0]["return_pct"]) - float(baseline[0]["return_pct"]), 2),
+            "spot_vs_futures": {
+                "pnl_spot": round(float(best[0].get("pnl_spot", 0)), 2),
+                "pnl_futures": round(float(best[0].get("pnl_futures", 0)), 2),
+            },
             "ts": to_mexico_time(datetime.utcnow()).isoformat()
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Config snapshots + rollback helpers ─────────────────────────────────────
+
+def _create_config_snapshot(settings) -> str:
+    """Create a point-in-time snapshot of current editable config and return snapshot_id."""
+    import json as _json
+    _snapshot = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "scalars": {field: getattr(settings, field, None) for field in _KELLY_EDITABLE_FIELDS},
+        "category_thresholds": getattr(settings, "category_thresholds", {}),
+        "futures_category_thresholds": getattr(settings, "futures_category_thresholds", {}),
+    }
+    _snapshot_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    _payload = _json.dumps(_snapshot)
+    db_client.execute_update(
+        "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+        "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+        (f"config_snapshot_{_snapshot_id}", _payload, _payload)
+    )
+    db_client.execute_update(
+        "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES ('config_snapshot_latest', %s::jsonb, NOW()) "
+        "ON CONFLICT (key) DO UPDATE SET value=%s::jsonb, updated_at=NOW()",
+        (json.dumps(_snapshot_id), json.dumps(_snapshot_id))
+    )
+    db_client.execute_update(
+        "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+        "VALUES ('__config__', 'system', 'config_snapshot_created', %s, false)",
+        (_json.dumps({"snapshot_id": _snapshot_id}),)
+    )
+    return _snapshot_id
+
+
+def _restore_config_snapshot(snapshot_id: str, settings) -> Dict:
+    """Restore editable config from a snapshot."""
+    import json as _json
+    _rows = db_client.execute_query(
+        "SELECT value FROM trading_runtime_state WHERE key=%s", (f"config_snapshot_{snapshot_id}",)
+    )
+    if not _rows or not _rows[0].get("value"):
+        return {"ok": False, "error": f"Snapshot {snapshot_id} not found"}
+    _snap = _rows[0]["value"]
+    if isinstance(_snap, str):
+        _snap = _json.loads(_snap)
+    _restored = {}
+    _rejected = {}
+    for field, value in _snap.get("scalars", {}).items():
+        if value is None or field not in _KELLY_EDITABLE_FIELDS:
+            continue
+        try:
+            _cur = getattr(settings, field, None)
+            setattr(settings, field, type(_cur)(value) if _cur is not None else value)
+            _restored[field] = value
+        except Exception as _e:
+            _rejected[field] = str(_e)
+    for _ct_attr in ("category_thresholds", "futures_category_thresholds"):
+        if _ct_attr in _snap:
+            setattr(settings, _ct_attr, _snap[_ct_attr])
+            _restored[_ct_attr] = "restored"
+    # Persist restored state as current override
+    _payload = _json.dumps({"restored": _restored, "snapshot_id": snapshot_id})
+    db_client.execute_update(
+        "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES ('kelly_config_override', %s, NOW()) "
+        "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+        (_payload, _payload)
+    )
+    db_client.execute_update(
+        "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+        "VALUES ('__config__', 'system', 'config_rollback', %s, false)",
+        (_json.dumps({"snapshot_id": snapshot_id, "restored": _restored, "rejected": _rejected}),)
+    )
+    return {"ok": True, "restored": _restored, "rejected": _rejected, "snapshot_id": snapshot_id}
+
+
+@app.post("/backtest/apply")
+async def post_backtest_apply(body: Dict, _auth=Depends(_require_api_key)) -> Dict:
+    """Apply a backtest run configuration to live settings with snapshot + audit."""
+    try:
+        from init_components import get_components
+        _comp = get_components()
+        _s = _comp.settings
+
+        _run_id = body.get("run_id")
+        _mode = body.get("mode", "manual")  # manual | auto | hybrid
+        _selected_fields = set(body.get("fields", []))
+        _selected_cat = body.get("category_thresholds", {})  # {cat: [field, ...]}
+        _selected_futures_cat = body.get("futures_category_thresholds", {})
+        _auto = body.get("auto_apply", False)
+
+        # Fetch run (best if run_id is None)
+        if _run_id is None:
+            _run = db_client.execute_query(
+                """SELECT id, label, params, pnl_total, return_pct, is_baseline
+                   FROM backtest_run WHERE is_baseline=FALSE ORDER BY pnl_total DESC LIMIT 1"""
+            )
+        else:
+            _run = db_client.execute_query(
+                "SELECT id, label, params, pnl_total, return_pct, is_baseline FROM backtest_run WHERE id=%s",
+                (_run_id,)
+            )
+        if not _run:
+            return {"ok": False, "error": "Run not found"}
+        _run = _run[0]
+        if _run.get("is_baseline"):
+            return {"ok": False, "error": "Cannot apply baseline run directly"}
+        _params = _run["params"] if isinstance(_run["params"], dict) else {}
+
+        # Snapshot before any change
+        _snapshot_id = _create_config_snapshot(_s)
+
+        # Build request body for PATCH /config/kelly
+        _patch_body = {}
+
+        # Scalar mapping from backtest param -> Settings field + scale
+        # min/max are in BACKTEST raw scale (decimal), not Settings scale
+        _PARAM_MAP = {
+            "kelly_base_usdt":        {"field": "kelly_base_usdt",        "scale": 1.0,   "min": 50.0,   "max": 300.0},
+            "kelly_max_usdt":         {"field": "kelly_max_usdt",         "scale": 1.0,   "min": 200.0,  "max": 1200.0},
+            "kelly_max_pct_liquid":   {"field": "kelly_max_pct_liquid",   "scale": 1.0,   "min": 0.20,   "max": 0.90},
+            "futures_kelly_max_usdt": {"field": "futures_kelly_max_usdt", "scale": 1.0,   "min": 300.0,  "max": 2000.0},
+            "futures_sl_pct":         {"field": "futures_sl_pct",         "scale": 100.0, "min": 0.010,  "max": 0.050},
+            "futures_tp_pct":         {"field": "futures_tp_pct",         "scale": 100.0, "min": 0.020,  "max": 0.100},
+            "spot_sl_pct":            {"field": "stop_loss_pct",          "scale": 100.0, "min": 0.010,  "max": 0.040},
+            "spot_tp_pct":            {"field": "take_profit_pct",        "scale": 100.0, "min": 0.018,  "max": 0.080},
+            "min_strength":           {"field": "min_signal_strength",      "scale": 1.0,   "min": 0.40,   "max": 0.90},
+            "min_prob":               {"field": "min_prob",                 "scale": 1.0,   "min": 0.45,   "max": 0.80},
+            "vol_spike_min":          {"field": "vol_spike_min",            "scale": 1.0,   "min": 1.0,    "max": 3.0},
+        }
+        _NEVER_AUTO = {"min_strength", "vol_spike_min"}
+        _safe_only = getattr(_s, "backtest_safe_only", True)
+
+        _applied_scalars = {}
+        _skipped = {}
+        for bt_key, mapping in _PARAM_MAP.items():
+            if bt_key not in _params:
+                continue
+            # Filter by explicit field selection (manual mode)
+            if _selected_fields and bt_key not in _selected_fields:
+                continue
+            _raw = float(_params[bt_key])
+            _safe = mapping["min"] <= _raw <= mapping["max"]
+            if (_mode == "auto" or _auto) and (bt_key in _NEVER_AUTO or not _safe):
+                _skipped[bt_key] = "auto-apply blocked by safety rules"
+                continue
+            if _safe_only and not _safe:
+                _skipped[bt_key] = "outside safe range"
+                continue
+            _scaled = round(_raw * mapping["scale"], 6)
+            _patch_body[mapping["field"]] = _scaled
+            _applied_scalars[bt_key] = _scaled
+
+        # Special: min_prob -> SPOT category_thresholds
+        _opt_min_prob = float(_params.get("min_prob", 0))
+        _opt_spot_tp = round(float(_params.get("spot_tp_pct", 0)) * 100.0, 4)
+        _opt_fut_tp = round(float(_params.get("futures_tp_pct", 0)) * 100.0, 4)
+        _opt_fut_sl = round(float(_params.get("futures_sl_pct", 0)) * 100.0, 4)
+
+        _cat_patch = {}
+        _live_ct = getattr(_s, "category_thresholds", {}) or {}
+        for _cat in ["LARGE_CAP", "MIDCAP_ALT", "NARRATIVE", "MEME"]:
+            _fields = _selected_cat.get(_cat, []) if isinstance(_selected_cat, dict) else []
+            _ct = _live_ct.get(_cat, {})
+            _changes = {}
+            if (not _selected_fields or "min_prob" in _fields) and _opt_min_prob > 0 and float(_ct.get("min_prob", 0)) < _opt_min_prob:
+                _changes["min_prob"] = _opt_min_prob
+            if (not _selected_fields or "take_profit_pct" in _fields) and _opt_spot_tp > 0 and float(_ct.get("take_profit_pct", 0)) < _opt_spot_tp:
+                _changes["take_profit_pct"] = _opt_spot_tp
+            if _changes:
+                _cat_patch[_cat] = _changes
+        if _cat_patch:
+            _patch_body["category_thresholds"] = _cat_patch
+
+        _futures_cat_patch = {}
+        _live_fct = getattr(_s, "futures_category_thresholds", {}) or {}
+        for _cat in list(_live_fct.keys()) or ["LARGE_CAP", "MIDCAP", "NARRATIVE"]:
+            _fields = _selected_futures_cat.get(_cat, []) if isinstance(_selected_futures_cat, dict) else []
+            _ct = _live_fct.get(_cat, {})
+            _changes = {}
+            if (not _selected_fields or "min_prob" in _fields) and _opt_min_prob > 0 and float(_ct.get("min_prob", 0)) < _opt_min_prob:
+                _changes["min_prob"] = _opt_min_prob
+            if (not _selected_fields or "take_profit_pct" in _fields) and _opt_fut_tp > 0 and float(_ct.get("take_profit_pct", 0)) < _opt_fut_tp:
+                _changes["take_profit_pct"] = _opt_fut_tp
+            if (not _selected_fields or "stop_loss_pct" in _fields) and _opt_fut_sl > 0 and float(_ct.get("stop_loss_pct", 0)) < _opt_fut_sl:
+                _changes["stop_loss_pct"] = _opt_fut_sl
+            if _changes:
+                _futures_cat_patch[_cat] = _changes
+        if _futures_cat_patch:
+            _patch_body["futures_category_thresholds"] = _futures_cat_patch
+
+        if not _patch_body:
+            return {"ok": False, "error": "No parameters selected or all blocked by safety rules", "skipped": _skipped, "snapshot_id": _snapshot_id}
+
+        # Apply via internal helper (reuse PATCH /config/kelly logic)
+        _patch_result = await patch_kelly_config(_patch_body, _auth)
+        if not _patch_result.get("ok"):
+            _patch_result["snapshot_id"] = _snapshot_id
+            return _patch_result
+
+        # Audit event specifically for backtest apply
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+            "VALUES ('__config__', 'system', 'backtest_apply', %s, false)",
+            (json.dumps({
+                "run_id": _run["id"],
+                "run_label": _run["label"],
+                "mode": _mode,
+                "applied_scalars": _applied_scalars,
+                "category_thresholds": _cat_patch,
+                "futures_category_thresholds": _futures_cat_patch,
+                "skipped": _skipped,
+                "snapshot_id": _snapshot_id,
+            }),)
+        )
+
+        return {
+            "ok": True,
+            "run_id": _run["id"],
+            "run_label": _run["label"],
+            "mode": _mode,
+            "snapshot_id": _snapshot_id,
+            "applied": _patch_result.get("applied", {}),
+            "rejected": _patch_result.get("rejected", {}),
+            "skipped": _skipped,
+            "message": "Backtest configuration applied successfully",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/config/snapshots")
+async def get_config_snapshots(limit: int = 10, _auth=Depends(_require_api_key)) -> Dict:
+    """List recent config snapshots for rollback."""
+    try:
+        _rows = db_client.execute_query(
+            "SELECT key, value, updated_at FROM trading_runtime_state WHERE key LIKE 'config_snapshot_%%' ORDER BY updated_at DESC LIMIT %s",
+            (limit,)
+        )
+        _snapshots = []
+        for r in _rows:
+            _key = r["key"]
+            if _key == "config_snapshot_latest":
+                continue
+            _snap_id = _key.replace("config_snapshot_", "")
+            _snapshots.append({"snapshot_id": _snap_id, "updated_at": r["updated_at"].isoformat()})
+        return {"ok": True, "snapshots": _snapshots, "count": len(_snapshots)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/config/rollback")
+async def post_config_rollback(body: Dict, _auth=Depends(_require_api_key)) -> Dict:
+    """Rollback to a previous config snapshot."""
+    try:
+        from init_components import get_components
+        _comp = get_components()
+        _s = _comp.settings
+        _snapshot_id = body.get("snapshot_id")
+        if not _snapshot_id:
+            return {"ok": False, "error": "snapshot_id required"}
+        return _restore_config_snapshot(_snapshot_id, _s)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HYBRID OPTIMIZER ENDPOINT (quantum + swarm + ML)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/hybrid/recommend")
+async def get_hybrid_recommend(
+    top_n: int = 10,
+    _auth=Depends(_require_api_key)
+) -> Dict:
+    """Return a hybrid recommendation for the next configuration using QIO+swarm+ML."""
+    try:
+        from init_components import get_components
+        from hybrid_optimizer import recommend_config
+        _comp = get_components()
+        _s = _comp.settings
+
+        # Fetch top backtest runs
+        _rows = db_client.execute_query(
+            """SELECT id, label, params, pnl_total, return_pct, sharpe, n_trades
+               FROM backtest_run
+               WHERE is_baseline = FALSE
+               ORDER BY pnl_total DESC
+               LIMIT %s""",
+            (top_n,)
+        )
+        if not _rows:
+            return {"ok": False, "error": "No backtest runs found"}
+
+        # Fetch recent PnL for allocation (trades_closed uses exit_time)
+        _spot_pnl = db_client.execute_query(
+            "SELECT COALESCE(SUM(pnl), 0) AS pnl FROM trades_closed "
+            "WHERE side IN ('BUY','SELL') AND exit_time > NOW() - INTERVAL '7 days'"
+        )
+        _fut_pnl = db_client.execute_query(
+            "SELECT COALESCE(SUM(pnl), 0) AS pnl FROM trades_closed "
+            "WHERE side IN ('SHORT','LONG') AND exit_time > NOW() - INTERVAL '7 days'"
+        )
+        _spot_pnl_7d = float(_spot_pnl[0]["pnl"] if _spot_pnl else 0)
+        _fut_pnl_7d = float(_fut_pnl[0]["pnl"] if _fut_pnl else 0)
+        _regime = getattr(_comp, "current_regime_mode", None) or getattr(
+            _comp.orchestrator if hasattr(_comp, "orchestrator") else None, "current_regime_mode", "SPOT_BULL"
+        ) or "SPOT_BULL"
+
+        _rec = recommend_config(
+            top_runs=_rows,
+            regime=_regime,
+            spot_pnl_7d=_spot_pnl_7d,
+            futures_pnl_7d=_fut_pnl_7d,
+            settings=_s,
+        )
+
+        # Audit
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+            "VALUES ('__hybrid__', 'system', 'hybrid_optimizer_suggestion', %s, false)",
+            (json.dumps({
+                "confidence": _rec.get("confidence"),
+                "safe": _rec.get("safe"),
+                "regime": _regime,
+                "predicted_pnl": _rec.get("predicted_pnl"),
+                "capital_allocation": _rec.get("capital_allocation"),
+            }),)
+        )
+        return _rec
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

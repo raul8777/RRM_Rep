@@ -40,6 +40,48 @@ def _is_valid_pair(symbol: str, last_price: float) -> bool:
     return True
 
 
+def _futures_short_score(c: dict, cached_indicators: dict = None) -> float:
+    """
+    Score optimized for SHORT candidates in FUTURES_SHORT regime.
+
+    Goal: short bounces inside a bearish trend, NOT already-overextended dumps.
+    A positive 24h change in a bearish context is often a bounce to short.
+    """
+    vol = c.get("vol_usdt", 0.0)
+    chg = c.get("chg_pct", 0.0)
+    base = vol * abs(chg)
+    if base == 0:
+        return 0.0
+
+    # Enrich with cached technical indicators if available
+    rsi = None
+    trend = None
+    if cached_indicators:
+        rsi = cached_indicators.get("rsi")
+        trend = cached_indicators.get("trend_4h")
+
+    score = base
+    # Reward moderate bounces (likely continuation shorts) on a DOWN day
+    if 0.5 <= chg <= 8.0:
+        score *= 1.40
+    # Heavy penalty for already-overextended drops (risk of short squeeze)
+    if chg < -8.0:
+        score *= 0.50
+    # Heavy penalty for strong bullish momentum (possible breakout)
+    if chg > 12.0:
+        score *= 0.30
+
+    # Cached indicator overrides (best-effort, no extra API calls)
+    if trend == "DOWN" and rsi is not None and 45 <= rsi <= 65:
+        score *= 1.30
+    elif trend == "UP" and chg > 5.0:
+        score *= 0.50
+    elif rsi is not None and rsi < 30:
+        score *= 0.50  # oversold extreme
+
+    return round(score, 2)
+
+
 def get_screened_pairs(
     spot_min_vol: float = 10_000_000,       # $10M min for spot eligibility
     futures_min_vol: float = 100_000_000,   # $100M min for futures eligibility
@@ -47,6 +89,7 @@ def get_screened_pairs(
     max_futures: int = 15,                  # max futures candidates
     cache_seconds: int = 900,               # 15 min default TTL
     settings=None,                          # optional: override defaults from settings
+    regime_mode: str = "SPOT_BULL",         # contextual scoring for futures SHORT
 ) -> Dict[str, List[str]]:
     """
     Return {"spot": [...], "futures": [...], "all": [...]} of best USDT pairs
@@ -61,6 +104,7 @@ def get_screened_pairs(
         futures_min_vol = getattr(settings, 'screener_futures_min_vol',  futures_min_vol)
         max_spot        = getattr(settings, 'screener_max_pairs',        max_spot)
         cache_seconds   = int(getattr(settings, 'screener_cache_minutes', cache_seconds / 60) * 60)
+        regime_mode     = getattr(settings, 'current_regime_mode', regime_mode)
 
     # ── Cache hit ─────────────────────────────────────────────────────────────
     now = time.time()
@@ -76,6 +120,13 @@ def get_screened_pairs(
     except Exception as e:
         print(f"[Screener] ticker/24hr fetch failed: {e} — returning empty screener result")
         return {"spot": [], "futures": [], "all": []}
+
+    # ── Best-effort indicator cache enrichment (no extra API calls) ───────────
+    try:
+        from analysis_cache import analysis_cache as _ac
+        _cached_all = _ac.get_all() or {}
+    except Exception:
+        _cached_all = {}
 
     # ── Parse and rank ────────────────────────────────────────────────────────
     candidates = []
@@ -97,33 +148,60 @@ def get_screened_pairs(
         # Bearish score kept separately — futures SHORT selection uses abs()
         spot_score    = vol * max(0.0, chg_pct)   # 0 if falling — avoids long entries in downtrend
         futures_score = vol * abs(chg_pct)         # full momentum for SHORT candidates
+        cached_ind = _cached_all.get(symbol, {}).get("indicators", {}) if _cached_all else {}
+        futures_short_score = _futures_short_score(
+            {"vol_usdt": vol, "chg_pct": chg_pct}, cached_indicators=cached_ind
+        )
         candidates.append({
             "symbol": symbol,
             "vol_usdt": round(vol),
             "chg_pct": round(chg_pct, 2),
             "score": spot_score,
             "futures_score": futures_score,
+            "futures_short_score": futures_short_score,
         })
 
-    # Sort spot by bullish score (uptrend priority), futures by abs momentum score
+    # Sort spot by bullish score (uptrend priority)
     candidates.sort(key=lambda x: x["score"], reverse=True)
-    spot_pairs    = [c["symbol"] for c in candidates[:max_spot]]
+    spot_pairs = [c["symbol"] for c in candidates[:max_spot]]
 
-    futures_candidates = sorted(
-        [c for c in candidates if c["vol_usdt"] >= futures_min_vol],
-        key=lambda x: x["futures_score"], reverse=True
-    )
+    # Futures ranking depends on regime: FUTURES_SHORT prioritizes short-bounce candidates
+    if regime_mode == "FUTURES_SHORT":
+        futures_candidates = sorted(
+            [c for c in candidates if c["vol_usdt"] >= futures_min_vol],
+            key=lambda x: x["futures_short_score"], reverse=True
+        )
+    else:
+        futures_candidates = sorted(
+            [c for c in candidates if c["vol_usdt"] >= futures_min_vol],
+            key=lambda x: x["futures_score"], reverse=True
+        )
     futures_pairs = [c["symbol"] for c in futures_candidates[:max_futures]]
+
+    top_bearish = sorted(
+        [c for c in candidates if c["vol_usdt"] >= futures_min_vol],
+        key=lambda x: x["futures_short_score"], reverse=True
+    )[:5]
+    top_bullish = sorted(candidates, key=lambda x: x["score"], reverse=True)[:5]
 
     result = {
         "spot":    spot_pairs,
         "futures": futures_pairs,
         "all":     [c["symbol"] for c in candidates],
         "_meta": {
+            "regime_mode": regime_mode,
             "fetched_at": now,
             "total_candidates": len(candidates),
             "spot_count": len(spot_pairs),
             "futures_count": len(futures_pairs),
+            "top_bearish": [
+                {"symbol": c["symbol"], "chg_pct": c["chg_pct"], "score": c["futures_short_score"]}
+                for c in top_bearish
+            ],
+            "top_bullish": [
+                {"symbol": c["symbol"], "chg_pct": c["chg_pct"], "score": c["score"]}
+                for c in top_bullish
+            ],
         }
     }
 
@@ -133,7 +211,8 @@ def get_screened_pairs(
 
     print(
         f"[Screener] {len(candidates)} pairs scanned → "
-        f"spot={len(spot_pairs)}, futures={len(futures_pairs)}"
+        f"spot={len(spot_pairs)}, futures={len(futures_pairs)} "
+        f"(regime={regime_mode}, top_bearish={top_bearish[0]['symbol'] if top_bearish else '-'})"
     )
     return result
 

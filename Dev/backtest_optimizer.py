@@ -876,88 +876,50 @@ _ALLOWED_CAT_FIELDS_AUTO = {"min_prob", "take_profit_pct"}
 
 def auto_apply_best(best_result: Dict, baseline_result: Dict, api_url: str, api_key: str, db=None):
     """
-    Automatically apply the best backtest config to the live system via PATCH /config/kelly.
-    Excludes _NEVER_AUTO_APPLY params. Logs to DB trades_audit for full traceability.
+    Automatically apply the best backtest config to the live system via POST /backtest/apply.
+    Uses centralized snapshot + safety rules in app.py. Logs to trades_audit for full traceability.
     Returns: (applied_fields, skipped_fields, error_or_None)
     """
-    if best_result['label'] == 'baseline':
+    if best_result.get('label') == 'baseline':
         print("  [auto-apply] Baseline IS best — nothing to apply.")
         return {}, {}, None
 
-    best_params = best_result['params']
+    run_id = best_result.get('id')
+    if not run_id:
+        return {}, {}, "best_result missing id"
 
-    # ── Kelly / SL / TP params ────────────────────────────────────────────────
-    _PARAM_MAP = {
-        "kelly_max_usdt":         {"field": "kelly_max_usdt",         "scale": 1.0},
-        "kelly_max_pct_liquid":   {"field": "kelly_max_pct_liquid",   "scale": 1.0},
-        "futures_kelly_max_usdt": {"field": "futures_kelly_max_usdt", "scale": 1.0},
-        "futures_sl_pct":         {"field": "futures_sl_pct",         "scale": 100.0},
-        "futures_tp_pct":         {"field": "futures_tp_pct",         "scale": 100.0},
-        "spot_sl_pct":            {"field": "stop_loss_pct",          "scale": 100.0},
+    body = {
+        "run_id": run_id,
+        "mode": "auto",
+        "auto_apply": True,
     }
 
-    patch_body = {}
-    skipped = {}
-    for bt_key, mapping in _PARAM_MAP.items():
-        if bt_key in _NEVER_AUTO_APPLY:
-            skipped[bt_key] = "in NEVER_AUTO_APPLY list"
-            continue
-        if bt_key not in best_params:
-            continue
-        scaled_val = round(float(best_params[bt_key]) * mapping["scale"], 6)
-        # Safety: don't lower a field if its scaled value looks unsafe
-        baseline_scaled = round(float(baseline_result['params'].get(bt_key, 0)) * mapping["scale"], 6)
-        patch_body[mapping["field"]] = scaled_val
-
-    # ── Category thresholds: min_prob and take_profit_pct ─────────────────────
-    opt_min_prob = float(best_params.get("min_prob", 0))
-    opt_spot_tp  = round(float(best_params.get("spot_tp_pct", 0)) * 100.0, 4)  # decimal → %
-
-    _CAT_BASELINES = {
-        "LARGE_CAP":  {"min_prob": 0.55, "take_profit_pct": 3.5},
-        "MIDCAP_ALT": {"min_prob": 0.50, "take_profit_pct": 3.5},
-        "NARRATIVE":  {"min_prob": 0.45, "take_profit_pct": 7.0},
-        "MEME":       {"min_prob": 0.52, "take_profit_pct": 4.5},
-    }
-    cat_patch = {}
-    for cat, base_fields in _CAT_BASELINES.items():
-        cat_changes = {}
-        if opt_min_prob > 0 and base_fields["min_prob"] < opt_min_prob:
-            cat_changes["min_prob"] = round(opt_min_prob, 4)
-        if opt_spot_tp > 0 and base_fields["take_profit_pct"] < opt_spot_tp:
-            cat_changes["take_profit_pct"] = round(opt_spot_tp, 4)
-        if cat_changes:
-            cat_patch[cat] = cat_changes
-
-    if cat_patch:
-        patch_body["category_thresholds"] = cat_patch
-
-    if not patch_body:
-        print("  [auto-apply] Nothing to patch after applying safety filters.")
-        return {}, skipped, None
-
-    # ── Call API ──────────────────────────────────────────────────────────────
-    print(f"\n  [auto-apply] Sending PATCH /config/kelly with {len(patch_body)} top-level keys...")
-    print(f"               Payload: {json.dumps(patch_body, indent=4)}")
+    print(f"\n  [auto-apply] Sending POST /backtest/apply for run {run_id}...")
+    print(f"               Payload: {json.dumps(body, indent=4)}")
 
     try:
         req = urllib.request.Request(
-            f"{api_url}/config/kelly",
-            data=json.dumps(patch_body).encode(),
+            f"{api_url}/backtest/apply",
+            data=json.dumps(body).encode(),
             headers={"X-API-Key": api_key, "Content-Type": "application/json"},
-            method="PATCH",
+            method="POST",
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             resp_data = json.loads(resp.read())
 
         if resp_data.get("ok"):
-            applied_fields  = resp_data.get("applied", {})
+            applied_fields = resp_data.get("applied", {})
             rejected_fields = resp_data.get("rejected", {})
+            skipped_fields = resp_data.get("skipped", {})
+            snapshot_id = resp_data.get("snapshot_id")
             print(f"  [auto-apply] ✅ Applied: {list(applied_fields.keys())}")
+            print(f"  [auto-apply] 📸 Snapshot: {snapshot_id}")
             if rejected_fields:
                 print(f"  [auto-apply] ⚠️  Rejected: {rejected_fields}")
+            if skipped_fields:
+                print(f"  [auto-apply] ⚠️  Skipped: {skipped_fields}")
 
-            # Extra audit: record auto-apply event in BD
+            # Extra audit already written by /backtest/apply; this is a local CLI backup
             if db:
                 try:
                     detail = json.dumps({
@@ -965,8 +927,9 @@ def auto_apply_best(best_result: Dict, baseline_result: Dict, api_url: str, api_
                         "best_label": best_result['label'],
                         "improvement_usdt": round(best_result['pnl_total'] - baseline_result['pnl_total'], 2),
                         "applied": applied_fields,
-                        "skipped": skipped,
+                        "skipped": skipped_fields,
                         "rejected": rejected_fields,
+                        "snapshot_id": snapshot_id,
                     }, cls=_NumpyEncoder)
                     db.execute_update(
                         "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
@@ -977,15 +940,15 @@ def auto_apply_best(best_result: Dict, baseline_result: Dict, api_url: str, api_
                 except Exception as _ae:
                     print(f"  [auto-apply] ⚠️  Audit write failed: {_ae}")
 
-            return applied_fields, skipped, None
+            return applied_fields, skipped_fields, None
         else:
             err = resp_data.get("error", str(resp_data))
             print(f"  [auto-apply] ❌ API returned error: {err}")
-            return {}, skipped, err
+            return {}, {}, err
 
     except Exception as e:
         print(f"  [auto-apply] ❌ Request failed: {e}")
-        return {}, skipped, str(e)
+        return {}, {}, str(e)
 
 
 if __name__ == '__main__':

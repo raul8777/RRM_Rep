@@ -13,6 +13,8 @@ from analysis_cache import analysis_cache
 from autonomous_signals import AutonomousSignalGenerator
 from trade_utils import align_quantity_to_step, get_symbol_filters, is_quantity_valid, compute_commission
 import pnl_service
+import json
+import state_persistence
 
 
 # Symbols confirmed invalid on Binance (delisted) — skip without API call
@@ -46,9 +48,43 @@ _asg_cycle_id: int = 0  # incremented each cycle to know when to reset
 _non_short_regime_cycles: int = 0
 
 
+def _audit_screener_selection(db_client, regime_mode: str, screened: dict) -> None:
+    """Persist screener candidate selection to trades_audit for full traceability."""
+    if not db_client:
+        return
+    try:
+        _meta = screened.get("_meta", {})
+        _detail = {
+            "regime_mode": regime_mode,
+            "spot_count": _meta.get("spot_count", 0),
+            "futures_count": _meta.get("futures_count", 0),
+            "total_candidates": _meta.get("total_candidates", 0),
+            "top_bearish": _meta.get("top_bearish", []),
+            "top_bullish": _meta.get("top_bullish", []),
+            "futures_symbols": screened.get("futures", []),
+            "spot_symbols": screened.get("spot", []),
+        }
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            ("SCREENER", "system", "screener_selection", json.dumps(_detail), True)
+        )
+        print(f"[Audit/Screener] Persisted screener_selection for regime={regime_mode}")
+    except Exception as _ae:
+        print(f"[Audit/Screener] Failed to persist screener_selection: {_ae}")
+
+
 def _get_futures_client(settings, db_client=None) -> FuturesClient:
     """Lazy singleton for FuturesClient. Reuses instance across cycles."""
     global _futures_client
+    # FIX-G2: Auto-resolve db_client from components if not provided
+    if db_client is None:
+        try:
+            from init_components import get_components as _get_comp
+            _comp = _get_comp()
+            db_client = getattr(_comp, 'db_client', None)
+        except Exception:
+            db_client = None
     if _futures_client is None:
         _futures_client = FuturesClient(
             api_key    = settings.binance_api_key,
@@ -131,7 +167,7 @@ def _get_spot_daily_pnl() -> float:
 
 
 def _set_cooldown(symbol: str, cooldown_type: str, hours: float, metadata: dict = None) -> None:
-    """Persist a cooldown to DB + update RAM dict. Type: 'volspike'|'narrative'|'override_daily'."""
+    """Persist a cooldown to DB + update RAM dict. Type: 'volspike'|'narrative'|'futures_sl'|'override_daily'."""
     from datetime import timedelta as _td
     _now = datetime.now(timezone.utc)
     _expires = _now + _td(hours=hours)
@@ -139,6 +175,8 @@ def _set_cooldown(symbol: str, cooldown_type: str, hours: float, metadata: dict 
         _VOLSPIKE_COOLDOWN[symbol] = _now
     elif cooldown_type == 'narrative':
         _NARRATIVE_BUY_COOLDOWN[symbol] = _now
+    elif cooldown_type == 'futures_sl':
+        _FUTURES_SL_COOLDOWN[symbol] = _now
     if _db_client_ref and getattr(_db_client_ref, 'execute_update', None):
         try:
             import json as _json
@@ -151,7 +189,7 @@ def _set_cooldown(symbol: str, cooldown_type: str, hours: float, metadata: dict 
                  _json.dumps(metadata) if metadata else None)
             )
         except Exception as _cd_err:
-            pass  # fail-open: RAM dict is still set
+            print(f"[Cooldown] Failed to persist {cooldown_type} for {symbol}: {_cd_err}")
 
 
 def _check_cooldown_db(symbol: str, cooldown_type: str) -> bool:
@@ -703,7 +741,8 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                     _screened = get_screened_pairs(
                         spot_min_vol=settings.screener_quality_min_vol_usdt,
                         max_spot=settings.screener_top_n_count + 20,  # Request extra for filtering
-                        settings=settings
+                        settings=settings,
+                        regime_mode=regime
                     )
                     # Apply additional quality filters
                     symbols = _filter_by_quality(
@@ -721,7 +760,7 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                     # Fallback to screener v1
                     if getattr(settings, 'screener_enabled', True):
                         from pair_screener import get_screened_pairs, merge_with_static
-                        _screened = get_screened_pairs(settings=settings)
+                        _screened = get_screened_pairs(settings=settings, regime_mode=regime)
                         symbols = merge_with_static(
                             _screened["spot"],
                             _static_symbols,
@@ -732,7 +771,7 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
             elif getattr(settings, 'screener_enabled', True):
                 try:
                     from pair_screener import get_screened_pairs, merge_with_static
-                    _screened = get_screened_pairs(settings=settings)
+                    _screened = get_screened_pairs(settings=settings, regime_mode=regime)
                     symbols = merge_with_static(
                         _screened["spot"],
                         _static_symbols,
@@ -2074,7 +2113,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 elif getattr(settings, 'screener_enabled', True):
                     try:
                         from pair_screener import get_screened_pairs
-                        _futures_symbols = list(dict.fromkeys(_futures_symbols + get_screened_pairs(settings=settings).get("futures", [])))
+                        _futures_symbols = list(dict.fromkeys(_futures_symbols + get_screened_pairs(settings=settings, regime_mode=_regime_mode).get("futures", [])))
                     except Exception:
                         pass
                 if symbol in _INVALID_FUTURES_SYMBOLS:
@@ -2505,7 +2544,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     elif getattr(settings, 'screener_enabled', True):
                         try:
                             from pair_screener import get_screened_pairs
-                            _f_sym_list = list(dict.fromkeys(_f_sym_list + get_screened_pairs(settings=settings).get("futures", [])))
+                            _f_sym_list = list(dict.fromkeys(_f_sym_list + get_screened_pairs(settings=settings, regime_mode=_regime_mode).get("futures", [])))
                         except Exception:
                             pass
                     if symbol in _f_sym_list:
@@ -2537,7 +2576,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 elif getattr(settings, 'screener_enabled', True):
                     try:
                         from pair_screener import get_screened_pairs
-                        _l_sym_list = list(dict.fromkeys(_l_sym_list + get_screened_pairs(settings=settings).get("futures", [])))
+                        _l_sym_list = list(dict.fromkeys(_l_sym_list + get_screened_pairs(settings=settings, regime_mode=_regime_mode).get("futures", [])))
                     except Exception:
                         pass
                 if symbol in _l_sym_list:
@@ -3200,7 +3239,7 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
 
 
 def execute_once(monitor_only: bool = False):
-    global _db_client_ref
+    global _db_client_ref, _FUTURES_MASS_SL_COOLDOWN_UNTIL, _VOLSPIKE_POSITIONS, _OVERRIDE_DAILY_COUNT
     from init_components import get_components
     comp = get_components()
     settings = comp.settings
@@ -3213,6 +3252,14 @@ def execute_once(monitor_only: bool = False):
     if _db_client_ref is None and hasattr(comp, 'db_client') and comp.db_client:
         _db_client_ref = comp.db_client
         _load_cooldowns_from_db()
+        # Load additional volatile state (mass-SL, volspike positions, override counters)
+        _loaded_state = state_persistence.load_state(_db_client_ref)
+        if _loaded_state:
+            _FUTURES_MASS_SL_COOLDOWN_UNTIL = _loaded_state.get('futures_mass_sl_cooldown_until') or _FUTURES_MASS_SL_COOLDOWN_UNTIL
+            _VOLSPIKE_POSITIONS = set(_loaded_state.get('volspike_positions', [])) or _VOLSPIKE_POSITIONS
+            _OVERRIDE_DAILY_COUNT = _loaded_state.get('override_daily_count', {}) or _OVERRIDE_DAILY_COUNT
+            print(f"[StatePersistence] Loaded volatile state: mass_sl={_FUTURES_MASS_SL_COOLDOWN_UNTIL}, "
+                  f"volspike_positions={len(_VOLSPIKE_POSITIONS)}, override_counts={len(_OVERRIDE_DAILY_COUNT)}")
 
     # ── PAUSED / monitor_only: solo ejecutar SL/TP y retornar ───────────────────
     if monitor_only:
@@ -3529,7 +3576,6 @@ def execute_once(monitor_only: bool = False):
                             _set_cooldown(_cc_sym, 'futures_sl', _sl_cd_hours, {'reason': 'sl_hit'})
                             print(f'[Futures/SL-CD] {_cc_sym}: cooldown {_sl_cd_hours}h — no re-entry until next window')
                 # PB2: Mass SL circuit breaker — global pause if too many positions stopped together
-                global _FUTURES_MASS_SL_COOLDOWN_UNTIL
                 _mass_sl_threshold = int(getattr(settings, 'futures_mass_sl_threshold', 3))
                 if _sl_count_this_cycle >= _mass_sl_threshold:
                     _mass_cd_hours = float(getattr(settings, 'futures_mass_sl_cooldown_hours', 4.0))
@@ -3551,7 +3597,9 @@ def execute_once(monitor_only: bool = False):
     if getattr(settings, 'screener_enabled', True):
         try:
             from pair_screener import get_screened_pairs as _gsp
-            _cached_screened_pairs = _gsp(settings=settings)
+            _cached_screened_pairs = _gsp(settings=settings, regime_mode=_regime_mode)
+            # Persist screener candidate selection for full traceability
+            _audit_screener_selection(comp.db_client, _regime_mode, _cached_screened_pairs)
         except Exception:
             pass
 
@@ -3648,6 +3696,18 @@ def execute_once(monitor_only: bool = False):
     }
     _next_cycle = _cycle_by_regime.get(_regime_mode, getattr(settings, 'trade_cycle_minutes', 5))
     print(f"Completed cycle. Next cycle in {_next_cycle} min (regime={_regime_mode})")
+
+    # Persist volatile state to DB for restart safety
+    if _db_client_ref:
+        state_persistence.save_state(
+            _db_client_ref,
+            futures_sl_cooldown=_FUTURES_SL_COOLDOWN,
+            futures_mass_sl_cooldown_until=_FUTURES_MASS_SL_COOLDOWN_UNTIL,
+            volspike_cooldown=_VOLSPIKE_COOLDOWN,
+            volspike_positions=_VOLSPIKE_POSITIONS,
+            override_daily_count=_OVERRIDE_DAILY_COUNT,
+        )
+
     return {"top_symbols": top_symbols, "sell_orders": sell_orders,
             "buy_orders": buy_orders, "sl_tp_closes": sl_tp_closes,
             "futures_closes": futures_closes, "next_cycle_minutes": _next_cycle,

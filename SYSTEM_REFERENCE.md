@@ -2471,4 +2471,141 @@ docker exec crypto-agent-app python Dev/validate_params.py # Validacion detallad
 
 ---
 
+## Sesión 26: Backtest 100% aplicable + Hybrid Roles
+
+### Objetivo
+Permitir aplicar **todos los parámetros identificados en la mejor configuración** del backtest de 1000 corridas desde el dashboard, con **100% trazabilidad** y **snapshots + rollback**. Además, introducir un framework híbrido que integra:
+- **Física cuántica**: Simulated Quantum Annealing (SQA) para refinar el espacio de parámetros.
+- **Robótica**: Enjambre multi-agente que valida señales y configuraciones.
+- **Machine Learning**: Ensemble ligero + bandit Thompson para selección de configuraciones.
+
+### Roles híbridos
+
+| Rol | Concepto | Implementación | Archivo |
+|-----|----------|----------------|---------|
+| **Física cuántica** | Optimización inspirada en annealing cuántico | `SimulatedQuantumAnnealing` explora el espacio de parámetros con túneles y convergencia | `hybrid_optimizer/quantum_space.py` |
+| **Robótica** | Multi-agente swarm que vota | `SignalSwarm` con robots: momentum, risk, correlation, regime | `hybrid_optimizer/signal_swarm.py` |
+| **Machine Learning** | Ensemble + multi-armed bandit | `LightweightEnsemble` predice PnL; `ThompsonBandit` selecciona entre configs | `hybrid_optimizer/ml_predictor.py` |
+
+### Nuevos campos en `Settings` (`config.py`)
+- `vol_spike_min`: vol spike mínimo global (SPOT + FUTURES)
+- `futures_min_prob`: mínima probabilidad para señales FUTURES
+- `futures_vol_spike_min`: vol spike mínimo para FUTURES
+- `futures_category_thresholds`: umbrales por categoría para FUTURES
+- `hybrid_optimizer_enabled`: flag para activar el framework híbrido
+- `auto_apply_backtest`: flag para auto-aplicar backtest
+- `backtest_safe_only`: solo aplica parámetros dentro de rangos seguros
+
+### Nuevos endpoints
+
+| Método | Endpoint | Descripción | Trazabilidad |
+|--------|----------|-------------|--------------|
+| GET | `/backtest/best` | Mejor config + sugerencias SPOT/FUTURES | - |
+| POST | `/backtest/apply` | Aplicar config seleccionada con snapshot previo | `backtest_apply` en `trades_audit` |
+| POST | `/backtest/optimize` | Ejecutar 1000 corridas en background | `backtest_auto_apply` si `--auto-apply` |
+| GET | `/config/snapshots` | Listar snapshots de configuración | `config_snapshot_created` |
+| POST | `/config/rollback` | Restaurar un snapshot | `config_rollback` |
+| GET | `/hybrid/recommend` | Recomendación híbrida QIO+swarm+ML | `hybrid_optimizer_suggestion` |
+
+### Rangos de seguridad para aplicación automática
+```python
+SAFE_BOUNDS = {
+    'min_strength': (0.40, 0.90),
+    'vol_spike_min': (1.0, 3.0),
+    'kelly_base_usdt': (50.0, 300.0),
+    'kelly_max_usdt': (200.0, 1200.0),
+    'futures_kelly_max_usdt': (300.0, 2000.0),
+    'spot_sl_pct': (0.010, 0.040),
+    'spot_tp_pct': (0.018, 0.080),
+    'futures_sl_pct': (0.012, 0.050),
+    'futures_tp_pct': (0.020, 0.100),
+}
+```
+`min_strength` y `vol_spike_min` están bloqueados de auto-aplicación; solo se aplican manualmente si el usuario los selecciona y el valor está dentro del rango seguro.
+
+### Mapeo de parámetros backtest → Settings
+| Backtest | Settings | Escala |
+|----------|----------|--------|
+| `kelly_base_usdt` | `kelly_base_usdt` | 1.0 |
+| `kelly_max_usdt` | `kelly_max_usdt` | 1.0 |
+| `kelly_max_pct_liquid` | `kelly_max_pct_liquid` | 1.0 |
+| `futures_kelly_max_usdt` | `futures_kelly_max_usdt` | 1.0 |
+| `spot_sl_pct` | `stop_loss_pct` | 100.0 |
+| `spot_tp_pct` | `take_profit_pct` | 100.0 |
+| `futures_sl_pct` | `futures_sl_pct` | 100.0 |
+| `futures_tp_pct` | `futures_tp_pct` | 100.0 |
+| `min_strength` | `min_signal_strength` | 1.0 |
+| `min_prob` | `category_thresholds.*.min_prob` | 1.0 |
+| `vol_spike_min` | `vol_spike_min` | 1.0 |
+
+### Comandos de validación
+```bash
+# Verificar sintaxis
+docker exec crypto-agent-app python -m py_compile /app/app.py /app/config.py /app/Dev/backtest_optimizer.py /app/hybrid_optimizer/*.py
+
+# Ejecutar tests
+docker exec crypto-agent-app python -m pytest /app/tests/test_hybrid_backtest.py -v
+
+# Ejecutar backtest + auto-apply
+docker exec crypto-agent-app python Dev/backtest_optimizer.py --runs 1000 --days 20 --auto-apply
+
+# Consultar recomendación híbrida
+curl -H "X-API-Key: $DASHBOARD_API_KEY" http://localhost:8000/hybrid/recommend
+```
+
+---
+
+## Auditoría exhaustiva híbrida — 27 jun 2026
+
+### Hallazgos críticos corregidos
+
+1. **Coherencia FUTURES trades_open ↔ Binance (FIX-S7)**
+   - Problema: escalonamiento y cierres parciales dejaban múltiples filas en `trades_open` con cantidades/precios desfasados respecto a Binance.
+   - Corrección: `futures_client.py` ahora ejecuta `_consolidate_futures_open_records()` durante `_sync_open_positions()` para colapsar filas obsoletas y usar el `entry_price` y `qty` de Binance como única fuente de verdad.
+   - Archivos: `futures_client.py`, `tests/test_futures_consolidation.py`.
+
+2. **Persistencia de estado volátil tras reinicio (FIX-STATE)**
+   - Problema: cooldowns de SL de futuros, mass-SL circuit breaker, posiciones VolSpike y contadores diarios vivían solo en RAM; se perdían al reiniciar el contenedor.
+   - Corrección: nuevo `state_persistence.py` guarda/recarga el estado volátil en `trading_runtime_state` al final de cada ciclo y en el startup.
+   - Archivos: `state_persistence.py`, `run_trades.py`, `tests/test_state_persistence.py`.
+
+3. **Futures SL cooldown no actualizaba dict en RAM (FIX-F1)**
+   - Problema: `_set_cooldown` con `cooldown_type='futures_sl'` persistía en `trading_cooldowns` pero no actualizaba `_FUTURES_SL_COOLDOWN` en memoria, causando comportamiento inconsistente dentro del mismo ciclo.
+   - Corrección: `_set_cooldown` ahora también actualiza `_FUTURES_SL_COOLDOWN` y loguea errores en vez de `pass` silencioso.
+   - Archivo: `run_trades.py`.
+
+4. **FuturesClient recibía `db_client=None` (FIX-G2)**
+   - Problema: `_get_futures_client` creaba el singleton sin `db_client`, por lo que `_sync_open_positions`, `_save_futures_open` y la consolidación no podían persistir en BD hasta que alguien asignaba manualmente el cliente.
+   - Corrección: `_get_futures_client` ahora resuelve automáticamente `db_client` desde `init_components.get_components()`.
+   - Archivo: `run_trades.py`.
+
+### Estado post-auditoría
+- `trades_open` futuros: 12 filas, 100% alineadas con Binance en `qty` y `entry_price`.
+- Tests nuevos: `tests/test_state_persistence.py` (2 passed), `tests/test_futures_consolidation.py` (1 passed).
+- Tests existentes: `tests/test_hybrid_backtest.py` (8 passed).
+- Nota: `tests/test_integration.py` falla en importación de `message_bus` (módulo no existe); no es introducido por esta auditoría.
+- Estado final del sistema: reanudado vía `POST /control/start` y en estado `RUNNING` con 12 posiciones FUTURES activas.
+
+### Comandos de validación post-auditoría
+```bash
+# Coherencia FUTURES con Binance
+docker exec crypto-agent-app python -c "
+import os, requests, psycopg2, psycopg2.extras
+api='http://localhost:8000'; key=os.environ['DASHBOARD_API_KEY']
+positions = requests.get(f'{api}/futures/positions', headers={'X-API-Key': key}).json().get('positions', [])
+conn=psycopg2.connect(host=os.environ['DB_HOST'], port=os.environ['DB_PORT'], dbname=os.environ['DB_NAME'], user=os.environ['DB_USER'], password=os.environ['DB_PASSWORD'])
+cur=conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+cur.execute(\"SELECT symbol, quantity FROM trades_open WHERE metadata->>'trade_type'='futures'\")
+db={r['symbol']: float(r['quantity']) for r in cur.fetchall()}
+conn.close()
+for p in positions:
+    print(p['symbol'], 'binance', p['qty'], 'db', db.get(p['symbol'], None))
+"
+
+# Tests de regresión
+docker exec crypto-agent-app python -m pytest tests/test_hybrid_backtest.py tests/test_state_persistence.py tests/test_futures_consolidation.py -q
+```
+
+---
+
 *Revisar este archivo al inicio de cada sesión de análisis o implementación.*

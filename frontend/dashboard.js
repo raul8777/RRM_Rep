@@ -3824,7 +3824,7 @@ function renderBacktestPanel(data, best) {
     const el = document.getElementById('backtestOptimizerPanel');
     if (!el) return;
     if (!data) {
-        el.innerHTML = '<p class="loading">Sin datos — ejecuta backtest_optimizer.py primero.</p>';
+        el.innerHTML = '<p class="loading">Sin datos — ejecuta backtest_optimizer.py primero o usa el botón de abajo.</p>';
         return;
     }
 
@@ -3832,6 +3832,8 @@ function renderBacktestPanel(data, best) {
     const runs        = data.runs || [];
     const total       = data.total_runs || 0;
     const unsafeList  = (best && best.unsafe_params) ? best.unsafe_params : ['min_strength'];
+    const neverAuto   = (best && best.never_auto_apply) ? best.never_auto_apply : ['min_strength','vol_spike_min'];
+    const spotFutures = best && best.spot_vs_futures ? best.spot_vs_futures : {};
 
     // ── Summary bar ──────────────────────────────────────────────────────────
     let summaryHtml = '';
@@ -3860,13 +3862,34 @@ function renderBacktestPanel(data, best) {
                 <div class="bt-sum-value positive">+${impUSDT.toFixed(2)} USDT</div>
                 <div class="bt-sum-sub">+${(best.improvement_pct||0).toFixed(2)}% retorno</div>
             </div>
+            <div class="bt-sum-card">
+                <div class="bt-sum-label">SPOT / FUTURES</div>
+                <div class="bt-sum-value">${(spotFutures.pnl_spot||0).toFixed(2)} / ${(spotFutures.pnl_futures||0).toFixed(2)}</div>
+                <div class="bt-sum-sub">USDT por tipo</div>
+            </div>
         </div>`;
     }
 
+    // ── Action buttons ───────────────────────────────────────────────────────
+    const actionHtml = `
+    <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-xs" onclick="runBacktestOptimizer()" style="padding:6px 16px">
+            ▶️ Ejecutar 1000 corridas
+        </button>
+        <button class="btn btn-success btn-xs" onclick="applyBestBacktestConfig()" style="padding:6px 16px">
+            ⚡ Aplicar seleccionados
+        </button>
+        <button class="btn btn-warning btn-xs" onclick="rollbackLastConfig()" style="padding:6px 16px">
+            ↩️ Deshacer último cambio
+        </button>
+        <span id="bt-action-status" style="font-size:12px;color:#4ecca3"></span>
+    </div>`;
+
     // ── Param diff table with checkboxes ──────────────────────────────────────
     let diffHtml = '';
-    const patch    = (best && best.kelly_patch_suggestion)    ? best.kelly_patch_suggestion    : null;
+    const patch    = (best && best.kelly_patch_suggestion) ? best.kelly_patch_suggestion : null;
     const catPatch = (best && best.category_patch_suggestion) ? best.category_patch_suggestion : null;
+    const futCatPatch = (best && best.futures_category_patch_suggestion) ? best.futures_category_patch_suggestion : null;
 
     if (best && best.param_diff) {
         const rows = Object.entries(best.param_diff).map(([k, v]) => {
@@ -3875,21 +3898,22 @@ function renderBacktestPanel(data, best) {
             const deltaCls = delta > 0.0001 ? 'positive' : delta < -0.0001 ? 'negative' : '';
             const bv       = typeof v.baseline === 'number' ? v.baseline.toFixed(4) : v.baseline;
             const ov       = typeof v.optimal  === 'number' ? v.optimal.toFixed(4)  : v.optimal;
+            const p        = patch && patch[k];
             const isUnsafe = unsafeList.includes(k);
-            const hasPatch = patch && patch[k];
-            const checkedAttr = (hasPatch && !isUnsafe) ? 'checked' : '';
+            const isNeverAuto = neverAuto.includes(k);
+            const hasPatch = !!p;
+            const safe = hasPatch && p.safe;
+            const checkedAttr = (hasPatch && safe) ? 'checked' : '';
             const disabledNote = !hasPatch
-                ? '<span class="bt-note">escala incompatible</span>'
+                ? '<span class="bt-note">sin mapeo directo</span>'
+                : '';
+            const safeBadge = hasPatch
+                ? (safe ? '<span class="bt-safe-badge">✅ seguro</span>' : '<span class="bt-unsafe-badge">⚠️ bloqueado</span>')
                 : '';
 
-            // Show the value that will be sent to Settings (scaled)
             const patchVal = hasPatch
-                ? `→ ${patch[k].value.toFixed(patch[k].field.includes('kelly') ? 0 : 4)} <span style="font-size:10px;color:#666">(${patch[k].field})</span>`
+                ? `→ ${p.value.toFixed(p.field.includes('kelly') ? 0 : 4)} <span style="font-size:10px;color:#666">(${p.field})</span>`
                 : '<span class="bt-note">no aplicable</span>';
-
-            const unsafeBadge = isUnsafe
-                ? '<span class="bt-unsafe-badge">⚠️ No recomendado</span>'
-                : '';
 
             const rowCls = isUnsafe ? 'bt-toggle-row bt-unsafe-row' : 'bt-toggle-row';
             const chkId  = `bt-chk-${k}`;
@@ -3899,10 +3923,10 @@ function renderBacktestPanel(data, best) {
                     ${hasPatch
                         ? `<input type="checkbox" id="${chkId}" data-param="${k}" ${checkedAttr}
                                onchange="btToggleRow('${k}',this.checked)"
-                               title="${isUnsafe ? 'Peligroso — marcar con cuidado' : 'Incluir en PATCH'}">`
+                               title="${isNeverAuto ? 'Auto-aplicación bloqueada; puedes forzar manualmente' : 'Incluir en aplicación'}">`
                         : '<span style="color:#333;font-size:10px">—</span>'}
                 </td>
-                <td>${k} ${unsafeBadge} ${disabledNote}</td>
+                <td>${k} ${safeBadge} ${disabledNote}</td>
                 <td>${bv}</td>
                 <td>${ov}</td>
                 <td class="${deltaCls}">${delta>=0?'+':''}${delta.toFixed(4)} ${arrow}</td>
@@ -3932,63 +3956,50 @@ function renderBacktestPanel(data, best) {
                 <tbody>${rows}</tbody>
             </table>
             </div>
-            <div style="margin-top:10px;display:flex;align-items:center;gap:12px">
-                <button class="btn btn-success btn-xs" onclick="applyBestBacktestConfig()" style="padding:6px 16px">
-                    ⚡ Aplicar seleccionados
-                </button>
-                <span style="font-size:11px;color:#666">Solo los parámetros con ☑ activo serán enviados a /config/kelly</span>
+            <div style="margin-top:8px;font-size:11px;color:#888">
+                ⚠️ <strong>vol_spike_min</strong> y <strong>min_strength</strong> están bloqueados de auto-aplicación.
+                Solo se aplican si el valor óptimo está dentro del rango seguro (vol_spike_min ≥ 1.0, min_strength ≥ 0.40).
             </div>
             <div id="bt-apply-status" style="margin-top:8px;font-size:12px;color:#4ecca3"></div>
         </div>`;
 
-        // ── Category thresholds section ───────────────────────────────────────
+        // ── SPOT Category thresholds ───────────────────────────────────────
         if (catPatch && Object.keys(catPatch).length > 0) {
-            const catRows = [];
-            Object.entries(catPatch).forEach(([cat, fields]) => {
-                Object.entries(fields).forEach(([field, info]) => {
-                    const chkId = `bt-cat-chk-${cat}-${field}`;
-                    const curVal  = info.current !== null ? parseFloat(info.current).toFixed(4) : '—';
-                    const optVal  = parseFloat(info.optimal).toFixed(4);
-                    const delta   = info.current !== null ? (info.optimal - info.current) : 0;
-                    const arrow   = delta > 0 ? '▲' : delta < 0 ? '▼' : '—';
-                    const deltaCls = delta > 0 ? 'positive' : delta < 0 ? 'negative' : '';
-                    catRows.push(`<tr class="bt-toggle-row" id="bt-cat-row-${cat}-${field}">
-                        <td style="text-align:center">
-                            <input type="checkbox" id="${chkId}" data-cat="${cat}" data-field="${field}"
-                                   data-value="${info.optimal}" checked
-                                   onchange="btToggleCatRow('${cat}','${field}',this.checked)">
-                        </td>
-                        <td><strong>${cat}</strong></td>
-                        <td>${field}</td>
-                        <td>${curVal}</td>
-                        <td>${optVal}</td>
-                        <td class="${deltaCls}">${delta>=0?'+':''}${delta.toFixed(4)} ${arrow}</td>
-                    </tr>`);
-                });
-            });
+            const catRows = _renderCatPatchRows(catPatch, 'spot');
             diffHtml += `
             <div style="margin-top:16px">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-                    <div class="kelly-card-title" style="margin:0">Category Thresholds — Cambios por categoría</div>
-                    <span style="font-size:11px;color:#666">Aplican a SPOT y FUTURES (pnl_service.validate)</span>
+                    <div class="kelly-card-title" style="margin:0">SPOT — Category Thresholds</div>
+                    <span style="font-size:11px;color:#666">Aplican a trades SPOT</span>
                 </div>
                 <div style="overflow-x:auto">
                 <table class="kelly-table">
                     <thead><tr>
-                        <th style="width:32px">✓</th>
-                        <th>Categoría</th>
-                        <th>Campo</th>
-                        <th>Actual</th>
-                        <th>Óptimo</th>
-                        <th>Delta</th>
+                        <th style="width:32px">✓</th><th>Categoría</th><th>Campo</th><th>Actual</th><th>Óptimo</th><th>Delta</th>
                     </tr></thead>
-                    <tbody>${catRows.join('')}</tbody>
+                    <tbody>${catRows}</tbody>
                 </table>
                 </div>
-                <p style="font-size:11px;color:#666;margin-top:6px">
-                    ⚠️ <strong>vol_spike_min no se aplica</strong> — óptimo 0.83 &lt; 1.0 = vol por debajo del promedio (sin convicción).
-                    <strong>NARRATIVE TP</strong> ya está en 7.0% (mayor que el óptimo).
-                </p>
+            </div>`;
+        }
+
+        // ── FUTURES Category thresholds ──────────────────────────────────────
+        if (futCatPatch && Object.keys(futCatPatch).length > 0) {
+            const catRows = _renderCatPatchRows(futCatPatch, 'futures');
+            diffHtml += `
+            <div style="margin-top:16px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                    <div class="kelly-card-title" style="margin:0">FUTURES — Category Thresholds</div>
+                    <span style="font-size:11px;color:#666">Aplican a trades FUTURES</span>
+                </div>
+                <div style="overflow-x:auto">
+                <table class="kelly-table">
+                    <thead><tr>
+                        <th style="width:32px">✓</th><th>Categoría</th><th>Campo</th><th>Actual</th><th>Óptimo</th><th>Delta</th>
+                    </tr></thead>
+                    <tbody>${catRows}</tbody>
+                </table>
+                </div>
             </div>`;
         }
     }
@@ -4017,6 +4028,7 @@ function renderBacktestPanel(data, best) {
 
     el.innerHTML = `
         ${summaryHtml}
+        ${actionHtml}
         <div style="margin-top:16px">
             <div class="kelly-card-title">Top 15 corridas por PnL (de ${total.toLocaleString()} totales)</div>
             <div style="overflow-x:auto">
@@ -4033,6 +4045,33 @@ function renderBacktestPanel(data, best) {
     `;
 }
 
+function _renderCatPatchRows(catPatch, prefix) {
+    const rows = [];
+    Object.entries(catPatch).forEach(([cat, fields]) => {
+        Object.entries(fields).forEach(([field, info]) => {
+            const chkId = `bt-${prefix}-cat-chk-${cat}-${field}`;
+            const curVal  = info.current !== null ? parseFloat(info.current).toFixed(4) : '—';
+            const optVal  = parseFloat(info.optimal).toFixed(4);
+            const delta   = info.current !== null ? (info.optimal - info.current) : 0;
+            const arrow   = delta > 0 ? '▲' : delta < 0 ? '▼' : '—';
+            const deltaCls = delta > 0 ? 'positive' : delta < 0 ? 'negative' : '';
+            rows.push(`<tr class="bt-toggle-row" id="bt-${prefix}-cat-row-${cat}-${field}">
+                <td style="text-align:center">
+                    <input type="checkbox" id="${chkId}" data-prefix="${prefix}" data-cat="${cat}" data-field="${field}"
+                           data-value="${info.optimal}" checked
+                           onchange="btToggleCatRow('${prefix}','${cat}','${field}',this.checked)">
+                </td>
+                <td><strong>${cat}</strong></td>
+                <td>${field}</td>
+                <td>${curVal}</td>
+                <td>${optVal}</td>
+                <td class="${deltaCls}">${delta>=0?'+':''}${delta.toFixed(4)} ${arrow}</td>
+            </tr>`);
+        });
+    });
+    return rows.join('');
+}
+
 function btToggleRow(param, checked) {
     const row = document.getElementById(`bt-row-${param}`);
     if (row) row.style.opacity = checked ? '1' : '0.35';
@@ -4042,78 +4081,120 @@ function btSelectAll(onlyUnsafe) {
     const checkboxes = document.querySelectorAll('[id^="bt-chk-"]');
     checkboxes.forEach(chk => {
         const param = chk.dataset.param;
-        const isUnsafe = (_backtestBestCache && (_backtestBestCache.unsafe_params || ['min_strength']).includes(param));
-        // If onlyUnsafe=true: check all that are NOT unsafe; if false: uncheck all
-        const newState = onlyUnsafe ? !isUnsafe : false;
+        const p = _backtestBestCache && _backtestBestCache.kelly_patch_suggestion
+            ? _backtestBestCache.kelly_patch_suggestion[param] : null;
+        const safe = !!p && p.safe;
+        const newState = onlyUnsafe ? safe : false;
         chk.checked = newState;
         btToggleRow(param, newState);
     });
 }
 
-function btToggleCatRow(cat, field, checked) {
-    const row = document.getElementById(`bt-cat-row-${cat}-${field}`);
+function btToggleCatRow(prefix, cat, field, checked) {
+    const row = document.getElementById(`bt-${prefix}-cat-row-${cat}-${field}`);
     if (row) row.style.opacity = checked ? '1' : '0.35';
 }
 
 async function applyBestBacktestConfig() {
     const statusEl = document.getElementById('bt-apply-status');
-    if (!_backtestBestCache || !_backtestBestCache.kelly_patch_suggestion) {
+    const actionStatus = document.getElementById('bt-action-status');
+    if (!_backtestBestCache || !_backtestBestCache.best) {
         if (statusEl) statusEl.textContent = '⚠️ Sin datos de optimización disponibles. Carga primero.';
         return;
     }
 
-    // Build patch from checked kelly checkboxes
-    const patchMap = _backtestBestCache.kelly_patch_suggestion;
-    const body = {};
-    const checkboxes = document.querySelectorAll('[id^="bt-chk-"]');
-    checkboxes.forEach(chk => {
-        if (chk.checked) {
-            const param = chk.dataset.param;
-            if (patchMap[param]) {
-                body[patchMap[param].field] = patchMap[param].value;
-            }
-        }
+    const runId = _backtestBestCache.best.id;
+    const fields = [];
+    document.querySelectorAll('[id^="bt-chk-"]').forEach(chk => {
+        if (chk.checked) fields.push(chk.dataset.param);
     });
 
-    // Build category_thresholds from checked category checkboxes
-    const catCheckboxes = document.querySelectorAll('[id^="bt-cat-chk-"]');
-    const catBody = {};
-    catCheckboxes.forEach(chk => {
-        if (chk.checked) {
-            const cat   = chk.dataset.cat;
-            const field = chk.dataset.field;
-            const val   = parseFloat(chk.dataset.value);
-            if (!catBody[cat]) catBody[cat] = {};
-            catBody[cat][field] = val;
-        }
+    const category_thresholds = {};
+    document.querySelectorAll('[id^="bt-spot-cat-chk-"]').forEach(chk => {
+        if (!chk.checked) return;
+        const cat = chk.dataset.cat, field = chk.dataset.field;
+        if (!category_thresholds[cat]) category_thresholds[cat] = [];
+        category_thresholds[cat].push(field);
     });
-    if (Object.keys(catBody).length > 0) {
-        body['category_thresholds'] = catBody;
-    }
 
-    if (Object.keys(body).length === 0) {
-        if (statusEl) statusEl.textContent = '⚠️ Ningún parámetro seleccionado.';
-        return;
-    }
+    const futures_category_thresholds = {};
+    document.querySelectorAll('[id^="bt-futures-cat-chk-"]').forEach(chk => {
+        if (!chk.checked) return;
+        const cat = chk.dataset.cat, field = chk.dataset.field;
+        if (!futures_category_thresholds[cat]) futures_category_thresholds[cat] = [];
+        futures_category_thresholds[cat].push(field);
+    });
 
-    if (statusEl) statusEl.textContent = `⏳ Aplicando ${Object.keys(body).length} parámetros...`;
+    const body = { run_id: runId, mode: "manual" };
+    if (fields.length) body.fields = fields;
+    if (Object.keys(category_thresholds).length) body.category_thresholds = category_thresholds;
+    if (Object.keys(futures_category_thresholds).length) body.futures_category_thresholds = futures_category_thresholds;
+
+    if (statusEl) statusEl.textContent = '⏳ Aplicando configuración...';
     try {
-        const res = await fetch(`${API_BASE}/config/kelly`, {
-            method: 'PATCH',
+        const res = await fetch(`${API_BASE}/backtest/apply`, {
+            method: 'POST',
             headers: { ..._authHeaders(), 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
         const d = await res.json();
         if (res.ok && d.ok) {
-            const applied  = Object.keys(d.applied  || {});
+            const applied  = Object.keys(d.applied || {});
             const rejected = Object.keys(d.rejected || {});
-            let msg = `✅ ${applied.length} parámetros aplicados`;
-            if (rejected.length) msg += ` | ⚠️ ${rejected.length} rechazados: ${rejected.join(', ')}`;
+            const skipped  = Object.keys(d.skipped || {});
+            let msg = `✅ ${applied.length} parámetros aplicados | snapshot ${d.snapshot_id}`;
+            if (rejected.length) msg += ` | ⚠️ ${rejected.length} rechazados`;
+            if (skipped.length) msg += ` | ⛔ ${skipped.length} bloqueados`;
             if (statusEl) statusEl.textContent = msg;
+            if (actionStatus) actionStatus.textContent = '';
             setTimeout(() => fetchBacktestResults(), 800);
         } else {
             if (statusEl) statusEl.textContent = `❌ Error: ${d.detail || d.error || JSON.stringify(d)}`;
         }
+    } catch(e) {
+        if (statusEl) statusEl.textContent = `❌ ${e.message}`;
+    }
+}
+
+async function runBacktestOptimizer() {
+    const statusEl = document.getElementById('bt-action-status');
+    if (statusEl) statusEl.textContent = '⏳ Ejecutando backtest en el servidor...';
+    try {
+        const res = await fetch(`${API_BASE}/backtest/optimize`, {
+            method: 'POST',
+            headers: { ..._authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ runs: 1000, days: 20, auto_apply: false }),
+        });
+        const d = await res.json();
+        if (statusEl) statusEl.textContent = d.ok
+            ? `✅ Backtest iniciado: ${d.message || 'ver logs del servidor'}`
+            : `❌ Error: ${d.error || JSON.stringify(d)}`;
+        setTimeout(() => fetchBacktestResults(), 5000);
+    } catch(e) {
+        if (statusEl) statusEl.textContent = `❌ ${e.message}`;
+    }
+}
+
+async function rollbackLastConfig() {
+    const statusEl = document.getElementById('bt-action-status');
+    try {
+        const res = await fetch(`${API_BASE}/config/snapshots?limit=2`, { headers: _authHeaders() });
+        const d = await res.json();
+        if (!d.ok || !d.snapshots || d.snapshots.length === 0) {
+            if (statusEl) statusEl.textContent = '⚠️ No hay snapshots disponibles.';
+            return;
+        }
+        const snapshotId = d.snapshots[0].snapshot_id;
+        const res2 = await fetch(`${API_BASE}/config/rollback`, {
+            method: 'POST',
+            headers: { ..._authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ snapshot_id: snapshotId }),
+        });
+        const d2 = await res2.json();
+        if (statusEl) statusEl.textContent = d2.ok
+            ? `✅ Rollback a ${snapshotId} exitoso`
+            : `❌ Error rollback: ${d2.error || JSON.stringify(d2)}`;
+        setTimeout(() => fetchBacktestResults(), 800);
     } catch(e) {
         if (statusEl) statusEl.textContent = `❌ ${e.message}`;
     }
@@ -4322,10 +4403,22 @@ function renderPairScanner(pairScreener) {
     const el = document.getElementById('pairScannerData');
     if (!el) return;
     const pairs = Array.isArray(pairScreener) ? pairScreener : (pairScreener?.pairs || pairScreener?.candidates || []);
+    const regimeMode = pairScreener?.regime_mode || 'SPOT_BULL';
+    const scannerNote = pairScreener?.scanner_note || (
+        regimeMode === 'FUTURES_SHORT'
+            ? 'FUTURES_SHORT: bias ajustado = shortear rebotes en tendencia bajista.'
+            : regimeMode === 'SPOT_BULL'
+                ? 'SPOT_BULL: bias ajustado = priorizar pares alcistas.'
+                : 'Régimen lateral: bias ajustado = comprar en soporte, vender en resistencia.'
+    );
     if (!pairs.length) {
         el.innerHTML = '<div class="loading">Sin datos del screener</div>';
         return;
     }
+    const banner = `<div style="margin-bottom:10px;padding:8px 10px;border-radius:6px;background:rgba(255,255,255,0.05);font-size:11px;color:#aaa;line-height:1.4">
+        <strong style="color:#4ecca3">${regimeMode}</strong> — ${scannerNote}
+        <br><span style="opacity:0.8">RAW = señal técnica pura. REGIMEN = interpretación según el modo de mercado.</span>
+    </div>`;
     const header = `<div class="scanner-row scanner-header">
         <span class="scanner-sym">PAR</span>
         <span>SCORE</span>
@@ -4333,27 +4426,32 @@ function renderPairScanner(pairScreener) {
         <span>Vol</span>
         <span>24h%</span>
         <span>Trend</span>
-        <span>BIAS</span>
+        <span>RAW</span>
+        <span>RÉGIMEN</span>
     </div>`;
-    el.innerHTML = header + pairs.slice(0, 20).map(p => {
+    el.innerHTML = banner + header + pairs.slice(0, 20).map(p => {
         const score = parseFloat(p.composite_score ?? p.score ?? 0);
+        const strength = parseFloat(p.strength ?? (score / 100.0));
         const rsi   = parseFloat(p.rsi_4h ?? p.rsi ?? 0);
         const vol   = parseFloat(p.vol_spike ?? p.volume_spike_ratio ?? 0);
         const chg24 = parseFloat(p.change_24h ?? p.price_change_24h ?? 0);
         const trend = p.trend_4h ?? p.trend ?? '—';
-        const bias  = p.bias ?? (score >= 0.6 ? 'LONG' : score <= 0.35 ? 'SHORT' : 'NEUTRAL');
-        const bCls  = bias === 'LONG' ? 'scanner-long' : bias === 'SHORT' ? 'scanner-short' : 'scanner-neutral';
+        const rawBias = p.bias ?? (strength >= 0.6 ? 'LONG' : strength <= 0.35 ? 'SHORT' : 'NEUTRAL');
+        const regimeBias = p.regime_adjusted_bias ?? rawBias;
+        const rbCls = regimeBias === 'LONG' ? 'scanner-long' : regimeBias === 'SHORT' ? 'scanner-short' : 'scanner-neutral';
+        const rawCls = rawBias === 'LONG' ? 'scanner-long' : rawBias === 'SHORT' ? 'scanner-short' : 'scanner-neutral';
         const chgCls = chg24 >= 0 ? 'scanner-up' : 'scanner-down';
         const trendCls = trend === 'UP' ? 'scanner-up' : trend === 'DOWN' ? 'scanner-down' : 'scanner-flat';
-        const scoreCls = score >= 0.65 ? 'positive' : score >= 0.50 ? '' : 'negative';
+        const scoreCls = score >= 60 ? 'positive' : score >= 40 ? '' : 'negative';
         return `<div class="scanner-row">
             <span class="scanner-sym">${p.symbol || '—'}</span>
-            <span class="${scoreCls}">${(score*100).toFixed(0)}%</span>
+            <span class="${scoreCls}">${score.toFixed(0)}</span>
             <span style="color:${rsi>70?'#e74c3c':rsi<30?'#4ecca3':'#aaa'}">${rsi.toFixed(1)}</span>
             <span style="color:${vol>1.5?'#4ecca3':'#888'}">${vol.toFixed(1)}x</span>
             <span class="${chgCls}">${chg24>=0?'+':''}${chg24.toFixed(2)}%</span>
             <span class="${trendCls}">${trend}</span>
-            <span><span class="scanner-badge ${bCls}">${bias}</span></span>
+            <span><span class="scanner-badge ${rawCls}" style="opacity:0.7">${rawBias}</span></span>
+            <span><span class="scanner-badge ${rbCls}">${regimeBias}</span></span>
         </div>`;
     }).join('');
 }

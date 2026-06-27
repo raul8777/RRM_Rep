@@ -446,6 +446,21 @@ class Settings(BaseSettings):
     futures_min_inject_strength: float = Field(default=0.40, env="FUTURES_MIN_INJECT_STRENGTH")
     # Futures Kelly dynamic cap
     futures_kelly_cap_pct: float = Field(default=0.20, env="FUTURES_KELLY_CAP_PCT")  # PB4: 15→20% of available futures margin (bigger positions)
+    # Futures signal filtering: minimum probability and vol spike (backtest-optimizable)
+    futures_min_prob: float = Field(default=0.50, env="FUTURES_MIN_PROB")
+    futures_vol_spike_min: float = Field(default=1.0, env="FUTURES_VOL_SPIKE_MIN")
+    # Futures category thresholds (mirror category_thresholds for SPOT)
+    futures_category_thresholds: dict = Field(default={
+        "LARGE_CAP":  {"min_prob": 0.55, "stop_loss_pct": 3.33, "take_profit_pct": 7.68, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},
+        "MIDCAP":     {"min_prob": 0.50, "stop_loss_pct": 3.33, "take_profit_pct": 7.68, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},
+        "NARRATIVE":  {"min_prob": 0.45, "stop_loss_pct": 3.33, "take_profit_pct": 7.68, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},
+    }, env="FUTURES_CATEGORY_THRESHOLDS")
+    # Global vol spike minimum (used by both SPOT and FUTURES signal filtering)
+    vol_spike_min: float = Field(default=1.0, env="VOL_SPIKE_MIN")
+    # Hybrid optimizer framework (quantum + swarm + ML)
+    hybrid_optimizer_enabled: bool = Field(default=False, env="HYBRID_OPTIMIZER_ENABLED")
+    auto_apply_backtest: bool = Field(default=False, env="AUTO_APPLY_BACKTEST")
+    backtest_safe_only: bool = Field(default=True, env="BACKTEST_SAFE_ONLY")
     # Capital Bridge: bidirectional autonomous spot↔futures transfer
     futures_capital_bridge_enabled: bool = Field(default=True, env="FUTURES_CAPITAL_BRIDGE_ENABLED")
     futures_capital_bridge_min_transfer: float = Field(default=10.0, env="FUTURES_CAPITAL_BRIDGE_MIN_TRANSFER")  # min USDT to trigger transfer
