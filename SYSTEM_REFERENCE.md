@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 26 2026 13:31 UTC-6 | Sesión 24: SSO-6 Smart Gate + Dashboard Bounce Rescue + trazabilidad BD (Fix 12)
+> Última actualización: jun 26 2026 21:44 UTC-6 | Sesión 25: Gap analysis parámetros backtest — category_thresholds hot-config + startup restore + auto-apply optimizer
 
 > ✅ **OBSERVACIÓN CERRADA** — jun 23 2026 14:08 UTC-6  
 > `FUTURES_MIN_INJECT_STRENGTH` probado en **0.30** (commit `d3dced6`) → **revertido a 0.40** (commit actual).  
@@ -2394,6 +2394,80 @@ docker exec crypto-agent-app python Dev/backtest_optimizer.py --runs 1000 --days
 - `pyarrow` v24.0.0 instalado en container (necesario para leer parquets)
 - `_NumpyEncoder` en backtest_optimizer: serialización correcta de `np.float64` → JSON/BD
 - Transacción única `get_connection()` para INSERT run + batch trades (fix FK constraint fallo)
+
+---
+
+## Sesión 25 — jun 26 2026 — Gap Analysis: category_thresholds + startup restore + auto-apply
+
+### Commits: `6e2e72e` (category_thresholds) + `<startup-restore>` (app.py startup loader)
+
+### Parámetros 100% activos en producción (verificados 21:44 UTC-6)
+
+| Parámetro | Valor | Fuente |
+|---|---|---|
+| `kelly_max_usdt` | **663** | kelly_config_override BD |
+| `kelly_max_pct_liquid` | **0.621** | kelly_config_override BD |
+| `kelly_base_usdt` | 100 | default (NO cambiar) |
+| `futures_kelly_max_usdt` | **1162** | kelly_config_override BD |
+| `futures_sl_pct` | **3.33%** | kelly_config_override BD |
+| `futures_tp_pct` | **7.68%** | kelly_config_override BD |
+| `stop_loss_pct` (SPOT) | 1.5% | kelly_config_override BD |
+| `min_signal_strength` | 0.40 | kelly_config_override BD |
+| `LARGE_CAP.take_profit_pct` | **5.83%** | category_thresholds_override BD |
+| `MIDCAP_ALT.min_prob` | **0.527** | category_thresholds_override BD |
+| `MIDCAP_ALT.take_profit_pct` | **5.83%** | category_thresholds_override BD |
+| `NARRATIVE.min_prob` | **0.527** | category_thresholds_override BD |
+| `MEME.min_prob` | **0.527** | category_thresholds_override BD |
+| `MEME.take_profit_pct` | **5.83%** | category_thresholds_override BD |
+
+### Parámetros NO aplicados (intencional)
+- `min_strength=0.359` — **NO**: mínimo 0.40 (AAVE SHORT -5.88%)
+- `vol_spike_min=0.83` — **NO**: < 1.0 = vol por debajo del promedio, sin convicción
+- `kelly_base_usdt=76` — **NO**: bajar floor reduce tamaño base de posición
+
+### Infraestructura añadida
+
+**`app.py` — Startup Loader (nuevo)**
+```python
+# startup_event() ahora restaura overrides de BD al arrancar:
+# 1. kelly_config_override -> scalars (kelly_max, futures_sl/tp, etc.)
+# 2. category_thresholds_override -> toda la estructura de thresholds por categoría
+```
+Garantiza que `PATCH /config/kelly` **sobrevive reinicios** — sin este loader los cambios hot-config se perdían.
+
+**`app.py` — `PATCH /config/kelly` extendido**
+- Acepta `category_thresholds` en el body → merge parcial por categoría/campo
+- Persiste en `trading_runtime_state` key=`category_thresholds_override`
+- Registra en `trades_audit` event=`kelly_config_change` (trazabilidad 100%)
+- `_ALLOWED_CAT_FIELDS`: `min_prob, min_pnl, min_volspike, stop_loss_pct, take_profit_pct, trailing_*`
+
+**`app.py` — `/backtest/best` extendido**
+- Nuevo campo `category_patch_suggestion`: cambios propuestos a `category_thresholds` basados en el backtest óptimo
+- Nuevo campo `never_auto_apply`: lista de params que NUNCA deben auto-aplicarse
+- `category_patch_suggestion` vacío cuando todos los valores ya están en óptimos ✅
+
+**`Dev/backtest_optimizer.py` — `--auto-apply` flag**
+```bash
+docker exec crypto-agent-app python Dev/backtest_optimizer.py --runs 1000 --days 20 --auto-apply
+```
+- `auto_apply_best()`: aplica best config vía API al finalizar la simulación
+- `_NEVER_AUTO_APPLY = {"min_strength", "vol_spike_min", "kelly_base_usdt"}` — hardcodeado
+- Registra `backtest_auto_apply` en `trades_audit` para trazabilidad
+- API key desde `DASHBOARD_API_KEY` env var automáticamente
+
+**`frontend/dashboard.js` v25**
+- Sección "Category Thresholds" con checkboxes por categoría/campo
+- `btToggleCatRow()` para opacidad visual
+- `applyBestBacktestConfig()` construye `category_thresholds` dinámicamente desde checkboxes
+
+### Scripts de validación (Dev/)
+```bash
+docker exec crypto-agent-app python Dev/verify_final.py   # Estado completo post-restart
+docker exec crypto-agent-app python Dev/check_live.py     # Kelly scalars vs backtest optimos
+docker exec crypto-agent-app python Dev/validate_params.py # Validacion detallada
+```
+
+### Resultado verificado: 7 OK, 0 DIFF, 3 SKIP intencionales
 
 ---
 

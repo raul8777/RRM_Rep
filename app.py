@@ -183,6 +183,48 @@ def startup_event():
             print("Bootstrap: sufficient trade history found — skipping")
     except Exception as e:
         print(f"Bootstrap startup error: {e}")
+    # ── Restore hot-config overrides persisted in trading_runtime_state ────────
+    # Ensures PATCH /config/kelly changes survive restarts (kelly params + category_thresholds)
+    try:
+        import json as _json
+        _comp_s = get_components()
+        _live_s = _comp_s.settings
+
+        # 1. Restore scalar kelly/sl/tp overrides
+        _ov_rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
+        )
+        if _ov_rows and _ov_rows[0].get('value'):
+            _ov = _ov_rows[0]['value']
+            if isinstance(_ov, str):
+                _ov = _json.loads(_ov)
+            _restored = 0
+            for field, change in _ov.items():
+                if field == 'category_thresholds':
+                    continue  # handled separately below
+                if isinstance(change, dict) and 'new' in change:
+                    try:
+                        _cur = getattr(_live_s, field, None)
+                        setattr(_live_s, field, type(_cur)(change['new']) if _cur is not None else change['new'])
+                        _restored += 1
+                    except Exception:
+                        pass
+            if _restored:
+                print(f"Config restore: {_restored} kelly overrides re-applied from DB")
+
+        # 2. Restore category_thresholds
+        _ct_rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key='category_thresholds_override'"
+        )
+        if _ct_rows and _ct_rows[0].get('value'):
+            _ct = _ct_rows[0]['value']
+            if isinstance(_ct, str):
+                _ct = _json.loads(_ct)
+            if isinstance(_ct, dict):
+                setattr(_live_s, 'category_thresholds', _ct)
+                print(f"Config restore: category_thresholds re-applied ({list(_ct.keys())})")
+    except Exception as _re:
+        print(f"Config restore error (non-fatal): {_re}")
 
 
 @app.post("/predictor/bootstrap")
