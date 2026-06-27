@@ -338,6 +338,26 @@ class Orchestrator:
                     f"updated={result.get('symbols_updated', [])}"
                 )
                 get_predictor().invalidate_cache()
+                # P2.2: Persist last_learning_run to trading_runtime_state for dashboard visibility
+                try:
+                    import json as _json
+                    from init_components import get_components as _gc
+                    _db = _gc().db_client
+                    if _db:
+                        _payload = _json.dumps({
+                            'ts': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
+                            'trigger': 'scheduled',
+                            'trades_analyzed': result.get('trades_analyzed', 0),
+                            'symbols': result.get('symbols_updated', []),
+                        })
+                        _db.execute_update(
+                            "INSERT INTO trading_runtime_state (key, value, updated_at) "
+                            "VALUES ('last_learning_run', %s, NOW()) "
+                            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                            (_payload, _payload)
+                        )
+                except Exception as _rs_err:
+                    logger.debug(f"[LearningCycle] runtime_state persist failed (non-fatal): {_rs_err}")
         except Exception as e:
             import error_collector as ec
             logger.warning(f"LearningEngine cycle failed (non-critical): {e}")

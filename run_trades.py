@@ -121,6 +121,15 @@ _db_client_ref = None
 _AUDIT_STARTUP_DONE: bool = False
 
 
+def _get_spot_daily_pnl() -> float:
+    """P1.1: Return today's realized SPOT PnL from BD via daily_pnl_tracker (thread-safe, restart-safe)."""
+    try:
+        from daily_pnl_tracker import get_daily_realized_pnl as _gdpnl
+        return _gdpnl(_db_client_ref, trade_type='spot')
+    except Exception:
+        return 0.0
+
+
 def _set_cooldown(symbol: str, cooldown_type: str, hours: float, metadata: dict = None) -> None:
     """Persist a cooldown to DB + update RAM dict. Type: 'volspike'|'narrative'|'override_daily'."""
     from datetime import timedelta as _td
@@ -1326,7 +1335,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             rsi_1h=_sso_s_rsi,
                             vol_spike=_sso_s_vol,
                             atr_4h_pct=_sso_s_atr,
-                            today_realized_pnl=0.0,  # will be enriched from dashboard cache
+                            today_realized_pnl=_get_spot_daily_pnl(),  # P1.1: real from BD, thread-safe
                             daily_target=getattr(settings, 'sso_target_daily_usd', 40.0),
                             trade_type="spot",
                             bounce_entry=_spot_bounce_entry_flag,
@@ -1828,20 +1837,24 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
                          tp_pct: float = 0.025,
                          base_override: float = None,
                          max_override: float = None,
-                         cap_pct_override: float = None) -> float:
+                         cap_pct_override: float = None,
+                         db_client=None, symbol: str = None,
+                         trade_type: str = 'spot', regime: str = None,
+                         action: str = 'open', extra_multipliers: dict = None) -> float:
     """
-    Half-Kelly position sizing scaled by signal quality.
+    Half-Kelly position sizing scaled by signal quality.  (K1: bases subidas)
 
     Tiers (prob / strength thresholds):
-      FUERTE  prob >= 0.65 + strength >= 0.80  → kelly_max_usdt  ($150)
-      ALTA    prob >= 0.60 + strength >= 0.70  → 80% of max       ($120)
-      MEDIA   prob >= 0.55 + strength >= 0.55  → 60% of max       ($90)
-      BASE    prob >= 0.50  (passed validation) → kelly_base_usdt  ($60)
+      FUERTE  prob >= 0.65 + strength >= 0.80  → kelly_max_usdt  ($500 SPOT / $800 FUT)
+      ALTA    prob >= 0.60 + strength >= 0.70  → 90% of max       (K1: 80%→90%)
+      MEDIA   prob >= 0.55 + strength >= 0.55  → 60% of max
+      BASE    prob >= 0.50  (passed validation) → kelly_base_usdt  ($100)
 
     Fallback (kelly disabled): max_per_trade_usdt.
     Hard cap: kelly_max_pct_liquid of available USDT.
     base_override / max_override: optional per-call overrides (used by Unified Portfolio Manager
     to supply Futures-specific floors/ceilings without changing SPOT Kelly behavior).
+    db_client / symbol / trade_type / regime: used to write to kelly_sizing_log (C3 trazabilidad).
     """
     if not getattr(settings, "kelly_enabled", True):
         return getattr(settings, "max_per_trade_usdt", 50.0)
@@ -1867,7 +1880,7 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
         tier, amount = "FUERTE", max_usdt
         sized = amount  # at max conviction, use full tier
     elif prob >= 0.60 and strength >= 0.70:
-        tier, amount = "ALTA", base + (max_usdt - base) * 0.80
+        tier, amount = "ALTA", base + (max_usdt - base) * 0.90  # K1: 80%→90%
         sized = amount  # high conviction, no kelly_f discount
     elif prob >= 0.55 and strength >= 0.55:
         tier, amount = "MEDIA", base + (max_usdt - base) * 0.50
@@ -1884,6 +1897,24 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
 
     print(f"Kelly sizing: prob={prob:.2f}, strength={strength:.2f}, kelly_f={kelly_f:.3f} "
           f"→ tier={tier}, sized=${sized:.2f}, cap=${liquid_cap:.2f} → final=${final:.2f} USDT")
+
+    # C3: Persist kelly decision to kelly_sizing_log for 100% traceability
+    if db_client and symbol:
+        try:
+            import json as _json
+            _mults = extra_multipliers or {}
+            db_client.execute_update(
+                "INSERT INTO kelly_sizing_log "
+                "(symbol, trade_type, regime, prob, strength, tier, "
+                " base_usdt, sized_usdt, final_usdt, multipliers, liquid_usdt, cap_usdt, action) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (symbol, trade_type, regime or 'unknown', round(prob, 4), round(strength, 4),
+                 tier, round(base, 2), round(sized, 2), round(final, 2),
+                 _json.dumps(_mults), round(usdt_liquid, 2), round(liquid_cap, 2), action)
+            )
+        except Exception as _kl_err:
+            pass  # fail-silent — log failure must never block a trade
+
     return final
 
 
@@ -2169,7 +2200,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     prediction=_f_pred, usdt_liquid=_f_kelly_liquid,
                     sl_pct=_f_sl * _f_lev / 100, tp_pct=_f_tp * _f_lev / 100,
                     base_override=_f_base_ov, max_override=_f_max_ov,
-                    cap_pct_override=_f_cap_ov)
+                    cap_pct_override=_f_cap_ov,
+                    db_client=_db_client_ref, symbol=symbol,
+                    trade_type='futures', regime='FUTURES_SHORT')
                 # F4: Dynamic cap — max(per_trade_floor, futures_margin × kelly_cap_pct)
                 _futures_kelly_cap = getattr(settings, 'futures_kelly_cap_pct', 0.15)
                 _futures_margin_avail = _fc.get_available_usdt() if not _fc.dry_run else _f_kelly_liquid * 0.3
@@ -2178,6 +2211,22 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     _futures_margin_avail * _futures_kelly_cap
                 )
                 _f_usdt = min(_f_usdt, _f_usdt_cap)
+
+                # P3.2: Dynamic correlation guard — reduce Kelly when open SHORTs are highly correlated
+                try:
+                    from futures_correlation import get_portfolio_correlation as _get_corr
+                    _open_short_syms = [p.symbol for p in _fc._open_positions.values()
+                                        if not p.closed and p.side == "SHORT"]
+                    if len(_open_short_syms) >= 2:
+                        _avg_r, _corr_kelly = _get_corr(client, _open_short_syms)
+                        if _corr_kelly < 1.0:
+                            _f_usdt_pre = _f_usdt
+                            _f_usdt = round(_f_usdt * _corr_kelly, 2)
+                            print(f"[Futures/Corr] {symbol}: avg_|r|={_avg_r:.2f} → kelly_mult={_corr_kelly:.2f} "
+                                  f"${_f_usdt_pre:.1f}→${_f_usdt:.1f}")
+                except Exception as _corr_err:
+                    pass  # fail-open — correlation guard is advisory only
+
                 try:
                     if news_client:
                         _fng = news_client.get_fear_greed()
@@ -2746,7 +2795,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 print(f"[Kelly] {symbol} ({_sym_cat_e}): SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}%")
 
         trade_allocation = _kelly_position_size(
-            settings, strength, prediction, usdt_liquid_now, sl_pct, tp_pct
+            settings, strength, prediction, usdt_liquid_now, sl_pct, tp_pct,
+            db_client=_db_client_ref, symbol=symbol,
+            trade_type='spot', regime=_regime_mode
         )
         # C2: Kelly reducido para prediction_add (segunda entrada en mismo par)
         if position_manager and position_manager.get_positions_count(symbol) >= 1:

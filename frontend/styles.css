@@ -1018,3 +1018,154 @@ body {
 .esc-sub-row td { font-size:12px; padding:4px 8px; border-bottom:1px solid rgba(255,255,255,0.04); }
 .esc-sub-row { border-left:2px solid rgba(155,89,182,0.5); }
 .esc-sub-row:last-of-type { border-bottom:2px solid rgba(155,89,182,0.2); }
+
+/* ── D2: Runtime State Panel ────────────────────────────────────────────────── */
+.runtime-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px;
+    padding: 10px 0;
+}
+.runtime-card {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    text-align: center;
+    transition: border-color 0.2s;
+}
+.runtime-card:hover { border-color: var(--border2); }
+.runtime-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 4px;
+}
+.runtime-value {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 3px;
+}
+.runtime-value.positive { color: var(--green); }
+.runtime-value.negative { color: var(--red); }
+.runtime-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+.runtime-sub .positive { color: var(--green); }
+.runtime-sub .negative { color: var(--red); }
+
+/* ── D1: Kelly Config Panel ─────────────────────────────────────────────────── */
+.kelly-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+    padding: 6px 0;
+}
+.kelly-card {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    transition: border-color 0.2s;
+}
+.kelly-card:hover { border-color: var(--border2); }
+.kelly-card-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin-bottom: 8px;
+}
+.kelly-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+}
+.kelly-table th {
+    color: var(--text-muted);
+    font-weight: 600;
+    padding: 2px 6px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+.kelly-table td {
+    padding: 3px 6px;
+    color: var(--text);
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.kelly-table tr.tier-fuerte td:first-child { color: #4ecca3; font-weight: 700; }
+.kelly-table tr.tier-alta   td:first-child { color: #5b9bd5; font-weight: 700; }
+.kelly-table tr.tier-media  td:first-child { color: #f39c12; font-weight: 700; }
+.kelly-table tr.tier-base   td:first-child { color: #888;    font-weight: 600; }
+
+.kelly-edit-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 8px;
+}
+.kelly-edit-row {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+.kelly-edit-row label {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.kelly-input {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 4px 8px;
+    width: 100%;
+    box-sizing: border-box;
+    transition: border-color 0.2s;
+}
+.kelly-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+/* ── Backtest Optimizer Panel ───────────────────────────────────────────────── */
+.bt-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+    padding: 8px 0 4px;
+}
+.bt-sum-card {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    text-align: center;
+}
+.bt-sum-best {
+    border-color: #4ecca3;
+    background: #0d1f18;
+}
+.bt-sum-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 4px;
+}
+.bt-sum-value {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+}
+.bt-sum-sub {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}

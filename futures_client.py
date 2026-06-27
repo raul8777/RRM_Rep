@@ -143,6 +143,11 @@ class FuturesClient:
             )
             print(f'[Futures/DB] {pos.symbol} {pos.side} OPEN saved to trades_open '
                   f'(pred={pos.pnl_prediction is not None}, esc_idx={_esc_index})')
+            try:
+                from futures_correlation import invalidate_cache as _corr_inv
+                _corr_inv()
+            except Exception:
+                pass
             self._audit(pos.symbol, 'open', {
                 'side': pos.side, 'qty': pos.qty, 'price': pos.entry_price,
                 'sl': pos.sl_price, 'tp': pos.tp_price,
@@ -286,6 +291,18 @@ class FuturesClient:
             )
             print(f'[Futures/DB] {pos.symbol} {pos.side} CLOSED ({reason}) pnl=${pnl:.2f} '
                   f'(comm=${_entry_comm+_exit_comm:.4f} esc={esc_index}/{total_esc} grp={_cgid[:8]}) saved')
+            # P1.1: Invalidate daily PnL cache so next SSO-4 evaluation sees the updated total
+            try:
+                from daily_pnl_tracker import invalidate_cache as _inv_dpnl
+                _inv_dpnl()
+            except Exception:
+                pass
+            # P3.2: Invalidate correlation cache — portfolio composition changed
+            try:
+                from futures_correlation import invalidate_cache as _corr_inv
+                _corr_inv()
+            except Exception:
+                pass
             _binance_close = reason in ('trailing_sl_binance', 'stop_loss_binance', 'take_profit_binance',
                                          'stop_loss_binance_safety', 'binance_safety_close', 'binance_closed_untracked')
             self._audit(pos.symbol, 'close', {
@@ -2247,12 +2264,13 @@ class FuturesClient:
                                 _sso_vol = float(_sso_ind.get("vol_spike") or _sso_ind.get("volume_ratio") or 1.0)
                         except Exception:
                             pass
-                        # Get today's realized PnL
+                        # P1.1: Get today's realized PnL from BD (thread-safe, restart-safe)
                         _sso_today_pnl = 0.0
                         try:
-                            _sso_today_pnl = float(pos._smart_meta.get('sso_today_realized', 0))
-                        except Exception:
-                            pass
+                            from daily_pnl_tracker import get_daily_realized_pnl as _get_dpnl
+                            _sso_today_pnl = _get_dpnl(self.db_client, trade_type='futures')
+                        except Exception as _dpnl_err:
+                            logger.debug(f"[SSO] daily_pnl fallback 0.0: {_dpnl_err}")
                         # SSO-6 Smart Gate: compute rescue_prediction_ev + signal
                         # Only when bounce_entry flag is set and pnl is near target (avoid unnecessary API call)
                         _rescue_pred_ev = None

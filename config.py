@@ -52,10 +52,10 @@ class Settings(BaseSettings):
     trade_horizon_minutes: int = Field(default=240, env="TRADE_HORIZON_MINUTES")  # realistic hold time for PnL prediction (4h)
     # Kelly dynamic position sizing
     kelly_enabled: bool = Field(default=True, env="KELLY_ENABLED")
-    kelly_base_usdt: float = Field(default=60.0, env="KELLY_BASE_USDT")
-    kelly_max_usdt: float = Field(default=350.0, env="KELLY_MAX_USDT")           # floor: never less than this
+    kelly_base_usdt: float = Field(default=100.0, env="KELLY_BASE_USDT")  # K1: $60→$100 (sistema con 9+ filtros de entrada, Kelly agresivo)
+    kelly_max_usdt: float = Field(default=500.0, env="KELLY_MAX_USDT")    # K1: $350→$500 SPOT (techo FUERTE tier)           # floor: never less than this
     kelly_max_pct_cap: float = Field(default=0.25, env="KELLY_MAX_PCT_CAP")       # Smart Kelly: max = max(floor, liquid * this)
-    kelly_max_pct_liquid: float = Field(default=0.40, env="KELLY_MAX_PCT_LIQUID")
+    kelly_max_pct_liquid: float = Field(default=0.55, env="KELLY_MAX_PCT_LIQUID")  # K1: 0.40→0.55 SPOT (alineado con futures_kelly_max_pct_liquid)
     kelly_dynamic_base_pct: float = Field(default=0.15, env="KELLY_DYNAMIC_BASE_PCT")  # base = capital * this (if > fixed base)
     # Bear market mode
     bear_market_mode_enabled: bool = Field(default=True, env="BEAR_MARKET_MODE_ENABLED")
@@ -324,6 +324,8 @@ class Settings(BaseSettings):
 
     # Signal quality filter
     min_signal_strength: float = Field(default=0.55, env="MIN_SIGNAL_STRENGTH")  # v4 OPT: 0.35→0.55 (+$570 USDT/mes validado en sim)
+    # P1.3: Signal cache TTL dinámico — reduce de 600s fijo a 1 ciclo por régimen
+    signal_cache_ttl_seconds: int = Field(default=240, env="SIGNAL_CACHE_TTL_SECONDS")  # default 4 min (1 ciclo FUTURES_SHORT)
 
     # Narrative token classification (used by volspike override + bootstrap)
     narrative_tokens: list = Field(default=[
@@ -450,7 +452,7 @@ class Settings(BaseSettings):
     # Unified Portfolio Manager: PortfolioManager as capital director for both SPOT and Futures
     use_unified_portfolio_manager: bool = Field(default=False, env="USE_UNIFIED_PORTFOLIO_MANAGER")  # feature flag — false = legacy behavior
     futures_kelly_base_usdt: float = Field(default=100.0, env="FUTURES_KELLY_BASE_USDT")  # Kelly floor for Futures (vs kelly_base_usdt for SPOT)
-    futures_kelly_max_usdt: float = Field(default=500.0, env="FUTURES_KELLY_MAX_USDT")    # Kelly ceiling for Futures (vs kelly_max_usdt for SPOT)
+    futures_kelly_max_usdt: float = Field(default=800.0, env="FUTURES_KELLY_MAX_USDT")    # K1: $500→$800 Kelly ceiling for Futures (bear confirmado con SSO/trailing)
     futures_kelly_max_pct_liquid: float = Field(default=0.55, env="FUTURES_KELLY_MAX_PCT_LIQUID")  # liquid cap for Futures Kelly (vs kelly_max_pct_liquid=0.28 for SPOT)
 
     # ── Dynamic pair screener ─────────────────────────────────────────────────

@@ -357,6 +357,36 @@
             </div>
         </div>
 
+        <!-- D2: Estado en Tiempo Real (runtime-state) -->
+        <div class="card">
+            <h2>📡 Estado en Tiempo Real</h2>
+            <div id="runtimeStatePanel">
+                <p class="loading">Cargando estado del sistema...</p>
+            </div>
+        </div>
+
+        <!-- D1: Kelly Config Panel -->
+        <div class="card">
+            <h2>⚡ Kelly Sizing — Configuración Activa</h2>
+            <div id="kellyConfigPanel">
+                <p class="loading">Cargando configuración Kelly...</p>
+            </div>
+        </div>
+
+        <!-- Backtest Optimizer Panel -->
+        <div class="card">
+            <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+                <h2>🔬 Backtest Optimizer — 1000 Corridas</h2>
+                <div style="display:flex;gap:8px;align-items:center">
+                    <button class="btn btn-success btn-xs" onclick="applyBestBacktestConfig()">⚡ Aplicar Óptimo</button>
+                    <button class="btn btn-primary btn-xs" onclick="fetchBacktestResults()">↻ Actualizar</button>
+                </div>
+            </div>
+            <div id="backtestOptimizerPanel">
+                <p class="loading">Cargando resultados...</p>
+            </div>
+        </div>
+
         <!-- Avanzado (colapsable) -->
         <div class="card card-collapsible card-advanced">
             <h2 class="collapsible-header" onclick="toggleSection('advancedBody','advChevron')">
@@ -449,6 +479,6 @@
 <!-- ══ MODAL DETALLE POSICIÓN ════════════════════════════════════════════════ -->
 <!-- Injected dynamically by JS -->
 
-<script src="/frontend/dashboard.js?v=22"></script>
+<script src="/frontend/dashboard.js?v=23"></script>
 </body>
 </html>

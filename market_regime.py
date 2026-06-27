@@ -46,6 +46,7 @@ class MarketRegime:
     ema9_vs_ema21: str           # "UP" | "DOWN" | "FLAT"
     confirmed: bool              # True if 2 consecutive cycles agreed
     reason: str                  # Human-readable explanation
+    confidence: float = 0.5      # P3.1: 0.0-1.0 regime confidence score
     # Mode-specific parameter overrides (applied by run_trades.py)
     sl_pct: float = 1.8          # Stop-loss %
     tp_pct: float = 3.5          # Take-profit %
@@ -196,6 +197,41 @@ def _detect_raw(binance_client) -> dict:
     return result
 
 
+def _compute_confidence(raw: dict) -> float:
+    """P3.1: Compute regime confidence [0-1] by counting aligned indicators.
+    More indicators pointing to the detected mode → higher confidence.
+    """
+    mode = raw.get("mode", "SPOT_BULL")
+    score = 0
+    total = 5  # number of indicator checks
+
+    if mode in ("PRESERVATION", "FUTURES_SHORT"):
+        if raw.get("btc_30d_pct", 0) <= _BEAR_30D_THRESHOLD:    score += 1
+        if raw.get("btc_7d_pct",  0) <= _BEAR_7D_THRESHOLD:     score += 1
+        if raw.get("ema9_vs_ema21") == "DOWN":                   score += 1
+        if raw.get("vol_ratio", 1.0) < 0.8:                      score += 1  # vol drying up
+        if raw.get("btc_day_pct", 0) < -0.5:                     score += 1
+    elif mode == "SPOT_BULL":
+        if raw.get("btc_7d_pct",  0) >  0:                       score += 1
+        if raw.get("btc_30d_pct", 0) > -5:                       score += 1
+        if raw.get("ema9_vs_ema21") == "UP":                      score += 1
+        if raw.get("vol_ratio", 1.0) >= 1.0:                     score += 1
+        if raw.get("btc_day_pct", 0) > _BULL_DAY_MIN:            score += 1
+    elif mode == "RANGE_SCALP":
+        bw = raw.get("bb_bandwidth", 0.05)
+        if bw < _BB_SIDEWAYS_MAX:                                 score += 1
+        if abs(raw.get("btc_day_pct", 0)) < _SIDEWAYS_DAY_RANGE: score += 1
+        if raw.get("vol_ratio", 1.0) < _SIDEWAYS_VOL_MAX:       score += 1
+        if raw.get("ema9_vs_ema21") != "UP":                      score += 1
+        if raw.get("btc_7d_pct", 0) > -5:                        score += 1
+    else:
+        return 0.5  # unknown mode
+
+    raw_conf = score / total
+    # Clamp: confirmed regime gets a floor of 0.5; unconfirmed gets a cap of 0.7
+    return round(max(0.1, raw_conf), 2)
+
+
 def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
     """Convert raw detection dict to MarketRegime with mode-specific parameters."""
     mode = raw["mode"]
@@ -230,8 +266,23 @@ def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
         # Active bear market shorting via futures (2x leverage)
         sl_pct         = 3.0    # 3% above entry → 6% loss on margin at 2x
         tp_pct         = 7.0    # 7% below entry → 14% gain on margin at 2x (v4 OPT jun20)
-        kelly_mult     = 0.3    # conservative: use only 30% of normal Kelly for futures margin
+        kelly_mult     = 0.5    # K2: base para no-confirmado (era 0.3 fijo)
         max_rsi        = 70.0   # enter shorts when RSI not yet extremely oversold
+
+    confidence = _compute_confidence(raw)
+    if not confirmed:
+        confidence = min(confidence, 0.65)  # unconfirmed → cap at 65%
+
+    # K2: Kelly dinámico por régimen+confidence — FUTURES_SHORT escala con convicción
+    # Con SSO, trailing SL, breakeven y 9+ filtros de entrada, el 0.3 fijo era innecesariamente
+    # conservador. Ahora el multiplier refleja la confianza real en el régimen bajista.
+    if mode == "FUTURES_SHORT" and confirmed:
+        if confidence >= 0.80:
+            kelly_mult = 1.0    # Bear estructural fuerte + todos indicadores alineados
+        elif confidence >= 0.60:
+            kelly_mult = 0.8    # Bear confirmado con buena convicción
+        else:
+            kelly_mult = 0.6    # Bear confirmado pero con señales mixtas
 
     return MarketRegime(
         mode             = mode,
@@ -245,6 +296,7 @@ def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
         ema9_vs_ema21    = raw["ema9_vs_ema21"],
         confirmed        = confirmed,
         reason           = raw["reason"],
+        confidence       = confidence,
         sl_pct           = sl_pct,
         tp_pct           = tp_pct,
         kelly_multiplier = kelly_mult,
@@ -334,6 +386,30 @@ def get_regime(binance_client, force_refresh: bool = False, settings=None) -> Ma
 
     _cache["regime"] = confirmed_regime
     _cache["ts"]     = now
+
+    # P3.1: Persist regime_confidence to trading_runtime_state
+    try:
+        import json as _json
+        from init_components import get_components as _gc
+        _db = _gc().db_client
+        if _db:
+            _payload = _json.dumps({
+                'mode':       confirmed_regime.mode,
+                'confidence': confirmed_regime.confidence,
+                'confirmed':  confirmed_regime.confirmed,
+                'reason':     confirmed_regime.reason,
+                'btc_7d_pct': confirmed_regime.btc_7d_pct,
+                'btc_30d_pct':confirmed_regime.btc_30d_pct,
+            })
+            _db.execute_update(
+                "INSERT INTO trading_runtime_state (key, value, updated_at) "
+                "VALUES ('regime_confidence', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                (_payload, _payload)
+            )
+    except Exception:
+        pass  # non-fatal — regime detection must never fail because of DB
+
     return confirmed_regime
 
 

@@ -85,8 +85,12 @@ services:
       # Unified Portfolio Manager (jun 23 2026) — PortfolioManager as capital director
       - USE_UNIFIED_PORTFOLIO_MANAGER=true
       - FUTURES_KELLY_BASE_USDT=100.0
-      - FUTURES_KELLY_MAX_USDT=500.0
+      - FUTURES_KELLY_MAX_USDT=800.0      # K1: $500→$800
       - FUTURES_KELLY_MAX_PCT_LIQUID=0.55
+      # K1: SPOT Kelly agresivo (era $40/$350/0.28 en .env)
+      - KELLY_BASE_USDT=100.0
+      - KELLY_MAX_USDT=500.0
+      - KELLY_MAX_PCT_LIQUID=0.55
       # PB (Profit Boost) sesion 16 jun21 2026
       - FUTURES_SL_COOLDOWN_HOURS=4.0
       - FUTURES_MAX_NEW_PER_CYCLE=3

@@ -2801,7 +2801,17 @@ function renderTradingModeCard(r) {
     const bb        = r.bb_bandwidth != null ? r.bb_bandwidth : null;
     const bbCls     = bb != null ? (bb < 0.04 ? 'down' : bb < 0.07 ? 'flat' : 'up') : '';
     const bbAlert   = bb != null && bb < 0.04 ? ' ⚡' : '';
-    const confirmed = r.mode_confirmed !== false;
+    const confirmed   = r.mode_confirmed !== false;
+    const confidence  = r.mode_confidence != null ? parseFloat(r.mode_confidence) : null;  // P3.1
+    const confPct     = confidence != null ? Math.round(confidence * 100) : null;
+    const confColor   = confPct != null ? (confPct >= 80 ? '#4ecca3' : confPct >= 60 ? '#f39c12' : '#e74c3c') : '#888';
+    const confBar     = confPct != null
+        ? `<div title="Confianza del régimen: ${confPct}%" style="margin-top:4px;display:flex;align-items:center;gap:6px">
+             <div style="flex:1;height:4px;background:#1a1a30;border-radius:2px">
+               <div style="width:${confPct}%;height:100%;background:${confColor};border-radius:2px;transition:width 0.4s"></div>
+             </div>
+             <span style="font-size:10px;color:${confColor};white-space:nowrap">${confPct}% conf.</span>
+           </div>` : '';
 
     const futuresWarn = (mode === 'FUTURES_SHORT')
         ? `<div class="mode-warn" style="color:#9b59b6;border-left-color:#9b59b6">⚠️ FUTURES SHORT activo — Posiciones con apalancamiento 2× abiertas. SL: ${r.regime_sl_pct ?? 3.0}% | TP: ${r.regime_tp_pct ?? 5.0}% | Kelly: ${r.regime_kelly ?? 0.3}×</div>`
@@ -2819,6 +2829,7 @@ function renderTradingModeCard(r) {
             <div style="flex:1;min-width:0">
                 <div class="mode-banner-title" style="color:${cfg.color}">${cfg.label}</div>
                 <div class="mode-banner-conf" style="font-size:11px;margin-top:2px;color:${confirmed ? '#4ecca3' : '#f39c12'}">${confirmed ? '✅ Confirmado' : '⏳ Pendiente confirmación'}</div>
+                ${confBar}
             </div>
             <div style="display:flex;gap:20px;flex-shrink:0;text-align:center;padding-left:12px;border-left:1px solid rgba(255,255,255,0.1)">
                 <div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px">SL</div><div style="font-size:20px;font-weight:700;color:#e74c3c">${sl}%</div></div>
@@ -3475,6 +3486,474 @@ async function updateDashboard() {
 
     // Futures closed card: refresh every cycle alongside the rest of the dashboard
     renderFuturesClosed();
+
+    // D2: Runtime state panel (daily PnL, analysis freshness, learning status)
+    fetchRuntimeState();
+
+    // D1: Kelly Config panel (config + log)
+    fetchKellyConfig();
+
+    // Backtest Optimizer panel (static results — only refresh on demand)
+    if (!_backtestCache) fetchBacktestResults();
+}
+
+// ── D2: Runtime State Panel ───────────────────────────────────────────────────
+let _runtimeStateCache = null;
+let _missionCache = null;
+async function fetchRuntimeState() {
+    try {
+        const [rsRes, msRes] = await Promise.all([
+            fetch(`${API_BASE}/system/runtime-state`, { headers: _authHeaders() }),
+            fetch(`${API_BASE}/system/mission-status`, { headers: _authHeaders() }),
+        ]);
+        if (rsRes.ok) {
+            const data = await rsRes.json();
+            if (data.ok) { _runtimeStateCache = data.state; }
+        }
+        if (msRes.ok) {
+            const ms = await msRes.json();
+            if (ms.ok) { _missionCache = ms; }
+        }
+        renderRuntimeState(_runtimeStateCache, _missionCache);
+    } catch (e) { /* silent — panel optional */ }
+}
+
+function renderRuntimeState(state, mission) {
+    const el = document.getElementById('runtimeStatePanel');
+    if (!el) return;
+
+    // ── System state cards ────────────────────────────────────────────────────
+    let stateHtml = '';
+    if (state) {
+        const futures = state.daily_pnl_futures || {};
+        const spot    = state.daily_pnl_spot    || {};
+        const learn   = state.last_learning_run  || {};
+        const cache   = state.analysis_cache_freshness || {};
+
+        const fPnl  = parseFloat(futures.live_pnl ?? futures.pnl ?? 0);
+        const sPnl  = parseFloat(spot.live_pnl    ?? spot.pnl    ?? 0);
+        const total = fPnl + sPnl;
+
+        function _age(ts) {
+            if (!ts) return '—';
+            const sec = (Date.now() - new Date(ts).getTime()) / 1000;
+            if (sec < 60)   return `${Math.round(sec)}s`;
+            if (sec < 3600) return `${Math.round(sec/60)}m`;
+            return `${Math.round(sec/3600)}h`;
+        }
+
+        const learnTs  = learn.ts  ? _age(learn.ts)  : '—';
+        const cacheTs  = cache.ts  ? _age(cache.ts)  : '—';
+        const cacheSym = Array.isArray(cache.symbols) ? cache.symbols.length : '—';
+        const learnSym = Array.isArray(learn.symbols)  ? learn.symbols.length : '—';
+        const pnlCls   = c => parseFloat(c) >= 0 ? 'positive' : 'negative';
+
+        stateHtml = `
+        <div class="runtime-card">
+          <div class="runtime-label">PnL Diario Total</div>
+          <div class="runtime-value ${pnlCls(total)}">${total >= 0 ? '+' : ''}${total.toFixed(2)} USDT</div>
+          <div class="runtime-sub">
+            <span class="${pnlCls(fPnl)}">Fut: ${fPnl >= 0 ? '+' : ''}${fPnl.toFixed(2)}</span>
+            &nbsp;|
+            <span class="${pnlCls(sPnl)}">Spot: ${sPnl >= 0 ? '+' : ''}${sPnl.toFixed(2)}</span>
+          </div>
+        </div>
+        <div class="runtime-card">
+          <div class="runtime-label">Analysis Cache</div>
+          <div class="runtime-value">${cacheSym} símbolos</div>
+          <div class="runtime-sub">Hace ${cacheTs}</div>
+        </div>
+        <div class="runtime-card">
+          <div class="runtime-label">Learning Engine</div>
+          <div class="runtime-value">${learnSym} actualizados</div>
+          <div class="runtime-sub">Hace ${learnTs} | trigger: ${learn.trigger || '—'}</div>
+        </div>`;
+    }
+
+    // ── P3.3 Mission Planner card ─────────────────────────────────────────────
+    let missionHtml = '';
+    if (mission) {
+        const pct   = parseFloat(mission.progress_pct || 0);
+        const urg   = mission.urgency || 'NORMAL';
+        const urgColor = { COMPLETE:'#4ecca3', NORMAL:'#4ecca3', LOW:'#f39c12', HIGH:'#e67e22', CRITICAL:'#e74c3c' }[urg] || '#aaa';
+        const barColor = pct >= 100 ? '#4ecca3' : pct >= 70 ? '#f39c12' : pct >= 40 ? '#e67e22' : '#e74c3c';
+        missionHtml = `
+        <div class="runtime-card" style="grid-column:1/-1">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <div class="runtime-label" style="margin:0">🎯 Mission Planner</div>
+            <span style="font-size:11px;font-weight:700;color:${urgColor};background:${urgColor}18;padding:2px 8px;border-radius:10px">${urg}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+            <div style="flex:1;height:6px;background:#1a1a30;border-radius:3px">
+              <div style="width:${Math.min(pct,100)}%;height:100%;background:${barColor};border-radius:3px;transition:width 0.5s"></div>
+            </div>
+            <span style="font-size:12px;font-weight:700;color:${barColor};white-space:nowrap">${pct.toFixed(1)}%</span>
+          </div>
+          <div style="font-size:11px;color:#888;margin-bottom:4px">
+            ${mission.total_pnl_usd >= 0 ? '+' : ''}${mission.total_pnl_usd} / ${mission.daily_target} USDT — ${mission.hours_left}h restantes
+          </div>
+          <div style="font-size:11px;color:#aaa">${mission.recommendation || ''}</div>
+        </div>`;
+    }
+
+    el.innerHTML = `<div class="runtime-grid">${stateHtml}${missionHtml}</div>`;
+}
+
+// ── D1: Kelly Config Panel ────────────────────────────────────────────────────
+let _kellyCache    = null;
+let _kellyLogCache = null;
+
+async function fetchKellyConfig() {
+    try {
+        const [cfgRes, logRes] = await Promise.all([
+            fetch(`${API_BASE}/config/kelly`,     { headers: _authHeaders() }),
+            fetch(`${API_BASE}/config/kelly/log?limit=50`, { headers: _authHeaders() }),
+        ]);
+        if (cfgRes.ok) { const d = await cfgRes.json(); if (d.ok) _kellyCache    = d; }
+        if (logRes.ok) { const d = await logRes.json(); if (d.ok) _kellyLogCache = d.log; }
+        renderKellyPanel(_kellyCache, _kellyLogCache);
+    } catch (e) { /* silent */ }
+}
+
+function renderKellyPanel(cfg, log) {
+    const el = document.getElementById('kellyConfigPanel');
+    if (!el) return;
+    if (!cfg) { el.innerHTML = '<p style="color:#888;font-size:12px">Sin datos</p>'; return; }
+
+    const s = cfg.spot, f = cfg.futures, r = cfg.regime;
+    const labelColor = { 'ÓPTIMO': '#4ecca3', 'MODERADO': '#f39c12', 'RESTRINGIDO': '#e74c3c' }[r.active_label] || '#aaa';
+    const kmPct = Math.round(r.kelly_mult * 100);
+
+    // ── Card 1: Live Status ────────────────────────────────────────────────
+    const corrMult  = f.correlation.current_mult;
+    const corrAvgR  = f.correlation.current_avg_r;
+    const corrColor = corrMult >= 0.95 ? '#4ecca3' : corrMult >= 0.80 ? '#f39c12' : '#e74c3c';
+
+    const statusHtml = `
+    <div class="kelly-grid">
+      <div class="kelly-card">
+        <div class="kelly-card-title">SPOT — Tiers</div>
+        <table class="kelly-table">
+          <tr><th>Tier</th><th>Min Prob</th><th>Min Str</th><th>Tamaño</th></tr>
+          <tr class="tier-fuerte"><td>FUERTE</td><td>≥0.65</td><td>≥0.80</td><td>$${s.max_usdt}</td></tr>
+          <tr class="tier-alta">  <td>ALTA</td>  <td>≥0.60</td><td>≥0.70</td><td>base+90%</td></tr>
+          <tr class="tier-media"> <td>MEDIA</td> <td>≥0.55</td><td>≥0.55</td><td>base+50%</td></tr>
+          <tr class="tier-base">  <td>BASE</td>  <td>≥0.50</td><td>—</td>    <td>$${s.base_usdt}</td></tr>
+        </table>
+        <div style="margin-top:8px;font-size:11px;color:#888">
+          Cap: ${(s.cap_pct_liquid*100).toFixed(0)}% líquido | dyn-base: ${(s.dynamic_base_pct*100).toFixed(0)}% capital
+        </div>
+      </div>
+
+      <div class="kelly-card">
+        <div class="kelly-card-title">FUTURES — Sizing</div>
+        <div style="font-size:12px;color:#ccc;margin-bottom:6px">
+          Base: <b>$${f.base_usdt}</b> | Max: <b>$${f.max_usdt}</b> | Cap: <b>${(f.cap_pct_liquid*100).toFixed(0)}%</b>
+        </div>
+        <div class="kelly-card-title" style="font-size:11px;margin-bottom:4px">Multiplier por confidence</div>
+        <table class="kelly-table">
+          <tr><th>Estado</th><th>Mult</th></tr>
+          <tr><td>No confirmado</td><td>0.5×</td></tr>
+          <tr><td>Conf. <60%</td>   <td>0.6×</td></tr>
+          <tr><td>Conf. 60-79%</td> <td>0.8×</td></tr>
+          <tr><td>Conf. ≥80%</td>   <td>1.0×</td></tr>
+        </table>
+        <div style="margin-top:8px;font-size:11px;color:#888">
+          Correlación: avg|r|=${corrAvgR.toFixed(2)}
+          <span style="color:${corrColor};font-weight:700"> ×${corrMult.toFixed(2)}</span>
+        </div>
+      </div>
+
+      <div class="kelly-card">
+        <div class="kelly-card-title">Régimen Activo</div>
+        <div style="font-size:22px;font-weight:700;color:${labelColor};margin:6px 0">${r.active_label}</div>
+        <div style="font-size:13px;color:#ccc;margin-bottom:6px">${r.mode} ${r.confirmed ? '✅ confirmado' : '⏳ pendiente'}</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          <div style="flex:1;height:8px;background:#1a1a30;border-radius:4px">
+            <div style="width:${kmPct}%;height:100%;background:${labelColor};border-radius:4px;transition:width 0.5s"></div>
+          </div>
+          <span style="font-size:13px;font-weight:700;color:${labelColor}">${kmPct}%</span>
+        </div>
+        <div style="font-size:11px;color:#888">
+          Confidence: ${(r.confidence*100).toFixed(0)}% | Kelly mult: ${r.kelly_mult.toFixed(2)}×
+        </div>
+        <div style="margin-top:8px;font-size:11px;color:#888">
+          F&G boost:
+          <span style="color:#4ecca3">Cap×${cfg.spot.fng_boost.capitulacion_mult}</span> /
+          <span style="color:#f39c12">Fear×${cfg.spot.fng_boost.fear_mult}</span> /
+          <span style="color:#e74c3c">Greed×${cfg.spot.fng_boost.greed_mult}</span>
+        </div>
+      </div>
+    </div>`;
+
+    // ── Card 2: Editor parámetros ─────────────────────────────────────────
+    const editorHtml = `
+    <div class="kelly-card" style="margin-top:10px">
+      <div class="kelly-card-title" style="margin-bottom:8px">🛠️ Editar Parámetros Kelly (hot-config)</div>
+      <div class="kelly-edit-grid">
+        <div class="kelly-edit-row">
+          <label>SPOT base ($)</label>
+          <input type="number" id="ke_spot_base" class="kelly-input" value="${s.base_usdt}" step="10">
+        </div>
+        <div class="kelly-edit-row">
+          <label>SPOT max ($)</label>
+          <input type="number" id="ke_spot_max" class="kelly-input" value="${s.max_usdt}" step="25">
+        </div>
+        <div class="kelly-edit-row">
+          <label>SPOT cap % líquido</label>
+          <input type="number" id="ke_spot_cap" class="kelly-input" value="${(s.cap_pct_liquid*100).toFixed(0)}" step="5" min="10" max="90">
+        </div>
+        <div class="kelly-edit-row">
+          <label>FUT base ($)</label>
+          <input type="number" id="ke_fut_base" class="kelly-input" value="${f.base_usdt}" step="10">
+        </div>
+        <div class="kelly-edit-row">
+          <label>FUT max ($)</label>
+          <input type="number" id="ke_fut_max" class="kelly-input" value="${f.max_usdt}" step="25">
+        </div>
+        <div class="kelly-edit-row">
+          <label>FUT cap % líquido</label>
+          <input type="number" id="ke_fut_cap" class="kelly-input" value="${(f.cap_pct_liquid*100).toFixed(0)}" step="5" min="10" max="90">
+        </div>
+        <div class="kelly-edit-row">
+          <label>F&G Fear mult</label>
+          <input type="number" id="ke_fng_fear" class="kelly-input" value="${cfg.spot.fng_boost.fear_mult}" step="0.05" min="1.0" max="3.0">
+        </div>
+        <div class="kelly-edit-row">
+          <label>F&G Greed mult</label>
+          <input type="number" id="ke_fng_greed" class="kelly-input" value="${cfg.spot.fng_boost.greed_mult}" step="0.05" min="0.2" max="1.0">
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+        <button class="btn btn-primary btn-xs" onclick="applyKellyPatch()">✅ Aplicar cambios</button>
+        <span id="kellyApplyStatus" style="font-size:11px;color:#aaa"></span>
+      </div>
+    </div>`;
+
+    // ── Card 3: Historial últimas decisiones ──────────────────────────────
+    const logHtml = _buildKellyLogTable(log);
+
+    el.innerHTML = statusHtml + editorHtml + logHtml;
+}
+
+function _buildKellyLogTable(log) {
+    if (!log || !log.length) {
+        return `<div class="kelly-card" style="margin-top:10px">
+          <div class="kelly-card-title">📋 Historial Kelly — últimas decisiones</div>
+          <p style="color:#888;font-size:12px;margin-top:6px">Sin decisiones registradas aún (tabla kelly_sizing_log vacía)</p>
+        </div>`;
+    }
+    const tierColor = { FUERTE: '#4ecca3', ALTA: '#5b9bd5', MEDIA: '#f39c12', BASE: '#888' };
+    const typeIcon  = t => t === 'futures' ? '⚡' : '🔵';
+    const rows = log.slice(0, 50).map(r => {
+        const tc   = tierColor[r.tier] || '#aaa';
+        const ts   = r.ts ? r.ts.substring(11, 16) : '—';
+        const mults = typeof r.multipliers === 'object' ? Object.entries(r.multipliers).map(([k,v]) => `${k}×${v}`).join(' ') : '';
+        return `<tr>
+          <td style="color:#aaa;font-size:10px">${ts}</td>
+          <td>${typeIcon(r.trade_type)} ${r.symbol || '—'}</td>
+          <td style="color:${tc};font-weight:700">${r.tier || '—'}</td>
+          <td>${(r.prob*100||0).toFixed(0)}% / ${(r.strength*100||0).toFixed(0)}%</td>
+          <td style="color:#4ecca3">$${(r.final_usdt||0).toFixed(0)}</td>
+          <td style="font-size:10px;color:#666">${mults}</td>
+        </tr>`;
+    }).join('');
+    return `<div class="kelly-card" style="margin-top:10px">
+      <div class="kelly-card-title">📋 Historial Kelly — últimas ${log.length} decisiones</div>
+      <div style="overflow-x:auto;margin-top:8px">
+        <table class="kelly-table" style="width:100%">
+          <thead><tr><th>Hora</th><th>Par</th><th>Tier</th><th>Prob/Str</th><th>Final $</th><th>Multipliers</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+async function applyKellyPatch() {
+    const statusEl = document.getElementById('kellyApplyStatus');
+    if (statusEl) statusEl.textContent = '⏳ Aplicando...';
+    const body = {};
+    const fld = (id, key, divisor) => {
+        const v = document.getElementById(id);
+        if (v) body[key] = divisor ? parseFloat(v.value) / divisor : parseFloat(v.value);
+    };
+    fld('ke_spot_base', 'kelly_base_usdt');
+    fld('ke_spot_max',  'kelly_max_usdt');
+    fld('ke_spot_cap',  'kelly_max_pct_liquid', 100);
+    fld('ke_fut_base',  'futures_kelly_base_usdt');
+    fld('ke_fut_max',   'futures_kelly_max_usdt');
+    fld('ke_fut_cap',   'futures_kelly_max_pct_liquid', 100);
+    fld('ke_fng_fear',  'fng_extreme_fear_multiplier');
+    fld('ke_fng_greed', 'fng_extreme_greed_multiplier');
+
+    try {
+        const res = await fetch(`${API_BASE}/config/kelly`, {
+            method: 'PATCH',
+            headers: { ..._authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const d = await res.json();
+        if (d.ok) {
+            if (statusEl) statusEl.textContent = `✅ ${d.message}`;
+            setTimeout(() => fetchKellyConfig(), 500);
+        } else {
+            if (statusEl) statusEl.textContent = `❌ Error: ${d.error}`;
+        }
+    } catch (e) {
+        if (statusEl) statusEl.textContent = `❌ ${e.message}`;
+    }
+}
+
+// ── Backtest Optimizer Panel ──────────────────────────────────────────────────
+let _backtestCache = null;
+let _backtestBestCache = null;
+
+async function fetchBacktestResults() {
+    try {
+        const [runsRes, bestRes] = await Promise.all([
+            fetch(`${API_BASE}/backtest/runs?limit=20`, { headers: _authHeaders() }),
+            fetch(`${API_BASE}/backtest/best`,          { headers: _authHeaders() }),
+        ]);
+        if (runsRes.ok) { const d = await runsRes.json(); if (d.ok) _backtestCache = d; }
+        if (bestRes.ok) { const d = await bestRes.json(); if (d.ok) _backtestBestCache = d; }
+        renderBacktestPanel(_backtestCache, _backtestBestCache);
+    } catch(e) { /* silent */ }
+}
+
+function renderBacktestPanel(data, best) {
+    const el = document.getElementById('backtestOptimizerPanel');
+    if (!el) return;
+    if (!data) {
+        el.innerHTML = '<p class="loading">Sin datos — ejecuta backtest_optimizer.py primero.</p>';
+        return;
+    }
+
+    const baseline = data.baseline;
+    const runs     = data.runs || [];
+    const total    = data.total_runs || 0;
+
+    // ── Summary bar ──────────────────────────────────────────────────────────
+    let summaryHtml = '';
+    if (baseline && best && best.best) {
+        const impUSDT = best.improvement_usdt || 0;
+        const impPct  = best.improvement_pct  || 0;
+        const bpnl    = parseFloat(baseline.pnl_total || 0);
+        const opnl    = parseFloat(best.best.pnl_total || 0);
+        summaryHtml = `
+        <div class="bt-summary">
+            <div class="bt-sum-card">
+                <div class="bt-sum-label">Corridas totales</div>
+                <div class="bt-sum-value">${total.toLocaleString()}</div>
+            </div>
+            <div class="bt-sum-card">
+                <div class="bt-sum-label">Baseline PnL</div>
+                <div class="bt-sum-value ${bpnl>=0?'positive':'negative'}">${bpnl>=0?'+':''}${bpnl.toFixed(2)} USDT</div>
+                <div class="bt-sum-sub">${parseFloat(baseline.return_pct||0).toFixed(2)}% | win=${parseFloat(baseline.win_rate||0)*100|0}%</div>
+            </div>
+            <div class="bt-sum-card bt-sum-best">
+                <div class="bt-sum-label">Mejor Config (${best.best.label})</div>
+                <div class="bt-sum-value positive">+${opnl.toFixed(2)} USDT</div>
+                <div class="bt-sum-sub">${parseFloat(best.best.return_pct||0).toFixed(2)}% | sharpe=${parseFloat(best.best.sharpe||0).toFixed(2)}</div>
+            </div>
+            <div class="bt-sum-card">
+                <div class="bt-sum-label">Mejora vs Baseline</div>
+                <div class="bt-sum-value positive">+${impUSDT.toFixed(2)} USDT</div>
+                <div class="bt-sum-sub">+${impPct.toFixed(2)}% retorno</div>
+            </div>
+        </div>`;
+    }
+
+    // ── Param diff table ─────────────────────────────────────────────────────
+    let diffHtml = '';
+    if (best && best.param_diff) {
+        const rows = Object.entries(best.param_diff).map(([k, v]) => {
+            const delta  = v.delta || 0;
+            const arrow  = delta > 0.0001 ? '▲' : delta < -0.0001 ? '▼' : '—';
+            const cls    = delta > 0.0001 ? 'positive' : delta < -0.0001 ? 'negative' : '';
+            const bv     = typeof v.baseline === 'number' ? v.baseline.toFixed(4) : v.baseline;
+            const ov     = typeof v.optimal  === 'number' ? v.optimal.toFixed(4)  : v.optimal;
+            return `<tr>
+                <td>${k}</td>
+                <td>${bv}</td>
+                <td>${ov}</td>
+                <td class="${cls}">${delta>=0?'+':''}${delta.toFixed(4)} ${arrow}</td>
+            </tr>`;
+        }).join('');
+        diffHtml = `
+        <div style="margin-top:16px">
+            <div class="kelly-card-title">Parámetros óptimos vs actual</div>
+            <table class="kelly-table">
+                <thead><tr><th>Parámetro</th><th>Actual</th><th>Óptimo</th><th>Delta</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>`;
+    }
+
+    // ── Top runs table ────────────────────────────────────────────────────────
+    const runRows = runs.slice(0, 15).map((r, i) => {
+        const pnl    = parseFloat(r.pnl_total||0);
+        const ret    = parseFloat(r.return_pct||0);
+        const wr     = (parseFloat(r.win_rate||0)*100).toFixed(1);
+        const sh     = parseFloat(r.sharpe||0).toFixed(2);
+        const dd     = parseFloat(r.max_drawdown||0).toFixed(2);
+        const isBase = r.is_baseline;
+        const cls    = isBase ? 'style="background:#1a2a1a"' : '';
+        const lbl    = isBase ? `${r.label} ← BASE` : r.label;
+        return `<tr ${cls}>
+            <td>${i+1}</td>
+            <td>${lbl}</td>
+            <td class="${pnl>=0?'positive':'negative'}">${pnl>=0?'+':''}${pnl.toFixed(2)}</td>
+            <td>${ret>=0?'+':''}${ret.toFixed(2)}%</td>
+            <td>${r.n_trades}</td>
+            <td>${wr}%</td>
+            <td>${sh}</td>
+            <td>${dd}</td>
+        </tr>`;
+    }).join('');
+
+    el.innerHTML = `
+        ${summaryHtml}
+        <div style="margin-top:16px">
+            <div class="kelly-card-title">Top 15 corridas por PnL (de ${total.toLocaleString()} totales)</div>
+            <div style="overflow-x:auto">
+            <table class="kelly-table">
+                <thead><tr>
+                    <th>#</th><th>Label</th><th>PnL (USDT)</th><th>Retorno</th>
+                    <th>Trades</th><th>WinRate</th><th>Sharpe</th><th>MaxDD</th>
+                </tr></thead>
+                <tbody>${runRows}</tbody>
+            </table>
+            </div>
+        </div>
+        ${diffHtml}
+        <div id="bt-apply-status" style="margin-top:10px;font-size:12px;color:#4ecca3"></div>
+    `;
+}
+
+async function applyBestBacktestConfig() {
+    const statusEl = document.getElementById('bt-apply-status');
+    if (!_backtestBestCache || !_backtestBestCache.kelly_patch_suggestion) {
+        if (statusEl) statusEl.textContent = '⚠️ Sin datos de optimización disponibles.';
+        return;
+    }
+    const patch = _backtestBestCache.kelly_patch_suggestion;
+    if (statusEl) statusEl.textContent = '⏳ Aplicando configuración óptima...';
+    try {
+        const res = await fetch(`${API_BASE}/config/kelly`, {
+            method: 'PATCH',
+            headers: { ..._authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch),
+        });
+        const d = await res.json();
+        if (res.ok && d.ok) {
+            if (statusEl) statusEl.textContent = `✅ Configuración aplicada — ${Object.keys(patch).length} parámetros actualizados`;
+            setTimeout(() => fetchBacktestResults(), 800);
+        } else {
+            if (statusEl) statusEl.textContent = `❌ Error: ${d.detail || JSON.stringify(d)}`;
+        }
+    } catch(e) {
+        if (statusEl) statusEl.textContent = `❌ ${e.message}`;
+    }
 }
 
 // ── Countdown ticker (local – no API call) ────────────────────────────────────

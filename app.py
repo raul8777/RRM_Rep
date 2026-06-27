@@ -145,6 +145,25 @@ def startup_event():
     # Start self-learning cycle (LearningEngine, every 90 min)
     orchestrator.start_learning_cycle(interval_minutes=90)
     print("Learning cycle started")
+    # P0.1: Warmup PnL predictor — preload learned weights before first trade cycle
+    try:
+        from pnl_predictor import PnLPredictor
+        _predictor = PnLPredictor()
+        _warmup_syms = list(getattr(settings, 'futures_symbols', []))
+        _top_spot = list(getattr(settings, 'analysis_symbols', []))[:10]
+        for _s in _top_spot:
+            if _s not in _warmup_syms:
+                _warmup_syms.append(_s)
+        _loaded = 0
+        for _sym in _warmup_syms:
+            try:
+                _predictor.load_learned_weights(_sym)
+                _loaded += 1
+            except Exception:
+                pass
+        print(f"Predictor warmup: loaded weights for {_loaded}/{len(_warmup_syms)} symbols")
+    except Exception as _pw_err:
+        print(f"Predictor warmup error (non-fatal): {_pw_err}")
     # Bootstrap PnL predictor with historical data if insufficient trade history
     try:
         from bootstrap_history import run_bootstrap, needs_bootstrap
@@ -1108,6 +1127,7 @@ def _get_market_regime() -> Dict:
             "mode_reason":      r.reason + (" [pendiente confirmacion]" if not r.confirmed else ""),
             "mode_desc":        _MODE_DESC.get(r.mode, ""),
             "mode_confirmed":   r.confirmed,
+            "mode_confidence":  getattr(r, 'confidence', 0.5),  # P3.1
             "regime_sl_pct":    r.sl_pct,
             "regime_tp_pct":    r.tp_pct,
             "regime_kelly":     r.kelly_multiplier,
@@ -3242,6 +3262,301 @@ def _test_wire_futures_client():
     assert_(fc._binance_client_ref == "mock", "_binance_client_ref not set")
 
 
+@app.get("/system/mission-status")
+async def get_mission_status(_auth=Depends(_require_api_key)) -> Dict:
+    """
+    P3.3: Mission Planner — daily urgency based on realized PnL vs daily target.
+    Returns urgency level, progress %, recommendation, and projected close time.
+    """
+    try:
+        from daily_pnl_tracker import get_daily_realized_pnl as _gdpnl
+        futures_pnl = _gdpnl(db_client, "futures")
+        spot_pnl    = _gdpnl(db_client, "spot")
+        total_pnl   = futures_pnl + spot_pnl
+
+        daily_target = float(getattr(settings, 'sso_target_daily_usd', 40.0))
+        progress_pct = (total_pnl / daily_target * 100) if daily_target > 0 else 0.0
+
+        # Time remaining in the trading day (UTC)
+        _now = datetime.now(timezone.utc)
+        _eod = _now.replace(hour=23, minute=59, second=59)
+        hours_left = (_eod - _now).total_seconds() / 3600.0
+
+        # Urgency classification
+        if progress_pct >= 100:
+            urgency = "COMPLETE"
+            recommendation = "🎯 Target diario alcanzado. Proteger capital, evitar nuevas entradas de riesgo."
+        elif hours_left < 2 and progress_pct < 50:
+            urgency = "CRITICAL"
+            recommendation = "🔴 Menos de 2h y <50% del target. Revisar posiciones abiertas, no escalar."
+        elif hours_left < 4 and progress_pct < 70:
+            urgency = "HIGH"
+            recommendation = "🟠 Tiempo reducido. Priorizar cierre de posiciones ganadoras."
+        elif progress_pct < 30:
+            urgency = "LOW"
+            recommendation = "🟡 Inicio del día. Seguir criterios de entrada normales."
+        else:
+            urgency = "NORMAL"
+            recommendation = "🟢 Progreso en línea. Mantener estrategia actual."
+
+        return {
+            "ok": True,
+            "total_pnl_usd":  round(total_pnl, 2),
+            "futures_pnl":    round(futures_pnl, 2),
+            "spot_pnl":       round(spot_pnl, 2),
+            "daily_target":   daily_target,
+            "progress_pct":   round(progress_pct, 1),
+            "urgency":        urgency,
+            "recommendation": recommendation,
+            "hours_left":     round(hours_left, 1),
+            "timestamp":      _now.isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/system/runtime-state")
+async def get_runtime_state(_auth=Depends(_require_api_key)) -> Dict:
+    """
+    D1: Return current trading_runtime_state from BD.
+    Exposes daily_pnl_futures, daily_pnl_spot, regime_confidence,
+    last_learning_run, and analysis_cache_freshness to the dashboard.
+    """
+    try:
+        rows = db_client.execute_query(
+            "SELECT key, value, updated_at FROM trading_runtime_state ORDER BY key"
+        )
+        result = {}
+        for r in rows:
+            result[r["key"]] = {
+                **r["value"],
+                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+            }
+        # Enrich with live daily PnL from daily_pnl_tracker cache
+        try:
+            from daily_pnl_tracker import get_daily_realized_pnl as _gdpnl
+            result.setdefault("daily_pnl_futures", {})["live_pnl"] = _gdpnl(db_client, "futures")
+            result.setdefault("daily_pnl_spot",    {})["live_pnl"] = _gdpnl(db_client, "spot")
+        except Exception:
+            pass
+        return {"ok": True, "state": result, "timestamp": datetime.now(timezone.utc).isoformat()}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "state": {}}
+
+
+@app.get("/config/kelly")
+async def get_kelly_config(_auth=Depends(_require_api_key)) -> Dict:
+    """
+    C1: Return current Kelly sizing configuration for SPOT and FUTURES.
+    Includes active multipliers, tier thresholds, and regime kelly_mult.
+    """
+    try:
+        from init_components import get_components
+        _comp = get_components()
+        _s = _comp.settings
+        _regime = None
+        try:
+            import market_regime as _mr
+            _regime = _mr.get_regime(_comp.binance_client, settings=_s)
+        except Exception:
+            pass
+
+        # Correlation status
+        _corr_avg_r, _corr_mult = 0.0, 1.0
+        try:
+            from futures_correlation import get_portfolio_correlation as _gpc
+            from run_trades import _futures_client as _fc_ref
+            if _fc_ref:
+                _shorts = [p.symbol for p in _fc_ref._open_positions.values()
+                           if not p.closed and p.side == "SHORT"]
+                if len(_shorts) >= 2:
+                    _corr_avg_r, _corr_mult = _gpc(_comp.binance_client, _shorts)
+        except Exception:
+            pass
+
+        _regime_mode = getattr(_regime, 'mode', 'unknown') if _regime else 'unknown'
+        _regime_conf = getattr(_regime, 'confidence', 0.5) if _regime else 0.5
+        _regime_km   = getattr(_regime, 'kelly_multiplier', 1.0) if _regime else 1.0
+        _confirmed   = getattr(_regime, 'confirmed', False) if _regime else False
+
+        # Load any DB overrides
+        _db_overrides = {}
+        try:
+            _ov_rows = db_client.execute_query(
+                "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
+            )
+            if _ov_rows:
+                _db_overrides = _ov_rows[0]['value'] or {}
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "spot": {
+                "base_usdt":       getattr(_s, 'kelly_base_usdt', 100.0),
+                "max_usdt":        getattr(_s, 'kelly_max_usdt', 500.0),
+                "cap_pct_liquid":  getattr(_s, 'kelly_max_pct_liquid', 0.55),
+                "dynamic_base_pct":getattr(_s, 'kelly_dynamic_base_pct', 0.15),
+                "max_pct_cap":     getattr(_s, 'kelly_max_pct_cap', 0.25),
+                "tiers": {
+                    "FUERTE": {"prob": 0.65, "strength": 0.80, "amount": "max_usdt"},
+                    "ALTA":   {"prob": 0.60, "strength": 0.70, "amount": "base + 90% tramo"},
+                    "MEDIA":  {"prob": 0.55, "strength": 0.55, "amount": "base + 50% tramo"},
+                    "BASE":   {"prob": 0.50, "strength": 0.0,  "amount": "base × kelly_f×10"},
+                },
+                "fng_boost": {
+                    "enabled":            getattr(_s, 'fng_kelly_boost_enabled', True),
+                    "capitulacion_thr":   getattr(_s, 'fng_capitulation_threshold', 15),
+                    "fear_thr":           getattr(_s, 'fng_extreme_fear_threshold', 20),
+                    "greed_thr":          getattr(_s, 'fng_extreme_greed_threshold', 75),
+                    "capitulacion_mult":  getattr(_s, 'fng_capitulation_multiplier', 1.50),
+                    "fear_mult":          getattr(_s, 'fng_extreme_fear_multiplier', 1.35),
+                    "greed_mult":         getattr(_s, 'fng_extreme_greed_multiplier', 0.65),
+                },
+                "conviction_m3": {
+                    "enabled":   getattr(_s, 'kelly_conviction_enabled', True),
+                    "vol2x_mult":getattr(_s, 'kelly_conviction_vol2x', 1.5),
+                    "vol3x_mult":getattr(_s, 'kelly_conviction_vol3x', 2.0),
+                    "max_pct":   getattr(_s, 'kelly_conviction_max_pct', 0.10),
+                },
+            },
+            "futures": {
+                "base_usdt":      getattr(_s, 'futures_kelly_base_usdt', 100.0),
+                "max_usdt":       getattr(_s, 'futures_kelly_max_usdt', 800.0),
+                "cap_pct_liquid": getattr(_s, 'futures_kelly_max_pct_liquid', 0.55),
+                "cap_pct_margin": getattr(_s, 'futures_kelly_cap_pct', 0.20),
+                "kelly_multiplier_table": {
+                    "not_confirmed":    0.5,
+                    "confirmed_low":    0.6,
+                    "confirmed_medium": 0.8,
+                    "confirmed_high":   1.0,
+                    "confidence_thresholds": {"low": 0.60, "high": 0.80},
+                },
+                "correlation": {
+                    "floor": 0.60,
+                    "kelly_min": 0.65,
+                    "current_avg_r": round(_corr_avg_r, 4),
+                    "current_mult":  round(_corr_mult, 3),
+                },
+            },
+            "regime": {
+                "mode":           _regime_mode,
+                "confirmed":      _confirmed,
+                "confidence":     round(_regime_conf, 2),
+                "kelly_mult":     round(_regime_km, 2),
+                "active_label":   (
+                    "ÓPTIMO" if _regime_km >= 0.9 else
+                    "MODERADO" if _regime_km >= 0.6 else "RESTRINGIDO"
+                ),
+            },
+            "db_overrides": _db_overrides,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# Whitelist de campos editables via PATCH /config/kelly
+_KELLY_EDITABLE_FIELDS = {
+    "kelly_base_usdt", "kelly_max_usdt", "kelly_max_pct_liquid",
+    "kelly_dynamic_base_pct", "kelly_max_pct_cap",
+    "futures_kelly_base_usdt", "futures_kelly_max_usdt",
+    "futures_kelly_max_pct_liquid", "futures_kelly_cap_pct",
+    "fng_capitulation_threshold", "fng_extreme_fear_threshold",
+    "fng_extreme_greed_threshold", "fng_capitulation_multiplier",
+    "fng_extreme_fear_multiplier", "fng_extreme_greed_multiplier",
+    "kelly_conviction_vol2x", "kelly_conviction_vol3x",
+    "kelly_conviction_max_pct",
+    "stop_loss_pct", "smart_tp_max_pnl_pct",
+    "futures_sl_pct", "futures_tp_pct",
+}
+
+
+@app.patch("/config/kelly")
+async def patch_kelly_config(body: Dict, _auth=Depends(_require_api_key)) -> Dict:
+    """
+    C2: Hot-config — update Kelly parameters without restart.
+    Only whitelisted fields are accepted. Changes persisted in trading_runtime_state
+    and recorded in trades_audit for 100% traceability.
+    """
+    try:
+        from init_components import get_components
+        _comp = get_components()
+        _s = _comp.settings
+
+        applied = {}
+        rejected = {}
+        for field, value in body.items():
+            if field not in _KELLY_EDITABLE_FIELDS:
+                rejected[field] = "not in whitelist"
+                continue
+            try:
+                _current = getattr(_s, field, None)
+                setattr(_s, field, type(_current)(value) if _current is not None else value)
+                applied[field] = {"old": _current, "new": value}
+            except Exception as _fe:
+                rejected[field] = str(_fe)
+
+        if not applied:
+            return {"ok": False, "error": "No valid fields applied", "rejected": rejected}
+
+        # Persist to trading_runtime_state (survives restart via DB load in app startup)
+        import json as _json
+        _payload = _json.dumps(applied)
+        db_client.execute_update(
+            "INSERT INTO trading_runtime_state (key, value, updated_at) "
+            "VALUES ('kelly_config_override', %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+            (_payload, _payload)
+        )
+
+        # Trazabilidad: trades_audit entry
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+            "VALUES ('__config__', 'system', 'kelly_config_change', %s, false)",
+            (_json.dumps({"applied": applied, "rejected": rejected}),)
+        )
+
+        return {
+            "ok": True,
+            "applied": applied,
+            "rejected": rejected,
+            "message": f"{len(applied)} campos actualizados — activos inmediatamente (sin restart)",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/config/kelly/log")
+async def get_kelly_log(limit: int = 50, trade_type: str = None,
+                        _auth=Depends(_require_api_key)) -> Dict:
+    """
+    C3: Return last N Kelly sizing decisions from kelly_sizing_log.
+    Filterable by trade_type (spot/futures).
+    """
+    try:
+        _where = "WHERE trade_type = %s" if trade_type else ""
+        _params = (trade_type, limit) if trade_type else (limit,)
+        rows = db_client.execute_query(
+            f"SELECT ts, symbol, trade_type, regime, prob, strength, tier, "
+            f"base_usdt, sized_usdt, final_usdt, multipliers, liquid_usdt, cap_usdt, action "
+            f"FROM kelly_sizing_log {_where} ORDER BY ts DESC LIMIT %s",
+            _params
+        )
+        return {
+            "ok": True,
+            "count": len(rows),
+            "log": [
+                {**r, "ts": r["ts"].isoformat() if r.get("ts") else None}
+                for r in rows
+            ],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "log": []}
+
+
 @app.get("/analysis/predictions")
 async def get_prediction_analysis() -> Dict:
     """Analyze PnL prediction accuracy from closed positions."""
@@ -3261,3 +3576,132 @@ async def get_prediction_analysis() -> Dict:
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get prediction analysis: {str(e)}")
+
+
+# ── Backtest Optimizer endpoints ──────────────────────────────────────────────
+
+@app.get("/backtest/runs")
+async def get_backtest_runs(
+    limit: int = 50,
+    only_baseline: bool = False,
+    _auth=Depends(_require_api_key)
+) -> Dict:
+    """List backtest optimization runs sorted by PnL."""
+    try:
+        where = "WHERE is_baseline = TRUE" if only_baseline else ""
+        rows = db_client.execute_query(
+            f"""SELECT id, label, ts, window_start, window_end,
+                       n_trades, n_spot, n_futures, n_wins, n_losses,
+                       pnl_total, pnl_spot, pnl_futures,
+                       win_rate, profit_factor, sharpe, max_drawdown,
+                       capital_start, capital_end, return_pct,
+                       is_baseline, rank_pnl, duration_ms
+                FROM backtest_run {where}
+                ORDER BY pnl_total DESC
+                LIMIT %s""",
+            (limit,)
+        )
+        baseline = db_client.execute_query(
+            "SELECT id, label, pnl_total, return_pct, win_rate, sharpe, n_trades, is_baseline "
+            "FROM backtest_run WHERE is_baseline = TRUE ORDER BY ts DESC LIMIT 1"
+        )
+        total_count = db_client.execute_query("SELECT COUNT(*) AS c FROM backtest_run")
+        return {
+            "ok": True,
+            "total_runs": total_count[0]["c"] if total_count else 0,
+            "baseline": baseline[0] if baseline else None,
+            "runs": rows,
+            "ts": to_mexico_time(datetime.utcnow()).isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/backtest/runs/{run_id}")
+async def get_backtest_run_detail(
+    run_id: int,
+    limit_trades: int = 100,
+    _auth=Depends(_require_api_key)
+) -> Dict:
+    """Get detailed info for a specific backtest run including its trades."""
+    try:
+        run = db_client.execute_query(
+            "SELECT * FROM backtest_run WHERE id = %s", (run_id,)
+        )
+        if not run:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        trades = db_client.execute_query(
+            """SELECT symbol, trade_type, side, entry_ts, exit_ts,
+                      entry_price, exit_price, usdt_size, pnl_usdt, pnl_pct,
+                      tier, regime, close_reason, kelly_mult
+               FROM backtest_trade
+               WHERE run_id = %s
+               ORDER BY entry_ts
+               LIMIT %s""",
+            (run_id, limit_trades)
+        )
+        return {
+            "ok": True,
+            "run": run[0],
+            "trades": trades,
+            "ts": to_mexico_time(datetime.utcnow()).isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/backtest/best")
+async def get_backtest_best(_auth=Depends(_require_api_key)) -> Dict:
+    """Return best config found vs baseline, with parameter diff and apply suggestion."""
+    try:
+        best = db_client.execute_query(
+            """SELECT id, label, params, pnl_total, return_pct, win_rate,
+                      profit_factor, sharpe, max_drawdown, n_trades, rank_pnl
+               FROM backtest_run
+               WHERE is_baseline = FALSE
+               ORDER BY pnl_total DESC
+               LIMIT 1"""
+        )
+        baseline = db_client.execute_query(
+            """SELECT id, label, params, pnl_total, return_pct, win_rate,
+                      profit_factor, sharpe, max_drawdown, n_trades
+               FROM backtest_run
+               WHERE is_baseline = TRUE
+               ORDER BY ts DESC
+               LIMIT 1"""
+        )
+        if not best or not baseline:
+            return {"ok": False, "detail": "No backtest runs found. Run backtest_optimizer.py first."}
+
+        best_params    = best[0]["params"] if isinstance(best[0]["params"], dict) else {}
+        base_params    = baseline[0]["params"] if isinstance(baseline[0]["params"], dict) else {}
+
+        # Build diff
+        diff = {}
+        for key in best_params:
+            bv = base_params.get(key)
+            ov = best_params.get(key)
+            if bv is not None and ov is not None:
+                diff[key] = {"baseline": bv, "optimal": ov, "delta": round(float(ov) - float(bv), 6)}
+
+        kelly_patch = {
+            k: best_params[k]
+            for k in ["kelly_base_usdt", "kelly_max_usdt",
+                      "kelly_max_pct_liquid", "futures_kelly_max_usdt"]
+            if k in best_params
+        }
+
+        return {
+            "ok": True,
+            "best": best[0],
+            "baseline": baseline[0],
+            "param_diff": diff,
+            "kelly_patch_suggestion": kelly_patch,
+            "improvement_usdt": round(float(best[0]["pnl_total"]) - float(baseline[0]["pnl_total"]), 2),
+            "improvement_pct":  round(float(best[0]["return_pct"]) - float(baseline[0]["return_pct"]), 2),
+            "ts": to_mexico_time(datetime.utcnow()).isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

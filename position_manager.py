@@ -657,6 +657,12 @@ class PositionManager:
                 "DELETE FROM trades_open WHERE symbol = %s AND entry_time = %s",
                 (position.symbol, position.entry_time)
             )
+        # P1.1: Invalidate daily PnL cache — next SSO-4 evaluation will read updated total from BD
+        try:
+            from daily_pnl_tracker import invalidate_cache as _inv_dpnl
+            _inv_dpnl()
+        except Exception:
+            pass
     
     def check_stop_loss_take_profit(self, current_prices: Dict[str, float]) -> List[ClosedPosition]:
         """

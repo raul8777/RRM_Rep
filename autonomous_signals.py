@@ -11,9 +11,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ── Per-symbol signal cache (TTL = SIGNAL_CACHE_TTL_SECONDS) ─────────────────
-SIGNAL_CACHE_TTL_SECONDS = 600   # 10 minutes (B3: fresher signals in volatile conditions)
+# ── Per-symbol signal cache (TTL dinámico desde settings) ───────────────────
+SIGNAL_CACHE_TTL_SECONDS = 240   # P1.3: 600→240s (4 min default = 1 ciclo FUTURES_SHORT)
 _signal_cache: Dict[str, Dict] = {}  # {symbol: {"signal": ..., "cached_at": datetime}}
+
+
+def _get_signal_ttl(settings=None) -> int:
+    """Return signal cache TTL from settings (P1.3) or module default."""
+    if settings is not None:
+        return int(getattr(settings, 'signal_cache_ttl_seconds', SIGNAL_CACHE_TTL_SECONDS))
+    return SIGNAL_CACHE_TTL_SECONDS
 
 
 class AutonomousSignalGenerator:
@@ -117,14 +124,15 @@ class AutonomousSignalGenerator:
             return 'FLAT'
 
     @staticmethod
-    def _get_cached_signal(symbol: str) -> Optional[Dict]:
-        """Return cached signal if still valid (within TTL), else None."""
+    def _get_cached_signal(symbol: str, settings=None) -> Optional[Dict]:
+        """Return cached signal if still valid (within TTL from settings), else None."""
         entry = _signal_cache.get(symbol)
         if not entry:
             return None
         age = (datetime.now(timezone.utc) - entry["cached_at"]).total_seconds()
-        if age < SIGNAL_CACHE_TTL_SECONDS:
-            logger.debug(f"Cache hit for {symbol} (age={age:.0f}s)")
+        ttl = _get_signal_ttl(settings)
+        if age < ttl:
+            logger.debug(f"Cache hit for {symbol} (age={age:.0f}s ttl={ttl}s)")
             return entry["signal"]
         return None
 
