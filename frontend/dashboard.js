@@ -3865,7 +3865,8 @@ function renderBacktestPanel(data, best) {
 
     // ── Param diff table with checkboxes ──────────────────────────────────────
     let diffHtml = '';
-    const patch = (best && best.kelly_patch_suggestion) ? best.kelly_patch_suggestion : null;
+    const patch    = (best && best.kelly_patch_suggestion)    ? best.kelly_patch_suggestion    : null;
+    const catPatch = (best && best.category_patch_suggestion) ? best.category_patch_suggestion : null;
 
     if (best && best.param_diff) {
         const rows = Object.entries(best.param_diff).map(([k, v]) => {
@@ -3939,6 +3940,57 @@ function renderBacktestPanel(data, best) {
             </div>
             <div id="bt-apply-status" style="margin-top:8px;font-size:12px;color:#4ecca3"></div>
         </div>`;
+
+        // ── Category thresholds section ───────────────────────────────────────
+        if (catPatch && Object.keys(catPatch).length > 0) {
+            const catRows = [];
+            Object.entries(catPatch).forEach(([cat, fields]) => {
+                Object.entries(fields).forEach(([field, info]) => {
+                    const chkId = `bt-cat-chk-${cat}-${field}`;
+                    const curVal  = info.current !== null ? parseFloat(info.current).toFixed(4) : '—';
+                    const optVal  = parseFloat(info.optimal).toFixed(4);
+                    const delta   = info.current !== null ? (info.optimal - info.current) : 0;
+                    const arrow   = delta > 0 ? '▲' : delta < 0 ? '▼' : '—';
+                    const deltaCls = delta > 0 ? 'positive' : delta < 0 ? 'negative' : '';
+                    catRows.push(`<tr class="bt-toggle-row" id="bt-cat-row-${cat}-${field}">
+                        <td style="text-align:center">
+                            <input type="checkbox" id="${chkId}" data-cat="${cat}" data-field="${field}"
+                                   data-value="${info.optimal}" checked
+                                   onchange="btToggleCatRow('${cat}','${field}',this.checked)">
+                        </td>
+                        <td><strong>${cat}</strong></td>
+                        <td>${field}</td>
+                        <td>${curVal}</td>
+                        <td>${optVal}</td>
+                        <td class="${deltaCls}">${delta>=0?'+':''}${delta.toFixed(4)} ${arrow}</td>
+                    </tr>`);
+                });
+            });
+            diffHtml += `
+            <div style="margin-top:16px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                    <div class="kelly-card-title" style="margin:0">Category Thresholds — Cambios por categoría</div>
+                    <span style="font-size:11px;color:#666">Aplican a SPOT y FUTURES (pnl_service.validate)</span>
+                </div>
+                <div style="overflow-x:auto">
+                <table class="kelly-table">
+                    <thead><tr>
+                        <th style="width:32px">✓</th>
+                        <th>Categoría</th>
+                        <th>Campo</th>
+                        <th>Actual</th>
+                        <th>Óptimo</th>
+                        <th>Delta</th>
+                    </tr></thead>
+                    <tbody>${catRows.join('')}</tbody>
+                </table>
+                </div>
+                <p style="font-size:11px;color:#666;margin-top:6px">
+                    ⚠️ <strong>vol_spike_min no se aplica</strong> — óptimo 0.83 &lt; 1.0 = vol por debajo del promedio (sin convicción).
+                    <strong>NARRATIVE TP</strong> ya está en 7.0% (mayor que el óptimo).
+                </p>
+            </div>`;
+        }
     }
 
     // ── Top runs table ────────────────────────────────────────────────────────
@@ -3998,6 +4050,11 @@ function btSelectAll(onlyUnsafe) {
     });
 }
 
+function btToggleCatRow(cat, field, checked) {
+    const row = document.getElementById(`bt-cat-row-${cat}-${field}`);
+    if (row) row.style.opacity = checked ? '1' : '0.35';
+}
+
 async function applyBestBacktestConfig() {
     const statusEl = document.getElementById('bt-apply-status');
     if (!_backtestBestCache || !_backtestBestCache.kelly_patch_suggestion) {
@@ -4005,7 +4062,7 @@ async function applyBestBacktestConfig() {
         return;
     }
 
-    // Build patch from checked checkboxes only
+    // Build patch from checked kelly checkboxes
     const patchMap = _backtestBestCache.kelly_patch_suggestion;
     const body = {};
     const checkboxes = document.querySelectorAll('[id^="bt-chk-"]');
@@ -4017,6 +4074,22 @@ async function applyBestBacktestConfig() {
             }
         }
     });
+
+    // Build category_thresholds from checked category checkboxes
+    const catCheckboxes = document.querySelectorAll('[id^="bt-cat-chk-"]');
+    const catBody = {};
+    catCheckboxes.forEach(chk => {
+        if (chk.checked) {
+            const cat   = chk.dataset.cat;
+            const field = chk.dataset.field;
+            const val   = parseFloat(chk.dataset.value);
+            if (!catBody[cat]) catBody[cat] = {};
+            catBody[cat][field] = val;
+        }
+    });
+    if (Object.keys(catBody).length > 0) {
+        body['category_thresholds'] = catBody;
+    }
 
     if (Object.keys(body).length === 0) {
         if (statusEl) statusEl.textContent = '⚠️ Ningún parámetro seleccionado.';

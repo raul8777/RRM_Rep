@@ -3487,6 +3487,33 @@ async def patch_kelly_config(body: Dict, _auth=Depends(_require_api_key)) -> Dic
 
         applied = {}
         rejected = {}
+
+        # Special handler: category_thresholds — partial merge per category/field
+        if "category_thresholds" in body:
+            _cat_patch = body.pop("category_thresholds")
+            if isinstance(_cat_patch, dict):
+                _current_ct = dict(getattr(_s, "category_thresholds", {}))
+                _merged = {}
+                _ALLOWED_CAT_FIELDS = {"min_prob", "min_pnl", "min_volspike",
+                                       "stop_loss_pct", "take_profit_pct",
+                                       "trailing_activation_pct", "trailing_distance_pct",
+                                       "tp_extension_pct"}
+                for cat, fields in _cat_patch.items():
+                    if not isinstance(fields, dict):
+                        rejected[f"category_thresholds.{cat}"] = "value must be a dict"
+                        continue
+                    _cat_old = dict(_current_ct.get(cat, {}))
+                    for cf, cv in fields.items():
+                        if cf not in _ALLOWED_CAT_FIELDS:
+                            rejected[f"category_thresholds.{cat}.{cf}"] = "field not allowed"
+                            continue
+                        _cat_old[cf] = float(cv)
+                        _merged[f"{cat}.{cf}"] = {"old": _current_ct.get(cat, {}).get(cf), "new": float(cv)}
+                    _current_ct[cat] = _cat_old
+                if _merged:
+                    setattr(_s, "category_thresholds", _current_ct)
+                    applied["category_thresholds"] = {"merged": _merged}
+
         for field, value in body.items():
             if field not in _KELLY_EDITABLE_FIELDS:
                 rejected[field] = "not in whitelist"
@@ -3510,6 +3537,16 @@ async def patch_kelly_config(body: Dict, _auth=Depends(_require_api_key)) -> Dic
             "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
             (_payload, _payload)
         )
+
+        # Persist category_thresholds separately so it can be reloaded on restart
+        if "category_thresholds" in applied:
+            _ct_payload = _json.dumps(getattr(_s, "category_thresholds", {}))
+            db_client.execute_update(
+                "INSERT INTO trading_runtime_state (key, value, updated_at) "
+                "VALUES ('category_thresholds_override', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                (_ct_payload, _ct_payload)
+            )
 
         # Trazabilidad: trades_audit entry
         db_client.execute_update(
@@ -3702,6 +3739,8 @@ async def get_backtest_best(_auth=Depends(_require_api_key)) -> Dict:
         }
         # spot_tp_pct excluded — scale mismatch (decimal vs %, unclear mapping)
         _UNSAFE = {"min_strength"}  # params that should be OFF by default
+        # vol_spike_min excluded — optimal 0.83 < 1.0 means below-average volume (unsafe by design)
+        _NEVER_AUTO = {"min_strength", "vol_spike_min"}  # also excluded from --auto-apply
 
         kelly_patch = {}
         for bt_key, mapping in _PARAM_MAP.items():
@@ -3713,13 +3752,45 @@ async def get_backtest_best(_auth=Depends(_require_api_key)) -> Dict:
                     "unsafe":  bt_key in _UNSAFE,
                 }
 
+        # Build category_patch_suggestion from min_prob and spot_tp_pct
+        # min_prob optimal -> raise category min_prob where it's below optimal
+        # spot_tp_pct optimal -> raise take_profit_pct where it's below optimal
+        _opt_min_prob  = float(best_params.get("min_prob", 0))
+        _opt_spot_tp   = round(float(best_params.get("spot_tp_pct", 0)) * 100.0, 4)  # decimal->%
+        _CAT_NAMES = ["LARGE_CAP", "MIDCAP_ALT", "NARRATIVE", "MEME"]
+
+        # Load current category_thresholds from live settings
+        from init_components import get_components as _gc
+        _live_ct = getattr(_gc().settings, "category_thresholds", {}) or {}
+
+        cat_patch = {}
+        for _cat in _CAT_NAMES:
+            _ct = _live_ct.get(_cat, {})
+            _changes = {}
+            if _opt_min_prob > 0 and float(_ct.get("min_prob", 0)) < _opt_min_prob:
+                _changes["min_prob"] = {
+                    "current": _ct.get("min_prob"),
+                    "optimal": round(_opt_min_prob, 4),
+                    "unsafe":  False,
+                }
+            if _opt_spot_tp > 0 and float(_ct.get("take_profit_pct", 0)) < _opt_spot_tp:
+                _changes["take_profit_pct"] = {
+                    "current": _ct.get("take_profit_pct"),
+                    "optimal": round(_opt_spot_tp, 4),
+                    "unsafe":  False,
+                }
+            if _changes:
+                cat_patch[_cat] = _changes
+
         return {
             "ok": True,
             "best": best[0],
             "baseline": baseline[0],
             "param_diff": diff,
             "kelly_patch_suggestion": kelly_patch,
+            "category_patch_suggestion": cat_patch,
             "unsafe_params": list(_UNSAFE),
+            "never_auto_apply": list(_NEVER_AUTO),
             "improvement_usdt": round(float(best[0]["pnl_total"]) - float(baseline[0]["pnl_total"]), 2),
             "improvement_pct":  round(float(best[0]["return_pct"]) - float(baseline[0]["return_pct"]), 2),
             "ts": to_mexico_time(datetime.utcnow()).isoformat()
