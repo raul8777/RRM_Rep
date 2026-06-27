@@ -3828,15 +3828,15 @@ function renderBacktestPanel(data, best) {
         return;
     }
 
-    const baseline = data.baseline;
-    const runs     = data.runs || [];
-    const total    = data.total_runs || 0;
+    const baseline    = data.baseline;
+    const runs        = data.runs || [];
+    const total       = data.total_runs || 0;
+    const unsafeList  = (best && best.unsafe_params) ? best.unsafe_params : ['min_strength'];
 
     // ── Summary bar ──────────────────────────────────────────────────────────
     let summaryHtml = '';
     if (baseline && best && best.best) {
         const impUSDT = best.improvement_usdt || 0;
-        const impPct  = best.improvement_pct  || 0;
         const bpnl    = parseFloat(baseline.pnl_total || 0);
         const opnl    = parseFloat(best.best.pnl_total || 0);
         summaryHtml = `
@@ -3858,34 +3858,86 @@ function renderBacktestPanel(data, best) {
             <div class="bt-sum-card">
                 <div class="bt-sum-label">Mejora vs Baseline</div>
                 <div class="bt-sum-value positive">+${impUSDT.toFixed(2)} USDT</div>
-                <div class="bt-sum-sub">+${impPct.toFixed(2)}% retorno</div>
+                <div class="bt-sum-sub">+${(best.improvement_pct||0).toFixed(2)}% retorno</div>
             </div>
         </div>`;
     }
 
-    // ── Param diff table ─────────────────────────────────────────────────────
+    // ── Param diff table with checkboxes ──────────────────────────────────────
     let diffHtml = '';
+    const patch = (best && best.kelly_patch_suggestion) ? best.kelly_patch_suggestion : null;
+
     if (best && best.param_diff) {
         const rows = Object.entries(best.param_diff).map(([k, v]) => {
-            const delta  = v.delta || 0;
-            const arrow  = delta > 0.0001 ? '▲' : delta < -0.0001 ? '▼' : '—';
-            const cls    = delta > 0.0001 ? 'positive' : delta < -0.0001 ? 'negative' : '';
-            const bv     = typeof v.baseline === 'number' ? v.baseline.toFixed(4) : v.baseline;
-            const ov     = typeof v.optimal  === 'number' ? v.optimal.toFixed(4)  : v.optimal;
-            return `<tr>
-                <td>${k}</td>
+            const delta    = v.delta || 0;
+            const arrow    = delta > 0.0001 ? '▲' : delta < -0.0001 ? '▼' : '—';
+            const deltaCls = delta > 0.0001 ? 'positive' : delta < -0.0001 ? 'negative' : '';
+            const bv       = typeof v.baseline === 'number' ? v.baseline.toFixed(4) : v.baseline;
+            const ov       = typeof v.optimal  === 'number' ? v.optimal.toFixed(4)  : v.optimal;
+            const isUnsafe = unsafeList.includes(k);
+            const hasPatch = patch && patch[k];
+            const checkedAttr = (hasPatch && !isUnsafe) ? 'checked' : '';
+            const disabledNote = !hasPatch
+                ? '<span class="bt-note">escala incompatible</span>'
+                : '';
+
+            // Show the value that will be sent to Settings (scaled)
+            const patchVal = hasPatch
+                ? `→ ${patch[k].value.toFixed(patch[k].field.includes('kelly') ? 0 : 4)} <span style="font-size:10px;color:#666">(${patch[k].field})</span>`
+                : '<span class="bt-note">no aplicable</span>';
+
+            const unsafeBadge = isUnsafe
+                ? '<span class="bt-unsafe-badge">⚠️ No recomendado</span>'
+                : '';
+
+            const rowCls = isUnsafe ? 'bt-toggle-row bt-unsafe-row' : 'bt-toggle-row';
+            const chkId  = `bt-chk-${k}`;
+
+            return `<tr class="${rowCls}" id="bt-row-${k}">
+                <td style="text-align:center">
+                    ${hasPatch
+                        ? `<input type="checkbox" id="${chkId}" data-param="${k}" ${checkedAttr}
+                               onchange="btToggleRow('${k}',this.checked)"
+                               title="${isUnsafe ? 'Peligroso — marcar con cuidado' : 'Incluir en PATCH'}">`
+                        : '<span style="color:#333;font-size:10px">—</span>'}
+                </td>
+                <td>${k} ${unsafeBadge} ${disabledNote}</td>
                 <td>${bv}</td>
                 <td>${ov}</td>
-                <td class="${cls}">${delta>=0?'+':''}${delta.toFixed(4)} ${arrow}</td>
+                <td class="${deltaCls}">${delta>=0?'+':''}${delta.toFixed(4)} ${arrow}</td>
+                <td style="font-size:11px">${patchVal}</td>
             </tr>`;
         }).join('');
+
         diffHtml = `
         <div style="margin-top:16px">
-            <div class="kelly-card-title">Parámetros óptimos vs actual</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                <div class="kelly-card-title" style="margin:0">Selecciona parámetros a aplicar</div>
+                <div style="display:flex;gap:8px">
+                    <button class="btn btn-xs" onclick="btSelectAll(true)" style="font-size:11px">☑ Todos seguros</button>
+                    <button class="btn btn-xs" onclick="btSelectAll(false)" style="font-size:11px">☐ Ninguno</button>
+                </div>
+            </div>
+            <div style="overflow-x:auto">
             <table class="kelly-table">
-                <thead><tr><th>Parámetro</th><th>Actual</th><th>Óptimo</th><th>Delta</th></tr></thead>
+                <thead><tr>
+                    <th style="width:32px">✓</th>
+                    <th>Parámetro</th>
+                    <th>Baseline BD</th>
+                    <th>Óptimo</th>
+                    <th>Delta</th>
+                    <th>Se enviará</th>
+                </tr></thead>
                 <tbody>${rows}</tbody>
             </table>
+            </div>
+            <div style="margin-top:10px;display:flex;align-items:center;gap:12px">
+                <button class="btn btn-success btn-xs" onclick="applyBestBacktestConfig()" style="padding:6px 16px">
+                    ⚡ Aplicar seleccionados
+                </button>
+                <span style="font-size:11px;color:#666">Solo los parámetros con ☑ activo serán enviados a /config/kelly</span>
+            </div>
+            <div id="bt-apply-status" style="margin-top:8px;font-size:12px;color:#4ecca3"></div>
         </div>`;
     }
 
@@ -3897,9 +3949,9 @@ function renderBacktestPanel(data, best) {
         const sh     = parseFloat(r.sharpe||0).toFixed(2);
         const dd     = parseFloat(r.max_drawdown||0).toFixed(2);
         const isBase = r.is_baseline;
-        const cls    = isBase ? 'style="background:#1a2a1a"' : '';
+        const rowStyle = isBase ? 'style="background:#1a2a1a"' : '';
         const lbl    = isBase ? `${r.label} ← BASE` : r.label;
-        return `<tr ${cls}>
+        return `<tr ${rowStyle}>
             <td>${i+1}</td>
             <td>${lbl}</td>
             <td class="${pnl>=0?'positive':'negative'}">${pnl>=0?'+':''}${pnl.toFixed(2)}</td>
@@ -3926,30 +3978,68 @@ function renderBacktestPanel(data, best) {
             </div>
         </div>
         ${diffHtml}
-        <div id="bt-apply-status" style="margin-top:10px;font-size:12px;color:#4ecca3"></div>
     `;
+}
+
+function btToggleRow(param, checked) {
+    const row = document.getElementById(`bt-row-${param}`);
+    if (row) row.style.opacity = checked ? '1' : '0.35';
+}
+
+function btSelectAll(onlyUnsafe) {
+    const checkboxes = document.querySelectorAll('[id^="bt-chk-"]');
+    checkboxes.forEach(chk => {
+        const param = chk.dataset.param;
+        const isUnsafe = (_backtestBestCache && (_backtestBestCache.unsafe_params || ['min_strength']).includes(param));
+        // If onlyUnsafe=true: check all that are NOT unsafe; if false: uncheck all
+        const newState = onlyUnsafe ? !isUnsafe : false;
+        chk.checked = newState;
+        btToggleRow(param, newState);
+    });
 }
 
 async function applyBestBacktestConfig() {
     const statusEl = document.getElementById('bt-apply-status');
     if (!_backtestBestCache || !_backtestBestCache.kelly_patch_suggestion) {
-        if (statusEl) statusEl.textContent = '⚠️ Sin datos de optimización disponibles.';
+        if (statusEl) statusEl.textContent = '⚠️ Sin datos de optimización disponibles. Carga primero.';
         return;
     }
-    const patch = _backtestBestCache.kelly_patch_suggestion;
-    if (statusEl) statusEl.textContent = '⏳ Aplicando configuración óptima...';
+
+    // Build patch from checked checkboxes only
+    const patchMap = _backtestBestCache.kelly_patch_suggestion;
+    const body = {};
+    const checkboxes = document.querySelectorAll('[id^="bt-chk-"]');
+    checkboxes.forEach(chk => {
+        if (chk.checked) {
+            const param = chk.dataset.param;
+            if (patchMap[param]) {
+                body[patchMap[param].field] = patchMap[param].value;
+            }
+        }
+    });
+
+    if (Object.keys(body).length === 0) {
+        if (statusEl) statusEl.textContent = '⚠️ Ningún parámetro seleccionado.';
+        return;
+    }
+
+    if (statusEl) statusEl.textContent = `⏳ Aplicando ${Object.keys(body).length} parámetros...`;
     try {
         const res = await fetch(`${API_BASE}/config/kelly`, {
             method: 'PATCH',
             headers: { ..._authHeaders(), 'Content-Type': 'application/json' },
-            body: JSON.stringify(patch),
+            body: JSON.stringify(body),
         });
         const d = await res.json();
         if (res.ok && d.ok) {
-            if (statusEl) statusEl.textContent = `✅ Configuración aplicada — ${Object.keys(patch).length} parámetros actualizados`;
+            const applied  = Object.keys(d.applied  || {});
+            const rejected = Object.keys(d.rejected || {});
+            let msg = `✅ ${applied.length} parámetros aplicados`;
+            if (rejected.length) msg += ` | ⚠️ ${rejected.length} rechazados: ${rejected.join(', ')}`;
+            if (statusEl) statusEl.textContent = msg;
             setTimeout(() => fetchBacktestResults(), 800);
         } else {
-            if (statusEl) statusEl.textContent = `❌ Error: ${d.detail || JSON.stringify(d)}`;
+            if (statusEl) statusEl.textContent = `❌ Error: ${d.detail || d.error || JSON.stringify(d)}`;
         }
     } catch(e) {
         if (statusEl) statusEl.textContent = `❌ ${e.message}`;

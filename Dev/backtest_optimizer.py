@@ -79,19 +79,19 @@ PARAM_SPACE = {
     'futures_tp_pct':          (0.020, 0.080),
 }
 
-# ── Current (baseline) config ─────────────────────────────────────────────────
+# ── Current (baseline) config — updated jun26 2026 post-backtest optimizer ────
 BASELINE_PARAMS = {
     'kelly_base_usdt':         100.0,
-    'kelly_max_usdt':          500.0,
-    'kelly_max_pct_liquid':    0.55,
-    'futures_kelly_max_usdt':  800.0,
+    'kelly_max_usdt':          663.0,   # updated: 500→663
+    'kelly_max_pct_liquid':    0.621,   # updated: 0.55→0.621
+    'futures_kelly_max_usdt':  1162.0,  # updated: 800→1162
     'min_strength':            0.40,
     'min_prob':                0.50,
     'vol_spike_min':           1.0,
     'spot_sl_pct':             0.015,
     'spot_tp_pct':             0.025,
-    'futures_sl_pct':          0.020,
-    'futures_tp_pct':          0.035,
+    'futures_sl_pct':          0.0333,  # updated: 0.020→0.0333
+    'futures_tp_pct':          0.0768,  # updated: 0.035→0.0768
 }
 
 

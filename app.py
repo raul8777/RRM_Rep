@@ -3469,6 +3469,7 @@ _KELLY_EDITABLE_FIELDS = {
     "kelly_conviction_max_pct",
     "stop_loss_pct", "smart_tp_max_pnl_pct",
     "futures_sl_pct", "futures_tp_pct",
+    "min_signal_strength",
 }
 
 
@@ -3686,12 +3687,31 @@ async def get_backtest_best(_auth=Depends(_require_api_key)) -> Dict:
             if bv is not None and ov is not None:
                 diff[key] = {"baseline": bv, "optimal": ov, "delta": round(float(ov) - float(bv), 6)}
 
-        kelly_patch = {
-            k: best_params[k]
-            for k in ["kelly_base_usdt", "kelly_max_usdt",
-                      "kelly_max_pct_liquid", "futures_kelly_max_usdt"]
-            if k in best_params
+        # All params from diff become the full patch suggestion
+        # Mapping: backtest param name -> Settings field name + scale factor
+        _PARAM_MAP = {
+            "kelly_base_usdt":        {"field": "kelly_base_usdt",        "scale": 1.0},
+            "kelly_max_usdt":         {"field": "kelly_max_usdt",         "scale": 1.0},
+            "kelly_max_pct_liquid":   {"field": "kelly_max_pct_liquid",   "scale": 1.0},
+            "futures_kelly_max_usdt": {"field": "futures_kelly_max_usdt", "scale": 1.0},
+            "futures_sl_pct":         {"field": "futures_sl_pct",         "scale": 100.0},
+            "futures_tp_pct":         {"field": "futures_tp_pct",         "scale": 100.0},
+            "spot_sl_pct":            {"field": "stop_loss_pct",          "scale": 100.0},
+            "min_strength":           {"field": "min_signal_strength",    "scale": 1.0},
+            # min_prob / vol_spike_min: no direct Settings field — shown in diff but not patchable
         }
+        # spot_tp_pct excluded — scale mismatch (decimal vs %, unclear mapping)
+        _UNSAFE = {"min_strength"}  # params that should be OFF by default
+
+        kelly_patch = {}
+        for bt_key, mapping in _PARAM_MAP.items():
+            if bt_key in best_params:
+                kelly_patch[bt_key] = {
+                    "field":   mapping["field"],
+                    "value":   round(float(best_params[bt_key]) * mapping["scale"], 6),
+                    "raw":     float(best_params[bt_key]),
+                    "unsafe":  bt_key in _UNSAFE,
+                }
 
         return {
             "ok": True,
@@ -3699,6 +3719,7 @@ async def get_backtest_best(_auth=Depends(_require_api_key)) -> Dict:
             "baseline": baseline[0],
             "param_diff": diff,
             "kelly_patch_suggestion": kelly_patch,
+            "unsafe_params": list(_UNSAFE),
             "improvement_usdt": round(float(best[0]["pnl_total"]) - float(baseline[0]["pnl_total"]), 2),
             "improvement_pct":  round(float(best[0]["return_pct"]) - float(baseline[0]["return_pct"]), 2),
             "ts": to_mexico_time(datetime.utcnow()).isoformat()

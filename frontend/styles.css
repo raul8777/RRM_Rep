@@ -1169,3 +1169,25 @@ body {
     color: var(--text-muted);
     margin-top: 2px;
 }
+.bt-toggle-row {
+    transition: opacity 0.2s;
+}
+.bt-unsafe-row {
+    background: rgba(255, 160, 0, 0.04);
+}
+.bt-unsafe-badge {
+    display: inline-block;
+    background: rgba(255,140,0,0.18);
+    color: #ffaa33;
+    border: 1px solid rgba(255,140,0,0.35);
+    border-radius: 4px;
+    font-size: 10px;
+    padding: 1px 5px;
+    margin-left: 4px;
+    vertical-align: middle;
+}
+.bt-note {
+    font-size: 10px;
+    color: #555;
+    font-style: italic;
+}
