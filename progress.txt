@@ -263,3 +263,4 @@ Backtest 1000-Run Re-optimization + Application run_0677 (2026-06-29 02:42 UTC):
   /screener/decisions returns persisted decisions.
 - Tests: test_screener.py 9/9 PASSED; test_config_governance.py 5/5 PASSED; test_system_health.py passes
   (occasional timeouts under full suite load, individual retries pass).
+- Commits: 91b7128 (feat: regime-aware screener + dashboard endpoints), 6948d46 (docs: SYSTEM_REFERENCE update).
