@@ -177,6 +177,46 @@ def _persist_screener_decision(
         print(f"[Screener] DB persist failed: {e}")
 
 
+def _persist_screener_snapshot(db_client, result: Dict[str, Any]) -> None:
+    """Persist the latest successful screener result for restart-safe fallback."""
+    if db_client is None:
+        return
+    try:
+        db_client.execute_update(
+            """
+            INSERT INTO trading_runtime_state (key, value, updated_at)
+            VALUES (%s, %s::jsonb, NOW())
+            ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value,
+                updated_at = NOW()
+            """,
+            ('screener_snapshot', json.dumps(result)),
+        )
+    except Exception as e:
+        print(f"[Screener] snapshot persist failed: {e}")
+
+
+def _load_screener_snapshot(db_client) -> Optional[Dict[str, Any]]:
+    """Load the last successful screener snapshot from DB fallback storage."""
+    if db_client is None:
+        return None
+    try:
+        rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key = %s",
+            ('screener_snapshot',),
+        )
+        if not rows:
+            return None
+        value = rows[0].get('value')
+        if isinstance(value, str):
+            value = json.loads(value)
+        if isinstance(value, dict):
+            return value
+    except Exception as e:
+        print(f"[Screener] snapshot load failed: {e}")
+    return None
+
+
 def get_screened_pairs(
     spot_min_vol: float = 10_000_000,       # $10M min for spot eligibility
     futures_min_vol: float = 100_000_000,   # $100M min for futures eligibility
@@ -219,7 +259,10 @@ def get_screened_pairs(
         with urllib.request.urlopen(req, timeout=8) as resp:
             tickers = json.loads(resp.read())
     except Exception as e:
-        print(f"[Screener] ticker/24hr fetch failed: {e} — returning empty screener result")
+        print(f"[Screener] ticker/24hr fetch failed: {e} — trying DB snapshot fallback")
+        snapshot = _load_screener_snapshot(db_client)
+        if snapshot:
+            return snapshot
         return {"spot": [], "futures": [], "all": []}
 
     # ── Best-effort indicator cache enrichment (no extra API calls) ───────────
@@ -334,6 +377,7 @@ def get_screened_pairs(
     if regime_mode in ("PRESERVATION", "FUTURES_SHORT") and not spot_pairs:
         rejected_reason = "Bear regime: SPOT longs disabled (narrative-only)"
     _persist_screener_decision(db_client, regime_mode, result, parameters, rejected_reason)
+    _persist_screener_snapshot(db_client, result)
 
     # ── Update cache ──────────────────────────────────────────────────────────
     _screener_cache["data"] = result

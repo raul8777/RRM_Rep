@@ -147,6 +147,27 @@ class DatabaseClient:
                 total_affected = len(params_list)
                 conn.commit()
                 return total_affected
+
+    def execute_transaction(self, statements: List[tuple]) -> List[int]:
+        """
+        Execute multiple write statements atomically in a single transaction.
+
+        Args:
+            statements: List of (query, params) tuples.
+
+        Returns:
+            List of affected-row counts in execution order.
+        """
+        if not statements:
+            return []
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                affected_rows: List[int] = []
+                for query, params in statements:
+                    cursor.execute(query, params or ())
+                    affected_rows.append(cursor.rowcount)
+                conn.commit()
+                return affected_rows
     
     def test_connection(self) -> bool:
         """

@@ -1,7 +1,44 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 28 2026 19:45 UTC-6 | Sesión 27+: CONFIG GOVERNANCE & DRIFT ALERTS — migrados getters críticos restantes a config_helpers.get_param; audit 0 mismatches; endpoints /config/snapshot|verify|apply|change-log; snapshots automáticos cada 15 min; tabla config_change_log; drift alerts vs baseline run_0812 con endpoints /config/drift-check|drift-alerts; config_change_log y config_drift_alerts 100% persistentes. Tests 5/5 config governance pass. Runtime alineado con baseline. Capital real ~2,987 USDT. BNB discount activo. Ver progress.txt.
+> Última actualización: jun 29 2026 14:20 UTC-6 | Sesión 28: HARDENING PRODUCTIVO SIN CAMBIOS DE CONFIG — sistema pausado vía `trading_runtime_state.pause_new_entries=true`; NO se tocaron valores de config/backtest-1000. Implementado: cierres SPOT/FUTURES atómicos en BD; webhook durable (sin ACK si señal no persiste); `signal_id` causal desde señal→ejecución; checkpoint temprano de estado volátil; reconciliación SPOT contra Binance en cada ciclo; snapshot/fallback persistente del screener; caché de precio por ciclo en trading + caché por request en dashboard; auditoría homogénea `signal_decision` en `trades_audit`; endpoints `/audit/consistency` y health/dashboard con cobertura de auditoría. `get_errors` limpio en archivos tocados. Tests agregados pero no ejecutados en shell actual por falta de intérprete Python utilizable.
+
+### ✅ Sesión 28 — Hardening productivo sin drift de config — jun 29 2026 14:20 UTC-6
+
+**Restricción operacional:** ningún valor de configuración fue cambiado. Todas las mejoras son de proceso, trazabilidad, persistencia y rendimiento operativo.  
+**Estado del sistema:** `pause_new_entries=true` persistido en BD. Monitoreo/lectura intactos; nuevas entradas pausadas.
+
+#### Fixes implementados
+
+| Área | Archivo(s) | Resultado |
+|-----|------------|-----------|
+| Atomicidad BD | `db_client.py`, `position_manager.py`, `futures_client.py` | `execute_transaction()` + cierres `trades_open → trades_closed` atómicos en SPOT/FUTURES |
+| Webhook durable | `signal_store.py`, `app.py` | `/webhook` ya no responde éxito si la señal externa no se persiste en DB |
+| Trazabilidad causal | `signal_store.py`, `run_trades.py`, `position_manager.py`, `futures_client.py` | `signal_id` propagado a ejecución y auditoría |
+| Restart safety | `run_trades.py`, `state_persistence.py` | checkpoint temprano al inicio de ciclo además del guardado al final |
+| Reconciliación SPOT | `position_manager.py`, `run_trades.py`, `app.py` | importa huérfanos y cierra posiciones DB sin balance en Binance, con auditoría |
+| Screener fallback | `pair_screener.py` | último screener exitoso persistido en `trading_runtime_state` y reutilizado si Binance falla |
+| Rendimiento ciclo | `run_trades.py`, `pnl_service.py` | caché de precio por ciclo y reuso en predicción |
+| Rendimiento dashboard | `app.py`, `portfolio_manager.py` | caché local por request/método para balance, posiciones, ticker, summary |
+| Auditoría homogénea | `run_trades.py`, `audit_tools.py`, `app.py` | `signal_decision` a `trades_audit` + endpoint `/audit/consistency` + health/dashboard con cobertura |
+| Regresiones | `tests/test_restart_reconciliation.py`, `tests/test_audit_consistency.py`, `tests/test_health_audit.py` | cobertura nueva para reconciliación SPOT, fallback del screener y consistencia de auditoría |
+
+#### Riesgo residual conocido
+
+- Los tests nuevos quedaron **escritos y sin errores estáticos**, pero no ejecutados desde shell por ausencia de un binario Python/uv utilizable en la sesión actual.
+- Existen archivos temporales/untracked históricos en el repo (`tmp_*`, snapshots, logs). No fueron tocados para evitar riesgo en productivo.
+
+#### Fix post-sesión — FUTURES_SHORT bloqueado por spot exposure cap
+- **Bug detectado:** `_buy_top_symbols()` en `run_trades.py` retornaba antes de evaluar shorts futuros cuando `_exposure_pct >= _max_exposure`. En FUTURES_SHORT el capital está en el wallet de futuros, por lo que la exposición de spot medida desde `portfolio_manager` llegaba al ~100% y abortaba toda apertura de nuevos shorts.
+- **Fix:** la guarda de exposure ahora solo bloquea compras spot; cuando `_regime_mode == 'FUTURES_SHORT'` el flujo continúa y permite abrir shorts futuros (respetando los límites propios de futuros: `MAX_SHORTS`, `LARGECAP_CAP`, `MAX_ESCALAMIENTOS`, margin, cooldowns, etc.).
+- **Commit/acción:** ver `run_trades.py` línea ~2109; se aplicó el fix y se ejecutó `tests/test_system_health.py -k "not Cat7"` (107 passed). Se requiere reinicio del contenedor para que el cambio entre en vigor.
+
+#### Siguiente acción recomendada
+
+1. Reiniciar el contenedor `crypto-agent-app` para cargar el fix de FUTURES_SHORT.
+2. Verificar en el próximo ciclo que aparezcan intentos `[Futures] FUTURES_SHORT mode: opening short ...` y no se detengan por `[Exposure]`.
+3. Ejecutar los tests nuevos dentro del contenedor/app o con un intérprete Python válido.
+4. Verificar en runtime real `/health`, `/dashboard/summary` y `/audit/consistency`.
 
 > ✅ **OBSERVACIÓN CERRADA** — jun 23 2026 14:08 UTC-6  
 > `FUTURES_MIN_INJECT_STRENGTH` probado en **0.30** (commit `d3dced6`) → **revertido a 0.40** (commit actual).  

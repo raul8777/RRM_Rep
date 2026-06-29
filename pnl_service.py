@@ -41,6 +41,7 @@ def predict_for_symbol(
     interval: str = "1h",
     precomputed_signal: Optional[Dict] = None,
     trade_type: str = "spot",
+    current_price: Optional[float] = None,
 ) -> Tuple[Optional[Dict], Optional[Dict]]:
     """
     Fetch indicators + run the PnL predictor for *symbol*.
@@ -50,13 +51,15 @@ def predict_for_symbol(
             analyze_symbol() and use these indicators directly. Avoids
             redundant API + analysis calls (BUG-E4 fix).
         trade_type: 'spot' or 'futures' — passed to predictor for fee adjustment.
+        current_price: Optional pre-fetched symbol price. When provided, avoids
+            another price call inside the predictor hot path.
 
     Returns:
         (prediction, formatted_indicators) – both None on failure.
     """
     predictor = get_predictor()
     try:
-        price = client.get_symbol_price(symbol)
+        price = current_price if current_price is not None else client.get_symbol_price(symbol)
 
         if precomputed_signal and precomputed_signal.get("indicators"):
             indicators_raw = precomputed_signal["indicators"]

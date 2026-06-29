@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from threading import Lock
 from typing import Any, Dict, List, Optional
+import uuid
 import logging
 import error_collector as ec
 
@@ -20,9 +21,21 @@ def set_db_client(db_client):
     logger.info("Database client set for signal store")
 
 
-def add_signal(signal: Dict[str, Any]) -> None:
-    """Add a signal to storage (database or in-memory fallback)."""
+def add_signal(signal: Dict[str, Any], strict_persistence: bool = False) -> Dict[str, Any]:
+    """
+    Add a signal to storage.
+
+    Args:
+        signal: Signal payload.
+        strict_persistence: If True, fail when DB write fails instead of silently
+            falling back to memory. Use this for external webhooks where ACK must
+            imply durable persistence.
+
+    Returns:
+        Dict with persistence status and signal metadata.
+    """
     record = signal.copy()
+    record.setdefault("signal_id", str(uuid.uuid4()))
     record["received_at"] = datetime.utcnow().isoformat() + "Z"
     record["processed"] = False  # Mark as not processed initially
     
@@ -37,12 +50,38 @@ def add_signal(signal: Dict[str, Any]) -> None:
                 (record.get("symbol", ""), json.dumps(record), record["received_at"])
             )
             logger.debug(f"Signal saved to database: {record.get('symbol')}")
+            return {
+                "ok": True,
+                "persisted": "db",
+                "signal_id": record.get("signal_id"),
+                "record": record,
+            }
         except Exception as e:
             logger.error(f"Failed to save signal to database, using in-memory fallback: {e}")
             ec.add_error(ec.SOURCE_DB, ec.LEVEL_WARNING, f"signal add_signal DB error: {e}")
+            if strict_persistence:
+                return {
+                    "ok": False,
+                    "persisted": "none",
+                    "signal_id": record.get("signal_id"),
+                    "record": record,
+                    "error": str(e),
+                }
             _add_signal_in_memory(record)
+            return {
+                "ok": True,
+                "persisted": "memory",
+                "signal_id": record.get("signal_id"),
+                "record": record,
+            }
     else:
         _add_signal_in_memory(record)
+        return {
+            "ok": True,
+            "persisted": "memory",
+            "signal_id": record.get("signal_id"),
+            "record": record,
+        }
 
 
 def _add_signal_in_memory(signal: Dict[str, Any]) -> None:
@@ -137,7 +176,7 @@ def clear_signals() -> None:
         _signals.clear()
 
 
-def update_signal_decision(symbol: str, decision: str, reason: str) -> None:
+def update_signal_decision(symbol: str, decision: str, reason: str, signal_id: Optional[str] = None) -> None:
     """
     Persist the trade decision for the most recent signal of a symbol.
 
@@ -154,18 +193,47 @@ def update_signal_decision(symbol: str, decision: str, reason: str) -> None:
               "processed": is_final}
     if _db_client:
         try:
-            query = """
-                UPDATE market_data
-                SET data = data || %s::jsonb
-                WHERE ctid = (
-                    SELECT ctid FROM market_data
-                    WHERE data_type = 'signal'
-                    AND data->>'symbol' = %s
-                    ORDER BY timestamp DESC
-                    LIMIT 1
-                )
-            """
-            _db_client.execute_update(query, (json.dumps(update), symbol))
+            if signal_id:
+                query = """
+                    UPDATE market_data
+                    SET data = data || %s::jsonb
+                    WHERE ctid = (
+                        SELECT ctid FROM market_data
+                        WHERE data_type = 'signal'
+                        AND data->>'symbol' = %s
+                        AND data->>'signal_id' = %s
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                    )
+                """
+                rows = _db_client.execute_update(query, (json.dumps(update), symbol, signal_id))
+                if not rows:
+                    # Backward-compatible fallback for older signals without signal_id.
+                    query_fb = """
+                        UPDATE market_data
+                        SET data = data || %s::jsonb
+                        WHERE ctid = (
+                            SELECT ctid FROM market_data
+                            WHERE data_type = 'signal'
+                            AND data->>'symbol' = %s
+                            ORDER BY timestamp DESC
+                            LIMIT 1
+                        )
+                    """
+                    _db_client.execute_update(query_fb, (json.dumps(update), symbol))
+            else:
+                query = """
+                    UPDATE market_data
+                    SET data = data || %s::jsonb
+                    WHERE ctid = (
+                        SELECT ctid FROM market_data
+                        WHERE data_type = 'signal'
+                        AND data->>'symbol' = %s
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                    )
+                """
+                _db_client.execute_update(query, (json.dumps(update), symbol))
         except Exception as e:
             logger.error(f"update_signal_decision DB failed ({symbol}): {e}")
             ec.add_error(ec.SOURCE_DB, ec.LEVEL_WARNING, f"update_signal_decision failed ({symbol}): {e}")
@@ -222,52 +290,70 @@ def expire_stale_signals(max_age_minutes: int = 30) -> int:
     return expired
 
 
-def mark_signal_as_processed(signal_id: str) -> None:
+def mark_signal_as_processed(symbol: str, signal_id: Optional[str] = None) -> None:
     """
     Mark a signal as processed to avoid reprocessing.
     
     Args:
-        signal_id: Unique identifier for the signal (e.g., symbol + timestamp)
+        symbol: Trading symbol.
+        signal_id: Optional unique identifier for deterministic selection.
     """
     if _db_client:
         try:
-            # Prefer marking the most recent external/non-autonomous signal for this symbol.
-            # Falls back to any signal for the symbol if no external one exists.
-            query = """
-                UPDATE market_data
-                SET data = jsonb_set(data, '{processed}', 'true')
-                WHERE ctid = (
-                    SELECT ctid FROM market_data
-                    WHERE data_type = 'signal'
-                    AND data->>'symbol' = %s
-                    AND (data->>'source' IS NULL OR data->>'source' != 'autonomous')
-                    ORDER BY timestamp DESC
-                    LIMIT 1
-                )
-            """
-            rows = _db_client.execute_update(query, (signal_id,))
-            if not rows:
-                # fallback: mark most recent signal regardless of source
-                query_fb = """
+            if signal_id:
+                query = """
                     UPDATE market_data
                     SET data = jsonb_set(data, '{processed}', 'true')
                     WHERE ctid = (
                         SELECT ctid FROM market_data
                         WHERE data_type = 'signal'
                         AND data->>'symbol' = %s
+                        AND data->>'signal_id' = %s
                         ORDER BY timestamp DESC
                         LIMIT 1
                     )
                 """
-                _db_client.execute_update(query_fb, (signal_id,))
-            logger.info(f"Signal marked as processed: {signal_id}")
+                rows = _db_client.execute_update(query, (symbol, signal_id))
+                if not rows:
+                    signal_id = None  # fallback to symbol-only path
+
+            if not signal_id:
+                # Prefer marking the most recent external/non-autonomous signal for this symbol.
+                query = """
+                    UPDATE market_data
+                    SET data = jsonb_set(data, '{processed}', 'true')
+                    WHERE ctid = (
+                        SELECT ctid FROM market_data
+                        WHERE data_type = 'signal'
+                        AND data->>'symbol' = %s
+                        AND (data->>'source' IS NULL OR data->>'source' != 'autonomous')
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                    )
+                """
+                rows = _db_client.execute_update(query, (symbol,))
+                if not rows:
+                    # fallback: mark most recent signal regardless of source
+                    query_fb = """
+                        UPDATE market_data
+                        SET data = jsonb_set(data, '{processed}', 'true')
+                        WHERE ctid = (
+                            SELECT ctid FROM market_data
+                            WHERE data_type = 'signal'
+                            AND data->>'symbol' = %s
+                            ORDER BY timestamp DESC
+                            LIMIT 1
+                        )
+                    """
+                    _db_client.execute_update(query_fb, (symbol,))
+            logger.info(f"Signal marked as processed: {symbol} ({signal_id or 'symbol-fallback'})")
         except Exception as e:
             logger.error(f"Failed to mark signal as processed in database: {e}")
-            ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"mark_signal_as_processed failed ({signal_id}): {e}")
+            ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"mark_signal_as_processed failed ({symbol}): {e}")
     
     # Also mark in memory
     with _lock:
         for signal in _signals:
-            if signal.get("symbol") == signal_id:
+            if signal.get("symbol") == symbol:
                 signal["processed"] = True
                 break

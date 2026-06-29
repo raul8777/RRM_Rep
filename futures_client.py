@@ -171,6 +171,7 @@ class FuturesClient:
                 'side': pos.side, 'qty': pos.qty, 'price': pos.entry_price,
                 'sl': pos.sl_price, 'tp': pos.tp_price,
                 'order_id': pos.order_id, 'esc_index': _esc_index,
+                'signal_id': pos._smart_meta.get('signal_id', ''),
                 'binance_confirmed': pos._smart_meta.get('binance_entry_confirmed', False),
             }, binance_confirmed=bool(pos._smart_meta.get('binance_entry_confirmed', False)))
         except Exception as e:
@@ -275,45 +276,49 @@ class FuturesClient:
                 _pred_pnl = float(pos.pnl_prediction.get('expected_pnl', 0) or 0)
                 if _pred_pnl != 0:
                     _pred_accuracy = round((pnl - _pred_pnl) / abs(_pred_pnl), 4)
-            self.db_client.execute_update(
-                """
+            insert_query = """
                 INSERT INTO trades_closed
                     (symbol, side, quantity, entry_price, exit_price, pnl, pnl_percentage,
                      close_reason, entry_time, exit_time, metadata, data_version,
                      pnl_prediction, indicators_at_entry, prediction_accuracy, learning_eligible,
                      entry_commission, exit_commission)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    pos.symbol,
-                    'SELL' if pos.side == 'SHORT' else 'BUY',
-                    pos.qty,
-                    pos.entry_price,
-                    exit_price,
-                    round(pnl, 6),
-                    pnl_pct,
-                    reason,
-                    pos.opened_at.isoformat(),
-                    (pos.closed_at or datetime.now(timezone.utc)).isoformat(),
-                    meta,
-                    'futures_v2',
-                    _pnl_pred_json,
-                    _ind_json,
-                    _pred_accuracy,
-                    True,
-                    _entry_comm,
-                    _exit_comm,
-                )
+            """
+            insert_params = (
+                pos.symbol,
+                'SELL' if pos.side == 'SHORT' else 'BUY',
+                pos.qty,
+                pos.entry_price,
+                exit_price,
+                round(pnl, 6),
+                pnl_pct,
+                reason,
+                pos.opened_at.isoformat(),
+                (pos.closed_at or datetime.now(timezone.utc)).isoformat(),
+                meta,
+                'futures_v2',
+                _pnl_pred_json,
+                _ind_json,
+                _pred_accuracy,
+                True,
+                _entry_comm,
+                _exit_comm,
             )
+
             # Remove from trades_open — delete exactly one row (oldest matching) using ctid
             _db_side_del = 'SELL' if pos.side == 'SHORT' else 'BUY'
-            self.db_client.execute_update(
+            delete_query = (
                 "DELETE FROM trades_open WHERE ctid = ("
                 "  SELECT ctid FROM trades_open WHERE symbol = %s AND price = %s AND side = %s "
                 "  AND metadata->>'trade_type' = 'futures' ORDER BY entry_time ASC LIMIT 1"
-                ")",
-                (pos.symbol, pos.entry_price, _db_side_del)
+                ")"
             )
+            delete_params = (pos.symbol, pos.entry_price, _db_side_del)
+
+            self.db_client.execute_transaction([
+                (insert_query, insert_params),
+                (delete_query, delete_params),
+            ])
             print(f'[Futures/DB] {pos.symbol} {pos.side} CLOSED ({reason}) pnl=${pnl:.2f} '
                   f'(comm=${_entry_comm+_exit_comm:.4f} esc={esc_index}/{total_esc} grp={_cgid[:8]}) saved')
             # P1.1: Invalidate daily PnL cache so next SSO-4 evaluation sees the updated total
@@ -335,6 +340,7 @@ class FuturesClient:
                 'exit_price': exit_price, 'pnl': round(pnl, 4), 'reason': reason,
                 'bounce_entry': bool(pos._smart_meta.get('bounce_entry', False)),
                 'esc': f"{esc_index}/{total_esc}", 'group': _cgid[:8],
+                'signal_id': pos._smart_meta.get('signal_id', ''),
             }, binance_confirmed=_binance_close)
         except Exception as e:
             print(f'[Futures/DB] save_closed {pos.symbol} failed: {e}')
@@ -1585,6 +1591,7 @@ class FuturesClient:
         leverage: int = None,
         pnl_prediction: Optional[Dict] = None,      # FIX-P2: predictor output at entry
         indicators_at_entry: Optional[Dict] = None, # FIX-P2: technical indicators at entry
+        signal_id: Optional[str] = None,
     ) -> Optional[FuturesPosition]:
         """
         Open a SHORT position with mandatory SL and TP orders.
@@ -1712,6 +1719,8 @@ class FuturesClient:
             pos._smart_meta['entry_filled_qty'] = float(entry_order.get('executedQty', qty))
             pos._smart_meta['entry_avg_price'] = filled_price
             pos._smart_meta['binance_entry_confirmed'] = entry_order.get('status') in ('FILLED', 'NEW')
+            if signal_id:
+                pos._smart_meta['signal_id'] = signal_id
             self._open_positions[self._pos_key(symbol, "SHORT")] = pos
             self._save_futures_open(pos)  # FIX-G+P2: persist to DB with prediction
             print(f"[Futures] SHORT {symbol} OPEN: entry={filled_price:.4f}, "
@@ -1730,6 +1739,7 @@ class FuturesClient:
         sl_pct: float = 2.5,   # % below entry — stop loss
         tp_pct: float = 5.0,   # % above entry — take profit
         leverage: int = None,
+        signal_id: Optional[str] = None,
     ) -> Optional[FuturesPosition]:
         """
         Open a LONG position with mandatory SL and TP orders.
@@ -1845,6 +1855,8 @@ class FuturesClient:
             pos._smart_meta['entry_filled_qty'] = float(entry_order.get('executedQty', qty))
             pos._smart_meta['entry_avg_price'] = filled_price
             pos._smart_meta['binance_entry_confirmed'] = entry_order.get('status') in ('FILLED', 'NEW')
+            if signal_id:
+                pos._smart_meta['signal_id'] = signal_id
             self._open_positions[self._pos_key(symbol, "LONG")] = pos
             self._save_futures_open(pos)  # FIX-G: persist to DB
             print(f"[Futures] LONG {symbol} OPEN: entry={filled_price:.4f}, "

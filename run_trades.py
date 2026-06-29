@@ -7,7 +7,7 @@ from binance_client import BinanceClient
 from market_regime import get_regime, MarketRegime
 from futures_client import FuturesClient
 from news_client import NewsClient
-from signal_store import get_signals, add_signal, mark_signal_as_processed, update_signal_decision, expire_stale_signals
+from signal_store import get_signals, add_signal, mark_signal_as_processed, update_signal_decision as _store_update_signal_decision, expire_stale_signals
 from strategy import rank_buy_signals, rank_with_technical, normalize_symbol, rank_for_portfolio_manager
 from analysis_cache import analysis_cache
 from autonomous_signals import AutonomousSignalGenerator
@@ -39,6 +39,9 @@ _OVERRIDE_PERFORMANCE: list = []            # Lista de resultados para análisis
 # Futures client singleton (lazy-initialized)
 _futures_client: FuturesClient = None
 
+# Cycle-scoped spot price cache to collapse duplicate lookups within one loop.
+_cycle_price_cache: Dict[str, float] = {}
+
 # BUG-E2: Cycle-scoped ASG instance — reset each execute_once() call so all
 # consumers (BTC trend check, futures inject, pnl_service) share one instance
 # and benefit from the per-symbol signal cache without redundant re-instantiation.
@@ -48,6 +51,55 @@ _asg_cycle_id: int = 0  # incremented each cycle to know when to reset
 # Whipsaw protection: count consecutive cycles where regime is NOT a short-friendly mode.
 # Shorts are only closed when this counter reaches min_cycles_before_close_shorts (config).
 _non_short_regime_cycles: int = 0
+
+
+_FUTURES_DECISION_REASONS = {
+    'MASS_SL_COOLDOWN', 'INVALID_FUTURES_SYM', 'NOT_FUTURES_SYM', 'SL_COOLDOWN',
+    'LARGECAP_CAP', 'MAX_ESCALAMIENTOS', 'MAX_SHORTS', 'INSUF_MARGIN', 'BTC_MOMENTUM',
+    'BTC_1H_BOUNCE', 'BTC_3H_RALLY', 'NO_RED_CANDLE', 'STAGGER_LIMIT', 'FUTURES_SHORT',
+    'FUTURES_BLOCKED', 'FUTURES_LONG', 'FUTURES_LONG_BULL',
+}
+
+
+def _infer_trade_type_from_reason(reason: str, explicit: Optional[str] = None) -> str:
+    if explicit:
+        return explicit
+    if not reason:
+        return 'unknown'
+    if reason.startswith('FUTURES_') or reason in _FUTURES_DECISION_REASONS:
+        return 'futures'
+    if reason in {
+        'QTY_INVALIDA', 'SIN_SALDO', 'ERROR_ORDEN', 'MAX_POSIC', 'LIM_SIMBOLO',
+        'ADD_STR_LOW', 'ADD_EV_LOW', 'ADD_NO_BASELINE', 'LIQUIDEZ', 'FUNDING_RATE',
+        'PRESERVATION', 'PRSV_RSI', 'RANGE_RSI', 'RANGE_BB', 'EXCLUIDO', 'BTC_DOM',
+        'NARRATIVE_CD', 'PNL_BAJO', 'ERROR_PRECIO', 'WR_BLOCK_3SL', 'WR_BLOCK_4SL',
+    } or reason.startswith('WR_BLOCK_'):
+        return 'spot'
+    return 'unknown'
+
+
+def _audit_signal_decision(symbol: str, decision: str, reason: str, signal_id: Optional[str] = None,
+                           trade_type: Optional[str] = None, binance_confirmed: bool = False) -> None:
+    """Persist a signal decision into trades_audit and update signal_store."""
+    inferred_trade_type = _infer_trade_type_from_reason(reason, explicit=trade_type)
+    try:
+        if _db_client_ref:
+            db_detail = {
+                'symbol': symbol,
+                'decision': decision,
+                'reason': reason,
+                'signal_id': signal_id,
+            }
+            _db_client_ref.execute_update(
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+                (symbol, inferred_trade_type, 'signal_decision', json.dumps(db_detail), binance_confirmed)
+            )
+    except Exception as _audit_err:
+        print(f"[Audit/Decision] failed for {symbol}: {_audit_err}")
+    _store_update_signal_decision(symbol, decision, reason, signal_id=signal_id)
+
+
+update_signal_decision = _audit_signal_decision
 
 
 def _audit_screener_selection(db_client, regime_mode: str, screened: dict) -> None:
@@ -130,6 +182,16 @@ def _get_cycle_asg(client: "BinanceClient") -> "AutonomousSignalGenerator":
 def _wire_futures_client(fc: FuturesClient, client, settings) -> None:
     """Attach BinanceClient reference to FuturesClient for momentum evaluation."""
     fc._binance_client_ref = client
+
+
+def _get_cycle_price(client: BinanceClient, symbol: str) -> float:
+    """Return a symbol price using a per-cycle cache first, then BinanceClient."""
+    cached = _cycle_price_cache.get(symbol)
+    if cached is not None:
+        return cached
+    price = client.get_symbol_price(symbol)
+    _cycle_price_cache[symbol] = price
+    return price
 
 
 _VOLSPIKE_COOLDOWN_HOURS = 4.0
@@ -603,7 +665,7 @@ def _try_replace_weakest_position(
         # Check: replace_only_losing — skip if worst position is in profit
         if getattr(settings, 'replace_only_losing', True):
             try:
-                _current_price = client.get_symbol_price(_worst_sym)
+                _current_price = _get_cycle_price(client, _worst_sym)
                 _entry_price = float(_worst_pos_list[0].entry_price) if _worst_pos_list else 0
                 if _entry_price > 0 and _current_price > _entry_price:
                     print(f"[Replace] {_worst_sym}: in profit ({(_current_price/_entry_price-1)*100:+.2f}%) — protected by replace_only_losing")
@@ -623,7 +685,7 @@ def _try_replace_weakest_position(
                 return False
             _filters = get_symbol_filters(client, _worst_sym)
             _qty = align_quantity_to_step(_qty_held, _filters["step"])
-            _valid, _reason = is_quantity_valid(_qty, client.get_symbol_price(_worst_sym), _filters)
+            _valid, _reason = is_quantity_valid(_qty, _get_cycle_price(client, _worst_sym), _filters)
             if not _valid:
                 print(f"[Replace] {_worst_sym}: invalid qty — {_reason}")
                 return False
@@ -631,7 +693,7 @@ def _try_replace_weakest_position(
             if not client.verify_order_filled(_order, f"Replace SELL {_worst_sym}"):
                 print(f"[WARN] Replace SELL {_worst_sym}: order NOT confirmed filled — aborting replacement")
                 return False
-            _exit_price = client.get_symbol_price(_worst_sym)
+            _exit_price = _get_cycle_price(client, _worst_sym)
             commission_rate = _get_commission_config(settings).rate_for('spot')
             position_manager.close_all_positions_for_symbol(_worst_sym, _exit_price, "active_replacement", commission_rate)
             _overflow_positions.discard(_worst_sym)   # INEF-4: free overflow slot if used
@@ -1180,7 +1242,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
 
         for pos in pos_list:
             try:
-                current_price = client.get_symbol_price(symbol)
+                current_price = _get_cycle_price(client, symbol)
                 entry_price = float(pos.entry_price)
                 if entry_price <= 0:
                     continue
@@ -1844,7 +1906,7 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
 
         try:
             filters = get_symbol_filters(client, symbol)
-            price = client.get_symbol_price(symbol)
+            price = _get_cycle_price(client, symbol)
         except Exception as exc:
             if "-1121" in str(exc):
                 _INVALID_SYMBOLS.add(symbol)
@@ -2044,7 +2106,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             _max_exposure = _spot_bull_fear_cap
             print(f"[Exposure] SPOT_BULL + F&G={_fng_early} (Fear) → aggressive cap {_max_exposure:.0%}")
         print(f"USDT liquid: {usdt_liquid:.2f}, total: {_total_portfolio:.2f}, invested: {_invested:.2f} ({_exposure_pct:.1%}) — cap: {_max_exposure:.0%}")
-        if _exposure_pct >= _max_exposure:
+        _spot_exposure_block = _exposure_pct >= _max_exposure and _regime_mode != "FUTURES_SHORT"
+        if _spot_exposure_block:
             print(f"[Exposure] Portfolio {_exposure_pct:.1%} >= cap {_max_exposure:.0%} — skipping new spot buys this cycle")
             return orders
         allocation = min(settings.max_per_trade_usdt, usdt_liquid / max(len(top_symbols), 1))
@@ -2117,6 +2180,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     _pb_new_shorts_this_cycle = 0
     _pb_max_new_per_cycle = int(getattr(settings, 'futures_max_new_per_cycle', 5))
     for symbol in top_symbols:
+        _signal_id = None
+        if isinstance(signal_meta, dict):
+            _signal_id = signal_meta.get(symbol, {}).get('signal_id')
         # ── FUTURES_SHORT mode — evaluated BEFORE spot position limits ────────
         # Futures positions are in a separate wallet — they must NOT be blocked
         # by the spot max_positions counter (which fills up with open spot trades).
@@ -2371,7 +2437,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 print(f"[Futures] FUTURES_SHORT mode: opening short {symbol} margin=${_f_usdt}")
                 _pos = _fc.open_short(symbol, usdt_amount=_f_usdt,
                                       sl_pct=_f_sl, tp_pct=_f_tp, leverage=_f_lev,
-                                      pnl_prediction=_f_prediction, indicators_at_entry=_f_indicators)
+                                      pnl_prediction=_f_prediction, indicators_at_entry=_f_indicators,
+                                      signal_id=_signal_id)
                 if _pos:
                     _pb_new_shorts_this_cycle += 1
                     orders.append({"symbol": symbol, "side": "SHORT_FUTURES",
@@ -2490,7 +2557,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 continue
 
         try:
-            price = client.get_symbol_price(symbol)
+            price = _get_cycle_price(client, symbol)
             filters = get_symbol_filters(client, symbol)
         except Exception as exc:
             print(f"Skip buy {symbol}: {exc}")
@@ -2579,7 +2646,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         _l_lev  = getattr(settings, 'futures_leverage', 10)
                         print(f"[Futures] RANGE_SCALP BB-lower: opening LONG {symbol} margin=${_l_usdt}")
                         _lpos = _fc_l.open_long(symbol, usdt_amount=_l_usdt,
-                                                sl_pct=_l_sl, tp_pct=_l_tp, leverage=_l_lev)
+                                                sl_pct=_l_sl, tp_pct=_l_tp, leverage=_l_lev,
+                                                signal_id=_signal_id)
                         if _lpos:
                             orders.append({"symbol": symbol, "side": "LONG_FUTURES",
                                            "qty": _lpos.qty, "entry_price": _lpos.entry_price,
@@ -2640,7 +2708,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     _l_usdt = min(_l_usdt, _l_usdt_cap)
                     print(f"[Futures] SPOT_BULL oversold LONG {symbol}: RSI={_l_rsi_val:.1f}<{_l_rsi_thresh}, BTC={btc_trend}, margin=${_l_usdt:.2f}")
                     _lpos_sb = _fc_sb.open_long(symbol, usdt_amount=_l_usdt,
-                                                sl_pct=_l_sl, tp_pct=_l_tp, leverage=_l_lev)
+                                                sl_pct=_l_sl, tp_pct=_l_tp, leverage=_l_lev,
+                                                signal_id=_signal_id)
                     if _lpos_sb:
                         orders.append({"symbol": symbol, "side": "LONG_FUTURES",
                                        "qty": _lpos_sb.qty, "entry_price": _lpos_sb.entry_price,
@@ -2896,7 +2965,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 _conv_mult = 1.0
             if _conv_mult > 1.0:
                 _total_portfolio_val = float(client.get_account_balance().get("USDT", usdt_liquid_now)) + sum(
-                    float(p.quantity) * client.get_symbol_price(s)
+                    float(p.quantity) * _get_cycle_price(client, s)
                     for s, pl in (position_manager.get_all_positions() if position_manager else {}).items()
                     for p in pl if True
                 ) if position_manager else usdt_liquid_now * 4
@@ -2910,9 +2979,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
 
         qty = align_quantity_to_step(trade_allocation / price, filters["step"])
         valid, reason = is_quantity_valid(qty, price, filters)
+        _signal_id = sig.get('signal_id') if isinstance(sig, dict) else None
+
         if not valid:
             print(f"Skipping buy {symbol}: {reason}")
-            update_signal_decision(symbol, "rejected", "QTY_INVALIDA")
+            update_signal_decision(symbol, "rejected", "QTY_INVALIDA", signal_id=_signal_id)
             continue
 
         # Guard: verify liquid USDT is sufficient before placing order
@@ -2923,7 +2994,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             print(f"Skipping buy {symbol}: insufficient USDT ({usdt_liquid_now:.4f} < {cost_estimate:.4f} needed)")
             ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_WARNING,
                          f"Skipped buy {symbol}: insufficient USDT ({usdt_liquid_now:.4f} < {cost_estimate:.4f})")
-            update_signal_decision(symbol, "rejected", "SIN_SALDO")
+            update_signal_decision(symbol, "rejected", "SIN_SALDO", signal_id=_signal_id)
             continue
 
         try:
@@ -2945,8 +3016,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             usdt_liquid_now = max(0.0, usdt_liquid_now - qty * price)  # BUG-E5: local deduction, avoids re-fetch
             print(f"Bought {qty} {symbol}")
             ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_INFO, f"Bought {qty} {symbol} @ ~{price:.4f} USDT")
-            update_signal_decision(symbol, "executed", "EJECUTADO")
-            mark_signal_as_processed(symbol)
+            update_signal_decision(symbol, "executed", "EJECUTADO", signal_id=_signal_id)
+            mark_signal_as_processed(symbol, signal_id=_signal_id)
 
             # Track position in Position Manager if available
             if position_manager:
@@ -3003,6 +3074,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     _is_pred_add = (position_manager.get_positions_count(symbol) >= 1) if position_manager else False
                     metadata = {
                         "order_id": order.get("orderId"),
+                        "signal_id": _signal_id,
                         "indicators_at_entry": _indicators_to_save,
                         "rsi_at_entry": float(signal_meta.get(symbol, {}).get('rsi', 50.0)),
                         "vol_spike_at_entry": float(signal_meta.get(symbol, {}).get('vol_spike', 0.0)),
@@ -3014,7 +3086,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "entry_type": "prediction_add" if _is_pred_add else "normal",
                         "reevaluation_count": 0,
                         "spot_total_at_open": usdt_liquid_now,  # SSO gate anchor — protects position from balance changes
-                        "btc_price_at_entry": client.get_symbol_price('BTCUSDT') if client else None,  # SSO-6: BTC ref for bounce detection
+                        "btc_price_at_entry": _get_cycle_price(client, 'BTCUSDT') if client else None,  # SSO-6: BTC ref for bounce detection
                         # FIX-8: trazabilidad Binance para SPOT
                         "entry_order_id": str(order.get("orderId", "")),
                         "entry_filled_qty": float(order.get('executedQty') or qty),
@@ -3048,7 +3120,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             print(f"Buy order failed for {symbol}: {exc}")
             ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_ERROR, f"Buy order failed for {symbol}: {exc}")
             _record_order_failure(settings)  # R5: track consecutive failures
-            update_signal_decision(symbol, "rejected", "ERROR_ORDEN")
+            update_signal_decision(symbol, "rejected", "ERROR_ORDEN", signal_id=_signal_id)
     return orders
 
 
@@ -3060,7 +3132,7 @@ def _select_symbols(settings, news_client: NewsClient, client: BinanceClient, po
     return top_signals
 
 
-def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, portfolio_manager, signal_meta: Dict = None) -> Dict:
+def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, portfolio_manager, signal_meta: Dict = None, trade_type: str = 'spot') -> Dict:
     """Step 2: Generate PnL predictions once for all top symbols (reused in buy step).
     BUG-E4: accepts signal_meta to reuse pre-computed indicators from Step 1,
     avoiding redundant analyze_symbol() calls inside pnl_service."""
@@ -3073,7 +3145,15 @@ def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, 
         alloc_per = min(settings.max_per_trade_usdt, usdt_liquid / len(top_symbols))
         for symbol in top_symbols:
             _pre_sig = (signal_meta or {}).get(symbol)
-            pred, _ = pnl_service.predict_for_symbol(symbol, client, settings, alloc_per, precomputed_signal=_pre_sig, trade_type='spot')
+            pred, _ = pnl_service.predict_for_symbol(
+                symbol,
+                client,
+                settings,
+                alloc_per,
+                precomputed_signal=_pre_sig,
+                trade_type=trade_type,
+                current_price=_get_cycle_price(client, symbol),
+            )
             if pred:
                 predictions[symbol] = pred
                 print(f"Prediction for {symbol}: {pred['expected_pnl']:.2f} USDT")
@@ -3156,7 +3236,7 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
                 continue
             pos = pos_list[0]
             try:
-                current_price = client.get_symbol_price(sym)
+                current_price = _get_cycle_price(client, sym)
             except Exception:
                 print(f"[SlotPressure] {sym}: price fetch failed — skipping")
                 continue
@@ -3242,7 +3322,7 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
                     continue
                 filters = get_symbol_filters(client, sym)
                 qty = align_quantity_to_step(qty_held, filters["step"])
-                exit_price_sp = client.get_symbol_price(sym)
+                exit_price_sp = _get_cycle_price(client, sym)
                 valid, reason = is_quantity_valid(qty, exit_price_sp, filters)
                 if not valid:
                     print(f"[SlotPressure] {sym}: invalid qty {qty} — {reason}")
@@ -3312,6 +3392,34 @@ def execute_once(monitor_only: bool = False):
             print(f"[StatePersistence] Loaded volatile state: mass_sl={_FUTURES_MASS_SL_COOLDOWN_UNTIL}, "
                   f"volspike_positions={len(_VOLSPIKE_POSITIONS)}, override_counts={len(_OVERRIDE_DAILY_COUNT)}")
 
+    # SPOT reconciliation: keep DB aligned with Binance balance on every cycle.
+    # This is intentionally run even when the system is paused so restart drift
+    # is corrected without opening new trades.
+    try:
+        if position_manager and client:
+            _reconciled = position_manager.sync_with_exchange_balance(
+                client, settings, min_value_usdt=5.0
+            )
+            if _reconciled:
+                print(f"[SPOT-Reconcile] Imported orphan positions: {_reconciled}")
+    except Exception as _sync_err:
+        print(f"[SPOT-Reconcile] cycle sync failed: {_sync_err}")
+
+    # Early checkpoint: persist current volatile state at cycle start to minimize
+    # loss window on mid-cycle crash/restart. End-of-cycle checkpoint is kept too.
+    if _db_client_ref:
+        try:
+            state_persistence.save_state(
+                _db_client_ref,
+                futures_sl_cooldown=_FUTURES_SL_COOLDOWN,
+                futures_mass_sl_cooldown_until=_FUTURES_MASS_SL_COOLDOWN_UNTIL,
+                volspike_cooldown=_VOLSPIKE_COOLDOWN,
+                volspike_positions=_VOLSPIKE_POSITIONS,
+                override_daily_count=_OVERRIDE_DAILY_COUNT,
+            )
+        except Exception as _sp_start_err:
+            print(f"[StatePersistence] start checkpoint failed: {_sp_start_err}")
+
     # ── K2: Pause new entries if requested via trading_runtime_state (survives restart) ─
     if not monitor_only and _is_new_entries_paused(_db_client_ref):
         print("[execute_once] pause_new_entries=True — running SL/TP monitor only")
@@ -3345,6 +3453,8 @@ def execute_once(monitor_only: bool = False):
     # BUG-E2: Reset cycle-scoped ASG so all consumers share a fresh instance this cycle
     global _asg_cycle_instance
     _asg_cycle_instance = None
+    global _cycle_price_cache
+    _cycle_price_cache = {}
 
     # ── BUG-6: Cleanup expired cooldown entries (memory hygiene for 24/7 operation) ──
     try:
@@ -3447,7 +3557,7 @@ def execute_once(monitor_only: bool = False):
                     if _qty_held <= 0:
                         continue
                     try:
-                        _price_excl = client.get_symbol_price(_excl_sym)
+                        _price_excl = _get_cycle_price(client, _excl_sym)
                         if _qty_held * _price_excl < 5.0:
                             continue
                         _filt_excl = get_symbol_filters(client, _excl_sym)
@@ -3571,7 +3681,7 @@ def execute_once(monitor_only: bool = False):
                             continue  # known stablecoin asset — skip
                         _b2_price = None
                         try:
-                            _b2_price = client.get_symbol_price(_b2_sym)
+                            _b2_price = _get_cycle_price(client, _b2_sym)
                         except Exception:
                             continue
                         if _b2_price and 0.98 <= _b2_price <= 1.02:
@@ -3748,10 +3858,11 @@ def execute_once(monitor_only: bool = False):
     # ── Step 2: Generate predictions once (reused by step 3 and step 5) ───────
     # BUG-E4: pass signal_meta so pnl_service reuses pre-computed indicators from Step 1
     _step2_signal_meta = {s['symbol']: s for s in top_signals if isinstance(s, dict)}
-    predictions = _build_predictions(top_symbols, client, settings, portfolio_manager, signal_meta=_step2_signal_meta)
+    _prediction_trade_type = 'futures' if _regime_mode == 'FUTURES_SHORT' else 'spot'
+    predictions = _build_predictions(top_symbols, client, settings, portfolio_manager, signal_meta=_step2_signal_meta, trade_type=_prediction_trade_type)
 
     # ── MEJORA-A1: Re-sort by predicted EV so highest-EV candidates fill slots first ──
-    if predictions and _regime_mode != "FUTURES_SHORT" and isinstance(top_signals[0], dict) if top_signals else False:
+    if predictions and isinstance(top_signals[0], dict) if top_signals else False:
         def _ev_sort_key(s):
             sym = s['symbol'] if isinstance(s, dict) else s
             pred = predictions.get(sym)

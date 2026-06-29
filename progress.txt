@@ -283,3 +283,4 @@ Backtest 1000-Run Re-optimization + Application run_0677 (2026-06-29 02:42 UTC):
 - Files changed: futures_client.py (transfer_to_spot safety), binance_commission.py (regime-aware funding logic), run_trades.py/app.py (pass regime_mode), tests/test_binance_commission.py (regime funding tests), SYSTEM_REFERENCE.md.
 - Verified: tests/test_binance_commission.py 18 passed, combined BNB+PM+screener+governance 42 passed, system_health -k "not Cat7" 107 passed.
 - 2026-06-29 13:20 UTC-6: session closed; all changes saved and committed. Temporary audit/debug files left untracked.
+- 2026-06-29 16:20 UTC-6: diagnosed why no new futures were opening — `_buy_top_symbols()` in `run_trades.py` returned early due to spot exposure cap (100%) even in FUTURES_SHORT. Applied fix to bypass the spot exposure block when regime is FUTURES_SHORT. Tests 107 passed. Container restart required to activate.

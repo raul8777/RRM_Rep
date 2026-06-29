@@ -85,6 +85,15 @@ class PortfolioManager:
             f"Portfolio Manager initialized: allocation_pct={self.allocation_pct:.2%}, "
             f"min_confidence={self.min_confidence}, max_risk_per_pair={self.max_risk_per_pair:.2%}"
         )
+
+    def _get_symbol_price_cached(self, symbol: str, price_cache: Optional[Dict[str, float]] = None) -> float:
+        """Return a symbol price using a caller-local cache, then BinanceClient cache/API."""
+        if price_cache is not None and symbol in price_cache:
+            return price_cache[symbol]
+        price = self.binance_client.get_symbol_price(symbol)
+        if price_cache is not None:
+            price_cache[symbol] = price
+        return price
     
     def get_total_balance(self, use_cache: bool = True) -> Dict[str, float]:
         """
@@ -104,6 +113,7 @@ class PortfolioManager:
 
         try:
             balances = self.binance_client.get_account_balance()
+            price_cache: Dict[str, float] = {}
             
             # Calculate total USDT value including all assets
             total_usdt = 0.0
@@ -116,7 +126,7 @@ class PortfolioManager:
                     continue
                 try:
                     symbol = f"{asset.upper()}USDT"
-                    price = self.binance_client.get_symbol_price(symbol)
+                    price = self._get_symbol_price_cached(symbol, price_cache)
                     total_usdt += amount * price
                 except Exception:
                     pass
@@ -377,11 +387,12 @@ class PortfolioManager:
             # Import AutonomousSignalGenerator for technical indicators
             from autonomous_signals import AutonomousSignalGenerator
             signal_gen = AutonomousSignalGenerator(self.binance_client)
+            price_cache: Dict[str, float] = {}
             
             for symbol, position_data in current_positions.items():
                 try:
                     # Get current price
-                    current_price = self.binance_client.get_symbol_price(symbol)
+                    current_price = self._get_symbol_price_cached(symbol, price_cache)
                     
                     # Get technical indicators
                     signal_data = signal_gen.analyze_symbol(symbol, interval='1h')

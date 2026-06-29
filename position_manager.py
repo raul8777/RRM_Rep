@@ -251,6 +251,7 @@ class PositionManager:
             'sl': float(position.stop_loss or 0), 'tp': float(position.take_profit or 0),
             'esc_index': _esc_idx,
             'order_id': str(_pos_meta.get('entry_order_id', _pos_meta.get('order_id', ''))),
+            'signal_id': str(_pos_meta.get('signal_id', '')),
             'binance_confirmed': bool(_pos_meta.get('binance_entry_confirmed', False)),
         }, binance_confirmed=bool(_pos_meta.get('binance_entry_confirmed', False)))
         logger.info(f"Position opened: {position.symbol} {position.side} {position.quantity} @ {position.entry_price}")
@@ -318,8 +319,11 @@ class PositionManager:
 
     def sync_with_exchange_balance(self, binance_client, settings, min_value_usdt: float = 5.0) -> List[str]:
         """
-        Import orphan assets from Binance balance as managed positions.
-        Runs at startup to ensure pre-existing or untracked holdings are managed with SL/TP.
+        Reconcile SPOT state against Binance balances.
+
+        - Imports orphan assets that exist on Binance but not in DB.
+        - Closes DB positions whose Binance balance is missing/zero.
+        - Audits any mismatch so restart recovery stays fully traceable.
 
         Args:
             binance_client: BinanceClient instance
@@ -333,7 +337,8 @@ class PositionManager:
         imported = []
         try:
             balances = binance_client.get_account_balance()
-            existing = set(self.get_all_positions().keys())
+            existing_positions = self.get_all_positions()
+            existing = set(existing_positions.keys())
 
             for asset, amount in balances.items():
                 if asset in EXCLUDED_ASSETS or amount <= 0:
@@ -382,6 +387,36 @@ class PositionManager:
                     f"(${value_usdt:.2f}) — SL={sl_price:.4f} TP={tp_price:.4f}"
                 )
                 logger.info(f"Balance sync imported: {symbol} qty={amount} price={price}")
+
+            # Reconcile DB positions that no longer have an on-exchange balance.
+            for symbol, pos_list in existing_positions.items():
+                if not pos_list:
+                    continue
+                asset = symbol.replace('USDT', '')
+                balance_qty = float(balances.get(asset, 0.0))
+                db_qty = sum(float(p.quantity or 0) for p in pos_list)
+                if db_qty <= 0:
+                    continue
+                # If Binance no longer shows the asset, treat the position as externally closed.
+                if balance_qty <= 0:
+                    try:
+                        exit_price = binance_client.get_symbol_price(symbol)
+                    except Exception:
+                        exit_price = float(pos_list[0].entry_price or 0)
+                    self._audit(symbol, 'reconcile_missing_balance', {
+                        'db_qty': db_qty,
+                        'exchange_qty': balance_qty,
+                        'exit_price': exit_price,
+                        'reason': 'balance_missing_on_exchange',
+                    }, binance_confirmed=True)
+                    closed = self.close_all_positions_for_symbol(
+                        symbol,
+                        exit_price,
+                        'reconcile_missing_balance',
+                        get_param(settings, 'binance_commission_rate') if settings else 0.001,
+                    )
+                    if closed:
+                        logger.info(f"Balance sync reconciled missing balance: {symbol} closed {len(closed)} DB position(s)")
         except Exception as e:
             logger.error(f"Balance sync failed: {e}")
             ec.add_error(ec.SOURCE_SYSTEM, ec.LEVEL_ERROR, f"Balance sync error: {e}")
@@ -629,37 +664,38 @@ class PositionManager:
              pnl_prediction, indicators_at_entry, prediction_accuracy)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        self.db_client.execute_update(
-            insert_query,
-            (
-                closed_position.symbol,
-                closed_position.side,
-                _safe_float(closed_position.quantity),
-                _safe_float(closed_position.entry_price),
-                _safe_float(closed_position.exit_price),
-                closed_position.strategy_id,
-                closed_position.entry_time,
-                closed_position.exit_time,
-                _safe_float(closed_position.pnl),
-                _safe_float(closed_position.pnl_percentage),
-                closed_position.close_reason,
-                _meta_json,
-                _safe_float(closed_position.entry_commission),
-                _safe_float(closed_position.exit_commission),
-                _to_json(closed_position.pnl_prediction),
-                _to_json(closed_position.indicators_at_entry),
-                _safe_float(closed_position.prediction_accuracy)
-            )
+        insert_params = (
+            closed_position.symbol,
+            closed_position.side,
+            _safe_float(closed_position.quantity),
+            _safe_float(closed_position.entry_price),
+            _safe_float(closed_position.exit_price),
+            closed_position.strategy_id,
+            closed_position.entry_time,
+            closed_position.exit_time,
+            _safe_float(closed_position.pnl),
+            _safe_float(closed_position.pnl_percentage),
+            closed_position.close_reason,
+            _meta_json,
+            _safe_float(closed_position.entry_commission),
+            _safe_float(closed_position.exit_commission),
+            _to_json(closed_position.pnl_prediction),
+            _to_json(closed_position.indicators_at_entry),
+            _safe_float(closed_position.prediction_accuracy)
         )
 
-        # Delete by primary key when available, otherwise fallback to symbol
+        # Delete by primary key when available, otherwise fallback to symbol+entry_time.
         if position.db_id:
-            self.db_client.execute_update("DELETE FROM trades_open WHERE id = %s", (position.db_id,))
+            delete_query = "DELETE FROM trades_open WHERE id = %s"
+            delete_params = (position.db_id,)
         else:
-            self.db_client.execute_update(
-                "DELETE FROM trades_open WHERE symbol = %s AND entry_time = %s",
-                (position.symbol, position.entry_time)
-            )
+            delete_query = "DELETE FROM trades_open WHERE symbol = %s AND entry_time = %s"
+            delete_params = (position.symbol, position.entry_time)
+
+        self.db_client.execute_transaction([
+            (insert_query, insert_params),
+            (delete_query, delete_params),
+        ])
         # P1.1: Invalidate daily PnL cache — next SSO-4 evaluation will read updated total from BD
         try:
             from daily_pnl_tracker import invalidate_cache as _inv_dpnl

@@ -22,6 +22,7 @@ from learning_engine import get_learning_engine
 from param_optimizer import get_optimizer
 from orchestrator import SystemState
 from init_components import get_components
+from audit_tools import check_signal_audit_consistency
 import error_collector as ec
 
 settings = get_settings()
@@ -98,6 +99,16 @@ def to_mexico_time_str(utc_iso: str) -> str:
         return mexico_dt.isoformat()
     except:
         return utc_iso
+
+
+def _get_request_price(price_cache: Dict[str, float], symbol: str) -> float:
+    """Return a symbol price using a request-local cache to avoid repeated fetches."""
+    cached = price_cache.get(symbol)
+    if cached is not None:
+        return cached
+    price = float(binance_client.get_symbol_price(symbol))
+    price_cache[symbol] = price
+    return price
 
 
 def _enrich_entries(entries: list, current_price: float, side: str) -> list:
@@ -235,6 +246,7 @@ def startup_event():
     # Refresh live commission rates from Binance API (Binance-controlled values)
     try:
         from binance_commission import refresh_config_from_binance
+        from run_trades import _get_futures_client
         _comp_c = get_components()
         _refresh = refresh_config_from_binance(
             _comp_c.settings,
@@ -420,6 +432,13 @@ async def signals_recent(limit: int = 20) -> Dict[str, object]:
     }
 
 
+@app.get("/audit/consistency")
+async def audit_consistency(limit: int = 100, _auth: None = Depends(_require_api_key)) -> Dict:
+    """Check that recent signal decisions are mirrored in trades_audit."""
+    comp = get_components()
+    return check_signal_audit_consistency(comp.db_client, limit=limit)
+
+
 @app.post("/webhook")
 async def webhook(payload: TradingViewPayload, request: Request, _auth: None = Depends(_require_api_key)) -> Dict:
     secret = request.headers.get("X-Webhook-Secret")
@@ -433,8 +452,17 @@ async def webhook(payload: TradingViewPayload, request: Request, _auth: None = D
         raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     signal['source'] = 'external'
-    add_signal(signal)
-    return {"signal_registered": True, "signal": signal}
+    persist_result = add_signal(signal, strict_persistence=True)
+    if not persist_result.get("ok") or persist_result.get("persisted") != "db":
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Signal persistence failed",
+        )
+    return {
+        "signal_registered": True,
+        "signal": persist_result.get("record", signal),
+        "persisted": persist_result.get("persisted"),
+    }
 
 
 @app.post("/command")
@@ -510,7 +538,16 @@ async def get_control_status() -> Dict:
 @app.get("/health")
 async def health_check() -> Dict:
     """Get overall health status of the system."""
-    return orchestrator.get_health_status()
+    health = orchestrator.get_health_status()
+    try:
+        comp = get_components()
+        health["audit_consistency"] = check_signal_audit_consistency(comp.db_client, limit=100)
+    except Exception as e:
+        health["audit_consistency"] = {
+            "available": False,
+            "error": str(e),
+        }
+    return health
 
 
 @app.get("/performance/commissions")
@@ -694,6 +731,7 @@ async def get_account_balance() -> Dict:
     try:
         balances = binance_client.get_account_balance()
         total_usdt = 0.0
+        price_cache: Dict[str, float] = {}
         
         # Calculate total in USDT and get prices
         balances_with_prices = {}
@@ -705,7 +743,7 @@ async def get_account_balance() -> Dict:
                 # For non-USDT assets, get current price in USDT
                 try:
                     symbol = f"{asset}USDT"
-                    price = binance_client.get_symbol_price(symbol)
+                    price = _get_request_price(price_cache, symbol)
                     usdt_value = amount * price
                     balances_with_prices[asset] = {"amount": amount, "usdt_value": usdt_value}
                     total_usdt += usdt_value
@@ -766,11 +804,12 @@ async def get_open_positions() -> Dict:
     try:
         positions = position_manager.get_all_positions()
         positions_data = []
+        price_cache: Dict[str, float] = {}
         
         for symbol, pos_list in positions.items():
             # Fetch current price once per symbol
             try:
-                current_price = float(binance_client.get_symbol_price(symbol))
+                current_price = float(_get_request_price(price_cache, symbol))
             except Exception:
                 current_price = None
             for entry_num, position in enumerate(pos_list, start=1):
@@ -828,6 +867,7 @@ async def close_all_positions(_auth: None = Depends(_require_api_key)) -> Dict:
     all_positions = position_manager.get_all_positions()
     if not all_positions:
         return {"closed": [], "message": "No open positions"}
+    price_cache: Dict[str, float] = {}
     for symbol, pos_list in all_positions.items():
         total_qty = sum(float(p.quantity) for p in pos_list)
         try:
@@ -836,7 +876,7 @@ async def close_all_positions(_auth: None = Depends(_require_api_key)) -> Dict:
                 total_qty = align_quantity_to_step(total_qty, filters["step"])
             except Exception:
                 pass
-            price = float(binance_client.get_symbol_price(symbol))
+            price = float(_get_request_price(price_cache, symbol))
             order = binance_client.create_market_order(symbol=symbol, side="SELL", quantity=total_qty)
             commission_rate = config_helpers.get_param(settings, 'binance_commission_rate')
             position_manager.close_all_positions_for_symbol(symbol, price, "manual_rebalance", commission_rate)
@@ -1022,7 +1062,7 @@ def _get_monte_carlo_projection(force: bool = False) -> Dict:
             _invested = 0.0
             for _sym, _pos in _open_pos.items():
                 try:
-                    _px = binance_client.get_symbol_price(_sym)
+                    _px = _get_request_price(price_cache, _sym)
                     _invested += float(getattr(_pos, 'quantity', 0)) * _px
                 except Exception:
                     pass
@@ -1195,7 +1235,7 @@ def _get_market_regime() -> Dict:
         _btc_price = 0.0
         _btc_rsi = 0.0
         try:
-            _btc_price = float(comp.binance_client.get_symbol_price("BTCUSDT"))
+            _btc_price = float(_get_request_price(price_cache, "BTCUSDT"))
         except Exception:
             pass
         result = {
@@ -1252,11 +1292,12 @@ async def get_dashboard_config(request: Request) -> Dict:
 async def get_dashboard_summary() -> Dict:
     """Single endpoint that returns all dashboard data to minimize API calls."""
     result = {}
+    price_cache: Dict[str, float] = {}
 
     # Exchange rate (computed once, reused across blocks)
     _usd_mxn = 17.5  # Fixed display rate MXN/USD (USDCUSDT ≈1.0 on Binance, not a real FX source)
     try:
-        _usdmxn_candidate = binance_client.get_symbol_price("USDTMXN") or 0
+        _usdmxn_candidate = _get_request_price(price_cache, "USDTMXN") or 0
         if _usdmxn_candidate > 10:  # sanity check: real MXN rate is always > 10
             _usd_mxn = _usdmxn_candidate
     except Exception:
@@ -1273,6 +1314,12 @@ async def get_dashboard_summary() -> Dict:
         result["health"] = orchestrator.get_health_status()
     except Exception as e:
         result["health"] = {"error": str(e)}
+
+    # Audit consistency — mirrors signal decisions against trades_audit
+    try:
+        result["audit_consistency"] = check_signal_audit_consistency(comp.db_client, limit=100)
+    except Exception as e:
+        result["audit_consistency"] = {"available": False, "error": str(e)}
 
     # Portfolio config
     try:
@@ -1296,6 +1343,7 @@ async def get_dashboard_summary() -> Dict:
     try:
         balances = binance_client.get_account_balance()
         total_usdt = 0.0
+        # Reuse dashboard-local price cache when the same quote appears multiple times.
         balances_usdt = {}
         for asset, amount in balances.items():
             if asset == "USDT":
@@ -1303,7 +1351,7 @@ async def get_dashboard_summary() -> Dict:
                 total_usdt += amount
             else:
                 try:
-                    price = binance_client.get_symbol_price(f"{asset}USDT")
+                    price = _get_request_price(price_cache, f"{asset}USDT")
                     usdt_val = amount * price
                     balances_usdt[asset] = usdt_val
                     total_usdt += usdt_val
@@ -1536,7 +1584,7 @@ async def get_dashboard_summary() -> Dict:
         for symbol, pos_list in positions.items():
             # Fetch price once per symbol
             try:
-                current_price_sym = float(binance_client.get_symbol_price(symbol))
+                current_price_sym = float(_get_request_price(price_cache, symbol))
             except Exception:
                 current_price_sym = None
 
@@ -2116,7 +2164,7 @@ async def get_dashboard_summary() -> Dict:
         for sym in ticker_symbols:
             try:
                 open_p = binance_client.get_daily_open_price(sym)
-                cur_p = binance_client.get_symbol_price(sym)
+                cur_p = _get_request_price(price_cache, sym)
                 change_pct = round((cur_p - open_p) / open_p * 100, 2) if open_p else 0.0
                 ticker_data.append({
                     "symbol": sym,
@@ -2259,10 +2307,11 @@ async def get_daily_ticker() -> Dict:
     """Daily open (8AM Mexico) vs current price for main trading pairs."""
     symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
     data = []
+    price_cache: Dict[str, float] = {}
     for sym in symbols:
         try:
             open_p = binance_client.get_daily_open_price(sym)
-            cur_p = binance_client.get_symbol_price(sym)
+            cur_p = _get_request_price(price_cache, sym)
             change_pct = round((cur_p - open_p) / open_p * 100, 2) if open_p else 0.0
             data.append({
                 "symbol": sym,
@@ -2380,9 +2429,10 @@ async def get_open_positions_detail() -> Dict:
     try:
         positions = position_manager.get_all_positions()
         positions_data = []
+        price_cache: Dict[str, float] = {}
         for symbol, position in positions.items():
             try:
-                current_price = binance_client.get_symbol_price(symbol)
+                current_price = _get_request_price(price_cache, symbol)
                 if position.side.upper() == "BUY":
                     unrealized_pnl = float((current_price - position.entry_price) * position.quantity)
                 else:
