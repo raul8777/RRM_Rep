@@ -22,9 +22,15 @@ class BinanceClient:
         self._price_cache: Dict[str, Tuple[float, float]] = {}
         self._filters_cache: Dict[str, Tuple[Dict, float]] = {}
 
+    def get_account_info(self) -> Dict[str, Any]:
+        try:
+            return self.client.get_account()
+        except (BinanceAPIException, BinanceRequestException) as exc:
+            raise RuntimeError(f"Binance account info error: {exc}") from exc
+
     def get_account_balance(self) -> Dict[str, float]:
         try:
-            account_info = self.client.get_account()
+            account_info = self.get_account_info()
             balances = {
                 item["asset"]: float(item["free"])
                 for item in account_info.get("balances", [])
@@ -33,6 +39,21 @@ class BinanceClient:
             return balances
         except (BinanceAPIException, BinanceRequestException) as exc:
             raise RuntimeError(f"Binance balance error: {exc}") from exc
+
+    def get_commission_rate(self) -> float:
+        """Return the live spot taker commission rate from Binance account info.
+
+        Falls back to the documented default (0.001) if the API response does not
+        contain the field or if the call fails.
+        """
+        try:
+            info = self.get_account_info()
+            rate = info.get("commission")
+            if rate is not None:
+                return float(rate)
+        except Exception as exc:
+            print(f"[BinanceClient] commission rate fetch failed, using default: {exc}")
+        return 0.001  # Binance default spot taker rate
 
     def _format_amount(self, amount: float) -> str:
         value = Decimal(str(amount))

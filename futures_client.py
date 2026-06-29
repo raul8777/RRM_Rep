@@ -27,12 +27,15 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timezone
+from config_helpers import get_param
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 FAPI_BASE     = "https://fapi.binance.com"
-LEVERAGE_MAX  = 2          # Hard cap — never allow higher
-MAX_SHORTS    = 2          # Max simultaneous short positions
+# Global safe caps — these are UPPER BOUNDS, not the active configured values.
+# Active values come from settings.futures_leverage / settings.futures_max_shorts.
+LEVERAGE_MAX  = 10         # hard upper bound; active leverage is settings.futures_leverage (backtest run_0812: 10)
+MAX_SHORTS    = 12         # hard upper bound; active max is settings.futures_max_shorts (backtest run_0812: 12)
 FUNDING_LIMIT = 0.0005     # Skip entry if funding rate > 0.05% (overleveraged longs → risky to short)
 _PRICE_CACHE_TTL = 15      # seconds
 
@@ -76,14 +79,24 @@ class FuturesPosition:
 class FuturesClient:
     def __init__(self, api_key: str, api_secret: str, dry_run: bool = False,
                  max_shorts: int = MAX_SHORTS, max_longs: int = 3,
-                 db_client=None):
+                 db_client=None, settings=None):
         self.api_key    = api_key
         self.api_secret = api_secret
         self.dry_run    = dry_run
-        self.max_shorts = max_shorts       # configurable via settings.futures_max_shorts
+        self.settings = settings
+        # Active trading caps are read from settings; module constants are only safety upper bounds.
+        from config_helpers import get_param
+        self._active_leverage = min(
+            get_param(settings, 'futures_leverage') if settings else 10,
+            LEVERAGE_MAX
+        )
+        self.max_shorts = min(
+            get_param(settings, 'futures_max_shorts') if settings else 12,
+            MAX_SHORTS
+        )
         self.max_longs  = max_longs        # configurable via settings.futures_max_longs
-        self.max_largecap_shorts: int = 3  # max LARGE_CAP shorts simultaneously — set by _get_futures_client
-        self.largecap_symbols: set = {'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT'}  # updated from settings
+        self.max_largecap_shorts: int = get_param(settings, 'futures_max_largecap_shorts') if settings else 5
+        self.largecap_symbols: set = set(get_param(settings, 'futures_largecap_symbols')) if settings else {'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT'}
         # Key format: "{SYMBOL}_{SIDE}" e.g. "BTCUSDT_SHORT", "ETHUSDT_LONG"
         self._open_positions: Dict[str, FuturesPosition] = {}
         self._price_cache: Dict[str, Tuple[float, float]] = {}  # {symbol: (price, ts)}
@@ -91,6 +104,7 @@ class FuturesClient:
         self._hedge_mode: Optional[bool] = None  # None = unknown until checked
         self._binance_client_ref = None  # set by _get_futures_client() for momentum eval
         self.db_client = db_client        # FIX-G: DB persistence for futures trades
+        self._cached_settings = settings  # FIX-G3: keep settings for commission/config lookups
         if not dry_run:
             self._sync_open_positions()
 
@@ -111,6 +125,9 @@ class FuturesClient:
             _existing_count = int((_existing[0]['cnt'] if _existing else 0) or 0)
             _esc_index = _existing_count + 1
             _es_esc = _existing_count > 0
+            # Commission on entry
+            from binance_commission import entry_commission
+            _entry_comm = round(entry_commission(pos.qty, pos.entry_price, 'futures', self._cached_settings), 6)
             meta = json.dumps({
                 'trade_type': 'futures',
                 'order_id': pos.order_id,
@@ -118,6 +135,7 @@ class FuturesClient:
                 'tp_order_id': pos.tp_order_id,
                 'escalonamiento_index': _esc_index,
                 'es_escalonamiento': _es_esc,
+                'entry_commission': _entry_comm,
             })
             _pnl_pred_json = json.dumps(pos.pnl_prediction) if pos.pnl_prediction else None
             _ind_json      = json.dumps(pos.indicators_at_entry) if pos.indicators_at_entry else None
@@ -125,8 +143,8 @@ class FuturesClient:
                 """
                 INSERT INTO trades_open
                     (symbol, side, quantity, price, entry_time, stop_loss, take_profit,
-                     metadata, pnl_prediction, indicators_at_entry)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     metadata, entry_commission, pnl_prediction, indicators_at_entry)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     pos.symbol,
@@ -137,6 +155,7 @@ class FuturesClient:
                     pos.sl_price,
                     pos.tp_price,
                     meta,
+                    _entry_comm,
                     _pnl_pred_json,
                     _ind_json,
                 )
@@ -215,19 +234,25 @@ class FuturesClient:
             else:
                 gross_pnl = (exit_price - pos.entry_price) * pos.qty
                 pnl_pct   = round((exit_price - pos.entry_price) / pos.entry_price * 100, 4)
-            # Commission accounting — futures taker rate (0.04% per side)
-            _f_comm_rate = getattr(getattr(self, '_cached_settings', None), 'futures_commission_rate', 0.0004)
-            _entry_comm  = round(pos.entry_price * pos.qty * _f_comm_rate, 6)
-            _exit_comm   = round(exit_price * pos.qty * _f_comm_rate, 6)
+            # Commission accounting — use centralized Binance commission module
+            from binance_commission import entry_commission, exit_commission, total_commission
+            _settings = getattr(self, '_cached_settings', None)
+            _entry_comm = round(entry_commission(pos.qty, pos.entry_price, 'futures', _settings), 6)
+            _exit_comm = round(exit_commission(pos.qty, exit_price, 'futures', _settings), 6)
+            _total_comm = total_commission(pos.qty, pos.entry_price, exit_price, 'futures', _settings)
             if pnl_override is not None:
-                # Proportional PnL from multi-entry close
-                pnl = pnl_override
+                # Proportional PnL from multi-entry close — ensure net of commission
+                pnl = pnl_override - _total_comm
             elif pos.pnl is not None:
                 # Binance realizedPnl (SL/TP/trailing closes) — already net, do NOT deduct again
                 pnl = pos.pnl
             else:
                 # Local SSO market-order close — gross, must deduct both sides
-                pnl = gross_pnl - _entry_comm - _exit_comm
+                pnl = gross_pnl - _total_comm
+            # Store commission breakdown in metadata for traceability
+            pos._smart_meta['entry_commission'] = _entry_comm
+            pos._smart_meta['exit_commission'] = _exit_comm
+            pos._smart_meta['total_commission'] = _total_comm
             _cgid = close_group_id or str(uuid.uuid4())
             meta = json.dumps({
                 'trade_type': 'futures',
@@ -543,7 +568,7 @@ class FuturesClient:
 
         if not _atr_enabled:
             # Fallback to static schedule (legacy)
-            return getattr(settings, 'futures_trailing_distance_pct', 1.5) / 100.0 if settings else 0.015
+            return getattr(settings, 'futures_trail_atr_fallback_distance_pct', 1.5) / 100.0 if settings else 0.015
 
         # Select multiplier based on PnL level
         if pnl_pct >= 0.08:
@@ -575,6 +600,21 @@ class FuturesClient:
 
     def get_account_info(self) -> dict:
         return self._get("/fapi/v2/account", signed=True)
+
+    def get_commission_rate(self) -> float:
+        """Return the live futures taker commission rate from Binance account info.
+
+        Falls back to the documented default (0.0004) if the API response does not
+        contain the field or if the call fails.
+        """
+        try:
+            info = self.get_account_info()
+            rate = info.get("commissionRate")
+            if rate is not None:
+                return float(rate)
+        except Exception as exc:
+            print(f"[FuturesClient] commission rate fetch failed, using default: {exc}")
+        return 0.0004  # Binance default futures taker rate
 
     def get_positions(self) -> List[dict]:
         """All open futures positions (non-zero positionAmt)."""
@@ -1335,7 +1375,7 @@ class FuturesClient:
             for pos in self._open_positions.values():
                 if not pos.closed and pos.side == "SHORT":
                     try:
-                        committed_margin += pos.qty * pos.entry_price / LEVERAGE_MAX
+                        committed_margin += pos.qty * pos.entry_price / self._active_leverage
                     except Exception:
                         pass
             futures_min_reserve = max(committed_margin * 1.1, 5.0)
@@ -1381,11 +1421,12 @@ class FuturesClient:
             # ── Case 2: Spot needs capital (non-bear regime, spot has open slots) ─
             elif regime in ("SPOT_BULL", "RANGE_SCALP"):
                 from config import get_settings as _gs
+                from config_helpers import get_param
                 try:
                     _s = _gs()
-                    _max_spot = getattr(_s, 'max_positions', 10)
+                    _max_spot = get_param(_s, 'max_positions')
                 except Exception:
-                    _max_spot = 10
+                    _max_spot = 12
                 spot_open_slots = max(0, _max_spot - open_spot_count)
                 if spot_open_slots > 0:
                     needed_spot = spot_open_slots * kelly_spot_amount
@@ -1442,9 +1483,9 @@ class FuturesClient:
 
     # ── Leverage management ───────────────────────────────────────────────────
 
-    def set_leverage(self, symbol: str, leverage: int = LEVERAGE_MAX) -> bool:
-        """Set leverage for symbol. Hard-capped at LEVERAGE_MAX=2."""
-        leverage = min(leverage, LEVERAGE_MAX)
+    def set_leverage(self, symbol: str, leverage: int = None) -> bool:
+        """Set leverage for symbol. Capped at the configured active leverage (settings.futures_leverage)."""
+        leverage = min(leverage or self._active_leverage, self._active_leverage)
         if symbol in self._leverage_set:
             return True
         if self.dry_run:
@@ -1529,7 +1570,7 @@ class FuturesClient:
         usdt_amount: float,
         sl_pct: float = 3.0,   # % above entry — stop loss
         tp_pct: float = 7.0,   # % below entry — take profit
-        leverage: int = LEVERAGE_MAX,
+        leverage: int = None,
         pnl_prediction: Optional[Dict] = None,      # FIX-P2: predictor output at entry
         indicators_at_entry: Optional[Dict] = None, # FIX-P2: technical indicators at entry
     ) -> Optional[FuturesPosition]:
@@ -1548,10 +1589,10 @@ class FuturesClient:
 
         # Configure leverage + isolated margin
         self.set_isolated_margin(symbol)
-        self.set_leverage(symbol, min(leverage, LEVERAGE_MAX))
+        self.set_leverage(symbol, min(leverage, self._active_leverage))
 
         price    = self.get_price(symbol)
-        notional = usdt_amount * min(leverage, LEVERAGE_MAX)  # leveraged notional
+        notional = usdt_amount * min(leverage, self._active_leverage)  # leveraged notional
         step     = self._get_step_size(symbol)
         qty      = self._align_qty(notional / price, step)
 
@@ -1676,7 +1717,7 @@ class FuturesClient:
         usdt_amount: float,
         sl_pct: float = 2.5,   # % below entry — stop loss
         tp_pct: float = 5.0,   # % above entry — take profit
-        leverage: int = LEVERAGE_MAX,
+        leverage: int = None,
     ) -> Optional[FuturesPosition]:
         """
         Open a LONG position with mandatory SL and TP orders.
@@ -1697,10 +1738,10 @@ class FuturesClient:
             return None
 
         self.set_isolated_margin(symbol)
-        self.set_leverage(symbol, min(leverage, LEVERAGE_MAX))
+        self.set_leverage(symbol, min(leverage, self._active_leverage))
 
         price    = self.get_price(symbol)
-        notional = usdt_amount * min(leverage, LEVERAGE_MAX)
+        notional = usdt_amount * min(leverage, self._active_leverage)
         step     = self._get_step_size(symbol)
         qty      = self._align_qty(notional / price, step)
 
@@ -2272,15 +2313,16 @@ class FuturesClient:
                 print(f"[Futures/SyncSL] algo order sync failed: {_sync_err}")
 
         # Read settings — use safe defaults if not provided
-        _trailing_enabled      = getattr(settings, 'futures_trailing_enabled', True)      if settings else True
-        _trail_act_pct        = getattr(settings, 'futures_trailing_activation_pct', 2.0) if settings else 2.0
-        _trail_dist_pct       = getattr(settings, 'futures_trailing_distance_pct', 1.0)   if settings else 1.0
-        _breakeven_act_pct    = getattr(settings, 'futures_breakeven_activation_pct', 1.2) if settings else 1.2
-        _smart_tp             = getattr(settings, 'futures_smart_tp_enabled', True)        if settings else True
-        _smart_tp_max_ext     = getattr(settings, 'futures_smart_tp_max_extensions', 2)   if settings else 2
-        _smart_tp_max_pnl     = getattr(settings, 'futures_smart_tp_max_pnl_pct', 12.0)  if settings else 12.0
-        _smart_tp_threshold   = getattr(settings, 'futures_smart_tp_extend_score_threshold', 3) if settings else 3
-        _smart_tp_ext_pct     = getattr(settings, 'futures_smart_tp_extension_pct', 2.0)  if settings else 2.0
+        from config_helpers import get_param
+        _trailing_enabled      = get_param(settings, 'futures_trailing_enabled')      if settings else True
+        _trail_act_pct        = get_param(settings, 'futures_trailing_activation_pct') if settings else 2.0
+        _trail_dist_pct       = get_param(settings, 'futures_trailing_distance_pct')   if settings else 1.5
+        _breakeven_act_pct    = get_param(settings, 'futures_breakeven_activation_pct') if settings else 1.0
+        _smart_tp             = get_param(settings, 'futures_smart_tp_enabled')        if settings else True
+        _smart_tp_max_ext     = get_param(settings, 'futures_smart_tp_max_extensions')   if settings else 2
+        _smart_tp_max_pnl     = get_param(settings, 'futures_smart_tp_max_pnl_pct')  if settings else 12.0
+        _smart_tp_threshold   = get_param(settings, 'futures_smart_tp_extend_score_threshold') if settings else 2
+        _smart_tp_ext_pct     = get_param(settings, 'futures_smart_tp_extension_pct')  if settings else 2.0
 
         for key, pos in list(self._open_positions.items()):
             if pos.closed:
@@ -2382,6 +2424,7 @@ class FuturesClient:
                                     settings=settings,
                                     position_size_usdt=round(entry * pos.qty, 2),
                                     precomputed_signal=(_sso_sig if '_sso_sig' in dir() else None),
+                                    trade_type='futures',
                                 )
                                 if _gate_pred:
                                     _rescue_pred_ev = float(_gate_pred.get('expected_pnl', 0.0))
@@ -2723,7 +2766,7 @@ class FuturesClient:
                             tick = self._get_tick_size(symbol)
                             # BUG-K5 fix: dynamic SL distance = 40% of configured SL (not hardcoded 0.5%)
                             # Prevents immediate SL hit after extension on volatile candles
-                            _sl_pct_raw = getattr(settings, 'futures_sl_pct', 3.0) if settings else 3.0
+                            _sl_pct_raw = get_param(settings, 'futures_sl_pct') if settings else 3.33
                             _smart_sl_buffer = _sl_pct_raw * 0.40 / 100.0  # 40% of configured SL %
                             if pos.side == "SHORT":
                                 # Extend: lower TP (SHORT profits on price drop)
@@ -2795,14 +2838,13 @@ class FuturesClient:
             trend_4h   = float(ind.get("trend_4h") or 0.0)  # 1.0=UP, 0.0=DOWN
 
             # Run predictor to get success probability
-            from pnl_service import PnlPredictionService
-            _pnl_svc = PnlPredictionService()
-            _default_size = float(getattr(settings, 'futures_usdt_per_trade', 20.0))
-            _max_size = float(getattr(settings, 'max_per_trade_usdt', 150.0))
+            import pnl_service as _pnl_service_module
+            _default_size = float(getattr(settings, 'futures_usdt_per_trade', 100.0))
+            _max_size = float(getattr(settings, 'max_per_trade_usdt', 500.0))
             _effective_size = min(position_size_usdt, _max_size) if position_size_usdt else _default_size
-            prediction, _ = _pnl_svc.predict_for_symbol(
+            prediction, _ = _pnl_service_module.predict_for_symbol(
                 symbol=symbol, client=_bc, settings=settings,
-                position_size_usdt=_effective_size
+                position_size_usdt=_effective_size, trade_type='futures'
             )
             success_prob = float((prediction or {}).get("success_probability", 0.5))
 

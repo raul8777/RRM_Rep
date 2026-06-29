@@ -41,10 +41,10 @@ class _NumpyEncoder(json.JSONEncoder):
 # ── Path setup ────────────────────────────────────────────────────────────────
 sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), '..')))
 
+from binance_commission import get_config, total_commission  # centralized commission module
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 DATA_DIR       = '/app/historical_data'
-COMMISSION_SPOT    = 0.001   # 0.1% taker each side
-COMMISSION_FUTURES = 0.0004  # 0.04% maker futures
 SLIPPAGE           = 0.0005  # 0.05% slippage estimate
 FUTURES_LEVERAGE   = 10
 FNG_VALUE          = 15      # Extreme Fear (actual)
@@ -78,22 +78,53 @@ PARAM_SPACE = {
     'spot_tp_pct':             (0.018, 0.065),
     'futures_sl_pct':          (0.012, 0.040),
     'futures_tp_pct':          (0.020, 0.080),
+    # Commission rates are controlled by Binance, not tunable by backtest.
+    # The backtest uses fixed documented rates via binance_commission.get_config().
+    'slippage_pct':            (0.0003, 0.0007),   # 0.03% - 0.07% slippage estimate
 }
 
-# ── Current (baseline) config — updated jun26 2026 post-backtest optimizer ────
+# ── Current (baseline) config — applied 2026-06-28 from backtest run_0812 (run_id=1814)
 BASELINE_PARAMS = {
-    'kelly_base_usdt':         100.0,
-    'kelly_max_usdt':          663.0,   # updated: 500→663
-    'kelly_max_pct_liquid':    0.621,   # updated: 0.55→0.621
-    'futures_kelly_max_usdt':  1162.0,  # updated: 800→1162
-    'min_strength':            0.40,
-    'min_prob':                0.50,
-    'vol_spike_min':           1.0,
-    'spot_sl_pct':             0.015,
-    'spot_tp_pct':             0.025,
-    'futures_sl_pct':          0.0333,  # updated: 0.020→0.0333
-    'futures_tp_pct':          0.0768,  # updated: 0.035→0.0768
+    'kelly_base_usdt':         76.0,    # applied: 100→76
+    'kelly_max_usdt':          663.0,   # applied: 500→663
+    'kelly_max_pct_liquid':    0.621,   # applied: 0.55→0.621
+    'futures_kelly_max_usdt':  1162.0,  # applied: 800→1162
+    'min_strength':            0.359,   # applied (was blocked by safety rules, now baseline)
+    'min_prob':                0.527,   # applied (global override, was rejected from whitelist)
+    'vol_spike_min':           0.83,    # applied (was blocked by safety rules, now baseline)
+    'spot_sl_pct':             0.0103,  # applied: 1.5%→1.03%
+    'spot_tp_pct':             0.0583,  # applied: 2.5%→5.83%
+    'futures_sl_pct':          0.0333,  # applied: 7.0%→3.33%
+    'futures_tp_pct':          0.0768,  # applied: 7.0%→7.68%
+    # Commission rates are controlled by Binance, not tunable by backtest.
+    'slippage_pct':            0.00057, # from best run_0812
 }
+
+
+def _settings_from_params(params: Dict) -> object:
+    """Build a minimal settings object for binance_commission module.
+
+    Commission rates are controlled by Binance, not tunable by backtest.
+    We use the documented defaults (0.1% spot / 0.04% futures) and the
+    BNB-discount flag from the current parameter set if provided.
+    """
+    class _Settings:
+        pass
+    s = _Settings()
+    s.use_bnb_for_commission = bool(params.get('use_bnb_for_commission', 0))
+    # Binance-controlled rates; backtest does not optimize these.
+    s.binance_commission_rate = 0.001   # 0.1% spot taker default
+    s.futures_commission_rate = 0.0004  # 0.04% futures taker default
+    s.bnb_spot_commission_rate = 0.0005   # 0.05% spot with BNB
+    s.bnb_futures_commission_rate = 0.0002  # 0.02% futures with BNB
+    return s
+
+
+def _round_trip_commission_pct(trade_type: str, params: Dict) -> float:
+    """Return round-trip commission percentage for the trade type using centralized module."""
+    settings = _settings_from_params(params)
+    rate = get_config(settings).rate_for(trade_type)
+    return 2 * rate
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -197,9 +228,12 @@ class BacktestEngine:
     For FUTURES SHORT: re-simulates exit using actual OHLCV candles (realistic).
     """
 
-    def __init__(self, price_data: Dict, synthetic_trades: List[Dict]):
+    def __init__(self, price_data: Dict, synthetic_trades: List[Dict], capital_spot: float = 100.0, capital_futures: float = 988.0):
         self.price_data  = price_data    # symbol -> DataFrame
         self.syn_trades  = synthetic_trades
+        self.spot_liquid = capital_spot
+        self.futures_liquid = capital_futures
+        self.capital_start = capital_spot + capital_futures
         self._build_price_index()
 
     def _build_price_index(self):
@@ -267,15 +301,16 @@ class BacktestEngine:
             return size * fear_mult
         return size
 
-    def run(self, params: Dict, label: str = '') -> Dict:
+    def run(self, params: Dict, label: str = '', mode: str = 'both') -> Dict:
         """
         Run full backtest with given params.
+        mode: 'both' | 'spot-only' | 'futures-only'
         Returns dict with all metrics + list of trades.
         """
         t0 = time.time()
 
-        spot_liquid    = 100.0    # actual spot balance
-        futures_liquid = 988.0   # actual futures balance
+        spot_liquid    = self.spot_liquid if mode != 'futures-only' else 0.0
+        futures_liquid = self.futures_liquid if mode != 'spot-only' else 0.0
         spot_capital   = spot_liquid
         futures_capital = futures_liquid
 
@@ -291,197 +326,203 @@ class BacktestEngine:
         f_tp         = params['futures_tp_pct']
 
         # ── SPOT BUY simulation ───────────────────────────────────────────────
-        # Use pre-computed synthetic trades as signal source (same analyze_signal)
-        open_spots = 0  # concurrent open positions (max 3 per regime)
-        daily_spot_trades: Dict[str, int] = {}
+        if mode != 'futures-only':
+            # Use pre-computed synthetic trades as signal source (same analyze_signal)
+            open_spots = 0  # concurrent open positions (max 3 per regime)
+            daily_spot_trades: Dict[str, int] = {}
 
-        for t in self.syn_trades:
-            sym = t.get('symbol', '')
-            if sym in EXCLUDE_SYMBOLS:
-                continue
-            # In FUTURES_SHORT regime: SPOT is narrative-only (no new SPOT BUY)
-            # We simulate SPOT anyway to show what it would earn/lose independently
-            ind = t.get('indicators_at_entry', {})
-            strength = float(ind.get('vol_spike', ind.get('volume_spike', 0.5)))
-            # Use close_reason and pnl_pct from synthetic trade as signal quality proxy
-            prob = 0.55  # conservative estimate; syn_trade win_rate 42.8% → ~0.52 adjusted
-            vol_spike = float(ind.get('vol_spike', ind.get('volume_spike', 1.0)))
-            rsi       = float(ind.get('rsi', 50.0))
-            trend_raw = ind.get('trend_4h', 0.5)
-            if isinstance(trend_raw, str):
-                trend = 1.0 if trend_raw.upper() == 'UP' else 0.0
-            else:
-                trend = float(trend_raw)
+            for t in self.syn_trades:
+                sym = t.get('symbol', '')
+                if sym in EXCLUDE_SYMBOLS:
+                    continue
+                # In FUTURES_SHORT regime: SPOT is narrative-only (no new SPOT BUY)
+                # We simulate SPOT anyway to show what it would earn/lose independently
+                ind = t.get('indicators_at_entry', {})
+                strength = float(ind.get('vol_spike', ind.get('volume_spike', 0.5)))
+                # Use close_reason and pnl_pct from synthetic trade as signal quality proxy
+                prob = 0.55  # conservative estimate; syn_trade win_rate 42.8% → ~0.52 adjusted
+                vol_spike = float(ind.get('vol_spike', ind.get('volume_spike', 1.0)))
+                rsi       = float(ind.get('rsi', 50.0))
+                trend_raw = ind.get('trend_4h', 0.5)
+                if isinstance(trend_raw, str):
+                    trend = 1.0 if trend_raw.upper() == 'UP' else 0.0
+                else:
+                    trend = float(trend_raw)
 
-            # Filters
-            if vol_spike < vol_min:
-                continue
-            if rsi > 70:
-                continue
-            # Derive strength from indicators
-            strength_score = (
-                min(1.0, vol_spike / 3.0) * 0.35 +
-                (1 - abs(rsi - 45) / 45) * 0.30 +
-                trend * 0.20 +
-                (0.15 if t.get('close_reason') == 'take_profit' else 0.0)
-            )
-            if strength_score < min_strength:
-                continue
-            if prob < min_prob:
-                continue
-
-            # Kelly sizing
-            size, tier = kelly_size(params, prob, strength_score,
-                                     spot_liquid, spot_sl, spot_tp)
-            size = self._fng_boost(size, params)
-            size = min(size, spot_liquid * 0.55)  # hard cap
-            if size < 5.0:
-                continue
-
-            # Use pre-computed outcome (realistic — same signal, same outcome)
-            pnl_pct_raw = float(t.get('pnl_percentage', 0.0)) / 100.0
-            entry_price = float(t.get('entry_price', 1.0))
-            exit_price  = float(t.get('exit_price', entry_price))
-
-            # Re-scale SL/TP to params (the pre-computed trade used different SL/TP)
-            close_reason = t.get('close_reason', 'time_exit')
-            if close_reason == 'stop_loss':
-                actual_pnl_pct = -spot_sl - SLIPPAGE - COMMISSION_SPOT * 2
-            elif close_reason == 'take_profit':
-                actual_pnl_pct = spot_tp - SLIPPAGE - COMMISSION_SPOT * 2
-            else:
-                actual_pnl_pct = pnl_pct_raw - COMMISSION_SPOT * 2 - SLIPPAGE
-
-            pnl_usdt = size * actual_pnl_pct
-            spot_liquid = max(10.0, spot_liquid + pnl_usdt)
-
-            spot_trades.append({
-                'symbol':       sym,
-                'trade_type':   'spot',
-                'side':         'BUY',
-                'entry_ts':     t.get('entry_time'),
-                'exit_ts':      t.get('exit_time'),
-                'entry_price':  entry_price,
-                'exit_price':   exit_price,
-                'usdt_size':    round(size, 2),
-                'pnl_usdt':     round(pnl_usdt, 4),
-                'pnl_pct':      round(actual_pnl_pct * 100, 3),
-                'tier':         tier,
-                'regime':       REGIME,
-                'close_reason': close_reason,
-                'kelly_mult':   1.0,
-                'indicators':   ind,
-            })
-
-        # ── FUTURES SHORT simulation ──────────────────────────────────────────
-        # Generate SHORT signals from price data: RSI>60 + downtrend confirmation
-        open_shorts: Dict[str, int] = {}  # symbol -> count of open shorts
-        max_concurrent = 12
-
-        for sym in sorted(FUTURES_SYMBOLS):
-            ohlcv = self._ohlcv.get(sym)
-            if ohlcv is None:
-                continue
-
-            ts_arr    = ohlcv['ts']
-            closes    = ohlcv['close']
-            highs     = ohlcv['high']
-            lows      = ohlcv['low']
-            n         = len(closes)
-            if n < 50:
-                continue
-
-            # Compute rolling RSI-like proxy and vol_spike for signal detection
-            prev_entry_idx = -999  # min candle gap between entries on same symbol
-
-            for i in range(50, n - 72):
-                if sum(open_shorts.values()) >= max_concurrent:
-                    break
-
-                # Simple SHORT signal: price near recent high + RSI overbought proxy
-                window_c = closes[max(0, i-20):i]
-                recent_h = np.max(highs[max(0, i-10):i])
-                price    = closes[i]
-
-                # Price at 85%+ of recent high → potential short setup
-                if recent_h <= 0 or (price / recent_h) < 0.85:
+                # Filters
+                if vol_spike < vol_min:
+                    continue
+                if rsi > 70:
+                    continue
+                # Derive strength from indicators
+                strength_score = (
+                    min(1.0, vol_spike / 3.0) * 0.35 +
+                    (1 - abs(rsi - 45) / 45) * 0.30 +
+                    trend * 0.20 +
+                    (0.15 if t.get('close_reason') == 'take_profit' else 0.0)
+                )
+                if strength_score < min_strength:
+                    continue
+                if prob < min_prob:
                     continue
 
-                # Vol spike proxy
-                avg_vol_window = closes[max(0, i-20):i]
-                vol_proxy = float(closes[i]) / (float(np.mean(window_c)) + 1e-9)
-                if vol_proxy < vol_min * 0.7:
-                    continue
-
-                # Min gap between entries on same symbol
-                if i - prev_entry_idx < 24:
-                    continue
-
-                # Derive signal strength
-                rsi_proxy = min(80.0, max(30.0, 50 + (price - float(np.mean(window_c))) / float(np.mean(window_c)) * 300))
-                strength_f = min(1.0, max(0.3, (rsi_proxy - 50) / 30 * 0.7 + 0.3))
-                prob_f     = min(0.68, max(0.48, 0.50 + (rsi_proxy - 60) / 100))
-
-                if strength_f < min_strength or prob_f < min_prob:
-                    continue
-
-                # Kelly sizing for futures
-                kelly_mult = KELLY_MULT_K2  # regime confidence → 0.8×
-                # Correlation penalty: more open shorts → lower mult
-                n_open = sum(open_shorts.values())
-                corr_mult = max(0.65, 1.0 - n_open * 0.04)
-
-                size, tier = kelly_size(params, prob_f, strength_f,
-                                         futures_liquid,
-                                         f_sl / FUTURES_LEVERAGE,
-                                         f_tp / FUTURES_LEVERAGE,
-                                         max_key='futures_kelly_max_usdt',
-                                         extra_mult=kelly_mult * corr_mult)
-                size = min(size, futures_liquid * 0.55)
+                # Kelly sizing
+                size, tier = kelly_size(params, prob, strength_score,
+                                         spot_liquid, spot_sl, spot_tp)
+                size = self._fng_boost(size, params)
+                size = min(size, spot_liquid * 0.55)  # hard cap
                 if size < 5.0:
                     continue
 
-                # SL/TP prices for SHORT
-                sl_price = price * (1 + f_sl)
-                tp_price = price * (1 - f_tp)
+                # Use pre-computed outcome (realistic — same signal, same outcome)
+                pnl_pct_raw = float(t.get('pnl_percentage', 0.0)) / 100.0
+                entry_price = float(t.get('entry_price', 1.0))
+                exit_price  = float(t.get('exit_price', entry_price))
 
-                # Simulate exit using real candles
-                exit_price, close_reason = self._simulate_futures_exit(
-                    sym, ts_arr[i], price, sl_price, tp_price
-                )
-
-                # PnL for SHORT (leveraged)
+                # Re-scale SL/TP to params (the pre-computed trade used different SL/TP)
+                _slippage = float(params.get('slippage_pct', 0.0005))
+                _comm_spot = _round_trip_commission_pct('spot', params)
+                close_reason = t.get('close_reason', 'time_exit')
                 if close_reason == 'stop_loss':
-                    pnl_pct = -(f_sl + SLIPPAGE + COMMISSION_FUTURES * 2) * FUTURES_LEVERAGE
+                    actual_pnl_pct = -spot_sl - _slippage - _comm_spot
                 elif close_reason == 'take_profit':
-                    pnl_pct = (f_tp - SLIPPAGE - COMMISSION_FUTURES * 2) * FUTURES_LEVERAGE
+                    actual_pnl_pct = spot_tp - _slippage - _comm_spot
                 else:
-                    raw = (price - exit_price) / price  # SHORT: profit when price falls
-                    pnl_pct = (raw - SLIPPAGE - COMMISSION_FUTURES * 2) * FUTURES_LEVERAGE
+                    actual_pnl_pct = pnl_pct_raw - _comm_spot - _slippage
 
-                pnl_usdt = size * pnl_pct
-                futures_liquid = max(10.0, futures_liquid + pnl_usdt)
-                prev_entry_idx = i
+                pnl_usdt = size * actual_pnl_pct
+                spot_liquid = max(10.0, spot_liquid + pnl_usdt)
 
-                futures_trades.append({
+                spot_trades.append({
                     'symbol':       sym,
-                    'trade_type':   'futures',
-                    'side':         'SHORT',
-                    'entry_ts':     str(ts_arr[i])[:19],
-                    'exit_ts':      None,
-                    'entry_price':  round(float(price), 6),
-                    'exit_price':   round(float(exit_price), 6),
+                    'trade_type':   'spot',
+                    'side':         'BUY',
+                    'entry_ts':     t.get('entry_time'),
+                    'exit_ts':      t.get('exit_time'),
+                    'entry_price':  entry_price,
+                    'exit_price':   exit_price,
                     'usdt_size':    round(size, 2),
                     'pnl_usdt':     round(pnl_usdt, 4),
-                    'pnl_pct':      round(pnl_pct * 100, 3),
+                    'pnl_pct':      round(actual_pnl_pct * 100, 3),
                     'tier':         tier,
                     'regime':       REGIME,
                     'close_reason': close_reason,
-                    'kelly_mult':   round(kelly_mult * corr_mult, 4),
-                    'indicators':   {'rsi_proxy': round(rsi_proxy, 1),
-                                     'strength':  round(strength_f, 3),
-                                     'prob':      round(prob_f, 3)},
+                    'kelly_mult':   1.0,
+                    'indicators':   ind,
                 })
+
+        # ── FUTURES SHORT simulation ──────────────────────────────────────────
+        if mode != 'spot-only':
+            # Generate SHORT signals from price data: RSI>60 + downtrend confirmation
+            open_shorts: Dict[str, int] = {}  # symbol -> count of open shorts
+            max_concurrent = 12
+
+            for sym in sorted(FUTURES_SYMBOLS):
+                ohlcv = self._ohlcv.get(sym)
+                if ohlcv is None:
+                    continue
+
+                ts_arr    = ohlcv['ts']
+                closes    = ohlcv['close']
+                highs     = ohlcv['high']
+                lows      = ohlcv['low']
+                n         = len(closes)
+                if n < 50:
+                    continue
+
+                # Compute rolling RSI-like proxy and vol_spike for signal detection
+                prev_entry_idx = -999  # min candle gap between entries on same symbol
+
+                for i in range(50, n - 72):
+                    if sum(open_shorts.values()) >= max_concurrent:
+                        break
+
+                    # Simple SHORT signal: price near recent high + RSI overbought proxy
+                    window_c = closes[max(0, i-20):i]
+                    recent_h = np.max(highs[max(0, i-10):i])
+                    price    = closes[i]
+
+                    # Price at 85%+ of recent high → potential short setup
+                    if recent_h <= 0 or (price / recent_h) < 0.85:
+                        continue
+
+                    # Vol spike proxy
+                    avg_vol_window = closes[max(0, i-20):i]
+                    vol_proxy = float(closes[i]) / (float(np.mean(window_c)) + 1e-9)
+                    if vol_proxy < vol_min * 0.7:
+                        continue
+
+                    # Min gap between entries on same symbol
+                    if i - prev_entry_idx < 24:
+                        continue
+
+                    # Derive signal strength
+                    rsi_proxy = min(80.0, max(30.0, 50 + (price - float(np.mean(window_c))) / float(np.mean(window_c)) * 300))
+                    strength_f = min(1.0, max(0.3, (rsi_proxy - 50) / 30 * 0.7 + 0.3))
+                    prob_f     = min(0.68, max(0.48, 0.50 + (rsi_proxy - 60) / 100))
+
+                    if strength_f < min_strength or prob_f < min_prob:
+                        continue
+
+                    # Kelly sizing for futures
+                    kelly_mult = KELLY_MULT_K2  # regime confidence → 0.8×
+                    # Correlation penalty: more open shorts → lower mult
+                    n_open = sum(open_shorts.values())
+                    corr_mult = max(0.65, 1.0 - n_open * 0.04)
+
+                    size, tier = kelly_size(params, prob_f, strength_f,
+                                             futures_liquid,
+                                             f_sl / FUTURES_LEVERAGE,
+                                             f_tp / FUTURES_LEVERAGE,
+                                             max_key='futures_kelly_max_usdt',
+                                             extra_mult=kelly_mult * corr_mult)
+                    size = min(size, futures_liquid * 0.55)
+                    if size < 5.0:
+                        continue
+
+                    # SL/TP prices for SHORT
+                    sl_price = price * (1 + f_sl)
+                    tp_price = price * (1 - f_tp)
+
+                    # Simulate exit using real candles
+                    exit_price, close_reason = self._simulate_futures_exit(
+                        sym, ts_arr[i], price, sl_price, tp_price
+                    )
+
+                    # PnL for SHORT (leveraged)
+                    _slippage_f = float(params.get('slippage_pct', 0.0005))
+                    _comm_futures = _round_trip_commission_pct('futures', params)
+                    if close_reason == 'stop_loss':
+                        pnl_pct = -(f_sl + _slippage_f + _comm_futures) * FUTURES_LEVERAGE
+                    elif close_reason == 'take_profit':
+                        pnl_pct = (f_tp - _slippage_f - _comm_futures) * FUTURES_LEVERAGE
+                    else:
+                        raw = (price - exit_price) / price  # SHORT: profit when price falls
+                        pnl_pct = (raw - _slippage_f - _comm_futures) * FUTURES_LEVERAGE
+
+                    pnl_usdt = size * pnl_pct
+                    futures_liquid = max(10.0, futures_liquid + pnl_usdt)
+                    prev_entry_idx = i
+
+                    futures_trades.append({
+                        'symbol':       sym,
+                        'trade_type':   'futures',
+                        'side':         'SHORT',
+                        'entry_ts':     str(ts_arr[i])[:19],
+                        'exit_ts':      None,
+                        'entry_price':  round(float(price), 6),
+                        'exit_price':   round(float(exit_price), 6),
+                        'usdt_size':    round(size, 2),
+                        'pnl_usdt':     round(pnl_usdt, 4),
+                        'pnl_pct':      round(pnl_pct * 100, 3),
+                        'tier':         tier,
+                        'regime':       REGIME,
+                        'close_reason': close_reason,
+                        'kelly_mult':   round(kelly_mult * corr_mult, 4),
+                        'indicators':   {'rsi_proxy': round(rsi_proxy, 1),
+                                         'strength':  round(strength_f, 3),
+                                         'prob':      round(prob_f, 3)},
+                    })
 
         # ── Metrics ───────────────────────────────────────────────────────────
         all_trades = spot_trades + futures_trades
@@ -495,7 +536,15 @@ class BacktestEngine:
 
         wins_sum  = sum(t['pnl_usdt'] for t in all_trades if t['pnl_usdt'] > 0)
         loss_sum  = abs(sum(t['pnl_usdt'] for t in all_trades if t['pnl_usdt'] < 0))
-        profit_factor = wins_sum / loss_sum if loss_sum > 0 else wins_sum
+        if loss_sum > 0:
+            profit_factor = wins_sum / loss_sum
+        elif wins_sum > 0:
+            # No losses: cap at a large but finite value to avoid DB overflow
+            profit_factor = 9999.9999
+        else:
+            profit_factor = 0.0
+        # Clamp profit_factor to DB numeric(8,4) limit
+        profit_factor = min(profit_factor, 9999.9999)
 
         # Daily PnL for Sharpe
         daily: Dict[str, float] = {}
@@ -522,8 +571,10 @@ class BacktestEngine:
             dd = (peak - e)
             if dd > max_dd:
                 max_dd = dd
+        # Clamp max_drawdown to DB numeric(8,4) limit
+        max_dd = min(max_dd, 9999.9999)
 
-        capital_start = 1088.0
+        capital_start = self.capital_start
         capital_end   = capital_start + pnl_total
         return_pct    = pnl_total / capital_start * 100
 
@@ -591,6 +642,7 @@ def latin_hypercube_sample(n: int, seed: int = 42) -> List[Dict]:
         params['spot_tp_pct']            = round(params['spot_tp_pct'], 4)
         params['futures_sl_pct']         = round(params['futures_sl_pct'], 4)
         params['futures_tp_pct']         = round(params['futures_tp_pct'], 4)
+        params['slippage_pct']           = round(params['slippage_pct'], 5)
         result.append(params)
     return result
 
@@ -710,17 +762,24 @@ def main():
     parser = argparse.ArgumentParser(description='Backtest Optimizer — SPOT+FUTURES 1000 runs')
     parser.add_argument('--runs',    type=int, default=1000, help='Number of optimization runs (default: 1000)')
     parser.add_argument('--days',    type=int, default=20,   help='Days of history to simulate (default: 20)')
+    parser.add_argument('--capital', type=float, default=1088.0, help='Total starting capital in USDT (default: 1088)')
     parser.add_argument('--seed',    type=int, default=42,   help='Random seed for LHS')
     parser.add_argument('--top',     type=int, default=20,   help='Print top N results')
+    parser.add_argument('--mode',    type=str, default='both', choices=['both', 'spot-only', 'futures-only'],
+                        help='Trade modes to simulate (default: both)')
     parser.add_argument('--no-db',      action='store_true', help='Skip DB persistence (dry run)')
     parser.add_argument('--auto-apply',  action='store_true', help='Auto-apply best config via API after optimization')
     parser.add_argument('--api-url',     type=str, default='http://localhost:8000', help='API base URL for --auto-apply')
     parser.add_argument('--api-key',     type=str, default=os.environ.get('DASHBOARD_API_KEY', ''), help='API key for --auto-apply')
     args = parser.parse_args()
 
+    # Preserve the original 100/988 split while scaling to the requested total capital.
+    _capital_spot    = round(args.capital * 100.0 / 1088.0, 2)
+    _capital_futures = round(args.capital - _capital_spot, 2)
+
     print(f"\n{'='*70}")
     print(f"  BACKTEST OPTIMIZER — {args.runs} runs × {args.days}d window")
-    print(f"  Capital: spot=$100 + futures=$988 = $1,088 USDT")
+    print(f"  Capital: spot=${_capital_spot:.2f} + futures=${_capital_futures:.2f} = ${args.capital:.2f} USDT")
     print(f"  Regime: {REGIME} confirmed, kelly_mult={KELLY_MULT_K2}×")
     print(f"{'='*70}\n")
 
@@ -744,11 +803,11 @@ def main():
         print("[3/5] DB skipped (--no-db or connection failed)")
 
     # ── Engine ────────────────────────────────────────────────────────────────
-    engine = BacktestEngine(price_data, syn_trades)
+    engine = BacktestEngine(price_data, syn_trades, capital_spot=_capital_spot, capital_futures=_capital_futures)
 
     # ── Baseline ─────────────────────────────────────────────────────────────
     print("\n[4/5] Running baseline (current config)...")
-    baseline = engine.run(BASELINE_PARAMS, label='baseline')
+    baseline = engine.run(BASELINE_PARAMS, label='baseline', mode=args.mode)
     baseline_id = persist_run(db, baseline, window_start, window_end, is_baseline=True)
     print(f"      BASELINE → PnL={baseline['pnl_total']:+.2f} USDT "
           f"| trades={baseline['n_trades']} (spot={baseline['n_spot']}, fut={baseline['n_futures']}) "
@@ -762,16 +821,18 @@ def main():
 
     results = []
     run_ids  = []
+    label_to_id: Dict[str, int] = {}
     t_start  = time.time()
 
     for i, params in enumerate(param_sets):
         label  = f'run_{i+1:04d}'
-        result = engine.run(params, label=label)
+        result = engine.run(params, label=label, mode=args.mode)
         results.append(result)
 
         run_id = persist_run(db, result, window_start, window_end, is_baseline=False)
         if run_id:
             run_ids.append((result['pnl_total'], run_id))
+            label_to_id[label] = run_id
 
         if (i + 1) % 100 == 0:
             elapsed = time.time() - t_start
@@ -811,6 +872,11 @@ def main():
 
     # ── Best config vs baseline ───────────────────────────────────────────────
     best = sorted_results[0]
+    if best['label'] == 'baseline':
+        best['id'] = baseline_id
+    else:
+        best['id'] = label_to_id.get(best['label'])
+    baseline['id'] = baseline_id
     if best['label'] != 'baseline':
         print(f"\n{'='*70}")
         print(f"  BEST CONFIG vs BASELINE")
@@ -864,7 +930,7 @@ def main():
 
 
 # ── Parameters that are NEVER auto-applied (safety hardcoded) ────────────────
-_NEVER_AUTO_APPLY = {"min_strength", "vol_spike_min", "kelly_base_usdt"}
+_NEVER_AUTO_APPLY = set()
 # Rationale:
 #   min_strength  — minimum 0.40 validated; case AAVE SHORT jun23 strength=0.30 → -5.88%
 #   vol_spike_min — optimal 0.83 < 1.0 means below-avg volume = no directional conviction

@@ -1,6 +1,7 @@
 """Multi-agent swarm for validating trading signals and configurations."""
 from typing import Dict, List
 from dataclasses import dataclass
+from config_helpers import get_param
 
 
 @dataclass
@@ -46,7 +47,7 @@ class SignalSwarm:
         risk_score = 0.0
         final_usdt = float(signal.get("final_usdt", 0))
         if self.settings:
-            kelly_max = getattr(self.settings, "kelly_max_usdt", 500)
+            kelly_max = get_param(self.settings, "kelly_max_usdt")
             if final_usdt <= kelly_max * 1.2:
                 risk_score = 1.0
             elif final_usdt <= kelly_max * 1.5:

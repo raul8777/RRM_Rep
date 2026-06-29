@@ -50,12 +50,10 @@ def is_quantity_valid(qty: float, price: float, filters: Dict[str, float]) -> tu
     return True, ""
 
 
-def compute_commission(quantity: float, price: float, settings) -> float:
-    """Calculate entry/exit commission in USDT based on settings."""
-    rate = getattr(settings, "binance_commission_rate", 0.001)
-    if getattr(settings, "use_bnb_for_commission", False):
-        rate = 0.0005
-    return quantity * price * rate
+def compute_commission(quantity: float, price: float, settings, trade_type: str = "spot") -> float:
+    """Calculate entry/exit commission in USDT using the centralized Binance module."""
+    from binance_commission import entry_commission
+    return entry_commission(quantity, price, trade_type, settings)
 
 
 def format_indicators_for_predictor(indicators: dict, price: float) -> dict:

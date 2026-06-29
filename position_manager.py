@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 
 import error_collector as ec
+from config_helpers import get_param
 
 
 def _parse_exit_time(t) -> datetime:
@@ -351,11 +352,11 @@ class PositionManager:
                 _tok_cat = getattr(settings, 'token_categories', {}).get(symbol, {})
                 _cat_beh = _tok_cat.get('market_behavior', 'MIDCAP_ALT')
                 _cat_th  = getattr(settings, 'category_thresholds', {}).get(_cat_beh, {})
-                _sl_pct  = _cat_th.get('stop_loss_pct',  getattr(settings, 'stop_loss_pct',  1.5))
-                _tp_pct  = _cat_th.get('take_profit_pct', getattr(settings, 'take_profit_pct', 2.5))
+                _sl_pct  = _cat_th.get('stop_loss_pct',  get_param(settings, 'stop_loss_pct'))
+                _tp_pct  = _cat_th.get('take_profit_pct', get_param(settings, 'take_profit_pct'))
                 sl_price = price * (1 - _sl_pct / 100)
                 tp_price = price * (1 + _tp_pct / 100)
-                commission_rate = getattr(settings, 'binance_commission_rate', 0.001)
+                commission_rate = get_param(settings, 'binance_commission_rate')
                 entry_commission = amount * price * commission_rate
 
                 pos = Position(
@@ -460,23 +461,25 @@ class PositionManager:
                             logger.warning(f"Could not persist TP update for {position_id}: {e}")
                     return
 
-    def _calc_close(self, position: Position, exit_price: float, commission_rate: float):
+    def _calc_close(self, position: Position, exit_price: float, commission_rate: float = None):
         """Shared PnL calculation for closing a position. Returns (qty, entry_p, exit_price, pnl, pnl_pct, exit_comm, pred_accuracy)."""
+        from binance_commission import get_config, exit_commission, net_pnl
         qty        = float(position.quantity)
         entry_p    = float(position.entry_price)
-        entry_comm = float(position.entry_commission or 0)
         exit_price = float(exit_price)
-        exit_commission = qty * exit_price * commission_rate
-        if position.side.upper() == "BUY":
-            gross_pnl        = (exit_price - entry_p) * qty
-            total_commission = entry_comm + exit_commission
-            pnl              = gross_pnl - total_commission
-            pnl_percentage   = ((exit_price - entry_p) / entry_p) * 100 - (total_commission / (qty * entry_p)) * 100
+        # Use centralized commission module if commission_rate is not explicitly provided
+        if commission_rate is None:
+            exit_commission = exit_commission(qty, exit_price, 'spot')
         else:
-            gross_pnl        = (entry_p - exit_price) * qty
-            total_commission = entry_comm + exit_commission
-            pnl              = gross_pnl - total_commission
-            pnl_percentage   = ((entry_p - exit_price) / entry_p) * 100 - (total_commission / (qty * entry_p)) * 100
+            exit_commission = qty * exit_price * commission_rate
+        # Preserve stored entry commission if available
+        entry_comm = float(position.entry_commission or 0)
+        if position.side.upper() == "BUY":
+            gross_pnl = (exit_price - entry_p) * qty
+        else:
+            gross_pnl = (entry_p - exit_price) * qty
+        pnl = gross_pnl - entry_comm - exit_commission
+        pnl_percentage = (pnl / (qty * entry_p)) * 100 if (qty * entry_p) > 0 else 0.0
         prediction_accuracy = None
         if position.pnl_prediction:
             expected_pnl = float(position.pnl_prediction.get('expected_pnl', 0))

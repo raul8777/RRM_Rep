@@ -41,6 +41,11 @@
             <span class="chip-val countdown" id="headerCountdownValue">—:——</span>
             <span class="chip-label" id="chipRegime">—</span>
         </div>
+        <div class="status-chip" id="commissionChip" title="Comisiones / BNB" style="cursor:pointer" onclick="switchTab('tab-perf')">
+            <span class="chip-icon">🪙</span>
+            <span class="chip-val" id="headerCommissionRate">—</span>
+            <span class="chip-label" id="headerCommissionBnb">BNB</span>
+        </div>
         <div class="status-chip" id="healthChip" onclick="switchTab('tab-system')" style="cursor:pointer">
             <span id="healthDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#888;margin-right:4px;flex-shrink:0"></span>
             <span id="healthText" style="font-size:11px;color:#ccc">Health</span>
@@ -370,6 +375,20 @@
             <h2>⚡ Kelly Sizing — Configuración Activa</h2>
             <div id="kellyConfigPanel">
                 <p class="loading">Cargando configuración Kelly...</p>
+            </div>
+        </div>
+
+        <!-- Commission & BNB Discount Panel -->
+        <div class="card">
+            <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+                <h2>🪙 Comisiones &amp; Descuento BNB</h2>
+                <div style="display:flex;gap:8px;align-items:center">
+                    <span class="card-sub" id="commissionPanelSub">SPOT + FUTURES</span>
+                    <button class="btn btn-primary btn-xs" onclick="fetchCommissionStatus()">↻ Actualizar</button>
+                </div>
+            </div>
+            <div id="commissionPanel">
+                <p class="loading">Cargando comisiones...</p>
             </div>
         </div>
 

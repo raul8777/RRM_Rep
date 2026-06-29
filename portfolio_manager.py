@@ -255,7 +255,8 @@ class PortfolioManager:
         max_pairs = len(ranked_pairs)
         
         # Also limit by settings.max_positions if available
-        max_positions = getattr(self.settings, "max_positions", 10)
+        from config_helpers import get_param
+        max_positions = get_param(self.settings, "max_positions")
         
         optimal_count = min(base_count, max_pairs, max_positions)
         

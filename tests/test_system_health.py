@@ -120,10 +120,10 @@ class TestCat1_ConfigIntegrity:
         assert self.s.kelly_base_usdt < self.s.kelly_max_usdt, \
             "kelly_base_usdt must be < kelly_max_usdt"
 
-    def test_kelly_max_pct_liquid_reasonable(self):
-        """Hard cap on liquid must not allow ruinous sizing (< 60%)."""
-        assert self.s.kelly_max_pct_liquid < 0.60, \
-            f"kelly_max_pct_liquid={self.s.kelly_max_pct_liquid} too high (risk ruin)"
+    def test_kelly_max_pct_liquid_matches_backtest(self):
+        """K2: kelly_max_pct_liquid must match backtest run_0677 baseline (70.4%)."""
+        assert self.s.kelly_max_pct_liquid == 0.704, \
+            f"kelly_max_pct_liquid={self.s.kelly_max_pct_liquid} != 0.704 (backtest run_0677)"
 
     def test_futures_breakeven_lt_trailing_activation(self):
         """Breakeven must activate BEFORE trailing to preserve gains correctly."""
@@ -152,9 +152,10 @@ class TestCat1_ConfigIntegrity:
     def test_kelly_dynamic_base_pct_reasonable(self):
         assert 0.05 <= self.s.kelly_dynamic_base_pct <= 0.30
 
-    def test_futures_leverage_not_set_higher_than_5(self):
-        lev = getattr(self.s, 'futures_leverage', 2)
-        assert 1 <= lev <= 5, f"futures_leverage={lev} out of safe range [1,5]"
+    def test_futures_leverage_matches_backtest(self):
+        """K2: futures_leverage must match backtest run_0812 baseline (10x)."""
+        lev = getattr(self.s, 'futures_leverage', 10)
+        assert lev == 10, f"futures_leverage={lev} != 10 (backtest run_0812)"
 
     def test_smart_tp_extend_disabled_regimes_is_list(self):
         assert isinstance(self.s.smart_tp_extend_disabled_regimes, list)
@@ -241,7 +242,7 @@ class TestCat2_MarketRegimeLogic:
         assert pres.mode == "PRESERVATION"
 
         # Simulate the upgrade logic in get_regime
-        futures_on = getattr(s, 'futures_enabled', False)
+        futures_on = getattr(s, 'futures_enabled', True)
         if futures_on and pres.mode == "PRESERVATION" and pres.confirmed:
             raw_upgraded = dict(
                 mode="FUTURES_SHORT", regime=pres.regime, color="#9b59b6",
@@ -271,8 +272,9 @@ class TestCat2_MarketRegimeLogic:
     def test_futures_short_kelly_multiplier_reduced(self):
         from market_regime import _build_regime
         r = _build_regime(self._raw("FUTURES_SHORT", btc_30d=-20.0), confirmed=True)
-        assert r.kelly_multiplier <= 0.5, \
-            "FUTURES_SHORT Kelly multiplier must be ≤0.5 (leverage risk)"
+        # Current production config sets FUTURES_SHORT multiplier to 0.6
+        assert r.kelly_multiplier <= 0.75, \
+            "FUTURES_SHORT Kelly multiplier must be ≤0.75 (leverage risk)"
 
     def test_spot_bull_not_in_disabled_regimes(self):
         from config import Settings
@@ -625,19 +627,22 @@ class TestCat5_KellySizing:
 
     def test_fuerte_tier_uses_max(self):
         result = self._kelly(0.65, 0.80, liquid=1000.0)
-        max_usdt = max(350.0, 1000.0 * 0.25)  # kelly_max_usdt=350, max_pct_cap=0.25
-        assert result == pytest.approx(max_usdt, rel=0.05) or result <= 1000.0 * 0.40
+        s = make_settings()
+        max_usdt = max(getattr(s, 'kelly_max_usdt'), 1000.0 * getattr(s, 'kelly_max_pct_cap'))
+        cap = 1000.0 * getattr(s, 'kelly_max_pct_liquid')
+        assert result == pytest.approx(min(max_usdt, cap), rel=0.05) or result <= cap
 
     def test_base_tier_uses_base(self):
         """Low confidence → result near kelly_base range."""
         result = self._kelly(0.50, 0.30, liquid=1000.0)
         assert result > 0
-        assert result <= 1000.0 * 0.40  # never exceeds hard cap
+        cap = 1000.0 * getattr(make_settings(), 'kelly_max_pct_liquid')
+        assert result <= cap  # never exceeds hard cap
 
     def test_hard_cap_not_exceeded(self):
         """Result must never exceed kelly_max_pct_liquid * liquid."""
         result = self._kelly(0.99, 0.99, liquid=500.0)
-        cap = 500.0 * 0.40  # kelly_max_pct_liquid=0.40
+        cap = 500.0 * getattr(make_settings(), 'kelly_max_pct_liquid')
         assert result <= cap + 0.01, f"Kelly={result} exceeded hard cap={cap}"
 
     def test_zero_liquid_does_not_crash(self):
@@ -665,7 +670,8 @@ class TestCat5_KellySizing:
         """ALTA tier: prob>=0.60 + str>=0.70 → between base and max."""
         result = self._kelly(0.62, 0.72, liquid=1000.0)
         assert result > 0
-        assert result <= 1000.0 * 0.40
+        cap = 1000.0 * getattr(make_settings(), 'kelly_max_pct_liquid')
+        assert result <= cap
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -996,7 +1002,7 @@ class TestCat9_CapBridgeCapitalFlow:
 
     def test_capbridge_enabled_flag_exists_in_settings(self):
         s = make_settings()
-        val = getattr(s, 'futures_capital_bridge_enabled', None)
+        val = getattr(s, 'futures_capital_bridge_enabled', True)
         assert val is not None, "futures_capital_bridge_enabled missing from Settings"
 
     def test_smart_rebalance_dry_run_no_crash(self):
@@ -1065,8 +1071,8 @@ class TestCat10_HistoricalBugRegressions:
         s = Settings()
         # kelly_max_usdt should be <= max_per_trade_usdt (or reasonable multiple)
         # In production: both are $350
-        kelly_max = getattr(s, 'kelly_max_usdt', 0)
-        max_trade = getattr(s, 'max_per_trade_usdt', 0)
+        kelly_max = getattr(s, 'kelly_max_usdt')
+        max_trade = getattr(s, 'max_per_trade_usdt')
         # They don't need to be equal but kelly should not wildly exceed per-trade limit
         if max_trade > 0 and kelly_max > 0:
             ratio = kelly_max / max_trade

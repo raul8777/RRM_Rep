@@ -60,7 +60,7 @@ services:
       - DASHBOARD_API_KEY=${DASHBOARD_API_KEY:-}
       - REDIS_PASSWORD=${REDIS_PASSWORD:-changeme_redis_2024}
       - CRYPTOCOMPARE_API_KEY=${CRYPTOCOMPARE_API_KEY:-}
-      - MAX_PER_TRADE_USDT=${MAX_PER_TRADE_USDT:-350.0}
+      - MAX_PER_TRADE_USDT=${MAX_PER_TRADE_USDT:-500.0}
       - MAX_POSITIONS=${MAX_POSITIONS:-15}
       - MAX_POSITIONS_PER_SYMBOL=${MAX_POSITIONS_PER_SYMBOL:-1}
       - MAX_POSITIONS_SPOT_BULL=${MAX_POSITIONS_SPOT_BULL:-20}
@@ -70,8 +70,8 @@ services:
       - ANALYSIS_SYMBOLS=["DOGEUSDT","RENDERUSDT","BNBUSDT","SOLUSDT","TAOUSDT","FETUSDT","AVAXUSDT","ADAUSDT","XRPUSDT","DOTUSDT","SUIUSDT","PEPEUSDT","WIFUSDT","BTCUSDT","ETHUSDT","LINKUSDT","NEARUSDT","WLDUSDT","INJUSDT","AGIXUSDT","ONDOUSDT","JUPUSDT","OPUSDT","HBARUSDT","AAVEUSDT","ARBUSDT","MATICUSDT","ATOMUSDT","GRTUSDT","AIOZUSDT","SEIUSDT","SUSHIUSDT"]
       # Futures SHORT — pares elegibles, SL/TP, límites (F2 expansión jun 18 2026: 8→19 pares)
       - FUTURES_SYMBOLS=["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ADAUSDT","NEARUSDT","SUIUSDT","DOGEUSDT","AVAXUSDT","LINKUSDT","TAOUSDT","UNIUSDT","DOTUSDT","1000PEPEUSDT","BCHUSDT","AAVEUSDT","FILUSDT","INJUSDT"]
-      - FUTURES_SL_PCT=7.0
-      - FUTURES_TP_PCT=${FUTURES_TP_PCT:-7.0}
+      - FUTURES_SL_PCT=1.42               # jun29: 3.33→1.42 (backtest run_0677)
+      - FUTURES_TP_PCT=2.81               # jun29: 7.68→2.81 (backtest run_0677)
       - FUTURES_MAX_SHORTS=12
       - FUTURES_MAX_LARGECAP_SHORTS=5
       - FUTURES_LARGECAP_SYMBOLS=["BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","SOLUSDT"]
@@ -84,25 +84,28 @@ services:
       - FUTURES_CAPITAL_BRIDGE_MIN_TRANSFER=10.0
       # Unified Portfolio Manager (jun 23 2026) — PortfolioManager as capital director
       - USE_UNIFIED_PORTFOLIO_MANAGER=true
-      - FUTURES_KELLY_BASE_USDT=100.0
-      - FUTURES_KELLY_MAX_USDT=800.0      # K1: $500→$800
-      - FUTURES_KELLY_MAX_PCT_LIQUID=0.55
+      - FUTURES_KELLY_BASE_USDT=73.0        # jun29: 76→73 (backtest run_0677)
+      - FUTURES_KELLY_MAX_USDT=1111.0     # jun29: 1162→1111 (backtest run_0677)
+      - FUTURES_KELLY_MAX_PCT_LIQUID=0.704  # jun29: 0.621→0.704 (backtest run_0677)
+      - FUTURES_LEVERAGE=10                 # K2: 2→10 — backtest run_0812 validated 10x
       # K1: SPOT Kelly agresivo (era $40/$350/0.28 en .env)
-      - KELLY_BASE_USDT=100.0
-      - KELLY_MAX_USDT=500.0
-      - KELLY_MAX_PCT_LIQUID=0.55
+      - KELLY_BASE_USDT=73.0              # jun29: 76→73 (backtest run_0677)
+      - KELLY_MAX_USDT=747.0              # jun29: 663→747 (backtest run_0677)
+      - KELLY_MAX_PCT_LIQUID=0.704        # jun29: 0.621→0.704 (backtest run_0677)
       # PB (Profit Boost) sesion 16 jun21 2026
       - FUTURES_SL_COOLDOWN_HOURS=4.0
-      - FUTURES_MAX_NEW_PER_CYCLE=3
+      - MAX_POSITIONS_FUTURES_SHORT=12     # K2: 4→12 — backtest run_0812 uses 12 concurrent shorts
+      - FUTURES_MAX_NEW_PER_CYCLE=5        # K2: 3→5 — more throughput in FUTURES_SHORT without explosion
       - FUTURES_MASS_SL_THRESHOLD=3
       - FUTURES_MASS_SL_COOLDOWN_HOURS=4.0
       - FUTURES_CONFIRM_RED_CANDLE=true
       - FUTURES_NO_SHORT_BTC_3H_THRESHOLD=1.0
-      - FUTURES_USDT_PER_TRADE=100.0
+      - FUTURES_USDT_PER_TRADE=100.0      # PB4: minimum margin floor per short (NOT a hard cap for Kelly-sized SHORTs)
       # H-FIXES sesion 8 jun21 2026
       - FUTURES_TRAILING_ACTIVATION_PCT=2.0
       # SL-OPT sesion 19 jun22 2026 — wider SL + SSO adaptive exits
-      - STOP_LOSS_PCT=2.5
+      - STOP_LOSS_PCT=3.36                # jun29: 1.03→3.36 (backtest run_0677)
+      - TAKE_PROFIT_PCT=4.14              # jun29: 5.83→4.14 (backtest run_0677)
       - ATR_SL_MIN_PCT=0.015
       # SSO-1 Capital Velocity (jun 22 2026) — close decaying/slow positions faster
       # RECALIBRADO jun 23 2026: gates USD escalados al nuevo tamaño de posición (~$330 margin post-transfer $1,390 SPOT->FUT)
@@ -128,7 +131,21 @@ services:
       - MIN_CYCLES_BEFORE_CLOSE_SHORTS=5
       - CYCLE_FUTURES_SHORT=4
       - FUTURES_MIN_INJECT_STRENGTH=0.40
-      - FUTURES_COMMISSION_RATE=0.0004
+      - MIN_SIGNAL_STRENGTH=0.389
+      - MIN_SUCCESS_PROBABILITY=0.499
+      - VOL_SPIKE_MIN=0.91
+      - FUTURES_MIN_PROB=0.499
+      - FUTURES_VOL_SPIKE_MIN=0.91
+      - SLIPPAGE_PCT=0.00052
+      - BINANCE_COMMISSION_RATE=0.001      # Binance-controlled spot taker default (live rate refreshed from API)
+      - FUTURES_COMMISSION_RATE=0.0004     # Binance-controlled futures taker default (live rate refreshed from API)
+      - BNB_SPOT_COMMISSION_RATE=0.0005
+      - BNB_FUTURES_COMMISSION_RATE=0.0002
+      - USE_BNB_FOR_COMMISSION=true
+      - AUTO_BNB_FOR_COMMISSION=true
+      - BNB_BUFFER_DAYS=7
+      - BNB_MIN_BALANCE_USD=5.0
+      - BNB_EXTRA_BUFFER_USD=5.0
       - FUTURES_MAX_ESCALAMIENTOS=2
       # PV (Profit Velocity) sesion 17 jun21 2026 — scale-out + momentum reversal
       - FUTURES_SCALE_OUT_PCT=1.5

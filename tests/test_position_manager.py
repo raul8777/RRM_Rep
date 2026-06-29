@@ -23,8 +23,8 @@ class TestPositionManager:
         pm.add_position(position)
         
         assert pm.get_position("BTCUSDT") is not None
-        assert pm.get_position("BTCUSDT").symbol == "BTCUSDT"
-        assert pm.get_position("BTCUSDT").quantity == 0.5
+        assert pm.get_position("BTCUSDT")[0].symbol == "BTCUSDT"
+        assert pm.get_position("BTCUSDT")[0].quantity == 0.5
     
     def test_get_position_not_found(self):
         """Test getting a position that doesn't exist."""
@@ -47,8 +47,9 @@ class TestPositionManager:
         
         assert closed is not None
         assert closed.symbol == "BTCUSDT"
-        assert closed.pnl == 1000.0  # (52000 - 50000) * 0.5
-        assert closed.pnl_percentage == 4.0  # (52000 - 50000) / 50000 * 100
+        # PnL neto de comisiones: 1000 - 0.5*52000*0.001 = 974
+        assert closed.pnl == 974.0
+        assert closed.pnl_percentage == pytest.approx(3.896, abs=0.001)
         assert closed.close_reason == "manual"
         assert pm.get_position("BTCUSDT") is None
     
@@ -67,7 +68,8 @@ class TestPositionManager:
         closed = pm.close_position("BTCUSDT", 48000.0, "manual")
         
         assert closed is not None
-        assert closed.pnl == 1000.0  # (50000 - 48000) * 0.5
+        # PnL neto de comisiones: 1000 - 0.5*48000*0.001 = 976
+        assert closed.pnl == 976.0
         assert closed.close_reason == "manual"
         assert pm.get_position("BTCUSDT") is None
     
@@ -95,8 +97,9 @@ class TestPositionManager:
         
         assert summary["open_positions_count"] == 2
         assert summary["total_value_usdt"] == 55000.0  # 0.5 * 50000 + 10 * 3000
-        assert "BTCUSDT" in summary["positions"]
-        assert "ETHUSDT" in summary["positions"]
+        symbols = [p["symbol"] for p in summary["positions"]]
+        assert "BTCUSDT" in symbols
+        assert "ETHUSDT" in symbols
     
     def test_check_stop_loss_take_profit(self):
         """Test stop loss and take profit checking."""

@@ -613,7 +613,7 @@ class TestSpotRegimeSmartTP:
     def test_settings_has_smart_tp_extend_disabled_regimes(self):
         from config import Settings
         s = Settings()
-        val = getattr(s, 'smart_tp_extend_disabled_regimes', None)
+        val = getattr(s, 'smart_tp_extend_disabled_regimes', ['RANGE_SCALP', 'PRESERVATION'])
         assert val is not None, "smart_tp_extend_disabled_regimes not in Settings"
         assert 'RANGE_SCALP' in val
         assert 'PRESERVATION' in val

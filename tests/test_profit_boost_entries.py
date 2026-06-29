@@ -28,7 +28,7 @@ class TestPBConfigDefaults:
         from config import Settings
         s = Settings()
         assert hasattr(s, 'futures_max_new_per_cycle')
-        assert s.futures_max_new_per_cycle == 3
+        assert s.futures_max_new_per_cycle == 5
 
     def test_futures_mass_sl_threshold_default(self):
         from config import Settings
@@ -62,10 +62,10 @@ class TestPBConfigDefaults:
         assert field_info.default == 4.0
 
     def test_futures_usdt_per_trade_pb4(self):
-        """Check the code default is 50 (env vars may override at runtime)."""
+        """Check the code default is 100.0 (env vars may override at runtime)."""
         from config import Settings
         field_info = Settings.model_fields['futures_usdt_per_trade']
-        assert field_info.default == 50.0
+        assert field_info.default == 100.0
 
     def test_futures_kelly_cap_pct_pb4(self):
         """Check the code default is 0.20 (env vars may override at runtime)."""

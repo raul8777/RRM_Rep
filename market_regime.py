@@ -367,7 +367,7 @@ def get_regime(binance_client, force_refresh: bool = False, settings=None) -> Ma
         print(f"[MarketRegime] Proposed {proposed_mode} (1/{_CONFIRM_CYCLES}) | holding {current_mode} | {raw['reason']}")
 
     # ── Upgrade PRESERVATION → FUTURES_SHORT when futures enabled ────────────
-    futures_on = settings is not None and getattr(settings, 'futures_enabled', False)
+    futures_on = settings is not None and getattr(settings, 'futures_enabled', True)
     if futures_on and confirmed_regime.mode == "PRESERVATION" and confirmed_regime.confirmed:
         raw_upgraded = dict(
             mode          = "FUTURES_SHORT",

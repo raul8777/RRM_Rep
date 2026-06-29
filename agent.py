@@ -83,7 +83,7 @@ class TradingAgent:
                     result["error"] = "Real trading is disabled (set ALLOW_REAL_TRADING=true to enable)."
                 else:
                     # Enforce per-trade USDT limit if we have a notional estimate
-                    if notional is not None and notional > getattr(self.settings, "max_per_trade_usdt", 0):
+                    if notional is not None and notional > getattr(self.settings, "max_per_trade_usdt", 500.0):
                         result["error"] = f"Order not placed: notional {notional} exceeds max per-trade {self.settings.max_per_trade_usdt} USDT"
                     else:
                         # Check balances for buy/sell

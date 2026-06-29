@@ -3439,6 +3439,96 @@ function renderTickerBar(items) {
 }
 
 // ── Main update loop (single fetch per cycle) ─────────────────────────────────
+let _commissionStatus = null;
+
+async function fetchCommissionStatus() {
+    try {
+        const res = await fetch(`${API_BASE}/dashboard/commission`, { headers: _authHeaders() });
+        if (!res.ok) return;
+        _commissionStatus = await res.json();
+        renderCommissionChip(_commissionStatus);
+        renderCommissionPanel(_commissionStatus);
+    } catch (e) {
+        console.error('Commission status fetch error:', e);
+    }
+}
+
+function renderCommissionChip(status) {
+    if (!status || !status.ok) return;
+    const rate = status.use_bnb ? status.bnb_spot_rate : status.spot_rate;
+    const ratePct = (rate * 100).toFixed(3);
+    const bnbText = status.use_bnb ? 'ON' : 'OFF';
+    const bnbClass = status.use_bnb ? 'positive' : 'neutral';
+    const rateEl = document.getElementById('headerCommissionRate');
+    const bnbEl = document.getElementById('headerCommissionBnb');
+    if (rateEl) rateEl.textContent = `${ratePct}%`;
+    if (bnbEl) {
+        bnbEl.textContent = `BNB ${bnbText}`;
+        bnbEl.className = `chip-label ${bnbClass}`;
+    }
+}
+
+function renderCommissionPanel(status) {
+    const panel = document.getElementById('commissionPanel');
+    if (!panel) return;
+    if (!status || !status.ok) {
+        panel.innerHTML = `<p class="loading">Error cargando comisiones</p>`;
+        return;
+    }
+    const s = status;
+    const bs = s.bnb_status || {};
+    const fmtPct = (v) => (parseFloat(v || 0) * 100).toFixed(3);
+    const fmtUsd = (v) => parseFloat(v || 0).toFixed(2);
+    const fmtBnb = (v) => parseFloat(v || 0).toFixed(4);
+    const bnbBadge = s.use_bnb
+        ? '<span class="badge-positive">🟢 BNB activo</span>'
+        : '<span class="badge-negative">🔴 BNB inactivo</span>';
+    const spotBnbUsd = (bs.spot_bnb || 0) * (bs.bnb_price || 0);
+    const futuresBnbUsd = (bs.futures_bnb || 0) * (bs.bnb_price || 0);
+    const ct = s.commission_totals || {};
+    const spotToday = ct.spot ? ct.spot.today : 0;
+    const spot7d = ct.spot ? ct.spot['7d'] : 0;
+    const futuresToday = ct.futures ? ct.futures.today : 0;
+    const futures7d = ct.futures ? ct.futures['7d'] : 0;
+    const estSavingsSpot = spot7d * (s.spot_rate - s.bnb_spot_rate) / Math.max(s.spot_rate, 0.0001);
+    const estSavingsFutures = futures7d * (s.futures_rate - s.bnb_futures_rate) / Math.max(s.futures_rate, 0.0001);
+    panel.innerHTML = `
+        <div class="commission-grid">
+            <div class="commission-section">
+                <h3>Tasas activas</h3>
+                <div class="commission-row"><span>SPOT</span><span>${fmtPct(s.use_bnb ? s.bnb_spot_rate : s.spot_rate)}%</span></div>
+                <div class="commission-row"><span>FUTURES</span><span>${fmtPct(s.use_bnb ? s.bnb_futures_rate : s.futures_rate)}%</span></div>
+                <div class="commission-row"><span>Slippage</span><span>${fmtPct(s.slippage_pct)}%</span></div>
+                <div class="commission-row"><span>Descuento BNB</span><span>${bnbBadge}</span></div>
+            </div>
+            <div class="commission-section">
+                <h3>BNB balances</h3>
+                <div class="commission-row"><span>SPOT BNB</span><span>${fmtBnb(bs.spot_bnb)} BNB ($${fmtUsd(spotBnbUsd)})</span></div>
+                <div class="commission-row"><span>FUTURES BNB</span><span>${fmtBnb(bs.futures_bnb)} BNB ($${fmtUsd(futuresBnbUsd)})</span></div>
+                <div class="commission-row"><span>BNB precio</span><span>$${fmtUsd(bs.bnb_price)}</span></div>
+                <div class="commission-row"><span>Buffer SPOT 7d</span><span>$${fmtUsd(bs.spot_buffer)}</span></div>
+                <div class="commission-row"><span>Buffer FUTURES 7d</span><span>$${fmtUsd(bs.futures_buffer)}</span></div>
+            </div>
+            <div class="commission-section">
+                <h3>Comisiones pagadas</h3>
+                <div class="commission-row"><span>SPOT hoy</span><span>$${fmtUsd(spotToday)}</span></div>
+                <div class="commission-row"><span>SPOT 7d</span><span>$${fmtUsd(spot7d)}</span></div>
+                <div class="commission-row"><span>FUTURES hoy</span><span>$${fmtUsd(futuresToday)}</span></div>
+                <div class="commission-row"><span>FUTURES 7d</span><span>$${fmtUsd(futures7d)}</span></div>
+            </div>
+            <div class="commission-section">
+                <h3>Ahorro potencial BNB</h3>
+                <div class="commission-row"><span>SPOT 7d</span><span class="positive">$${fmtUsd(estSavingsSpot)}</span></div>
+                <div class="commission-row"><span>FUTURES 7d</span><span class="positive">$${fmtUsd(estSavingsFutures)}</span></div>
+                <div class="commission-row"><span>Total 7d</span><span class="positive">$${fmtUsd(estSavingsSpot + estSavingsFutures)}</span></div>
+            </div>
+        </div>
+        <div class="commission-actions" style="margin-top:10px">
+            <span class="commission-note">SPOT: ${fmtPct(s.spot_rate)}% → ${fmtPct(s.bnb_spot_rate)}% | FUTURES: ${fmtPct(s.futures_rate)}% → ${fmtPct(s.bnb_futures_rate)}%</span>
+        </div>
+    `;
+}
+
 async function updateDashboard() {
     const data = await fetchDashboardData();
     if (!data) return;
@@ -3492,6 +3582,9 @@ async function updateDashboard() {
 
     // D1: Kelly Config panel (config + log)
     fetchKellyConfig();
+
+    // Commission & BNB panel
+    fetchCommissionStatus();
 
     // Backtest Optimizer panel (static results — only refresh on demand)
     if (!_backtestCache) fetchBacktestResults();

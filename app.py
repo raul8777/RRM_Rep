@@ -3,13 +3,15 @@ from fastapi import status as http_status
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+import asyncio
 import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
 from config import get_settings
+from config_helpers import get_param as _cfg_param, dump_active_config, _PARAM_DEFAULTS
 from signal_store import add_signal, get_signals, get_recent_signals, set_db_client
 from strategy import parse_signal
 import run_trades
@@ -150,8 +152,8 @@ def startup_event():
     try:
         from pnl_predictor import PnLPredictor
         _predictor = PnLPredictor()
-        _warmup_syms = list(getattr(settings, 'futures_symbols', []))
-        _top_spot = list(getattr(settings, 'analysis_symbols', []))[:10]
+        _warmup_syms = list(_cfg_param(settings, 'futures_symbols'))
+        _top_spot = list(_cfg_param(settings, 'analysis_symbols'))[:10]
         for _s in _top_spot:
             if _s not in _warmup_syms:
                 _warmup_syms.append(_s)
@@ -230,6 +232,29 @@ def startup_event():
                     print(f"Config restore: {_ct_attr} re-applied ({list(_ct.keys())})")
     except Exception as _re:
         print(f"Config restore error (non-fatal): {_re}")
+    # Refresh live commission rates from Binance API (Binance-controlled values)
+    try:
+        from binance_commission import refresh_config_from_binance
+        _comp_c = get_components()
+        _refresh = refresh_config_from_binance(
+            _comp_c.settings,
+            spot_client=_comp_c.binance_client,
+            futures_client=_get_futures_client(_comp_c.settings),
+            db_client=_comp_c.db_client,
+        )
+        print(f"Commission refresh: spot={_refresh.get('spot_rate')} futures={_refresh.get('futures_rate')} use_bnb={_refresh.get('use_bnb')}")
+    except Exception as e:
+        print(f"Commission refresh error (non-fatal): {e}")
+    # Start background periodic config snapshot task for traceability
+    try:
+        asyncio.create_task(_config_snapshot_loop())
+    except Exception as e:
+        print(f"[ConfigGovernance] failed to start snapshot loop: {e}")
+    # Start background periodic config drift monitoring
+    try:
+        asyncio.create_task(_config_drift_loop())
+    except Exception as e:
+        print(f"[ConfigGovernance] failed to start drift loop: {e}")
 
 
 @app.post("/predictor/bootstrap")
@@ -491,8 +516,8 @@ async def get_commission_summary(hours: int = 24) -> Dict:
         )
         spot_gross = spot_comm = spot_trades = 0.0
         fut_gross  = fut_comm  = fut_trades  = 0.0
-        _spot_rate = getattr(settings, 'binance_commission_rate', 0.001)
-        _fut_rate  = getattr(settings, 'futures_commission_rate', 0.0004)
+        _spot_rate = config_helpers.get_param(settings, 'binance_commission_rate')
+        _fut_rate  = config_helpers.get_param(settings, 'futures_commission_rate')
         for r in rows:
             meta = r.get('metadata') or {}
             if isinstance(meta, str):
@@ -798,7 +823,7 @@ async def close_all_positions(_auth: None = Depends(_require_api_key)) -> Dict:
                 pass
             price = float(binance_client.get_symbol_price(symbol))
             order = binance_client.create_market_order(symbol=symbol, side="SELL", quantity=total_qty)
-            commission_rate = getattr(settings, 'binance_commission_rate', 0.001)
+            commission_rate = config_helpers.get_param(settings, 'binance_commission_rate')
             position_manager.close_all_positions_for_symbol(symbol, price, "manual_rebalance", commission_rate)
             results.append({"symbol": symbol, "qty": total_qty, "price": price, "status": "sold", "entries_closed": len(pos_list)})
         except Exception as e:
@@ -1578,7 +1603,7 @@ async def get_dashboard_summary() -> Dict:
                     import pnl_service as _pnl_svc
                     _sp_pred, _ = _pnl_svc.predict_for_symbol(
                         symbol=symbol, client=binance_client, settings=settings,
-                        position_size_usdt=_sp_total_cost or 50.0
+                        position_size_usdt=_sp_total_cost or 50.0, trade_type='spot'
                     )
                     if _sp_pred and _sp_first.db_id:
                         import json as _json
@@ -1704,7 +1729,7 @@ async def get_dashboard_summary() -> Dict:
                         _fp_invested = round(fp["entry_price"] * fp["qty"], 2)
                         _fp_pred, _ = _pnl_svc.predict_for_symbol(
                             symbol=fp["symbol"], client=binance_client, settings=settings,
-                            position_size_usdt=_fp_invested or 100.0
+                            position_size_usdt=_fp_invested or 100.0, trade_type='futures'
                         )
                         if _fp_pred and db_client:
                             import json as _json
@@ -2028,11 +2053,11 @@ async def get_dashboard_summary() -> Dict:
         _fng = _nc.get_fear_greed()
         _fng_mod = _nc.get_fear_greed_modifier()
         _trending = _nc.get_trending_symbols()
-        _analysis_base = [s.replace("USDT", "") for s in getattr(settings, "analysis_symbols", [])]
+        _analysis_base = [s.replace("USDT", "") for s in _cfg_param(settings, "analysis_symbols")]
         # News sentiment (Fase 3) — count positive/negative articles last 24h
         _news_sentiment = {"positive": 0, "negative": 0, "neutral": 0}
         try:
-            _all_syms = getattr(settings, "analysis_symbols", [])
+            _all_syms = _cfg_param(settings, "analysis_symbols")
             _recent = _nc.get_recent_news(_all_syms, since_hours=24)
             for _art in _recent:
                 _s = _art.get("sentiment", "neutral")
@@ -2388,7 +2413,7 @@ async def get_futures_positions() -> Dict:
         from run_trades import _get_futures_client
         from config import get_settings as _get_s
         _s = _get_s()
-        if not getattr(_s, 'futures_enabled', False):
+        if not getattr(_s, 'futures_enabled', True):
             return {"enabled": False, "positions": [], "count": 0}
         _fc = _get_futures_client(_s)
 
@@ -2622,13 +2647,13 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 7) -> Dict:
         from run_trades import _get_futures_client
         from config import get_settings as _get_s
         _s = _get_s()
-        if not getattr(_s, 'futures_enabled', False):
+        if not getattr(_s, 'futures_enabled', True):
             return {"enabled": False, "positions": [], "count": 0}
 
         _fc = _get_futures_client(_s)
 
         # Build symbol list from config to query even after restart (empty tracking)
-        _extra = list(getattr(_s, 'futures_symbols', []))
+        _extra = list(_cfg_param(_s, 'futures_symbols'))
         try:
             from pair_screener import get_screened_pairs
             _extra = list(dict.fromkeys(_extra + get_screened_pairs(settings=_s).get("futures", [])))
@@ -3046,7 +3071,7 @@ async def get_health_status() -> Dict:
 
     # C6: Futures API (fapi.binance.com) health check
     try:
-        _futures_enabled = getattr(settings, 'futures_enabled', False)
+        _futures_enabled = getattr(settings, 'futures_enabled', True)
         if _futures_enabled:
             import urllib.request as _ur, time as _time
             t0 = _time.monotonic()
@@ -3101,12 +3126,14 @@ async def get_health_status() -> Dict:
     # Fase D: portfolio exposure + ciclo dinámico actual
     try:
         comp = get_components()
-        _bal = comp.portfolio_manager.get_total_balance()
+        from run_trades import _get_futures_client as _health_gfc
+        _fc_health = _health_gfc(comp.settings)
+        _bal = comp.portfolio_manager.get_unified_balance(futures_client=_fc_health)
         _total = float(_bal.get("total_usdt", 0))
-        _liquid = float(_bal.get("usdt_available", 0))
+        _liquid = float(_bal.get("usdt_available", 0)) + float(_bal.get("futures_available", 0))
         _invested = _total - _liquid
         _exp_pct = _invested / _total if _total > 0 else 0.0
-        _max_exp = getattr(settings, 'max_total_exposure_pct', 0.65)
+        _max_exp = getattr(settings, 'max_total_exposure_pct', 0.75)
         _exp_status = "ok" if _exp_pct < _max_exp * 0.85 else ("warning" if _exp_pct < _max_exp else "cap_reached")
         checks["portfolio_exposure"] = {
             "status": _exp_status,
@@ -3115,6 +3142,8 @@ async def get_health_status() -> Dict:
             "total_usdt": round(_total, 2),
             "exposure_pct": round(_exp_pct * 100, 1),
             "max_exposure_pct": round(_max_exp * 100, 1),
+            "spot_usdt": round(float(_bal.get("usdt_available", 0)), 2),
+            "futures_usdt": round(float(_bal.get("futures_total", 0)), 2),
         }
         if _exp_status == "cap_reached" and overall == "ok":
             overall = "warning"
@@ -3136,7 +3165,7 @@ async def get_health_status() -> Dict:
         "regime": _regime_now,
         "max_positions_current": _max_pos_now,
         "overflow_slots_used": _overflow_used,
-        "overflow_max_extra": getattr(settings, 'overflow_max_extra', 3),
+        "overflow_max_extra": _cfg_param(settings, 'overflow_max_extra'),
     }
 
     # Circuit breaker status
@@ -3252,6 +3281,18 @@ async def get_health_full_check() -> Dict:
                lambda: assert_(cfg.kelly_max_pct_liquid < 0.60,
                                f"kelly_max_pct_liquid={cfg.kelly_max_pct_liquid} too high"),
                warn_only=True),
+        _check("futures_leverage_matches_backtest",
+               lambda: assert_(cfg.futures_leverage == 10,
+                               f"futures_leverage={cfg.futures_leverage} != 10 (backtest run_0812)")),
+        _check("futures_kelly_max_pct_liquid_matches_backtest",
+               lambda: assert_(cfg.futures_kelly_max_pct_liquid == 0.621,
+                               f"futures_kelly_max_pct_liquid={cfg.futures_kelly_max_pct_liquid} != 0.621")),
+        _check("max_positions_futures_short_matches_backtest",
+               lambda: assert_(cfg.max_positions_futures_short == 12,
+                               f"max_positions_futures_short={cfg.max_positions_futures_short} != 12")),
+        _check("no_module_level_leverage_override",
+               lambda: assert_(cfg.futures_leverage <= 10,
+                               f"futures_leverage={cfg.futures_leverage} exceeds module cap 10")),
     ]
     categories.append({"name": "config_integrity", "label": "Config Integrity",
                         "checks": cat1_checks})
@@ -3349,11 +3390,11 @@ async def get_health_full_check() -> Dict:
     cat6_checks = [
         _check("capbridge_min_transfer_geq10",
                lambda: assert_(
-                   getattr(cfg, 'futures_capital_bridge_min_transfer', 10.0) >= 10.0,
+                   _cfg_param(cfg, 'futures_capital_bridge_min_transfer') >= 10.0,
                    "Min transfer < $10")),
         _check("capbridge_enabled_flag_exists",
                lambda: assert_(
-                   getattr(cfg, 'futures_capital_bridge_enabled', None) is not None,
+                   _cfg_param(cfg, 'futures_capital_bridge_enabled') is not None,
                    "futures_capital_bridge_enabled missing"),
                warn_only=True),
         _check("smart_rebalance_capital_exists",
@@ -3558,11 +3599,11 @@ async def get_kelly_config(_auth=Depends(_require_api_key)) -> Dict:
         return {
             "ok": True,
             "spot": {
-                "base_usdt":       getattr(_s, 'kelly_base_usdt', 100.0),
-                "max_usdt":        getattr(_s, 'kelly_max_usdt', 500.0),
-                "cap_pct_liquid":  getattr(_s, 'kelly_max_pct_liquid', 0.55),
-                "dynamic_base_pct":getattr(_s, 'kelly_dynamic_base_pct', 0.15),
-                "max_pct_cap":     getattr(_s, 'kelly_max_pct_cap', 0.25),
+                "base_usdt":       config_helpers.get_param(_s, 'kelly_base_usdt'),
+                "max_usdt":        config_helpers.get_param(_s, 'kelly_max_usdt'),
+                "cap_pct_liquid":  config_helpers.get_param(_s, 'kelly_max_pct_liquid'),
+                "dynamic_base_pct":config_helpers.get_param(_s, 'kelly_dynamic_base_pct'),
+                "max_pct_cap":     config_helpers.get_param(_s, 'kelly_max_pct_cap'),
                 "tiers": {
                     "FUERTE": {"prob": 0.65, "strength": 0.80, "amount": "max_usdt"},
                     "ALTA":   {"prob": 0.60, "strength": 0.70, "amount": "base + 90% tramo"},
@@ -3586,10 +3627,10 @@ async def get_kelly_config(_auth=Depends(_require_api_key)) -> Dict:
                 },
             },
             "futures": {
-                "base_usdt":      getattr(_s, 'futures_kelly_base_usdt', 100.0),
-                "max_usdt":       getattr(_s, 'futures_kelly_max_usdt', 800.0),
-                "cap_pct_liquid": getattr(_s, 'futures_kelly_max_pct_liquid', 0.55),
-                "cap_pct_margin": getattr(_s, 'futures_kelly_cap_pct', 0.20),
+                "base_usdt":      config_helpers.get_param(_s, 'futures_kelly_base_usdt'),
+                "max_usdt":       config_helpers.get_param(_s, 'futures_kelly_max_usdt'),
+                "cap_pct_liquid": config_helpers.get_param(_s, 'futures_kelly_max_pct_liquid'),
+                "cap_pct_margin": config_helpers.get_param(_s, 'futures_kelly_cap_pct'),
                 "kelly_multiplier_table": {
                     "not_confirmed":    0.5,
                     "confirmed_low":    0.6,
@@ -3637,6 +3678,9 @@ _KELLY_EDITABLE_FIELDS = {
     "min_signal_strength",
     "vol_spike_min",
     "futures_min_prob", "futures_vol_spike_min",
+    "min_success_probability",
+    "slippage_pct",
+    "use_bnb_for_commission",
     "hybrid_optimizer_enabled", "auto_apply_backtest", "backtest_safe_only",
 }
 
@@ -3742,6 +3786,178 @@ async def patch_kelly_config(body: Dict, _auth=Depends(_require_api_key)) -> Dic
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+@app.get("/config/commission")
+async def get_commission_status(_auth=Depends(_require_api_key)) -> Dict:
+    """
+    Return current commission configuration and BNB discount status.
+    Also triggers a BNB balance check if auto_bnb_for_commission is enabled.
+    """
+    try:
+        from init_components import get_components
+        from run_trades import _get_futures_client
+        from binance_commission import get_config, auto_manage_bnb_discount
+        _comp = get_components()
+        _s = _comp.settings
+        _cfg = get_config(_s)
+        _bnb_status = auto_manage_bnb_discount(
+            settings=_s,
+            spot_client=_comp.binance_client,
+            futures_client=_get_futures_client(_s),
+            db_client=db_client,
+        )
+        return {
+            "ok": True,
+            "spot_rate": _cfg.spot_rate,
+            "futures_rate": _cfg.futures_rate,
+            "bnb_spot_rate": _cfg.bnb_spot_rate,
+            "bnb_futures_rate": _cfg.bnb_futures_rate,
+            "use_bnb": _bnb_status.get('use_bnb', _cfg.use_bnb),
+            "slippage_pct": _cfg.slippage_pct,
+            "bnb_status": _bnb_status,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/dashboard/commission")
+async def get_dashboard_commission(_auth=Depends(_require_api_key)) -> Dict:
+    """
+    Return commission/BNB data formatted for dashboard consumption.
+    Includes recent commission totals from trades_closed for visibility.
+    """
+    try:
+        from init_components import get_components
+        from run_trades import _get_futures_client
+        from binance_commission import get_config, auto_manage_bnb_discount
+        _comp = get_components()
+        _s = _comp.settings
+        _cfg = get_config(_s)
+        _bnb_status = auto_manage_bnb_discount(
+            settings=_s,
+            spot_client=_comp.binance_client,
+            futures_client=_get_futures_client(_s),
+            db_client=db_client,
+        )
+
+        # Recent commission totals from trades_closed (today + 7d)
+        # NOTE: trades_closed does not currently store trade_type. We show total paid
+        # and split by a simple heuristic: positions whose symbol is in futures_symbols
+        # are counted as FUTURES; everything else as SPOT.
+        _totals = {"spot": {"today": 0.0, "7d": 0.0}, "futures": {"today": 0.0, "7d": 0.0}}
+        try:
+            _futures_symbols = set(_cfg_param(_s, 'futures_symbols') or [])
+            rows = db_client.execute_query("""
+                SELECT symbol,
+                    COALESCE(SUM(CASE WHEN exit_time >= NOW() - INTERVAL '1 day' THEN COALESCE(entry_commission,0) + COALESCE(exit_commission,0) ELSE 0 END), 0) as today,
+                    COALESCE(SUM(CASE WHEN exit_time >= NOW() - INTERVAL '7 days' THEN COALESCE(entry_commission,0) + COALESCE(exit_commission,0) ELSE 0 END), 0) as d7
+                FROM trades_closed
+                WHERE exit_time >= NOW() - INTERVAL '7 days'
+                GROUP BY symbol
+            """)
+            for r in rows:
+                sym = r.get('symbol', '')
+                is_futures = sym in _futures_symbols
+                key = 'futures' if is_futures else 'spot'
+                _totals[key]['today'] += float(r.get('today', 0) or 0)
+                _totals[key]['7d'] += float(r.get('d7', 0) or 0)
+        except Exception as _e:
+            _totals["error"] = str(_e)
+
+        return {
+            "ok": True,
+            "spot_rate": _cfg.spot_rate,
+            "futures_rate": _cfg.futures_rate,
+            "bnb_spot_rate": _cfg.bnb_spot_rate,
+            "bnb_futures_rate": _cfg.bnb_futures_rate,
+            "use_bnb": _bnb_status.get('use_bnb', _cfg.use_bnb),
+            "slippage_pct": _cfg.slippage_pct,
+            "bnb_status": _bnb_status,
+            "commission_totals": _totals,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/dashboard/screener")
+async def get_dashboard_screener(_auth=Depends(_require_api_key)) -> Dict:
+    """
+    Return the latest regime-aware pair screening decision for dashboard consumption.
+    """
+    try:
+        from pair_screener import get_screened_pairs
+        from init_components import get_components
+        _comp = get_components()
+        _s = _comp.settings
+        _regime = getattr(_s, 'current_regime_mode', 'SPOT_BULL')
+        _screened = get_screened_pairs(
+            settings=_s,
+            regime_mode=_regime,
+            db_client=_comp.db_client,
+        )
+        return {
+            "ok": True,
+            "regime_mode": _regime,
+            "spot_count": len(_screened.get("spot", [])),
+            "futures_count": len(_screened.get("futures", [])),
+            "spot": _screened.get("spot", []),
+            "futures": _screened.get("futures", []),
+            "top_bullish": _screened.get("_meta", {}).get("top_bullish", []),
+            "top_bearish": _screened.get("_meta", {}).get("top_bearish", []),
+            "fetched_at": _screened.get("_meta", {}).get("fetched_at"),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/screener/decisions")
+async def get_screener_decisions(
+    limit: int = 50,
+    regime_mode: str = None,
+    acknowledged: bool = None,
+    _auth=Depends(_require_api_key)
+) -> Dict:
+    """
+    Return the last N screener decisions persisted to screener_decisions.
+    Optional filters: regime_mode, acknowledged.
+    """
+    try:
+        _where = []
+        _params = []
+        if regime_mode:
+            _where.append("regime_mode = %s")
+            _params.append(regime_mode)
+        if acknowledged is not None:
+            _where.append("rejected_reason IS " + ("NOT NULL" if acknowledged else "NULL"))
+        _sql = "SELECT * FROM screener_decisions"
+        if _where:
+            _sql += " WHERE " + " AND ".join(_where)
+        _sql += " ORDER BY created_at DESC LIMIT %s"
+        _params.append(limit)
+        rows = db_client.execute_query(_sql, tuple(_params))
+        return {
+            "ok": True,
+            "count": len(rows),
+            "decisions": [
+                {
+                    "id": r.get("id"),
+                    "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
+                    "regime_mode": r.get("regime_mode"),
+                    "spot_symbols": r.get("spot_symbols") if isinstance(r.get("spot_symbols"), list) else json.loads(r.get("spot_symbols") or "[]"),
+                    "futures_symbols": r.get("futures_symbols") if isinstance(r.get("futures_symbols"), list) else json.loads(r.get("futures_symbols") or "[]"),
+                    "scores_json": r.get("scores_json") if isinstance(r.get("scores_json"), dict) else json.loads(r.get("scores_json") or "{}"),
+                    "rejected_reason": r.get("rejected_reason"),
+                }
+                for r in rows
+            ],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "decisions": []}
 
 
 @app.get("/config/kelly/log")
@@ -3919,8 +4135,9 @@ async def get_backtest_best(_auth=Depends(_require_api_key)) -> Dict:
             "vol_spike_min":          {"field": "vol_spike_min",            "scale": 1.0,   "min": 1.0,    "max": 3.0},
         }
         # Safety: params that are locked from auto-apply unless optimal value is within safe range
-        _UNSAFE = {"min_strength", "vol_spike_min"}
-        _NEVER_AUTO = {"min_strength", "vol_spike_min"}
+        # jun28: relaxed after Backtest 1000 validated run_0812 as baseline=best
+        _UNSAFE = set()
+        _NEVER_AUTO = set()
 
         def _build_param_patch(bt_key: str, mapping: Dict) -> Dict:
             if bt_key not in best_params:
@@ -4075,6 +4292,196 @@ def _restore_config_snapshot(snapshot_id: str, settings) -> Dict:
     return {"ok": True, "restored": _restored, "rejected": _rejected, "snapshot_id": snapshot_id}
 
 
+def _log_config_change(
+    source: str,
+    changed_by: Optional[str] = None,
+    snapshot_id: Optional[str] = None,
+    diff: Optional[Dict] = None,
+    full_config: Optional[Dict] = None,
+) -> None:
+    """Persist a configuration change row for 100% traceability."""
+    try:
+        db_client.execute_update(
+            "INSERT INTO config_change_log (source, changed_by, snapshot_id, diff, full_config) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (
+                source,
+                changed_by,
+                snapshot_id,
+                json.dumps(diff or {}),
+                json.dumps(full_config) if full_config is not None else None,
+            ),
+        )
+    except Exception as e:
+        print(f"[ConfigGovernance] failed to log config change: {e}")
+
+
+def _create_full_config_snapshot(settings) -> str:
+    """Create a point-in-time snapshot of the full runtime config."""
+    _snapshot = dump_active_config(settings)
+    _snapshot_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    _payload = json.dumps(_snapshot)
+    db_client.execute_update(
+        "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+        "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+        (f"config_snapshot_{_snapshot_id}", _payload, _payload),
+    )
+    db_client.execute_update(
+        "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES ('config_snapshot_latest', %s, NOW()) "
+        "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+        (json.dumps(_snapshot_id), json.dumps(_snapshot_id)),
+    )
+    _log_config_change(
+        source="snapshot",
+        snapshot_id=_snapshot_id,
+        diff={},
+        full_config=_snapshot,
+    )
+    return _snapshot_id
+
+
+async def _config_snapshot_loop() -> None:
+    """Background task: save a full config snapshot every 15 minutes."""
+    while True:
+        try:
+            await asyncio.sleep(900)
+            _comp = get_components()
+            if _comp and _comp.settings:
+                _sid = _create_full_config_snapshot(_comp.settings)
+                print(f"[ConfigGovernance] periodic snapshot created: {_sid}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[ConfigGovernance] periodic snapshot failed: {e}")
+
+
+_BACKTEST_BASELINE: Dict[str, Any] = {
+    'kelly_base_usdt': 73.0,
+    'kelly_max_usdt': 747.0,
+    'kelly_max_pct_liquid': 0.704,
+    'kelly_max_pct_cap': 0.25,
+    'max_per_trade_usdt': 500.0,
+    'futures_leverage': 10,
+    'futures_max_shorts': 12,
+    'futures_max_new_per_cycle': 5,
+    'futures_usdt_per_trade': 100.0,
+    'futures_sl_pct': 1.42,
+    'futures_tp_pct': 2.81,
+    'futures_kelly_base_usdt': 73.0,
+    'futures_kelly_max_usdt': 1111.0,
+    'futures_kelly_max_pct_liquid': 0.704,
+    'stop_loss_pct': 3.36,
+    'take_profit_pct': 4.14,
+    'min_signal_strength': 0.389,
+    'min_success_probability': 0.499,
+    'futures_min_prob': 0.499,
+    'vol_spike_min': 0.91,
+    'slippage_pct': 0.00052,
+    'use_bnb_for_commission': True,
+}
+
+
+# Severity for each backtest baseline field. Anything else is 'warning' by default.
+_BACKTEST_BASELINE_SEVERITY: Dict[str, str] = {
+    'futures_leverage': 'critical',
+    'futures_max_shorts': 'critical',
+    'futures_usdt_per_trade': 'critical',
+    'futures_sl_pct': 'critical',
+    'futures_tp_pct': 'critical',
+    'kelly_max_pct_liquid': 'critical',
+    'max_per_trade_usdt': 'warning',
+    'stop_loss_pct': 'warning',
+    'take_profit_pct': 'warning',
+}
+
+
+def _check_config_drift(settings) -> List[Dict]:
+    """Compare runtime config against canonical defaults and backtest baseline."""
+    _drifts: List[Dict] = []
+    _actual = dump_active_config(settings)
+    # These are intentionally environment-specific or operator-controlled and not drift.
+    _EXCLUDED = {
+        'dry_run', 'allow_real_trading', 'analysis_symbols', 'futures_symbols',
+        'futures_largecap_symbols', 'trading_excluded_symbols', 'narrative_tokens',
+        'token_categories', 'category_thresholds', 'futures_category_thresholds',
+        'current_regime_mode',
+    }
+    # Canonical default drift (SPOT+FUTURES parameters) — skip keys already covered by baseline
+    for k, expected in _PARAM_DEFAULTS.items():
+        if k in _EXCLUDED or k in _BACKTEST_BASELINE:
+            continue
+        val = _actual.get(k)
+        if val != expected:
+            _drifts.append({
+                "severity": "critical" if k in _BACKTEST_BASELINE_SEVERITY else "warning",
+                "param": k,
+                "expected": expected,
+                "actual": val,
+                "source": "canonical_default",
+            })
+    # Backtest baseline drift (profit-critical subset) — single source of truth for these keys
+    for k, expected in _BACKTEST_BASELINE.items():
+        if k in _EXCLUDED:
+            continue
+        val = _actual.get(k)
+        if val != expected:
+            _drifts.append({
+                "severity": _BACKTEST_BASELINE_SEVERITY.get(k, "warning"),
+                "param": k,
+                "expected": expected,
+                "actual": val,
+                "source": "backtest_baseline",
+            })
+    return _drifts
+
+
+def _persist_drift_alerts(drifts: List[Dict]) -> int:
+    """Insert new drift alerts, deduplicating unacknowledged identical rows."""
+    _inserted = 0
+    for d in drifts:
+        try:
+            # Skip if identical unacknowledged alert already exists in last 24h
+            _dup = db_client.execute_query(
+                "SELECT 1 FROM config_drift_alerts "
+                "WHERE param=%s AND source=%s AND expected=%s AND actual=%s "
+                "AND acknowledged=FALSE AND detected_at > NOW() - INTERVAL '24 hours' "
+                "LIMIT 1",
+                (d["param"], d["source"], json.dumps(d["expected"]), json.dumps(d["actual"]))
+            )
+            if _dup:
+                continue
+            db_client.execute_update(
+                "INSERT INTO config_drift_alerts (severity, param, expected, actual, source) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (d["severity"], d["param"], json.dumps(d["expected"]), json.dumps(d["actual"]), d["source"])
+            )
+            _inserted += 1
+        except Exception as e:
+            print(f"[DriftAlert] failed to insert alert for {d.get('param')}: {e}")
+    return _inserted
+
+
+async def _config_drift_loop() -> None:
+    """Background task: check config drift every 15 minutes and persist alerts."""
+    while True:
+        try:
+            await asyncio.sleep(900)
+            _comp = get_components()
+            if not _comp or not _comp.settings:
+                continue
+            _drifts = _check_config_drift(_comp.settings)
+            if _drifts:
+                _n = _persist_drift_alerts(_drifts)
+                if _n:
+                    print(f"[DriftAlert] {_n} new drift alert(s) persisted")
+            else:
+                print("[DriftAlert] runtime config aligned with baseline")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[DriftAlert] drift check failed: {e}")
+
+
 @app.post("/backtest/apply")
 async def post_backtest_apply(body: Dict, _auth=Depends(_require_api_key)) -> Dict:
     """Apply a backtest run configuration to live settings with snapshot + audit."""
@@ -4125,11 +4532,15 @@ async def post_backtest_apply(body: Dict, _auth=Depends(_require_api_key)) -> Di
             "futures_tp_pct":         {"field": "futures_tp_pct",         "scale": 100.0, "min": 0.020,  "max": 0.100},
             "spot_sl_pct":            {"field": "stop_loss_pct",          "scale": 100.0, "min": 0.010,  "max": 0.040},
             "spot_tp_pct":            {"field": "take_profit_pct",        "scale": 100.0, "min": 0.018,  "max": 0.080},
-            "min_strength":           {"field": "min_signal_strength",      "scale": 1.0,   "min": 0.40,   "max": 0.90},
-            "min_prob":               {"field": "min_prob",                 "scale": 1.0,   "min": 0.45,   "max": 0.80},
-            "vol_spike_min":          {"field": "vol_spike_min",            "scale": 1.0,   "min": 1.0,    "max": 3.0},
+            "min_strength":           {"field": "min_signal_strength",      "scale": 1.0,   "min": 0.30,   "max": 0.90},
+            "min_prob":               {"field": "min_success_probability",  "scale": 1.0,   "min": 0.40,   "max": 0.80},
+            "futures_min_prob":       {"field": "futures_min_prob",           "scale": 1.0,   "min": 0.40,   "max": 0.80},
+            "vol_spike_min":          {"field": "vol_spike_min",            "scale": 1.0,   "min": 0.5,    "max": 3.0},
+            "futures_vol_spike_min":  {"field": "futures_vol_spike_min",    "scale": 1.0,   "min": 0.5,    "max": 3.0},
+            "slippage_pct":           {"field": "slippage_pct",             "scale": 1.0,   "min": 0.0001, "max": 0.001},
         }
-        _NEVER_AUTO = {"min_strength", "vol_spike_min"}
+        # jun28: relaxed after Backtest 1000 validated run_0812 as baseline=best
+        _NEVER_AUTO = set()
         _safe_only = getattr(_s, "backtest_safe_only", True)
 
         _applied_scalars = {}
@@ -4231,6 +4642,145 @@ async def post_backtest_apply(body: Dict, _auth=Depends(_require_api_key)) -> Di
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/config/drift")
+async def get_config_drift(_auth=Depends(_require_api_key)) -> Dict:
+    """
+    K2: Compare live runtime settings against the canonical backtest baseline (run_0812)
+    and module-level safety caps. Returns a list of drift issues.
+    """
+    try:
+        from config_helpers import validate_config, dump_active_config
+        from init_components import get_components
+        _comp = get_components()
+        _s = _comp.settings
+        _validation = validate_config(_s)
+        _snapshot = dump_active_config(_s)
+        _backtest_baseline = {
+            'kelly_base_usdt': 73.0,
+            'kelly_max_usdt': 747.0,
+            'kelly_max_pct_liquid': 0.704,
+            'futures_kelly_base_usdt': 73.0,
+            'futures_kelly_max_usdt': 1111.0,
+            'futures_kelly_max_pct_liquid': 0.704,
+            'futures_leverage': 10,
+            'futures_max_shorts': 12,
+            'futures_max_new_per_cycle': 5,
+            'futures_sl_pct': 1.42,
+            'futures_tp_pct': 2.81,
+            'stop_loss_pct': 3.36,
+            'take_profit_pct': 4.14,
+            'min_signal_strength': 0.389,
+            'min_success_probability': 0.499,
+            'futures_min_prob': 0.499,
+            'vol_spike_min': 0.91,
+            'slippage_pct': 0.00052,
+            'use_bnb_for_commission': True,
+        }
+        _drift = []
+        for k, expected in _backtest_baseline.items():
+            actual = _snapshot.get(k)
+            if actual != expected:
+                _drift.append({'param': k, 'expected': expected, 'actual': actual, 'severity': 'warning'})
+        return {
+            'ok': True,
+            'validation': _validation,
+            'drift': _drift,
+            'snapshot': _snapshot,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
+@app.post("/config/apply-backtest")
+async def post_config_apply_backtest(body: Dict, _auth=Depends(_require_api_key)) -> Dict:
+    """
+    K2: Apply a backtest run configuration to runtime state.
+    Reads the run from backtest_results, maps params to Settings fields, persists
+    a snapshot and the override in trading_runtime_state, and writes an audit row.
+    Container restart is required for env-var based fields to take full effect.
+    """
+    try:
+        from init_components import get_components
+        _comp = get_components()
+        _run_id = body.get('run_id')
+        if not _run_id:
+            return {'ok': False, 'error': 'run_id required'}
+        # Load backtest run result
+        _rows = db_client.execute_query(
+            "SELECT run_id, params, metrics FROM backtest_results WHERE run_id = %s ORDER BY created_at DESC LIMIT 1",
+            (_run_id,)
+        )
+        if not _rows:
+            return {'ok': False, 'error': f'backtest run {_run_id} not found'}
+        _params = _rows[0].get('params') or {}
+        _metrics = _rows[0].get('metrics') or {}
+
+        # Map backtest param names (decimals) to Settings field names
+        _MAP = {
+            'spot_sl_pct': 'stop_loss_pct',
+            'spot_tp_pct': 'take_profit_pct',
+            'futures_sl_pct': 'futures_sl_pct',
+            'futures_tp_pct': 'futures_tp_pct',
+            'kelly_base_usdt': 'kelly_base_usdt',
+            'kelly_max_usdt': 'kelly_max_usdt',
+            'kelly_max_pct_liquid': 'kelly_max_pct_liquid',
+            'futures_kelly_base_usdt': 'futures_kelly_base_usdt',
+            'futures_kelly_max_usdt': 'futures_kelly_max_usdt',
+            'futures_kelly_max_pct_liquid': 'futures_kelly_max_pct_liquid',
+            'futures_leverage': 'futures_leverage',
+            'futures_max_shorts': 'futures_max_shorts',
+            'futures_max_new_per_cycle': 'futures_max_new_per_cycle',
+            'min_signal_strength': 'min_signal_strength',
+            'min_success_probability': 'min_success_probability',
+            'vol_spike_min': 'vol_spike_min',
+        }
+        _mapped = {}
+        _rejected = {}
+        for _src, _dst in _MAP.items():
+            if _src in _params:
+                _mapped[_dst] = _params[_src]
+            else:
+                _rejected[_src] = 'not present in run params'
+
+        # Snapshot current config before applying
+        from config_helpers import dump_active_config
+        _snapshot = dump_active_config(_comp.settings)
+        _snapshot_id = f"pre_apply_{_run_id}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        db_client.execute_update(
+            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            (f"config_snapshot_{_snapshot_id}", json.dumps(_snapshot))
+        )
+        # Persist the override
+        db_client.execute_update(
+            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            ("kelly_config_override", json.dumps(_mapped))
+        )
+        # Audit row
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+            ('__config__', 'system', 'config_apply_backtest', json.dumps({
+                'run_id': _run_id,
+                'applied': _mapped,
+                'rejected': _rejected,
+                'metrics': _metrics,
+                'snapshot_id': _snapshot_id,
+            }), False)
+        )
+        return {
+            'ok': True,
+            'run_id': _run_id,
+            'applied': _mapped,
+            'rejected': _rejected,
+            'snapshot_id': _snapshot_id,
+            'message': 'Backtest config persisted. Restart container for env-var fields to take full effect.',
+        }
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
 @app.get("/config/snapshots")
 async def get_config_snapshots(limit: int = 10, _auth=Depends(_require_api_key)) -> Dict:
     """List recent config snapshots for rollback."""
@@ -4262,6 +4812,208 @@ async def post_config_rollback(body: Dict, _auth=Depends(_require_api_key)) -> D
         if not _snapshot_id:
             return {"ok": False, "error": "snapshot_id required"}
         return _restore_config_snapshot(_snapshot_id, _s)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/config/snapshot")
+async def post_config_snapshot(_auth=Depends(_require_api_key)) -> Dict:
+    """Create a point-in-time snapshot of the full runtime config."""
+    try:
+        _comp = get_components()
+        _sid = _create_full_config_snapshot(_comp.settings)
+        return {"ok": True, "snapshot_id": _sid}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/config/verify")
+async def post_config_verify(body: Dict = None, _auth=Depends(_require_api_key)) -> Dict:
+    """Verify runtime config against canonical baseline (same as tmp_verify_runtime_config.py)."""
+    try:
+        _comp = get_components()
+        _actual = dump_active_config(_comp.settings)
+        _exclude = {
+            'dry_run', 'allow_real_trading', 'analysis_symbols', 'futures_symbols',
+            'futures_largecap_symbols', 'trading_excluded_symbols', 'narrative_tokens',
+            'token_categories', 'category_thresholds', 'current_regime_mode',
+        }
+        if body and isinstance(body, dict):
+            _exclude.update(body.get('exclude', []))
+        _mismatches = {}
+        for k, expected in _PARAM_DEFAULTS.items():
+            if k in _exclude:
+                continue
+            val = _actual.get(k)
+            if val != expected:
+                _mismatches[k] = {"expected": expected, "actual": val}
+        _ok = not _mismatches
+        return {
+            "ok": _ok,
+            "mismatches": _mismatches,
+            "mismatch_count": len(_mismatches),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/config/change-log")
+async def get_config_change_log(limit: int = 50, _auth=Depends(_require_api_key)) -> Dict:
+    """Return recent configuration changes for 100% traceability."""
+    try:
+        _rows = db_client.execute_query(
+            "SELECT id, changed_at, source, changed_by, snapshot_id, diff "
+            "FROM config_change_log ORDER BY changed_at DESC LIMIT %s",
+            (limit,)
+        )
+        _changes = []
+        for r in _rows:
+            _diff = r.get("diff")
+            if isinstance(_diff, str):
+                _diff = json.loads(_diff)
+            _changes.append({
+                "id": r.get("id"),
+                "changed_at": r.get("changed_at").isoformat() if r.get("changed_at") else None,
+                "source": r.get("source"),
+                "changed_by": r.get("changed_by"),
+                "snapshot_id": r.get("snapshot_id"),
+                "diff": _diff,
+            })
+        return {"ok": True, "changes": _changes, "count": len(_changes)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/config/drift-alerts")
+async def get_config_drift_alerts(acknowledged: Optional[bool] = None, limit: int = 50, _auth=Depends(_require_api_key)) -> Dict:
+    """Return config drift alerts (optionally filtered by acknowledged)."""
+    try:
+        _params: List[Any] = []
+        _sql = (
+            "SELECT id, detected_at, severity, param, expected, actual, source, acknowledged, "
+            "acknowledged_at, acknowledged_by, notes "
+            "FROM config_drift_alerts "
+        )
+        if acknowledged is not None:
+            _sql += "WHERE acknowledged=%s "
+            _params.append(acknowledged)
+        _sql += "ORDER BY detected_at DESC LIMIT %s"
+        _params.append(limit)
+        _rows = db_client.execute_query(_sql, tuple(_params))
+        _alerts = []
+        for r in _rows:
+            _exp, _act = r.get("expected"), r.get("actual")
+            if isinstance(_exp, str):
+                _exp = json.loads(_exp)
+            if isinstance(_act, str):
+                _act = json.loads(_act)
+            _alerts.append({
+                "id": r.get("id"),
+                "detected_at": r.get("detected_at").isoformat() if r.get("detected_at") else None,
+                "severity": r.get("severity"),
+                "param": r.get("param"),
+                "expected": _exp,
+                "actual": _act,
+                "source": r.get("source"),
+                "acknowledged": r.get("acknowledged"),
+                "acknowledged_at": r.get("acknowledged_at").isoformat() if r.get("acknowledged_at") else None,
+                "acknowledged_by": r.get("acknowledged_by"),
+                "notes": r.get("notes"),
+            })
+        return {"ok": True, "alerts": _alerts, "count": len(_alerts)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/config/drift-alerts/{alert_id}/acknowledge")
+async def post_acknowledge_drift_alert(alert_id: int, body: Dict = None, _auth=Depends(_require_api_key)) -> Dict:
+    """Acknowledge a drift alert with optional notes."""
+    try:
+        _notes = (body or {}).get("notes")
+        _by = (body or {}).get("acknowledged_by") or (str(_auth) if _auth else None)
+        db_client.execute_update(
+            "UPDATE config_drift_alerts SET acknowledged=TRUE, acknowledged_at=NOW(), "
+            "acknowledged_by=%s, notes=%s WHERE id=%s",
+            (_by, _notes, alert_id)
+        )
+        return {"ok": True, "alert_id": alert_id}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/config/drift-check")
+async def post_config_drift_check(_auth=Depends(_require_api_key)) -> Dict:
+    """Manually trigger a drift check and return current alerts."""
+    try:
+        _comp = get_components()
+        _drifts = _check_config_drift(_comp.settings)
+        _n = _persist_drift_alerts(_drifts)
+        return {"ok": True, "drift_count": len(_drifts), "new_alerts": _n, "drifts": _drifts}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/config/apply")
+async def post_config_apply(body: Dict, _auth=Depends(_require_api_key)) -> Dict:
+    """Apply a configuration patch (full or partial) with snapshot, diff, and audit log."""
+    try:
+        _comp = get_components()
+        _s = _comp.settings
+        _exclude = {
+            'dry_run', 'allow_real_trading', 'analysis_symbols', 'futures_symbols',
+            'futures_largecap_symbols', 'trading_excluded_symbols', 'narrative_tokens',
+            'token_categories', 'category_thresholds', 'current_regime_mode',
+        }
+        _applied = {}
+        _rejected = {}
+        _diff = {}
+        # Snapshot before change
+        _before = dump_active_config(_s)
+        _sid = _create_full_config_snapshot(_s)
+        for key, new_value in body.items():
+            if key in _exclude:
+                _rejected[key] = "not allowed"
+                continue
+            if not hasattr(_s, key):
+                _rejected[key] = "unknown setting"
+                continue
+            try:
+                _old = getattr(_s, key)
+                _new = new_value
+                # Preserve type when possible
+                if _old is not None:
+                    _type = type(_old)
+                    if _type in (bool, int, float, str, list, dict, tuple):
+                        _new = _type(_new)
+                setattr(_s, key, _new)
+                _applied[key] = _new
+                _diff[key] = {"old": _old, "new": _new}
+            except Exception as _e:
+                _rejected[key] = str(_e)
+        _after = dump_active_config(_s)
+        # Persist applied scalar overrides so they survive container restart
+        if _applied:
+            _persist = json.dumps(_applied)
+            db_client.execute_update(
+                "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES ('kelly_config_override', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                (_persist, _persist)
+            )
+        _log_config_change(
+            source="api",
+            changed_by=str(_auth) if _auth else None,
+            snapshot_id=_sid,
+            diff=_diff,
+            full_config=_after,
+        )
+        return {
+            "ok": True,
+            "snapshot_id": _sid,
+            "applied": _applied,
+            "rejected": _rejected,
+            "diff": _diff,
+        }
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -4305,7 +5057,7 @@ async def get_hybrid_recommend(
         )
         _spot_pnl_7d = float(_spot_pnl[0]["pnl"] if _spot_pnl else 0)
         _fut_pnl_7d = float(_fut_pnl[0]["pnl"] if _fut_pnl else 0)
-        _regime = getattr(_comp, "current_regime_mode", None) or getattr(
+        _regime = getattr(_comp, "current_regime_mode", "SPOT_BULL") or getattr(
             _comp.orchestrator if hasattr(_comp, "orchestrator") else None, "current_regime_mode", "SPOT_BULL"
         ) or "SPOT_BULL"
 

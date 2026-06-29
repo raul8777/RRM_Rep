@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 26 2026 21:44 UTC-6 | Sesión 25: Gap analysis parámetros backtest — category_thresholds hot-config + startup restore + auto-apply optimizer
+> Última actualización: jun 28 2026 19:45 UTC-6 | Sesión 27+: CONFIG GOVERNANCE & DRIFT ALERTS — migrados getters críticos restantes a config_helpers.get_param; audit 0 mismatches; endpoints /config/snapshot|verify|apply|change-log; snapshots automáticos cada 15 min; tabla config_change_log; drift alerts vs baseline run_0812 con endpoints /config/drift-check|drift-alerts; config_change_log y config_drift_alerts 100% persistentes. Tests 5/5 config governance pass. Runtime alineado con baseline. Capital real ~2,987 USDT. BNB discount activo. Ver progress.txt.
 
 > ✅ **OBSERVACIÓN CERRADA** — jun 23 2026 14:08 UTC-6  
 > `FUTURES_MIN_INJECT_STRENGTH` probado en **0.30** (commit `d3dced6`) → **revertido a 0.40** (commit actual).  
@@ -101,7 +101,7 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 | CapBridge | ✅ ACTIVO — transferencia autónoma bidireccional spot↔futuros (jun 18 2026) |
 | B2 auto-close spots bear | ✅ ACTIVO — cierra spot LONGs +0.3% PnL en FUTURES_SHORT regime |
 | Docker | live, sin errores |
-| FUTURES_COMMISSION_RATE | **0.0004** (0.04% taker) — corregido jun 24 2026 |
+| FUTURES_COMMISSION_RATE | **0.00037** (0.037% taker) — jun29 run_0677 |
 | PnL Futures 48h bruto | $83.69 USDT |
 | PnL Futures 48h neto | **$74.75 USDT** (fees=$8.94 / 10.7% del bruto) |
 | Endpoint comisiones | `GET /performance/commissions?hours=N` — nuevo jun 24 |
@@ -375,9 +375,9 @@ Efecto: omite PnL predictor, entra directamente
 
 | Tipo | Rate config | PnL en DB | Estado |
 |------|-------------|-----------|--------|
-| SPOT | `binance_commission_rate=0.001` (0.1%) | **Neto** — `_calc_close()` descuenta entrada+salida | ✅ Correcto |
-| FUTURES SSO closes (`sso_slow_crawl`, `sso_profit_decay`, etc.) | `futures_commission_rate=0.0004` (0.04%) | **Neto desde jun 24** — commit `23c43ae` | ✅ Corregido |
-| FUTURES Binance closes (`stop_loss_binance`, `trailing_sl_binance`) | 0.04% | Neto — Binance `realizedPnl` ya lo descuenta | ✅ Siempre correcto |
+| SPOT | `binance_commission_rate=0.00097` (0.097%) | **Neto** — `_calc_close()` descuenta entrada+salida | ✅ Correcto |
+| FUTURES SSO closes (`sso_slow_crawl`, `sso_profit_decay`, etc.) | `futures_commission_rate=0.00037` (0.037%) | **Neto desde jun 24** — commit `23c43ae` | ✅ Corregido |
+| FUTURES Binance closes (`stop_loss_binance`, `trailing_sl_binance`) | 0.037% | Neto — Binance `realizedPnl` ya lo descuenta | ✅ Siempre correcto |
 
 ### Impacto real medido (48h, 60 trades futures)
 ```
@@ -409,13 +409,14 @@ MAX_POSITIONS_RANGE_SCALP=10        # ← jun17: era 8 → 10
 OVERFLOW_MAX_EXTRA=5                # ← jun17: era 3 → 5
 TRADE_CYCLE_MINUTES=5               # fallback (ciclo real es dinámico por régimen)
 
-# ── Kelly sizing — SMART KELLY (actualizado jun26 2026 — post-backtest optimizer) ─────
-KELLY_BASE_USDT=100                 # jun26: 40→100 (K1 agresivo)
+# ── Kelly sizing — SMART KELLY (actualizado jun29 2026 — post-backtest optimizer run_0677) ─────
+# NOTA: los valores hardcoded en docker-compose.yml tienen prioridad sobre .env y config.py defaults.
+KELLY_BASE_USDT=73                  # jun29: 76→73 (backtest optimizer run_0677, baseline=best)
 KELLY_DYNAMIC_BASE_PCT=0.12         # base = capital_liquido × 12%
-KELLY_MAX_USDT=663                  # jun26: 500→663 (backtest optimizer run_0812)
+KELLY_MAX_USDT=747                  # jun29: 663→747 (backtest optimizer run_0677)
 KELLY_MAX_PCT_CAP=0.25              # Smart Kelly: max = max(floor, liquid × 25%)
-KELLY_MAX_PCT_LIQUID=0.621          # jun26: 0.55→0.621 (backtest optimizer)
-MAX_PER_TRADE_USDT=663              # alineado con kelly_max
+KELLY_MAX_PCT_LIQUID=0.704          # jun29: 0.621→0.704 (backtest optimizer run_0677)
+MAX_PER_TRADE_USDT=500              # jun29: sin cambio (run_0677)
 
 # Smart Kelly — tiers con $1,758 USDT líquidos:
 #   FUERTE (prob≥0.65 + str≥0.80) → $439  (max dinámico 25% liquid)
@@ -424,14 +425,16 @@ MAX_PER_TRADE_USDT=663              # alineado con kelly_max
 #   BASE   (prob≥0.50)            → $211  (12% liquid)
 # Conviction boost SPOT_BULL (vol_spike×2/3): cap 10%→15% liquid = $263
 
-# ── SL/TP globales (overrideados por categoría — ver sección 4) ────────────
-STOP_LOSS_PCT=1.8
-TAKE_PROFIT_PCT=3.5
+# ── SL/TP globales (actualizado jun29 2026 — backtest run_0677, baseline=best) ────────────
+STOP_LOSS_PCT=3.36                  # jun29: 1.03→3.36 (backtest optimizer run_0677)
+TAKE_PROFIT_PCT=4.14                # jun29: 5.83→4.14 (backtest optimizer run_0677)
 TRAILING_STOP_ACTIVATION_PCT=2.5
 TRAILING_STOP_DISTANCE_PCT=1.2
 
-# ── Filtros de señal ────────────────────────────────────────────────────────
-MIN_SIGNAL_STRENGTH=0.55            # v4 OPT jun 20: 0.30→0.55 (+$775 USDT/90d validado en sim)
+# ── Filtros de señal (actualizado jun29 2026 — backtest run_0677) ─────────────────────────
+MIN_SIGNAL_STRENGTH=0.389           # jun29: 0.359→0.389 (backtest run_0677)
+MIN_SUCCESS_PROBABILITY=0.499       # jun29: 0.527→0.499 (backtest run_0677)
+VOL_SPIKE_MIN=0.91                  # jun29: 0.83→0.91 (backtest run_0677)
 BTC_DOMINANCE_ALTCOIN_THRESHOLD=64.0
 
 # ── Exposición y rebalanceo ─────────────────────────────────────────────────
@@ -451,12 +454,54 @@ CYCLE_FUTURES_SHORT=6               # jun17: era 8 → más monitoreo en shorts
 
 # ── Futuros SHORT ───────────────────────────────────────────────────────────
 FUTURES_ENABLED=true
-FUTURES_MAX_SHORTS=7                # jun19: 3→5→7 (1 TP confirmado SOL +$15.22 → slots 6-7 activados)
-FUTURES_USDT_PER_TRADE=100          # era 50 → Kelly futuros calcula $80-120
-FUTURES_KELLY_MAX_USDT=1162         # jun26: 800→1162 (backtest optimizer)
-FUTURES_SL_PCT=3.33                 # jun26: 3.0→3.33 (backtest optimizer run_0812)
-FUTURES_TP_PCT=7.68                 # jun26: 7.0→7.68 (backtest optimizer run_0812)
-FUTURES_LEVERAGE=10                 # desde K2 jun26 (era 2)
+FUTURES_MAX_SHORTS=12               # jun28: 7→12 — backtest run_0812 uses 12 concurrent shorts
+FUTURES_USDT_PER_TRADE=100          # era 50 → Kelly futuros calcula $80-120 (minimum margin floor, not hard cap)
+FUTURES_KELLY_MAX_USDT=1111         # jun29: 1162→1111 (backtest optimizer run_0677)
+FUTURES_KELLY_MAX_PCT_LIQUID=0.704  # jun29: 0.621→0.704 (backtest run_0677)
+FUTURES_KELLY_BASE_USDT=73          # jun29: 76→73 — align with spot kelly_base (backtest run_0677)
+FUTURES_SL_PCT=1.42                 # jun29: 3.33→1.42 (backtest optimizer run_0677)
+FUTURES_TP_PCT=2.81                 # jun29: 7.68→2.81 (backtest optimizer run_0677)
+FUTURES_LEVERAGE=10                 # jun28: 2→10 — backtest run_0812 validated 10x (fixed LEVERAGE_MAX hardcode in futures_client.py)
+FUTURES_MAX_NEW_PER_CYCLE=5         # jun28: 3→5 — more throughput in FUTURES_SHORT
+
+# ── Comisiones Binance (centralizado en binance_commission.py) ─────────────
+# SPOT: 0.1% taker por lado; 0.05% con BNB discount
+# FUTURES: 0.04% taker por lado; 0.02% con BNB discount
+BINANCE_COMMISSION_RATE=0.001           # Binance-controlled spot taker default (live rate refreshed from API)
+FUTURES_COMMISSION_RATE=0.0004          # Binance-controlled futures taker default (live rate refreshed from API)
+USE_BNB_FOR_COMMISSION=true           # 0.05% spot / 0.02% futures with BNB
+BNB_SPOT_COMMISSION_RATE=0.0005
+BNB_FUTURES_COMMISSION_RATE=0.0002
+AUTO_BNB_FOR_COMMISSION=true          # auto-detecta BNB, compra si falta, activa descuento
+BNB_BUFFER_DAYS=7                     # días de comisiones a mantener en BNB
+BNB_MIN_BALANCE_USD=5.0               # mínimo USD en BNB para mantener descuento activo
+BNB_EXTRA_BUFFER_USD=5.0              # excedente de USD a mantener en cada wallet para evitar quedarse sin BNB
+SLIPPAGE_PCT=0.00052                  # jun29: 0.0005→0.00052 (backtest run_0677)
+# PnL predictor y Kelly sizing ahora usan reward/risk NETO de comisiones.
+# BNB discount impact (Backtest 1000 window): round-trip SPOT 0.20%->0.10%, FUTURES 0.08%->0.04%.
+# Estimado ahorro: ~$585-$1,170 USDT/20d sobre ~$1.17M notional (= +15-35% PnL adicional).
+# Dashboard: status chip en header + panel detallado en tab Rendimiento vía /dashboard/commission.
+
+# ── Configuración Centralizada (K2 refactor) ─────────────────────────────────
+# Fuente única de verdad: config.py define los defaults; docker-compose.yml/.env los overrides.
+# El código NO debe usar constantes de módulo que anulen settings ni getattr(..., 'X', hardcode)
+# con valores distintos a config.py.
+#
+# Componentes:
+#   - config_helpers.py: get_param(), get_spot_param(), get_futures_param(), validate_config(), dump_active_config()
+#   - futures_client.py: LEVERAGE_MAX/MAX_SHORTS son sólo UPPER BOUNDS; el valor activo viene de settings.
+#   - run_trades.py: _get_futures_client() sincroniza _active_leverage y max_shorts cada ciclo.
+#   - app.py /config/drift: detecta desviación vs baseline run_0677 en runtime.
+#   - app.py /config/apply-backtest: persiste parámetros de un run de backtest en trading_runtime_state.
+#   - app.py /health/full-check: valida alineación de parámetros críticos con backtest run_0677.
+#
+# Baseline run_0677 (config.py defaults):
+#   futures_leverage=10, futures_max_shorts=12, futures_max_new_per_cycle=5,
+#   futures_sl_pct=1.42, futures_tp_pct=2.81, futures_usdt_per_trade=100.0,
+#   futures_kelly_base_usdt=73.0, futures_kelly_max_usdt=1111.0, futures_kelly_max_pct_liquid=0.704,
+#   kelly_base_usdt=73.0, kelly_max_usdt=747.0, kelly_max_pct_liquid=0.704,
+#   stop_loss_pct=3.36, take_profit_pct=4.14.
+#   min_signal_strength=0.389, min_success_probability=0.499, vol_spike_min=0.91.
 
 # ── Futuros LONG (hedge) ─────────────────────────────────────────────────────
 FUTURES_HEDGE_MODE_ENABLED=true
@@ -980,10 +1025,26 @@ Cache TTL: 15 min
 Score: volumen_24h × abs(priceChangePercent_24h)
 ```
 
+### Regime-aware ranking (jun 29 2026)
+| Modo | Spot | Futures | Lógica |
+|------|------|---------|--------|
+| `SPOT_BULL` | Sí (long momentum) | Sí (long momentum) | `vol × positive chg` para spot; `vol × abs(chg)` para futures long |
+| `RANGE_SCALP` | Sí | Sí (long) | `vol × abs(chg)` — aprovecha volatilidad en ambas direcciones |
+| `PRESERVATION` | Solo `narrative_tokens` | No aplica | Protección de capital: solo tokens de narrativa permitidos |
+| `FUTURES_SHORT` | Vacío | Sí (shorts) | Spot bloqueado; futures ordenados por bear-bounce score (`vol × abs(chg)`) |
+
+- Cache TTL: 15 min; se invalida automáticamente cuando cambia `current_regime_mode`.
+- Cada decisión del screener se persiste en `screener_decisions` (regime, símbolos, scores, parámetros, razón de rechazo).
+- `run_trades.py` actualiza `settings.current_regime_mode` en cada ciclo para que dashboard y screener vean el régimen vivo.
+
+### Endpoints de dashboard
+- `GET /dashboard/screener` — resultado del screener consciente del régimen actual: `regime_mode`, `spot_count`, `futures_count`, `spot`, `futures`, `top_bullish`, `top_bearish`.
+- `GET /screener/decisions?limit=&regime_mode=&acknowledged=` — audit trail de decisiones persistidas; filtrable por régimen y si fue rechazado.
+
 ### Cómo agregar/excluir pares del screener
 ```python
-# pair_screener.py línea ~35: blacklist de stablecoins
-STABLECOIN_PREFIXES = ["USDC", "BUSD", "TUSD", "DAI", "FDUSD", "USDP"]
+# pair_screener.py línea ~42: blacklist de stablecoins
+_EXCLUDE_BASES = {"USDC", "BUSD", "TUSD", "DAI", "FDUSD", "USDP", ...}
 # Para excluir un par específico, agregar a la blacklist
 ```
 
@@ -2607,5 +2668,26 @@ docker exec crypto-agent-app python -m pytest tests/test_hybrid_backtest.py test
 ```
 
 ---
+
+---
+
+## Config Governance & Drift Alerts — 28 jun 2026
+
+### Cambios
+- `config_helpers.py` es la fuente única de verdad para defaults canónicos SPOT+FUTURES; `_PARAM_DEFAULTS` ahora mapea 1:1 con campos de `Settings`.
+- Migración de getters críticos restantes a `config_helpers.get_param`; `audit_getattr.py` reporta **0 mismatches críticos**.
+- Nueva tabla `config_change_log` + endpoints `/config/snapshot`, `/config/verify`, `/config/apply`, `/config/change-log`.
+- Snapshots automáticos cada 15 min; todo cambio de config persiste en `trading_runtime_state` y se loguea con `diff` + `snapshot_id`.
+- Nueva tabla `config_drift_alerts` + background check cada 15 min + endpoints `/config/drift-check`, `/config/drift-alerts`, `/config/drift-alerts/{id}/acknowledge`.
+- Severidad `critical` para parámetros de apalancamiento/ganancia FUTURES; `warning` para el resto. Se excluyen campos operativos intencionales (listas de símbolos, dry_run, etc.).
+- Tests: `tests/test_config_governance.py` (5 passed incluyendo drift alert lifecycle).
+
+### Validación en vivo
+```bash
+docker exec crypto-agent-app python /app/tmp_audit_config.py
+docker exec crypto-agent-app python /app/tmp_verify_runtime_config.py
+docker exec crypto-agent-app pytest tests/test_config_governance.py -v
+curl -X POST http://localhost:8000/config/drift-check -H "X-API-Key: $DASHBOARD_API_KEY"
+```
 
 *Revisar este archivo al inicio de cada sesión de análisis o implementación.*

@@ -262,12 +262,9 @@ def run_bootstrap(binance_client, settings,
     """
     from learning_engine import get_learning_engine, WeightAdjustment, _WEIGHT_MIN, _WEIGHT_MAX
 
-    symbols = getattr(settings, "analysis_symbols", [
-        "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-        "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
-        "SUIUSDT", "PEPEUSDT", "FETUSDT", "RENDERUSDT", "WIFUSDT",
-    ])
-    position_size = getattr(settings, "max_per_trade_usdt", 50.0)
+    from config_helpers import get_param
+    symbols = get_param(settings, "analysis_symbols")
+    position_size = get_param(settings, "max_per_trade_usdt")
 
     all_synthetic: List[_SyntheticPosition] = []
     per_symbol: Dict[str, int] = {}

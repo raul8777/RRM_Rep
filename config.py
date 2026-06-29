@@ -52,10 +52,10 @@ class Settings(BaseSettings):
     trade_horizon_minutes: int = Field(default=240, env="TRADE_HORIZON_MINUTES")  # realistic hold time for PnL prediction (4h)
     # Kelly dynamic position sizing
     kelly_enabled: bool = Field(default=True, env="KELLY_ENABLED")
-    kelly_base_usdt: float = Field(default=100.0, env="KELLY_BASE_USDT")  # K1: $60→$100 (sistema con 9+ filtros de entrada, Kelly agresivo)
-    kelly_max_usdt: float = Field(default=500.0, env="KELLY_MAX_USDT")    # K1: $350→$500 SPOT (techo FUERTE tier)           # floor: never less than this
+    kelly_base_usdt: float = Field(default=73.0, env="KELLY_BASE_USDT")  # jun29: 76→73 (run_0677)
+    kelly_max_usdt: float = Field(default=747.0, env="KELLY_MAX_USDT")    # jun29: 663→747 (run_0677)
     kelly_max_pct_cap: float = Field(default=0.25, env="KELLY_MAX_PCT_CAP")       # Smart Kelly: max = max(floor, liquid * this)
-    kelly_max_pct_liquid: float = Field(default=0.55, env="KELLY_MAX_PCT_LIQUID")  # K1: 0.40→0.55 SPOT (alineado con futures_kelly_max_pct_liquid)
+    kelly_max_pct_liquid: float = Field(default=0.704, env="KELLY_MAX_PCT_LIQUID")  # jun29: 0.621→0.704 (run_0677)
     kelly_dynamic_base_pct: float = Field(default=0.15, env="KELLY_DYNAMIC_BASE_PCT")  # base = capital * this (if > fixed base)
     # Bear market mode
     bear_market_mode_enabled: bool = Field(default=True, env="BEAR_MARKET_MODE_ENABLED")
@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     futures_smart_tp_max_pnl_pct: float = Field(default=12.0, env="FUTURES_SMART_TP_MAX_PNL_PCT")  # cap at 12% PnL (2x leverage)
     futures_smart_tp_extend_score_threshold: int = Field(default=2, env="FUTURES_SMART_TP_EXTEND_SCORE_THRESHOLD")  # H-FIX: 3→2 (más extensiones TP = más ganancia por trade)
     futures_smart_tp_extension_pct: float = Field(default=2.0, env="FUTURES_SMART_TP_EXTENSION_PCT")  # extend TP by 2% of current price
+    smart_tp_extension_pct: float = Field(default=2.0, env="SMART_TP_EXTENSION_PCT")  # SPOT smart TP extension %
     # Futures trailing stop: protect unrealized gains during position lifecycle
     futures_trailing_enabled: bool = Field(default=True, env="FUTURES_TRAILING_ENABLED")
     futures_trailing_activation_pct: float = Field(default=2.0, env="FUTURES_TRAILING_ACTIVATION_PCT")  # SL-OPT: 1.5→2.0 (earlier trailing compensates wider SL)
@@ -108,6 +109,7 @@ class Settings(BaseSettings):
     futures_trail_atr_multiplier_deep: float = Field(default=0.8, env="FUTURES_TRAIL_ATR_MULT_DEEP")  # 0.8x ATR at 8%+ PnL
     futures_trail_floor_pct: float = Field(default=0.4, env="FUTURES_TRAIL_FLOOR_PCT")   # absolute min trail dist %
     futures_trail_ceiling_pct: float = Field(default=1.2, env="FUTURES_TRAIL_CEILING_PCT")  # absolute max trail dist %
+    futures_trail_atr_fallback_distance_pct: float = Field(default=1.5, env="FUTURES_TRAIL_ATR_FALLBACK_DISTANCE_PCT")  # fallback distance when ATR trail fails
     futures_breakeven_activation_pct: float = Field(default=1.0, env="FUTURES_BREAKEVEN_ACTIVATION_PCT")  # FIX-T2C: 2.0→1.0 (breakeven fires BEFORE trailing 1.5%)
     # FIX-F1: Cooldown after futures SL hit — prevents re-entering same symbol immediately after stop out
     futures_sl_cooldown_hours: float = Field(default=4.0, env="FUTURES_SL_COOLDOWN_HOURS")  # PB6: 1h→4h — stop chasing after SL
@@ -237,8 +239,8 @@ class Settings(BaseSettings):
     enable_prediction_based_closing: bool = Field(default=True, env="ENABLE_PREDICTION_BASED_CLOSING")
 
     # Stop-Loss / Take-Profit configuration
-    stop_loss_pct: float = Field(default=2.5, env="STOP_LOSS_PCT")       # % below entry price (SL-OPT: 1.8→2.5 — SSO era, reduce wick stops)
-    take_profit_pct: float = Field(default=3.5, env="TAKE_PROFIT_PCT")   # % above entry price
+    stop_loss_pct: float = Field(default=3.36, env="STOP_LOSS_PCT")       # jun29: 1.03→3.36 (run_0677)
+    take_profit_pct: float = Field(default=4.14, env="TAKE_PROFIT_PCT")   # jun29: 5.83→4.14 (run_0677)
     trailing_stop_enabled: bool = Field(default=True, env="TRAILING_STOP_ENABLED")
     trailing_stop_activation_pct: float = Field(default=2.0, env="TRAILING_STOP_ACTIVATION_PCT")  # activate trailing after +2%
     trailing_stop_distance_pct: float = Field(default=1.0, env="TRAILING_STOP_DISTANCE_PCT")      # trail 1% below peak
@@ -273,7 +275,7 @@ class Settings(BaseSettings):
     max_positions_spot_bull: int = Field(default=20, env="MAX_POSITIONS_SPOT_BULL")    # jun17: 15→20 (32 activos disponibles)
     max_positions_range_scalp: int = Field(default=10, env="MAX_POSITIONS_RANGE_SCALP")  # jun17: 8→10
     max_positions_preservation: int = Field(default=5, env="MAX_POSITIONS_PRESERVATION")
-    max_positions_futures_short: int = Field(default=4, env="MAX_POSITIONS_FUTURES_SHORT")
+    max_positions_futures_short: int = Field(default=12, env="MAX_POSITIONS_FUTURES_SHORT")  # K2: 4→12 — backtest run_0812 uses 12 concurrent shorts
     # Active replacement: swap weakest open position for a better new signal
     replace_only_losing: bool = Field(default=True, env="REPLACE_ONLY_LOSING")  # only replace positions in loss/flat
     replace_ev_min_ratio: float = Field(default=1.1, env="REPLACE_EV_MIN_RATIO")  # MEJO-1: 1.3→1.1 — more permissive given small EV values
@@ -296,6 +298,7 @@ class Settings(BaseSettings):
     liquidity_filter_enabled: bool = Field(default=True, env="LIQUIDITY_FILTER_ENABLED")
     min_liquidity_vol_usdt: float = Field(default=3_000_000.0, env="MIN_LIQUIDITY_VOL_USDT")  # vol 24h mínimo
     max_slippage_tp_ratio: float = Field(default=0.25, env="MAX_SLIPPAGE_TP_RATIO")           # spread/TP max (0.25 = 25% del TP)
+    slippage_pct: float = Field(default=0.00052, env="SLIPPAGE_PCT")  # jun29: 0.0005→0.00052 (run_0677)
 
     # ── Correlaciones: límite de posiciones por categoría ──────────────────
     category_max_positions_enabled: bool = Field(default=True, env="CATEGORY_MAX_POSITIONS_ENABLED")
@@ -323,7 +326,8 @@ class Settings(BaseSettings):
     cycle_futures_short: int = Field(default=4, env="CYCLE_FUTURES_SHORT")     # H-FIX: 6→4 min (trailing más reactivo a movimientos rápidos)
 
     # Signal quality filter
-    min_signal_strength: float = Field(default=0.55, env="MIN_SIGNAL_STRENGTH")  # v4 OPT: 0.35→0.55 (+$570 USDT/mes validado en sim)
+    min_signal_strength: float = Field(default=0.389, env="MIN_SIGNAL_STRENGTH")  # jun29: 0.359→0.389 (run_0677)
+    min_success_probability: float = Field(default=0.499, env="MIN_SUCCESS_PROBABILITY")  # jun29: 0.527→0.499 (run_0677)
     # P1.3: Signal cache TTL dinámico — reduce de 600s fijo a 1 ciclo por régimen
     signal_cache_ttl_seconds: int = Field(default=240, env="SIGNAL_CACHE_TTL_SECONDS")  # default 4 min (1 ciclo FUTURES_SHORT)
 
@@ -401,10 +405,10 @@ class Settings(BaseSettings):
     # min_volspike: VolSpike mínimo para confirmar señal (informativo, no enforcement aquí)
     # MEJO-A: NARRATIVE trailing aumentado (8%/3%) para capturar breakouts +15-30% completos
     category_thresholds: dict = Field(default={
-        "LARGE_CAP":  {"min_prob": 0.55, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 2.5, "take_profit_pct": 3.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.8, "tp_extension_pct": 1.5},  # SL-OPT: 1.8→2.5
-        "MIDCAP_ALT": {"min_prob": 0.50, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 2.5, "take_profit_pct": 3.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.8, "tp_extension_pct": 2.0},  # SL-OPT: 1.8→2.5
-        "NARRATIVE":  {"min_prob": 0.45, "min_pnl": -1.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 2.0, "tp_extension_pct": 3.0},  # V4: trail tighter (8/3→5/2) — SL stays 3.5%
-        "MEME":       {"min_prob": 0.52, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.5, "take_profit_pct": 4.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.0, "tp_extension_pct": 2.5},  # SL-OPT: 2.0→2.5
+        "LARGE_CAP":  {"min_prob": 0.527, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 2.5, "take_profit_pct": 3.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.8, "tp_extension_pct": 1.5},  # jun28: min_prob 0.55→0.527
+        "MIDCAP_ALT": {"min_prob": 0.527, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 2.5, "take_profit_pct": 3.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.8, "tp_extension_pct": 2.0},  # jun28: min_prob 0.50→0.527
+        "NARRATIVE":  {"min_prob": 0.527, "min_pnl": -1.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 2.0, "tp_extension_pct": 3.0},  # jun28: min_prob 0.45→0.527
+        "MEME":       {"min_prob": 0.527, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.5, "take_profit_pct": 4.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.0, "tp_extension_pct": 2.5},  # jun28: min_prob 0.52→0.527
     }, env="CATEGORY_THRESHOLDS")
     
     # ── Predicción con prioridad absoluta (jun 17 2026) ──────────────────────
@@ -422,17 +426,20 @@ class Settings(BaseSettings):
     auto_close_excluded_on_startup: bool = Field(default=True, env="AUTO_CLOSE_EXCLUDED_ON_STARTUP")
 
     # ── Futures trading (USDM, fapi.binance.com) ─────────────────────────────
-    futures_enabled: bool = Field(default=False, env="FUTURES_ENABLED")  # must opt-in explicitly
-    futures_leverage: int = Field(default=2, env="FUTURES_LEVERAGE")           # hard max 2x
-    futures_max_shorts: int = Field(default=5, env="FUTURES_MAX_SHORTS")       # max simultaneous shorts
+    futures_enabled: bool = Field(default=True, env="FUTURES_ENABLED")  # K2: True — backtest run_0812 uses futures
+    futures_leverage: int = Field(default=10, env="FUTURES_LEVERAGE")          # K2: 2→10 — backtest run_0812 validated 10x
+    futures_max_shorts: int = Field(default=12, env="FUTURES_MAX_SHORTS")       # K2: 5→12 — backtest run_0812 uses 12 concurrent shorts
     futures_max_largecap_shorts: int = Field(default=5, env="FUTURES_MAX_LARGECAP_SHORTS")  # max LARGE_CAP shorts simultaneously (diversification guard — raise MAX_SHORTS but keep this at 5 to force MID-CAP slots)
-    futures_usdt_per_trade: float = Field(default=50.0, env="FUTURES_USDT_PER_TRADE")  # PB4: 20→50 minimum margin floor per short
-    futures_sl_pct: float = Field(default=7.0, env="FUTURES_SL_PCT")           # SL % above entry (SL-OPT: 2.5→7.0 — align with TP, SSO/breakeven protect early)
-    futures_tp_pct: float = Field(default=7.0, env="FUTURES_TP_PCT")           # TP % below entry (A4+v4: 7.0%, EV +1.40%/trade)
+    futures_usdt_per_trade: float = Field(default=100.0, env="FUTURES_USDT_PER_TRADE")  # K2: 50→100 — minimum margin floor per short (backtest run_0812)
+    futures_sl_pct: float = Field(default=1.42, env="FUTURES_SL_PCT")          # jun29: 3.33→1.42 (run_0677)
+    futures_tp_pct: float = Field(default=2.81, env="FUTURES_TP_PCT")          # jun29: 7.68→2.81 (run_0677)
     futures_min_btc_7d_drop: float = Field(default=-7.0, env="FUTURES_MIN_BTC_7D_DROP")  # only short in bear
     futures_symbols: list = Field(default=[
-        'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT',
-    ], env="FUTURES_SYMBOLS")   # symbols eligible for shorting
+        'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT',
+        'NEARUSDT', 'SUIUSDT', 'DOGEUSDT', 'AVAXUSDT', 'LINKUSDT', 'TAOUSDT',
+        'UNIUSDT', 'DOTUSDT', '1000PEPEUSDT', 'BCHUSDT', 'AAVEUSDT', 'FILUSDT',
+        'INJUSDT',
+    ], env="FUTURES_SYMBOLS")   # symbols eligible for shorting (run_0812 baseline)
     futures_largecap_symbols: list = Field(default=[
         'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT',
     ], env="FUTURES_LARGECAP_SYMBOLS")   # LARGE_CAP futures symbols for category cap
@@ -447,16 +454,16 @@ class Settings(BaseSettings):
     # Futures Kelly dynamic cap
     futures_kelly_cap_pct: float = Field(default=0.20, env="FUTURES_KELLY_CAP_PCT")  # PB4: 15→20% of available futures margin (bigger positions)
     # Futures signal filtering: minimum probability and vol spike (backtest-optimizable)
-    futures_min_prob: float = Field(default=0.50, env="FUTURES_MIN_PROB")
-    futures_vol_spike_min: float = Field(default=1.0, env="FUTURES_VOL_SPIKE_MIN")
+    futures_min_prob: float = Field(default=0.499, env="FUTURES_MIN_PROB")  # jun29: 0.527→0.499 (run_0677)
+    futures_vol_spike_min: float = Field(default=0.91, env="FUTURES_VOL_SPIKE_MIN")  # jun29: 0.83→0.91 (run_0677)
     # Futures category thresholds (mirror category_thresholds for SPOT)
     futures_category_thresholds: dict = Field(default={
-        "LARGE_CAP":  {"min_prob": 0.55, "stop_loss_pct": 3.33, "take_profit_pct": 7.68, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},
-        "MIDCAP":     {"min_prob": 0.50, "stop_loss_pct": 3.33, "take_profit_pct": 7.68, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},
-        "NARRATIVE":  {"min_prob": 0.45, "stop_loss_pct": 3.33, "take_profit_pct": 7.68, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},
+        "LARGE_CAP":  {"min_prob": 0.499, "stop_loss_pct": 1.42, "take_profit_pct": 2.81, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},
+        "MIDCAP":     {"min_prob": 0.499, "stop_loss_pct": 1.42, "take_profit_pct": 2.81, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},
+        "NARRATIVE":  {"min_prob": 0.499, "stop_loss_pct": 1.42, "take_profit_pct": 2.81, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},
     }, env="FUTURES_CATEGORY_THRESHOLDS")
     # Global vol spike minimum (used by both SPOT and FUTURES signal filtering)
-    vol_spike_min: float = Field(default=1.0, env="VOL_SPIKE_MIN")
+    vol_spike_min: float = Field(default=0.91, env="VOL_SPIKE_MIN")  # jun29: 0.83→0.91 (run_0677)
     # Hybrid optimizer framework (quantum + swarm + ML)
     hybrid_optimizer_enabled: bool = Field(default=False, env="HYBRID_OPTIMIZER_ENABLED")
     auto_apply_backtest: bool = Field(default=False, env="AUTO_APPLY_BACKTEST")
@@ -466,9 +473,9 @@ class Settings(BaseSettings):
     futures_capital_bridge_min_transfer: float = Field(default=10.0, env="FUTURES_CAPITAL_BRIDGE_MIN_TRANSFER")  # min USDT to trigger transfer
     # Unified Portfolio Manager: PortfolioManager as capital director for both SPOT and Futures
     use_unified_portfolio_manager: bool = Field(default=False, env="USE_UNIFIED_PORTFOLIO_MANAGER")  # feature flag — false = legacy behavior
-    futures_kelly_base_usdt: float = Field(default=100.0, env="FUTURES_KELLY_BASE_USDT")  # Kelly floor for Futures (vs kelly_base_usdt for SPOT)
-    futures_kelly_max_usdt: float = Field(default=800.0, env="FUTURES_KELLY_MAX_USDT")    # K1: $500→$800 Kelly ceiling for Futures (bear confirmado con SSO/trailing)
-    futures_kelly_max_pct_liquid: float = Field(default=0.55, env="FUTURES_KELLY_MAX_PCT_LIQUID")  # liquid cap for Futures Kelly (vs kelly_max_pct_liquid=0.28 for SPOT)
+    futures_kelly_base_usdt: float = Field(default=73.0, env="FUTURES_KELLY_BASE_USDT")  # jun29: 76→73 (run_0677)
+    futures_kelly_max_usdt: float = Field(default=1111.0, env="FUTURES_KELLY_MAX_USDT")    # jun29: 800→1111 (run_0677)
+    futures_kelly_max_pct_liquid: float = Field(default=0.704, env="FUTURES_KELLY_MAX_PCT_LIQUID")  # jun29: 0.621→0.704 (run_0677)
 
     # ── Dynamic pair screener ─────────────────────────────────────────────────
     screener_enabled: bool = Field(default=True, env="SCREENER_ENABLED")
@@ -498,6 +505,7 @@ class Settings(BaseSettings):
 
     # ── Market Regime adaptive mode ──────────────────────────────────────────
     market_regime_enabled: bool = Field(default=True, env="MARKET_REGIME_ENABLED")
+    current_regime_mode: str = Field(default="SPOT_BULL", env="CURRENT_REGIME_MODE")
     # RANGE_SCALP mode parameters
     range_scalp_sl_pct: float = Field(default=1.2, env="RANGE_SCALP_SL_PCT")
     range_scalp_tp_pct: float = Field(default=1.5, env="RANGE_SCALP_TP_PCT")
@@ -511,10 +519,18 @@ class Settings(BaseSettings):
     preservation_narrative_only: bool = Field(default=True, env="PRESERVATION_NARRATIVE_ONLY")
     preservation_max_rsi: float = Field(default=65.0, env="PRESERVATION_MAX_RSI")
 
-    # Binance commission configuration
-    binance_commission_rate: float = Field(default=0.001, env="BINANCE_COMMISSION_RATE")  # 0.1% SPOT default
-    use_bnb_for_commission: bool = Field(default=False, env="USE_BNB_FOR_COMMISSION")  # 0.05% if True
-    futures_commission_rate: float = Field(default=0.0004, env="FUTURES_COMMISSION_RATE")  # 0.04% futures taker (0.02% with BNB)
+    # Binance commission configuration — rates are controlled by Binance, not backtest.
+    # Defaults are the documented standard rates; live rates are refreshed from API.
+    binance_commission_rate: float = Field(default=0.001, env="BINANCE_COMMISSION_RATE")  # 0.1% SPOT taker default
+    use_bnb_for_commission: bool = Field(default=True, env="USE_BNB_FOR_COMMISSION")  # 0.05% SPOT with BNB
+    bnb_spot_commission_rate: float = Field(default=0.0005, env="BNB_SPOT_COMMISSION_RATE")  # 0.05% SPOT with BNB
+    futures_commission_rate: float = Field(default=0.0004, env="FUTURES_COMMISSION_RATE")  # 0.04% futures taker default
+    bnb_futures_commission_rate: float = Field(default=0.0002, env="BNB_FUTURES_COMMISSION_RATE")  # 0.02% futures with BNB
+    # Auto BNB discount: system detects BNB balance and converts USDT if needed
+    auto_bnb_for_commission: bool = Field(default=False, env="AUTO_BNB_FOR_COMMISSION")
+    bnb_buffer_days: int = Field(default=7, env="BNB_BUFFER_DAYS")
+    bnb_min_balance_usd: float = Field(default=5.0, env="BNB_MIN_BALANCE_USD")
+    bnb_extra_buffer_usd: float = Field(default=5.0, env="BNB_EXTRA_BUFFER_USD")
     futures_max_escalamientos: int = Field(default=2, env="FUTURES_MAX_ESCALAMIENTOS")  # max entries per symbol (escalamiento cap)
     
     # Currency conversion configuration

@@ -65,18 +65,22 @@ class PnLPredictor:
         current_price: float,
         indicators: Dict,
         cycle_duration_minutes: int = 5,
-        position_size_usdt: float = 15.0
+        position_size_usdt: float = 15.0,
+        trade_type: str = 'spot',
+        settings = None,
     ) -> Dict:
         """
         Predict expected PnL for a position.
-        
+
         Args:
             symbol: Trading pair symbol
             current_price: Current market price
             indicators: Dictionary of technical indicators
             cycle_duration_minutes: Duration of trading cycle in minutes
             position_size_usdt: Size of position in USDT
-            
+            trade_type: 'spot' or 'futures' — used to subtract Binance fees
+            settings: Settings object for commission rates
+
         Returns:
             Dictionary with prediction results
         """
@@ -100,6 +104,10 @@ class PnLPredictor:
                 success_probability,
                 position_size_usdt
             )
+
+            # Subtract Binance round-trip commission so expected_pnl is net
+            from binance_commission import expected_pnl_after_fees
+            expected_pnl = expected_pnl_after_fees(expected_pnl, position_size_usdt, trade_type, settings)
 
             # Apply learned bias correction
             bias = weights.get("bias_correction", 1.0)

@@ -13,6 +13,7 @@ from typing import Optional, Dict, Tuple, TYPE_CHECKING
 
 from pnl_predictor import PnLPredictor
 from trade_utils import format_indicators_for_predictor
+from config_helpers import get_param
 
 if TYPE_CHECKING:
     from binance_client import BinanceClient
@@ -39,6 +40,7 @@ def predict_for_symbol(
     position_size_usdt: float,
     interval: str = "1h",
     precomputed_signal: Optional[Dict] = None,
+    trade_type: str = "spot",
 ) -> Tuple[Optional[Dict], Optional[Dict]]:
     """
     Fetch indicators + run the PnL predictor for *symbol*.
@@ -47,6 +49,7 @@ def predict_for_symbol(
         precomputed_signal: If provided (from signal_meta in Step 1), skip
             analyze_symbol() and use these indicators directly. Avoids
             redundant API + analysis calls (BUG-E4 fix).
+        trade_type: 'spot' or 'futures' — passed to predictor for fee adjustment.
 
     Returns:
         (prediction, formatted_indicators) – both None on failure.
@@ -74,6 +77,8 @@ def predict_for_symbol(
             indicators=formatted,
             cycle_duration_minutes=trade_horizon_minutes,
             position_size_usdt=position_size_usdt,
+            trade_type=trade_type,
+            settings=settings,
         )
         return prediction, formatted
     except Exception as exc:
@@ -98,7 +103,7 @@ def validate(prediction: Dict, settings, symbol: str = None,
         return True, "bootstrap mode – thresholds relaxed until trade history builds"
     predictor = get_predictor()
     min_pnl  = getattr(settings, "min_expected_pnl", 0.0)
-    min_prob = getattr(settings, "min_success_probability", 0.5)
+    min_prob = get_param(settings, "min_success_probability")
     max_risk = getattr(settings, "max_risk_percentage", 10.0)
 
     # ── Per-category thresholds ────────────────────────────────────────────────
