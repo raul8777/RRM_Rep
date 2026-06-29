@@ -278,3 +278,5 @@ Backtest 1000-Run Re-optimization + Application run_0677 (2026-06-29 02:42 UTC):
 - `app.py`: startup sanity check logs warning to `trades_audit` if `auto_bnb_for_commission` is disabled; extended `/dashboard/commission` with `auto_bnb_enabled`, `bnb_reserve_usdt`; added BNB drift health check in `_config_drift_loop`.
 - Added tests: `tests/test_binance_commission.py` (auto BNB buy/transfer/shortfall/no-action), `tests/test_portfolio_manager.py` (BNB reserve subtracts from available).
 - Updated `SYSTEM_REFERENCE.md` section 5b and resolved history.
+- Commits: adf48f4 (feat: autonomous BNB commission discount management), 5ebd620 (chore: remove accidentally tracked temp files).
+- Verified: container rebuilt, tests 25+39 passed, system_health 107 passed (Cat7 flaky), 0 critical config mismatches.
