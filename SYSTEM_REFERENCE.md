@@ -395,11 +395,18 @@ fees %    = 10.7% del PnL bruto
 | Concepto | SPOT | FUTURES | Implementación |
 |----------|------|---------|----------------|
 | Compra BNB | ✅ En spot wallet | ❌ No se compra directamente | `binance_commission.py:auto_manage_bnb_discount()` compra BNBUSDT spot |
-| Transferencia | Spot → Futures | ✅ Recibe BNB de spot | `universalTransfer(type='MAIN_UMFUTURE', asset='BNB')` |
+| Transferencia BNB | Spot → Futures | ✅ Recibe BNB de spot | `universalTransfer(type='MAIN_UMFUTURE', asset='BNB')` |
+| Funding BNB | USDT debe estar en spot para comprar | Sistema transfiere USDT futures→spot cuando el régimen lo indica | `FuturesClient.transfer_to_spot()` ahora permite transferir con posiciones abiertas respetando buffer de 10 USD |
 | Buffer extra | `bnb_extra_buffer_usd` por wallet | `bnb_extra_buffer_usd` por wallet | Subido a **10 USD** por wallet |
 | Reserva PM | Resta `total_reserve_usdt` del USDT disponible para trading | Resta `total_reserve_usdt` del margin disponible | `portfolio_manager.py` expone `*_after_reserve` |
-| Trazabilidad | `trades_audit` eventos `bnb_*` | `trades_audit` eventos `bnb_*` | 100% audit trail incluyendo shortfalls |
+| Trazabilidad | `trades_audit` eventos `bnb_*` y `usdt_futures_to_spot_*` | `trades_audit` eventos `bnb_*` y `usdt_futures_to_spot_*` | 100% audit trail incluyendo shortfalls |
 | Alerta | `config_drift_alerts` | `config_drift_alerts` | Si `use_bnb` apagado 2 checks consecutivos |
+
+#### Regla de preferencia de funding
+El sistema elige de qué wallet tomar USDT para comprar BNB según el régimen activo, para mantener líquida la wallet que está tradeando más:
+- **SPOT_BULL / RANGE_SCALP**: preferir USDT de **FUTURES** (spot se conserva para señales spot).
+- **FUTURES_SHORT / PRESERVATION**: preferir USDT de **SPOT** (futures se conserva para margin de shorts).
+- Si la fuente primaria no alcanza, se transfiere desde futures el excedente disponible (dejando 10 USD buffer). Si aún falta, se usa lo que haya en spot. Si ambos son insuficientes, se registra `bnb_liquidity_shortfall` y se salta la compra.
 
 
 ---
@@ -492,7 +499,8 @@ SLIPPAGE_PCT=0.00052                  # jun29: 0.0005→0.00052 (backtest run_06
 # Estimado ahorro: ~$585-$1,170 USDT/20d sobre ~$1.17M notional (= +15-35% PnL adicional).
 # Dashboard: status chip en header + panel detallado en tab Rendimiento vía /dashboard/commission.
 # Portfolio Manager reserva el valor BNB necesario (`bnb_reserve_usdt`) antes de calcular capital disponible para trading.
-# Trazabilidad: cada compra, transferencia, intento fallido y shortfall de BNB se persiste en `trades_audit`.
+# Funding: según el régimen activo, el sistema toma USDT de spot o de futures (excedente, dejando 10 USD buffer) para comprar BNB.
+# Trazabilidad: cada compra, transferencia USDT futures→spot, transferencia BNB spot→futures, intento fallido y shortfall se persiste en `trades_audit`.
 # Alerta: si `use_bnb` está apagado por 2 checks consecutivos, se inserta un `config_drift_alerts` warning.
 
 # ── Configuración Centralizada (K2 refactor) ─────────────────────────────────
@@ -847,7 +855,7 @@ if FUTURES_SHORT and confirmed:
 | Fecha | Bug | Fix |
 |-------|-----|-----|
 | jun 20 13:30 | **Anti-wick SL**: anti-wick comparaba contra `entry × (1-sl_pct)` ignorando `_effective_sl_price` — si SmartTP EXTEND había movido SL a breakeven (102.0), una vela 1m con close=101.8 bloqueaba el cierre correcto usando el floor viejo (98.2) | `run_trades.py:1135`: `if _last_close > _effective_sl_price` — mismo valor ya calculado por Fix 1 más arriba en el mismo ciclo |
-| jun 29 2026 | **BNB discount autónomo**: BNB Off por `auto_bnb_for_commission=false` default y falta de reserva. Activado por defecto, buffer extra subido a 10 USD, Portfolio Manager reserva BNB antes de sizing, compra/transferencia/shortfall auditados en `trades_audit`, alerta de drift si `use_bnb` apagado 2+ checks | `config.py`, `config_helpers.py`, `docker-compose.yml`, `binance_commission.py`, `portfolio_manager.py`, `run_trades.py`, `app.py`, `tests/test_binance_commission.py`, `tests/test_portfolio_manager.py` |
+| jun 29 2026 | **BNB discount autónomo**: BNB Off por `auto_bnb_for_commission=false` default y falta de reserva. Activado por defecto, buffer extra subido a 10 USD, Portfolio Manager reserva BNB antes de sizing, compra/transferencia/shortfall auditados en `trades_audit`, alerta de drift si `use_bnb` apagado 2+ checks. Luego, BNB funding por régimen: SPOT_BULL prefiere futures, FUTURES_SHORT prefiere spot, transferencia USDT futures→spot con buffer 10 USD | `config.py`, `config_helpers.py`, `docker-compose.yml`, `binance_commission.py`, `futures_client.py`, `portfolio_manager.py`, `run_trades.py`, `app.py`, `tests/test_binance_commission.py`, `tests/test_portfolio_manager.py` |
 | jun 29 2026 | **Screener consciente del régimen**: scanner sugería LONGs en FUTURES_SHORT. Añadido ranking por régimen (SPOT_BULL/RANGE_SCALP/PRESERVATION/FUTURES_SHORT), cache invalidado al cambiar de régimen, persistencia 100% en `screener_decisions`, endpoints `/dashboard/screener` y `/screener/decisions` | `pair_screener.py`, `run_trades.py`, `app.py`, `migrations/017_screener_decisions.sql`, `tests/test_screener.py` commit 91b7128 |
 | jun 20 13:30 | **Fix 4 orderType**: campo `type` en respuesta `/fapi/v1/openAlgoOrders` puede ser `None` para CONDITIONAL orders (Binance lo devuelve en `orderType`) → match fallaba silenciosamente, SL/TP se restauraban a defaults hardcodeados destruyendo el trailing | `futures_client.py:423`: `_o_type = _o.get("type") or _o.get("orderType", "")` |
 | jun 20 13:30 | **SmartTP predictor tamaño**: `_evaluate_tp_momentum()` pasaba `max_per_trade_usdt=$150` fijo al predictor — posiciones de $350 (FUERTE tier) tenían `success_probability` subestimada → decisión `scale_out` cuando debería ser `extend` | `run_trades.py`: función acepta `position_size_usdt` opcional; call site pasa `float(pos.quantity) × current_price` capped a `max_per_trade_usdt` |

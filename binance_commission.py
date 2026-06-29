@@ -512,11 +512,14 @@ def auto_manage_bnb_discount(
     futures_client=None,
     db_client=None,
     force: bool = False,
+    regime_mode: str = None,
 ) -> Dict[str, Any]:
     """
     Auto-detect BNB balance, top-up if needed, and activate BNB commission discount.
     Returns status dict with actions taken for full traceability.
     """
+    if regime_mode is None:
+        regime_mode = getattr(settings, 'current_regime_mode', 'SPOT_BULL') or 'SPOT_BULL'
     result = {
         'spot_bnb': 0.0,
         'futures_bnb': 0.0,
@@ -527,7 +530,12 @@ def auto_manage_bnb_discount(
         'futures_reserve_usdt': 0.0,
         'total_reserve_usdt': 0.0,
         'spot_usdt_available': 0.0,
+        'futures_usdt_available': 0.0,
         'shortfall_usdt': 0.0,
+        'usdt_source': 'none',
+        'usdt_transferred_from_futures': 0.0,
+        'usdt_transferred_from_spot': 0.0,
+        'regime_mode': regime_mode,
         'spot_action': 'none',
         'futures_action': 'none',
         'use_bnb': False,
@@ -606,21 +614,110 @@ def auto_manage_bnb_discount(
         if total_buy_bnb > 0 and total_buy_bnb < min_buy_notional_bnb:
             total_buy_bnb = round(min_buy_notional_bnb, 3)
 
-        # Check available USDT before buying to avoid failed orders and wasted fees
+        # Check available USDT in both wallets before buying
         buy_usdt_needed = total_buy_bnb * result['bnb_price']
         spot_usdt_available = 0.0
+        futures_usdt_available = 0.0
         if spot_client:
             try:
                 spot_usdt_available = float(spot_client.get_account_balance().get('USDT', 0))
             except Exception as e:
                 result['errors'].append(f'spot_usdt_balance: {e}')
+        if futures_client:
+            try:
+                futures_usdt_available = float(futures_client.get_available_usdt())
+            except Exception as e:
+                result['errors'].append(f'futures_usdt_balance: {e}')
+        result['spot_usdt_available'] = spot_usdt_available
+        result['futures_usdt_available'] = futures_usdt_available
+
+        # Determine USDT source preference based on active regime:
+        # - In SPOT-focused regimes, keep spot liquid -> prefer futures source.
+        # - In FUTURES-focused regimes, keep futures liquid -> prefer spot source.
+        _regime = regime_mode.upper()
+        if _regime in ('FUTURES_SHORT', 'PRESERVATION'):
+            primary_source, secondary_source = 'spot', 'futures'
+        else:
+            primary_source, secondary_source = 'futures', 'spot'
+
+        # Attempt to source USDT from the preferred wallet, then fallback
         if spot_client and total_buy_bnb >= 0.001:
+            usdt_in_spot = spot_usdt_available
+            usdt_in_futures = futures_usdt_available
+            if usdt_in_spot < buy_usdt_needed:
+                shortage = buy_usdt_needed - usdt_in_spot
+                # First, try the preferred source (futures) when possible
+                if futures_client and primary_source == 'futures' and shortage > 0:
+                    _max_from_futures = max(0.0, futures_usdt_available - extra_usd)
+                    _transfer_usdt = min(shortage, _max_from_futures)
+                    if _transfer_usdt >= 1.0:
+                        record_bnb_operation(db_client, 'usdt_futures_to_spot_attempt', {
+                            'amount': _transfer_usdt,
+                            'reason': 'bnb_top_up',
+                            'regime_mode': regime_mode,
+                            'futures_available_before': futures_usdt_available,
+                            'spot_usdt_before': spot_usdt_available,
+                        })
+                        _ok = futures_client.transfer_to_spot(_transfer_usdt)
+                        if _ok:
+                            result['usdt_transferred_from_futures'] = _transfer_usdt
+                            result['usdt_source'] = 'futures'
+                            record_bnb_operation(db_client, 'usdt_futures_to_spot_success', {
+                                'amount': _transfer_usdt,
+                                'reason': 'bnb_top_up',
+                                'regime_mode': regime_mode,
+                            })
+                        else:
+                            result['errors'].append('futures_to_spot_transfer_failed')
+                            record_bnb_operation(db_client, 'usdt_futures_to_spot_failed', {
+                                'amount': _transfer_usdt,
+                                'reason': 'bnb_top_up',
+                                'regime_mode': regime_mode,
+                            })
+                elif futures_client and primary_source == 'spot' and shortage > 0:
+                    # Futures is the fallback when spot is preferred but insufficient
+                    _max_from_futures = max(0.0, futures_usdt_available - extra_usd)
+                    _transfer_usdt = min(shortage, _max_from_futures)
+                    if _transfer_usdt >= 1.0:
+                        record_bnb_operation(db_client, 'usdt_futures_to_spot_attempt', {
+                            'amount': _transfer_usdt,
+                            'reason': 'bnb_top_up',
+                            'regime_mode': regime_mode,
+                            'futures_available_before': futures_usdt_available,
+                            'spot_usdt_before': spot_usdt_available,
+                        })
+                        _ok = futures_client.transfer_to_spot(_transfer_usdt)
+                        if _ok:
+                            result['usdt_transferred_from_futures'] = _transfer_usdt
+                            result['usdt_source'] = 'futures_fallback'
+                            record_bnb_operation(db_client, 'usdt_futures_to_spot_success', {
+                                'amount': _transfer_usdt,
+                                'reason': 'bnb_top_up',
+                                'regime_mode': regime_mode,
+                            })
+                        else:
+                            result['errors'].append('futures_to_spot_transfer_failed')
+                            record_bnb_operation(db_client, 'usdt_futures_to_spot_failed', {
+                                'amount': _transfer_usdt,
+                                'reason': 'bnb_top_up',
+                                'regime_mode': regime_mode,
+                            })
+                # Re-check spot balance after any transfer
+                try:
+                    spot_usdt_available = float(spot_client.get_account_balance().get('USDT', 0))
+                    result['spot_usdt_available'] = spot_usdt_available
+                except Exception as e:
+                    result['errors'].append(f'spot_usdt_recheck_after_transfer: {e}')
+
             if spot_usdt_available >= buy_usdt_needed:
+                result['usdt_source'] = result['usdt_source'] if result['usdt_source'] != 'none' else 'spot'
                 record_bnb_operation(db_client, 'bnb_buy_attempt', {
                     'bnb_quantity': total_buy_bnb,
                     'bnb_price': result['bnb_price'],
                     'usdt_needed': buy_usdt_needed,
                     'spot_usdt_available': spot_usdt_available,
+                    'futures_usdt_available': futures_usdt_available,
+                    'regime_mode': regime_mode,
                 })
                 try:
                     spot_client.create_market_order('BNBUSDT', 'BUY', quantity=total_buy_bnb)
@@ -629,6 +726,7 @@ def auto_manage_bnb_discount(
                         'bnb_quantity': total_buy_bnb,
                         'bnb_price': result['bnb_price'],
                         'usdt_needed': buy_usdt_needed,
+                        'regime_mode': regime_mode,
                     })
                 except Exception as e:
                     result['errors'].append(f'spot_buy_bnb: {e}')
@@ -637,16 +735,21 @@ def auto_manage_bnb_discount(
                         'bnb_quantity': total_buy_bnb,
                         'bnb_price': result['bnb_price'],
                         'error': str(e),
+                        'regime_mode': regime_mode,
                     })
             else:
                 result['spot_action'] = 'buy_skipped_insufficient_usdt'
                 result['shortfall_usdt'] = max(0.0, buy_usdt_needed - spot_usdt_available)
+                result['usdt_source'] = 'insufficient'
                 record_bnb_operation(db_client, 'bnb_liquidity_shortfall', {
                     'bnb_quantity_needed': total_buy_bnb,
                     'bnb_price': result['bnb_price'],
                     'usdt_needed': buy_usdt_needed,
                     'spot_usdt_available': spot_usdt_available,
+                    'futures_usdt_available': futures_usdt_available,
+                    'usdt_transferred_from_futures': result['usdt_transferred_from_futures'],
                     'shortfall_usdt': result['shortfall_usdt'],
+                    'regime_mode': regime_mode,
                 })
 
         # Re-read SPOT balance after purchase

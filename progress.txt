@@ -278,5 +278,7 @@ Backtest 1000-Run Re-optimization + Application run_0677 (2026-06-29 02:42 UTC):
 - `app.py`: startup sanity check logs warning to `trades_audit` if `auto_bnb_for_commission` is disabled; extended `/dashboard/commission` with `auto_bnb_enabled`, `bnb_reserve_usdt`; added BNB drift health check in `_config_drift_loop`.
 - Added tests: `tests/test_binance_commission.py` (auto BNB buy/transfer/shortfall/no-action), `tests/test_portfolio_manager.py` (BNB reserve subtracts from available).
 - Updated `SYSTEM_REFERENCE.md` section 5b and resolved history.
-- Commits: adf48f4 (feat: autonomous BNB commission discount management), 5ebd620 (chore: remove accidentally tracked temp files).
-- Verified: container rebuilt, tests 25+39 passed, system_health 107 passed (Cat7 flaky), 0 critical config mismatches.
+- Commits: adf48f4 (feat: autonomous BNB commission discount management), 5ebd620 (chore: remove accidentally tracked temp files), 858ef61 (chore: progress refs).
+- Follow-up: regime-aware BNB funding — SPOT_BULL/RANGE_SCALP prefer futures USDT; FUTURES_SHORT/PRESERVATION prefer spot USDT; transfers from futures to spot use only available excess keeping 10 USD buffer; full audit trail in trades_audit.
+- Files changed: futures_client.py (transfer_to_spot safety), binance_commission.py (regime-aware funding logic), run_trades.py/app.py (pass regime_mode), tests/test_binance_commission.py (regime funding tests), SYSTEM_REFERENCE.md.
+- Verified: tests/test_binance_commission.py 18 passed, combined BNB+PM+screener+governance 42 passed, system_health -k "not Cat7" 107 passed.

@@ -3317,24 +3317,6 @@ def execute_once(monitor_only: bool = False):
         print("[execute_once] pause_new_entries=True — running SL/TP monitor only")
         monitor_only = True
 
-    # ── Auto BNB commission discount management ─────────────────────────────────
-    try:
-        from binance_commission import auto_manage_bnb_discount
-        _fc = _get_futures_client(settings)
-        _bnb_status = auto_manage_bnb_discount(
-            settings=settings,
-            spot_client=client,
-            futures_client=_fc,
-            db_client=_db_client_ref,
-        )
-        print(f"[BNB] spot={_bnb_status['spot_bnb']:.4f} futures={_bnb_status['futures_bnb']:.4f} "
-              f"price={_bnb_status['bnb_price']:.2f} use_bnb={_bnb_status['use_bnb']} "
-              f"actions=[spot:{_bnb_status['spot_action']}, futures:{_bnb_status['futures_action']}]")
-        if _bnb_status['errors']:
-            print(f"[BNB] errors: {_bnb_status['errors']}")
-    except Exception as _bnb_err:
-        print(f"[BNB] auto-manage error: {_bnb_err}")
-
     # ── PAUSED / monitor_only: solo ejecutar SL/TP y retornar ───────────────────
     if monitor_only:
         print("[execute_once] monitor_only=True (system PAUSED) — running SL/TP monitor only")
@@ -3430,6 +3412,26 @@ def execute_once(monitor_only: bool = False):
                 print(f"[Regime] execute_once warm-up (severe bear): {_regime_mode} | confirmed={_regime_exe.confirmed}")
         except Exception as _re_exe:
             print(f"[Regime] execute_once detection failed: {_re_exe}")
+
+    # ── Auto BNB commission discount management (after regime detection) ───────────
+    try:
+        from binance_commission import auto_manage_bnb_discount
+        _fc = _get_futures_client(settings)
+        _bnb_status = auto_manage_bnb_discount(
+            settings=settings,
+            spot_client=client,
+            futures_client=_fc,
+            db_client=_db_client_ref,
+            regime_mode=_regime_mode,
+        )
+        print(f"[BNB] regime={_bnb_status.get('regime_mode')} spot={_bnb_status['spot_bnb']:.4f} "
+              f"futures={_bnb_status['futures_bnb']:.4f} price={_bnb_status['bnb_price']:.2f} "
+              f"use_bnb={_bnb_status['use_bnb']} source={_bnb_status.get('usdt_source')} "
+              f"actions=[spot:{_bnb_status['spot_action']}, futures:{_bnb_status['futures_action']}]")
+        if _bnb_status['errors']:
+            print(f"[BNB] errors: {_bnb_status['errors']}")
+    except Exception as _bnb_err:
+        print(f"[BNB] auto-manage error: {_bnb_err}")
 
     # ── Step -1: Audit on startup — cierra activos de trading_excluded_symbols ──
     global _AUDIT_STARTUP_DONE

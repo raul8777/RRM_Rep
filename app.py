@@ -3821,6 +3821,7 @@ async def get_commission_status(_auth=Depends(_require_api_key)) -> Dict:
             spot_client=_comp.binance_client,
             futures_client=_get_futures_client(_s),
             db_client=db_client,
+            regime_mode=getattr(_s, 'current_regime_mode', 'SPOT_BULL'),
         )
         return {
             "ok": True,
@@ -3855,6 +3856,7 @@ async def get_dashboard_commission(_auth=Depends(_require_api_key)) -> Dict:
             spot_client=_comp.binance_client,
             futures_client=_get_futures_client(_s),
             db_client=db_client,
+            regime_mode=getattr(_s, 'current_regime_mode', 'SPOT_BULL'),
         )
 
         # Recent commission totals from trades_closed (today + 7d)

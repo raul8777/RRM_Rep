@@ -1267,11 +1267,12 @@ class FuturesClient:
             print(f"[Futures] transfer_to_futures error: {e}")
             return False
 
-    def transfer_to_spot(self, amount: float, spot_api_key: str = None, spot_api_secret: str = None) -> bool:
+    def transfer_to_spot(self, amount: float, spot_api_key: str = None, spot_api_secret: str = None,
+                          safety_buffer_usdt: float = 10.0) -> bool:
         """
         Transfer USDT from Futures wallet back to Spot wallet.
         Uses /sapi/v1/futures/transfer (type=2 = USDT-M Futures→SPOT).
-        Only transfers if no open positions remain.
+        Only transfers if the futures wallet has enough available balance after keeping a safety buffer.
         Returns True on success.
         """
         _key    = spot_api_key    or self.api_key
@@ -1280,6 +1281,17 @@ class FuturesClient:
             print(f"[Futures DRY] Transfer ${amount:.2f} USDT futures→spot")
             return True
         try:
+            available = self.get_available_usdt()
+            max_transfer = max(0.0, available - safety_buffer_usdt)
+            if amount <= 0:
+                print(f"[Futures] Nothing to transfer to spot (amount={amount:.2f})")
+                return False
+            if amount > max_transfer:
+                print(f"[Futures] Transfer capped: requested ${amount:.2f} > max safe ${max_transfer:.2f} (available=${available:.2f}, buffer={safety_buffer_usdt:.2f})")
+                amount = max_transfer
+            if amount < 1.0:
+                print(f"[Futures] Transfer amount too small (${amount:.2f}), skipping")
+                return False
             params = {
                 "asset":     "USDT",
                 "amount":    str(round(amount, 4)),

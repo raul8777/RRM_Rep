@@ -138,20 +138,33 @@ class FakeSpotClient:
 
 
 class FakeFuturesClient:
-    def __init__(self, bnb=0.0):
+    def __init__(self, bnb=0.0, usdt=0.0, spot_client=None):
         self._bnb = bnb
+        self._usdt = usdt
+        self._spot_client = spot_client
+        self.transferred_to_spot = 0.0
 
     def get_price(self, symbol):
         return 600.0
 
     def get_account_info(self):
-        return {'assets': [{'asset': 'BNB', 'availableBalance': self._bnb}]}
+        return {'assets': [{'asset': 'BNB', 'availableBalance': self._bnb}, {'asset': 'USDT', 'availableBalance': self._usdt}]}
 
     def get_available_usdt(self):
-        return 0.0
+        return self._usdt
 
     def get_total_wallet_usdt(self):
-        return 0.0
+        return self._usdt
+
+    def transfer_to_spot(self, amount, **kwargs):
+        amount = min(amount, max(0.0, self._usdt - 10.0))
+        if amount >= 1.0:
+            self._usdt -= amount
+            self.transferred_to_spot += amount
+            if self._spot_client is not None:
+                self._spot_client._usdt += amount
+            return True
+        return False
 
 
 def test_get_bnb_reserve_usdt():
@@ -190,3 +203,35 @@ def test_auto_manage_bnb_discount_no_action_when_funded():
     assert res['spot_action'] == 'none'
     assert res['futures_action'] == 'none'
     assert res['use_bnb'] is True
+
+
+def test_auto_manage_bnb_discount_futures_regime_prefers_spot():
+    # FUTURES_SHORT regime: spot should be primary source; no futures transfer expected
+    spot = FakeSpotClient(bnb=0.0, usdt=0.0)
+    fut = FakeFuturesClient(bnb=0.0, usdt=1000.0, spot_client=spot)
+    db = MagicMock()
+    res = auto_manage_bnb_discount(BNBAutoSettings(), spot_client=spot, futures_client=fut, db_client=db, regime_mode='FUTURES_SHORT')
+    assert res['regime_mode'] == 'FUTURES_SHORT'
+    assert res['usdt_transferred_from_futures'] > 0
+    assert res['spot_action'].startswith('bought')
+
+
+def test_auto_manage_bnb_discount_spot_regime_prefers_futures():
+    # SPOT_BULL regime: futures should be primary source; transfer from futures expected
+    spot = FakeSpotClient(bnb=0.0, usdt=0.0)
+    fut = FakeFuturesClient(bnb=0.0, usdt=1000.0, spot_client=spot)
+    db = MagicMock()
+    res = auto_manage_bnb_discount(BNBAutoSettings(), spot_client=spot, futures_client=fut, db_client=db, regime_mode='SPOT_BULL')
+    assert res['regime_mode'] == 'SPOT_BULL'
+    assert res['usdt_transferred_from_futures'] > 0
+    assert res['spot_action'].startswith('bought')
+
+
+def test_auto_manage_bnb_discount_both_wallets_shortfall():
+    spot = FakeSpotClient(bnb=0.0, usdt=0.0)
+    fut = FakeFuturesClient(bnb=0.0, usdt=0.0, spot_client=spot)
+    db = MagicMock()
+    res = auto_manage_bnb_discount(BNBAutoSettings(), spot_client=spot, futures_client=fut, db_client=db, regime_mode='SPOT_BULL')
+    assert res['spot_action'] == 'buy_skipped_insufficient_usdt'
+    assert res['shortfall_usdt'] > 0
+    assert res['usdt_source'] == 'insufficient'
