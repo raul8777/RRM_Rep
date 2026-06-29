@@ -3,8 +3,21 @@ Unit tests for Portfolio Manager
 """
 
 import pytest
+from unittest.mock import MagicMock
 from portfolio_manager import PortfolioManager, PairRanking, CapitalAllocation
 from risk_calculator import RiskCalculator
+
+
+class _Settings:
+    portfolio_allocation_pct = 100.0
+    min_pair_confidence_score = 50.0
+    max_risk_per_pair_pct = 10.0
+    diversification_factor = 1.0
+    enable_position_closure = False
+    bnb_extra_buffer_usd = 10.0
+    bnb_buffer_days = 7
+    bnb_min_balance_usd = 5.0
+    db_url = ""
 
 
 class TestRiskCalculator:
@@ -79,6 +92,17 @@ class TestPortfolioManager:
         # This would require proper setup
         # For now, we'll skip actual implementation
         pass
+
+    def test_get_total_balance_respects_bnb_reserve(self):
+        """usdt_available_after_reserve subtracts BNB buffer."""
+        client = MagicMock()
+        client.get_account_balance.return_value = {'USDT': 100.0, 'BNB': 0.0}
+        pm = PortfolioManager(client, _Settings())
+        bal = pm.get_total_balance(use_cache=False)
+        assert 'usdt_available_after_reserve' in bal
+        assert 'bnb_reserve_usdt' in bal
+        assert bal['usdt_available_after_reserve'] <= bal['usdt_available']
+        assert bal['usdt_available_after_reserve'] >= 0
     
     def test_allocate_capital_basic(self):
         """Test basic capital allocation."""

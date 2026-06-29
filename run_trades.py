@@ -2025,7 +2025,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     if portfolio_manager:
         balance = portfolio_manager.get_total_balance()
         # Use liquid USDT as the actual cap — not total portfolio value
-        usdt_liquid = float(balance.get("usdt_available", usdt))
+        # Prefer BNB-reserve-aware balance so commission buffer is never traded away
+        usdt_liquid = float(balance.get("usdt_available_after_reserve", balance.get("usdt_available", usdt)))
         _total_portfolio = float(balance.get("total_usdt", usdt_liquid))
         _invested = _total_portfolio - usdt_liquid
         _exposure_pct = _invested / _total_portfolio if _total_portfolio > 0 else 0.0
@@ -2244,7 +2245,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 if _get_param(settings, 'use_unified_portfolio_manager') and portfolio_manager:
                     try:
                         _unified_short = portfolio_manager.get_unified_balance(_fc)
-                        _f_kelly_liquid = _unified_short.get('futures_available', usdt_liquid)
+                        _f_kelly_liquid = _unified_short.get('futures_available_after_reserve', _unified_short.get('futures_available', usdt_liquid))
                         _f_base_ov = _get_param(settings, 'futures_kelly_base_usdt')
                         _f_max_ov  = _get_param(settings, 'futures_kelly_max_usdt')
                         _f_cap_ov  = _get_param(settings, 'futures_kelly_max_pct_liquid')
@@ -2614,7 +2615,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     if _get_param(settings, 'use_unified_portfolio_manager') and portfolio_manager:
                         try:
                             _unified_long = portfolio_manager.get_unified_balance(_fc_sb)
-                            _l_kelly_liq = _unified_long.get('futures_available', usdt_liquid)
+                            _l_kelly_liq = _unified_long.get('futures_available_after_reserve', _unified_long.get('futures_available', usdt_liquid))
                             _l_base_ov = _get_param(settings, 'futures_kelly_base_usdt')
                             _l_max_ov  = _get_param(settings, 'futures_kelly_max_usdt')
                             _l_cap_ov  = _get_param(settings, 'futures_kelly_max_pct_liquid')
@@ -3067,7 +3068,8 @@ def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, 
     if not portfolio_manager or not top_symbols:
         return predictions
     try:
-        usdt_liquid = float(portfolio_manager.get_total_balance().get("usdt_available", 0))
+        _pm_balance = portfolio_manager.get_total_balance()
+        usdt_liquid = float(_pm_balance.get("usdt_available_after_reserve", _pm_balance.get("usdt_available", 0)))
         alloc_per = min(settings.max_per_trade_usdt, usdt_liquid / len(top_symbols))
         for symbol in top_symbols:
             _pre_sig = (signal_meta or {}).get(symbol)
@@ -3113,7 +3115,8 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
         # ── Gate 2: find the weakest current position vs best new opportunity ─
         # Use decide_position_closures (prediction-only path, fallback disabled)
         from portfolio_manager import CapitalAllocation
-        usdt_liquid = float(portfolio_manager.get_total_balance().get("usdt_available", 0))
+        _pm_balance_r = portfolio_manager.get_total_balance()
+        usdt_liquid = float(_pm_balance_r.get("usdt_available_after_reserve", _pm_balance_r.get("usdt_available", 0)))
         alloc_per = min(settings.max_per_trade_usdt, usdt_liquid / max(len(top_symbols), 1))
         new_allocations = [
             CapitalAllocation(
@@ -3490,7 +3493,7 @@ def execute_once(monitor_only: bool = False):
                     if _get_param(settings, 'use_unified_portfolio_manager') and portfolio_manager:
                         try:
                             _unified_cb = portfolio_manager.get_unified_balance(_fc)
-                            _cb_futures_avail = _unified_cb.get('futures_available', _fc.get_available_usdt())
+                            _cb_futures_avail = _unified_cb.get('futures_available_after_reserve', _unified_cb.get('futures_available', _fc.get_available_usdt()))
                         except Exception:
                             _cb_futures_avail = _fc.get_available_usdt()
                     else:

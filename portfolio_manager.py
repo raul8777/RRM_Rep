@@ -14,6 +14,15 @@ from risk_calculator import RiskCalculator
 from config import Settings
 from pnl_predictor import PnLPredictor
 
+
+def _get_bnb_reserve_usdt(settings) -> float:
+    """Return USD value of BNB that should be reserved for commission buffer."""
+    try:
+        from binance_commission import get_bnb_reserve_usdt
+        return get_bnb_reserve_usdt(settings).get('total_reserve_usdt', 0.0)
+    except Exception:
+        return 0.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -112,8 +121,12 @@ class PortfolioManager:
                 except Exception:
                     pass
             
+            bnb_reserve = _get_bnb_reserve_usdt(self.settings)
+            usdt_available_after_reserve = max(0.0, usdt_balance - bnb_reserve)
             result = {
                 "usdt_available": usdt_balance,
+                "usdt_available_after_reserve": usdt_available_after_reserve,
+                "bnb_reserve_usdt": bnb_reserve,
                 "total_usdt": total_usdt,
                 "allocation_usdt": total_usdt * self.allocation_pct,
                 "timestamp": datetime.utcnow().isoformat()
@@ -124,6 +137,8 @@ class PortfolioManager:
             logger.error(f"Error getting total balance: {e}")
             return {
                 "usdt_available": 0.0,
+                "usdt_available_after_reserve": 0.0,
+                "bnb_reserve_usdt": 0.0,
                 "total_usdt": 0.0,
                 "allocation_usdt": 0.0,
                 "timestamp": datetime.utcnow().isoformat()
@@ -145,14 +160,21 @@ class PortfolioManager:
             futures_total = futures_client.get_total_wallet_usdt()
             futures_avail = futures_client.get_available_usdt()
             spot_usdt     = spot["usdt_available"]
+            bnb_reserve = _get_bnb_reserve_usdt(self.settings)
+            # Reserve applies to the whole system (BNB held across both wallets)
+            usdt_after_reserve = max(0.0, spot_usdt - bnb_reserve)
+            futures_after_reserve = max(0.0, futures_avail - bnb_reserve)
             combined_total = spot["total_usdt"] + futures_total
             result = {
-                "usdt_available":    spot_usdt,
-                "futures_available": futures_avail,
-                "futures_total":     futures_total,
-                "total_usdt":        combined_total,
-                "allocation_usdt":   combined_total * self.allocation_pct,
-                "timestamp":         spot.get("timestamp", datetime.utcnow().isoformat()),
+                "usdt_available":                  spot_usdt,
+                "usdt_available_after_reserve":    usdt_after_reserve,
+                "futures_available":               futures_avail,
+                "futures_available_after_reserve": futures_after_reserve,
+                "bnb_reserve_usdt":                bnb_reserve,
+                "futures_total":                   futures_total,
+                "total_usdt":                      combined_total,
+                "allocation_usdt":               combined_total * self.allocation_pct,
+                "timestamp":                       spot.get("timestamp", datetime.utcnow().isoformat()),
             }
             logger.debug(
                 f"[UnifiedPM] spot=${spot_usdt:.2f} futures_avail=${futures_avail:.2f} "

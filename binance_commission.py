@@ -471,6 +471,41 @@ def audit_bnb_status(db_client: Any, spot_bnb: float, futures_bnb: float,
         pass
 
 
+def record_bnb_operation(db_client: Any, operation: str, detail: Dict[str, Any]) -> None:
+    """Persist a BNB management action (buy, transfer, shortfall, failure) to trades_audit."""
+    if not db_client:
+        return
+    try:
+        import json
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            ('__config__', 'system', operation,
+             json.dumps(detail), False)
+        )
+    except Exception:
+        pass
+
+
+def get_bnb_reserve_usdt(settings, trade_type: Optional[str] = None) -> Dict[str, float]:
+    """Return USD value of BNB the system should keep reserved per wallet.
+
+    If trade_type is None, returns both spot and futures reserves plus total.
+    """
+    spot_buffer = estimate_bnb_buffer_needed(settings, 'spot', settings.bnb_buffer_days)
+    futures_buffer = estimate_bnb_buffer_needed(settings, 'futures', settings.bnb_buffer_days)
+    extra = float(getattr(settings, 'bnb_extra_buffer_usd', 10.0))
+    result = {
+        'spot_reserve_usdt': spot_buffer + extra,
+        'futures_reserve_usdt': futures_buffer + extra,
+        'total_reserve_usdt': spot_buffer + futures_buffer + 2 * extra,
+    }
+    if trade_type and trade_type.lower() in ('spot', 'futures'):
+        key = f"{trade_type.lower()}_reserve_usdt"
+        return {key: result[key], 'total_reserve_usdt': result[key]}
+    return result
+
+
 def auto_manage_bnb_discount(
     settings,
     spot_client=None,
@@ -488,6 +523,11 @@ def auto_manage_bnb_discount(
         'bnb_price': 0.0,
         'spot_buffer': 0.0,
         'futures_buffer': 0.0,
+        'spot_reserve_usdt': 0.0,
+        'futures_reserve_usdt': 0.0,
+        'total_reserve_usdt': 0.0,
+        'spot_usdt_available': 0.0,
+        'shortfall_usdt': 0.0,
         'spot_action': 'none',
         'futures_action': 'none',
         'use_bnb': False,
@@ -525,9 +565,13 @@ def auto_manage_bnb_discount(
             except Exception as e:
                 result['errors'].append(f'futures_bnb_balance: {e}')
 
-        # Estimate buffers
+        # Estimate buffers and reserves
         result['spot_buffer'] = estimate_bnb_buffer_needed(settings, 'spot', settings.bnb_buffer_days)
         result['futures_buffer'] = estimate_bnb_buffer_needed(settings, 'futures', settings.bnb_buffer_days)
+        _reserves = get_bnb_reserve_usdt(settings)
+        result['spot_reserve_usdt'] = _reserves['spot_reserve_usdt']
+        result['futures_reserve_usdt'] = _reserves['futures_reserve_usdt']
+        result['total_reserve_usdt'] = _reserves['total_reserve_usdt']
 
         spot_bnb_usd = result['spot_bnb'] * result['bnb_price']
         futures_bnb_usd = result['futures_bnb'] * result['bnb_price']
@@ -541,8 +585,8 @@ def auto_manage_bnb_discount(
                              result['bnb_price'])
             return result
 
-        # Targets: buffer + extra USD (default 5 USD) to avoid running out
-        extra_usd = float(getattr(settings, 'bnb_extra_buffer_usd', 5.0))
+        # Targets: buffer + extra USD (default 10 USD) to avoid running out
+        extra_usd = float(getattr(settings, 'bnb_extra_buffer_usd', 10.0))
         target_spot_usd = result['spot_buffer'] + extra_usd
         target_futures_usd = result['futures_buffer'] + extra_usd
 
@@ -561,13 +605,49 @@ def auto_manage_bnb_discount(
         min_buy_notional_bnb = max(10.0 / result['bnb_price'], 0.001)
         if total_buy_bnb > 0 and total_buy_bnb < min_buy_notional_bnb:
             total_buy_bnb = round(min_buy_notional_bnb, 3)
-        if spot_client and total_buy_bnb >= 0.001:
+
+        # Check available USDT before buying to avoid failed orders and wasted fees
+        buy_usdt_needed = total_buy_bnb * result['bnb_price']
+        spot_usdt_available = 0.0
+        if spot_client:
             try:
-                spot_client.create_market_order('BNBUSDT', 'BUY', quantity=total_buy_bnb)
-                result['spot_action'] = f'bought_{total_buy_bnb:.6f}_bnb'
+                spot_usdt_available = float(spot_client.get_account_balance().get('USDT', 0))
             except Exception as e:
-                result['errors'].append(f'spot_buy_bnb: {e}')
-                result['spot_action'] = 'buy_failed'
+                result['errors'].append(f'spot_usdt_balance: {e}')
+        if spot_client and total_buy_bnb >= 0.001:
+            if spot_usdt_available >= buy_usdt_needed:
+                record_bnb_operation(db_client, 'bnb_buy_attempt', {
+                    'bnb_quantity': total_buy_bnb,
+                    'bnb_price': result['bnb_price'],
+                    'usdt_needed': buy_usdt_needed,
+                    'spot_usdt_available': spot_usdt_available,
+                })
+                try:
+                    spot_client.create_market_order('BNBUSDT', 'BUY', quantity=total_buy_bnb)
+                    result['spot_action'] = f'bought_{total_buy_bnb:.6f}_bnb'
+                    record_bnb_operation(db_client, 'bnb_buy_success', {
+                        'bnb_quantity': total_buy_bnb,
+                        'bnb_price': result['bnb_price'],
+                        'usdt_needed': buy_usdt_needed,
+                    })
+                except Exception as e:
+                    result['errors'].append(f'spot_buy_bnb: {e}')
+                    result['spot_action'] = 'buy_failed'
+                    record_bnb_operation(db_client, 'bnb_buy_failed', {
+                        'bnb_quantity': total_buy_bnb,
+                        'bnb_price': result['bnb_price'],
+                        'error': str(e),
+                    })
+            else:
+                result['spot_action'] = 'buy_skipped_insufficient_usdt'
+                result['shortfall_usdt'] = max(0.0, buy_usdt_needed - spot_usdt_available)
+                record_bnb_operation(db_client, 'bnb_liquidity_shortfall', {
+                    'bnb_quantity_needed': total_buy_bnb,
+                    'bnb_price': result['bnb_price'],
+                    'usdt_needed': buy_usdt_needed,
+                    'spot_usdt_available': spot_usdt_available,
+                    'shortfall_usdt': result['shortfall_usdt'],
+                })
 
         # Re-read SPOT balance after purchase
         if spot_client:
@@ -585,6 +665,12 @@ def auto_manage_bnb_discount(
             available_for_futures = max(0.0, result['spot_bnb'] - reserve_spot_bnb)
             transfer_bnb = round(min(needed_futures_bnb, available_for_futures), 3)
             if transfer_bnb >= 0.001:
+                record_bnb_operation(db_client, 'bnb_transfer_attempt', {
+                    'bnb_quantity': transfer_bnb,
+                    'bnb_price': result['bnb_price'],
+                    'from': 'spot',
+                    'to': 'futures',
+                })
                 try:
                     spot_client.client.universal_transfer(
                         type='MAIN_UMFUTURE',
@@ -592,9 +678,20 @@ def auto_manage_bnb_discount(
                         amount=transfer_bnb,
                     )
                     result['futures_action'] = f'transferred_{transfer_bnb:.6f}_bnb_to_futures'
+                    record_bnb_operation(db_client, 'bnb_transfer_success', {
+                        'bnb_quantity': transfer_bnb,
+                        'bnb_price': result['bnb_price'],
+                        'from': 'spot',
+                        'to': 'futures',
+                    })
                 except Exception as e:
                     result['errors'].append(f'futures_transfer_bnb: {e}')
                     result['futures_action'] = 'transfer_failed'
+                    record_bnb_operation(db_client, 'bnb_transfer_failed', {
+                        'bnb_quantity': transfer_bnb,
+                        'bnb_price': result['bnb_price'],
+                        'error': str(e),
+                    })
 
         # Re-read balances after transfer
         if spot_client:

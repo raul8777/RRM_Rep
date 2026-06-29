@@ -245,6 +245,21 @@ def startup_event():
         print(f"Commission refresh: spot={_refresh.get('spot_rate')} futures={_refresh.get('futures_rate')} use_bnb={_refresh.get('use_bnb')}")
     except Exception as e:
         print(f"Commission refresh error (non-fatal): {e}")
+    # Startup sanity check: BNB auto-management must be enabled for commission discount
+    try:
+        _comp_s = get_components()
+        _s_s = _comp_s.settings
+        if not getattr(_s_s, 'auto_bnb_for_commission', True):
+            _msg = "AUTO_BNB_FOR_COMMISSION is disabled — BNB discount will not be auto-maintained"
+            print(f"[BNB] WARNING: {_msg}")
+            if _comp_s.db_client:
+                _comp_s.db_client.execute_update(
+                    "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+                    ('__config__', 'system', 'bnb_auto_disabled_warning',
+                     json.dumps({'message': _msg}), False)
+                )
+    except Exception as e:
+        print(f"[BNB] startup sanity check error (non-fatal): {e}")
     # Start background periodic config snapshot task for traceability
     try:
         asyncio.create_task(_config_snapshot_loop())
@@ -3873,8 +3888,10 @@ async def get_dashboard_commission(_auth=Depends(_require_api_key)) -> Dict:
             "bnb_spot_rate": _cfg.bnb_spot_rate,
             "bnb_futures_rate": _cfg.bnb_futures_rate,
             "use_bnb": _bnb_status.get('use_bnb', _cfg.use_bnb),
+            "auto_bnb_enabled": getattr(_s, 'auto_bnb_for_commission', True),
             "slippage_pct": _cfg.slippage_pct,
             "bnb_status": _bnb_status,
+            "bnb_reserve_usdt": _bnb_status.get('total_reserve_usdt', 0.0),
             "commission_totals": _totals,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -4476,10 +4493,42 @@ async def _config_drift_loop() -> None:
                     print(f"[DriftAlert] {_n} new drift alert(s) persisted")
             else:
                 print("[DriftAlert] runtime config aligned with baseline")
+            # BNB discount health check
+            _bnb_drift = _check_bnb_drift(_comp)
+            if _bnb_drift:
+                _persist_drift_alerts([_bnb_drift])
+                print(f"[DriftAlert] BNB discount drift persisted: {_bnb_drift}")
         except asyncio.CancelledError:
             break
         except Exception as e:
             print(f"[DriftAlert] drift check failed: {e}")
+
+
+_bnb_drift_cache: Dict[str, Any] = {"consecutive_off": 0}
+
+
+def _check_bnb_drift(_comp) -> Optional[Dict]:
+    """Return a drift alert if BNB discount has been off for 2+ consecutive checks."""
+    try:
+        from binance_commission import get_config
+        _cfg = get_config(_comp.settings)
+        if _cfg.use_bnb:
+            _bnb_drift_cache["consecutive_off"] = 0
+            return None
+        _bnb_drift_cache["consecutive_off"] += 1
+        if _bnb_drift_cache["consecutive_off"] < 2:
+            return None
+        return {
+            "severity": "warning",
+            "param": "use_bnb_for_commission",
+            "expected": True,
+            "actual": False,
+            "source": "bnb_discount_health",
+            "notes": "BNB discount has been off for 2+ consecutive drift checks; check BNB balance or auto_bnb_for_commission",
+        }
+    except Exception as e:
+        print(f"[DriftAlert] BNB drift check failed: {e}")
+        return None
 
 
 @app.post("/backtest/apply")

@@ -527,10 +527,10 @@ class Settings(BaseSettings):
     futures_commission_rate: float = Field(default=0.0004, env="FUTURES_COMMISSION_RATE")  # 0.04% futures taker default
     bnb_futures_commission_rate: float = Field(default=0.0002, env="BNB_FUTURES_COMMISSION_RATE")  # 0.02% futures with BNB
     # Auto BNB discount: system detects BNB balance and converts USDT if needed
-    auto_bnb_for_commission: bool = Field(default=False, env="AUTO_BNB_FOR_COMMISSION")
+    auto_bnb_for_commission: bool = Field(default=True, env="AUTO_BNB_FOR_COMMISSION")
     bnb_buffer_days: int = Field(default=7, env="BNB_BUFFER_DAYS")
     bnb_min_balance_usd: float = Field(default=5.0, env="BNB_MIN_BALANCE_USD")
-    bnb_extra_buffer_usd: float = Field(default=5.0, env="BNB_EXTRA_BUFFER_USD")
+    bnb_extra_buffer_usd: float = Field(default=10.0, env="BNB_EXTRA_BUFFER_USD")
     futures_max_escalamientos: int = Field(default=2, env="FUTURES_MAX_ESCALAMIENTOS")  # max entries per symbol (escalamiento cap)
     
     # Currency conversion configuration

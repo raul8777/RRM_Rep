@@ -301,7 +301,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
 
     # BNB commission
     'bnb_min_balance_usd': 5.0,
-    'bnb_extra_buffer_usd': 5.0,
+    'bnb_extra_buffer_usd': 10.0,
     'bnb_buffer_days': 7,
 
     # Trading symbol lists

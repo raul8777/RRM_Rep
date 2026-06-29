@@ -391,6 +391,16 @@ fees %    = 10.7% del PnL bruto
 - `entry_commission` + `exit_commission` en `trades_closed` — siempre populadas para futuros desde jun 24
 - SPOT: `entry_commission` llega NULL en ~155/165 trades históricos (bug pre-jun 24); salida siempre calculada
 
+### Gestión autónoma de BNB (jun 29 2026)
+| Concepto | SPOT | FUTURES | Implementación |
+|----------|------|---------|----------------|
+| Compra BNB | ✅ En spot wallet | ❌ No se compra directamente | `binance_commission.py:auto_manage_bnb_discount()` compra BNBUSDT spot |
+| Transferencia | Spot → Futures | ✅ Recibe BNB de spot | `universalTransfer(type='MAIN_UMFUTURE', asset='BNB')` |
+| Buffer extra | `bnb_extra_buffer_usd` por wallet | `bnb_extra_buffer_usd` por wallet | Subido a **10 USD** por wallet |
+| Reserva PM | Resta `total_reserve_usdt` del USDT disponible para trading | Resta `total_reserve_usdt` del margin disponible | `portfolio_manager.py` expone `*_after_reserve` |
+| Trazabilidad | `trades_audit` eventos `bnb_*` | `trades_audit` eventos `bnb_*` | 100% audit trail incluyendo shortfalls |
+| Alerta | `config_drift_alerts` | `config_drift_alerts` | Si `use_bnb` apagado 2 checks consecutivos |
+
 
 ---
 
@@ -475,12 +485,15 @@ BNB_FUTURES_COMMISSION_RATE=0.0002
 AUTO_BNB_FOR_COMMISSION=true          # auto-detecta BNB, compra si falta, activa descuento
 BNB_BUFFER_DAYS=7                     # días de comisiones a mantener en BNB
 BNB_MIN_BALANCE_USD=5.0               # mínimo USD en BNB para mantener descuento activo
-BNB_EXTRA_BUFFER_USD=5.0              # excedente de USD a mantener en cada wallet para evitar quedarse sin BNB
+BNB_EXTRA_BUFFER_USD=10.0             # excedente de USD a mantener en cada wallet para evitar quedarse sin BNB
 SLIPPAGE_PCT=0.00052                  # jun29: 0.0005→0.00052 (backtest run_0677)
 # PnL predictor y Kelly sizing ahora usan reward/risk NETO de comisiones.
 # BNB discount impact (Backtest 1000 window): round-trip SPOT 0.20%->0.10%, FUTURES 0.08%->0.04%.
 # Estimado ahorro: ~$585-$1,170 USDT/20d sobre ~$1.17M notional (= +15-35% PnL adicional).
 # Dashboard: status chip en header + panel detallado en tab Rendimiento vía /dashboard/commission.
+# Portfolio Manager reserva el valor BNB necesario (`bnb_reserve_usdt`) antes de calcular capital disponible para trading.
+# Trazabilidad: cada compra, transferencia, intento fallido y shortfall de BNB se persiste en `trades_audit`.
+# Alerta: si `use_bnb` está apagado por 2 checks consecutivos, se inserta un `config_drift_alerts` warning.
 
 # ── Configuración Centralizada (K2 refactor) ─────────────────────────────────
 # Fuente única de verdad: config.py define los defaults; docker-compose.yml/.env los overrides.
@@ -834,6 +847,7 @@ if FUTURES_SHORT and confirmed:
 | Fecha | Bug | Fix |
 |-------|-----|-----|
 | jun 20 13:30 | **Anti-wick SL**: anti-wick comparaba contra `entry × (1-sl_pct)` ignorando `_effective_sl_price` — si SmartTP EXTEND había movido SL a breakeven (102.0), una vela 1m con close=101.8 bloqueaba el cierre correcto usando el floor viejo (98.2) | `run_trades.py:1135`: `if _last_close > _effective_sl_price` — mismo valor ya calculado por Fix 1 más arriba en el mismo ciclo |
+| jun 29 2026 | **BNB discount autónomo**: BNB Off por `auto_bnb_for_commission=false` default y falta de reserva. Activado por defecto, buffer extra subido a 10 USD, Portfolio Manager reserva BNB antes de sizing, compra/transferencia/shortfall auditados en `trades_audit`, alerta de drift si `use_bnb` apagado 2+ checks | `config.py`, `config_helpers.py`, `docker-compose.yml`, `binance_commission.py`, `portfolio_manager.py`, `run_trades.py`, `app.py`, `tests/test_binance_commission.py`, `tests/test_portfolio_manager.py` |
 | jun 29 2026 | **Screener consciente del régimen**: scanner sugería LONGs en FUTURES_SHORT. Añadido ranking por régimen (SPOT_BULL/RANGE_SCALP/PRESERVATION/FUTURES_SHORT), cache invalidado al cambiar de régimen, persistencia 100% en `screener_decisions`, endpoints `/dashboard/screener` y `/screener/decisions` | `pair_screener.py`, `run_trades.py`, `app.py`, `migrations/017_screener_decisions.sql`, `tests/test_screener.py` commit 91b7128 |
 | jun 20 13:30 | **Fix 4 orderType**: campo `type` en respuesta `/fapi/v1/openAlgoOrders` puede ser `None` para CONDITIONAL orders (Binance lo devuelve en `orderType`) → match fallaba silenciosamente, SL/TP se restauraban a defaults hardcodeados destruyendo el trailing | `futures_client.py:423`: `_o_type = _o.get("type") or _o.get("orderType", "")` |
 | jun 20 13:30 | **SmartTP predictor tamaño**: `_evaluate_tp_momentum()` pasaba `max_per_trade_usdt=$150` fijo al predictor — posiciones de $350 (FUERTE tier) tenían `success_probability` subestimada → decisión `scale_out` cuando debería ser `extend` | `run_trades.py`: función acepta `position_size_usdt` opcional; call site pasa `float(pos.quantity) × current_price` capped a `max_per_trade_usdt` |

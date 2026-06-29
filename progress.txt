@@ -264,3 +264,17 @@ Backtest 1000-Run Re-optimization + Application run_0677 (2026-06-29 02:42 UTC):
 - Tests: test_screener.py 9/9 PASSED; test_config_governance.py 5/5 PASSED; test_system_health.py passes
   (occasional timeouts under full suite load, individual retries pass).
 - Commits: 91b7128 (feat: regime-aware screener + dashboard endpoints), 6948d46 (docs: SYSTEM_REFERENCE update).
+
+2026-06-29 - Autonomous BNB Commission Discount Management
+===========================================================
+- Root cause: `auto_bnb_for_commission` default in `config.py` was False, so BNB was never auto-bought/transferred.
+- Changed `config.py` default `auto_bnb_for_commission=True` and `bnb_extra_buffer_usd=10.0`.
+- Updated `config_helpers.py` canonical default `bnb_extra_buffer_usd=10.0`.
+- Updated `docker-compose.yml` `BNB_EXTRA_BUFFER_USD=10.0`.
+- `binance_commission.py`: added `get_bnb_reserve_usdt()`, `record_bnb_operation()`.
+- `auto_manage_bnb_discount()` now checks available USDT before buying, records every buy/transfer/shortfall/failure to `trades_audit`, and exposes `spot_reserve_usdt`, `futures_reserve_usdt`, `total_reserve_usdt`, `spot_usdt_available`, `shortfall_usdt`.
+- `portfolio_manager.py`: `get_total_balance()` and `get_unified_balance()` now expose `*_after_reserve` fields and `bnb_reserve_usdt`.
+- `run_trades.py`: spot/futures sizing paths use `*_after_reserve` balances so BNB buffer is never traded away.
+- `app.py`: startup sanity check logs warning to `trades_audit` if `auto_bnb_for_commission` is disabled; extended `/dashboard/commission` with `auto_bnb_enabled`, `bnb_reserve_usdt`; added BNB drift health check in `_config_drift_loop`.
+- Added tests: `tests/test_binance_commission.py` (auto BNB buy/transfer/shortfall/no-action), `tests/test_portfolio_manager.py` (BNB reserve subtracts from available).
+- Updated `SYSTEM_REFERENCE.md` section 5b and resolved history.
