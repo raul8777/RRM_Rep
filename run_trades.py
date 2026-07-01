@@ -2181,6 +2181,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     _pb_max_new_per_cycle = int(getattr(settings, 'futures_max_new_per_cycle', 5))
     for symbol in top_symbols:
         _signal_id = None
+        volspike_override = False
         if isinstance(signal_meta, dict):
             _signal_id = signal_meta.get(symbol, {}).get('signal_id')
         # ── FUTURES_SHORT mode — evaluated BEFORE spot position limits ────────
