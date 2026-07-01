@@ -2979,7 +2979,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
 
         qty = align_quantity_to_step(trade_allocation / price, filters["step"])
         valid, reason = is_quantity_valid(qty, price, filters)
-        _signal_id = sig.get('signal_id') if isinstance(sig, dict) else None
+        _signal_id = signal_meta.get(symbol, {}).get('signal_id') if isinstance(signal_meta, dict) else None
 
         if not valid:
             print(f"Skipping buy {symbol}: {reason}")
