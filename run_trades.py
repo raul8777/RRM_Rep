@@ -1544,7 +1544,6 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             else:
                                 # Partial close for SPOT
                                 try:
-                                    from trade_utils import get_symbol_filters, align_quantity_to_step, is_quantity_valid
                                     _sso_s_filters = get_symbol_filters(client, symbol)
                                     _sso_s_full_qty = float(pos.quantity)
                                     _sso_s_sell_qty = align_quantity_to_step(
