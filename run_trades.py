@@ -1868,7 +1868,9 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         closed.append({"symbol": symbol, "reason": close_reason,
                                        "price": current_price, "order": order})
                     except Exception as exc:
-                        print(f"SL/TP sell failed for {symbol}: {exc}")
+                        import traceback
+                        _tb = traceback.format_exc()
+                        print(f"SL/TP sell failed for {symbol}: {exc}\n{_tb}")
                         ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_ERROR,
                                      f"SL/TP sell failed {symbol}: {exc}")
             except Exception as e:
