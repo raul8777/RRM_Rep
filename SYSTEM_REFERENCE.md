@@ -18,15 +18,16 @@
 - `run_trades.py`: se corrigió `sig.get('signal_id')` → `signal_meta.get(symbol, {}).get('signal_id')`.
 - `run_trades.py`: se inicializó `volspike_override = False` al inicio de cada iteración de `_buy_top_symbols` para evitar `UnboundLocalError` en compras spot normales.
 - `run_trades.py`: se agregó `'EJECUTADO'` al set de razones spot en `_infer_trade_type_from_reason` y un fallback a `'system'` cuando el tipo no se reconoce, evitando violaciones de la constraint `trades_audit_trade_type_check`.
+- `run_trades.py`: se eliminó el import local `from trade_utils import get_symbol_filters...` dentro de la rama SSO de `_check_sl_tp_positions`. El import local hacía que `get_symbol_filters` se comportara como variable local de la función; cuando el flujo SL/TP se ejecutaba sin pasar primero por la rama SSO, Python lanzaba `UnboundLocalError` y bloqueaba todos los cierres de SL/TP (AAVEUSDT, BTCUSDT, WLDUSDT). Se mantiene el import a nivel de módulo (línea 14) y el log de traceback para futuros diagnósticos.
 - Se reinició el contenedor `crypto-agent-app` varias veces para cargar los cambios.
 
 **Verificación post-fix:**
-- `/health/status`: `overall=ok`, `errors_last_5min=0`, `warnings_last_5min=0`, `open_shorts=7`.
-- `/errors/recent`: sin registros activos.
-- El ciclo completó sin `Error in cycle` ni `Failed to track`.
-- Nota: dos compras spot previas (AAVEUSDT, TRXUSDT) quedaron sin trackear por el bug de `volspike_override`; el sistema de reconciliación/cleanup las manejará como huérfanos en ciclos siguientes.
+- `/health/status`: `overall=ok`, `errors_last_5min=0`, `warnings_last_5min=0`.
+- `/errors/recent`: sin errores; solo mensaje INFO de salida SL/TP (WLDUSDT).
+- El ciclo completó sin `Error in cycle`, `Failed to track` ni `SL/TP sell failed`.
+- Nota: dos compras spot previas (AAVEUSDT, TRXUSDT) quedaron sin trackear por el bug de `volspike_override`; el sistema de reconciliación/cleanup las manejará como huérfanos en ciclos siguientes. Las posiciones futuras previas se cerraron (open_shorts=0) por SL/TP normales.
 
-**Commits:** `e0f87c8` (instrument orchestrator traceback), `e3dde0a` (fix NameError sig), `79fc92d` (fix volspike_override UnboundLocalError), `2f68912` (fix EJECUTADO trade_type), `4d28212` (fallback system trade_type).
+**Commits:** `e0f87c8` (instrument orchestrator traceback), `e3dde0a` (fix NameError sig), `79fc92d` (fix volspike_override UnboundLocalError), `2f68912` (fix EJECUTADO trade_type), `4d28212` (fallback system trade_type), `181691b` (fix get_symbol_filters shadowing).
 
 ---
 
