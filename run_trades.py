@@ -52,6 +52,10 @@ _asg_cycle_id: int = 0  # incremented each cycle to know when to reset
 # Shorts are only closed when this counter reaches min_cycles_before_close_shorts (config).
 _non_short_regime_cycles: int = 0
 
+# Regime-specific parameter auto-loading: track the last regime we applied params for
+# to avoid re-applying the same params every cycle.
+_last_applied_regime_mode: Optional[str] = None
+
 
 _FUTURES_DECISION_REASONS = {
     'MASS_SL_COOLDOWN', 'INVALID_FUTURES_SYM', 'NOT_FUTURES_SYM', 'SL_COOLDOWN',
@@ -330,6 +334,163 @@ def _get_max_positions_for_regime(settings, regime: str) -> int:
         "FUTURES_SHORT": _get_param(settings, 'max_positions_futures_short'),
     }
     return _mapping.get(regime, _get_param(settings, 'max_positions'))
+
+
+def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
+    """
+    Load regime-specific parameter overrides from trading_runtime_state and apply them
+    to the live settings object. Only runs when the regime changes to avoid redundant work.
+    Persisted under keys like 'regime_params_SPOT_BULL'.
+    Mirrors the audit trail used by PATCH /config/kelly.
+    """
+    global _last_applied_regime_mode
+    if regime == _last_applied_regime_mode:
+        return {"applied": {}, "skipped": True, "reason": "already_active"}
+    if not regime:
+        return {"applied": {}, "skipped": True, "reason": "no_regime"}
+
+    if db_client is None:
+        return {"applied": {}, "skipped": True, "reason": "no_db_client"}
+
+    try:
+        import json as _json
+        _state_key = f"regime_params_{regime}"
+        _rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key=%s", (_state_key,)
+        )
+        if not _rows or not _rows[0].get('value'):
+            return {"applied": {}, "skipped": True, "reason": "no_regime_params_stored"}
+
+        _raw = _rows[0]['value']
+        if isinstance(_raw, str):
+            _raw = _json.loads(_raw)
+        if not isinstance(_raw, dict):
+            return {"applied": {}, "skipped": True, "reason": "invalid_regime_params_format"}
+
+        # Scalar params mapped directly to settings attributes
+        _scalar_map = {
+            'kelly_base_usdt': 'kelly_base_usdt',
+            'kelly_max_usdt': 'kelly_max_usdt',
+            'kelly_max_pct_liquid': 'kelly_max_pct_liquid',
+            'futures_kelly_max_usdt': 'futures_kelly_max_usdt',
+            'futures_kelly_base_usdt': 'futures_kelly_base_usdt',
+            'min_signal_strength': 'min_signal_strength',
+            'min_success_probability': 'min_success_probability',
+            'vol_spike_min': 'vol_spike_min',
+            'futures_min_prob': 'futures_min_prob',
+            'futures_vol_spike_min': 'futures_vol_spike_min',
+            'stop_loss_pct': 'stop_loss_pct',
+            'take_profit_pct': 'take_profit_pct',
+            'futures_sl_pct': 'futures_sl_pct',
+            'futures_tp_pct': 'futures_tp_pct',
+            'slippage_pct': 'slippage_pct',
+        }
+
+        _applied = {}
+        _rejected = {}
+
+        for _src, _dst in _scalar_map.items():
+            if _src not in _raw:
+                continue
+            _val = _raw[_src]
+            try:
+                _cur = getattr(settings, _dst, None)
+                setattr(settings, _dst, type(_cur)(_val) if _cur is not None else _val)
+                _applied[_dst] = {"old": _cur, "new": _val}
+            except Exception as _ae:
+                _rejected[_dst] = str(_ae)
+
+        # Category thresholds (spot and futures) — partial merge
+        for _ct_attr, _ct_key in (
+            ('category_thresholds', 'category_thresholds'),
+            ('futures_category_thresholds', 'futures_category_thresholds'),
+        ):
+            if _ct_key not in _raw:
+                continue
+            _ct_patch = _raw[_ct_key]
+            if not isinstance(_ct_patch, dict):
+                _rejected[_ct_attr] = "must be dict"
+                continue
+            _current_ct = dict(getattr(settings, _ct_attr, {}))
+            _merged = {}
+            for _cat, _fields in _ct_patch.items():
+                if not isinstance(_fields, dict):
+                    _rejected[f"{_ct_attr}.{_cat}"] = "must be dict"
+                    continue
+                _cat_old = dict(_current_ct.get(_cat, {}))
+                for _cf, _cv in _fields.items():
+                    _cat_old[_cf] = float(_cv)
+                    _merged[f"{_cat}.{_cf}"] = {"old": _current_ct.get(_cat, {}).get(_cf), "new": float(_cv)}
+                _current_ct[_cat] = _cat_old
+            if _merged:
+                setattr(settings, _ct_attr, _current_ct)
+                _applied[_ct_attr] = {"merged": _merged}
+
+        if not _applied:
+            return {"applied": {}, "skipped": True, "reason": "no_applicable_fields"}
+
+        # Persist the merged scalar overrides to kelly_config_override so they survive restart
+        # and are visible to the dashboard / drift checker.
+        _scalar_payload = {
+            k: {"old": v.get("old"), "new": v.get("new")}
+            for k, v in _applied.items()
+            if k not in ('category_thresholds', 'futures_category_thresholds')
+        }
+        if _scalar_payload:
+            _existing_rows = db_client.execute_query(
+                "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
+            )
+            _existing = {}
+            if _existing_rows and _existing_rows[0].get('value'):
+                _ev = _existing_rows[0]['value']
+                if isinstance(_ev, str):
+                    _ev = _json.loads(_ev)
+                if isinstance(_ev, dict):
+                    _existing = _ev
+            # Merge regime overrides on top of existing scalar overrides
+            for k, change in _scalar_payload.items():
+                _existing[k] = change
+            _merged_scalar = _json.dumps(_existing)
+            db_client.execute_update(
+                "INSERT INTO trading_runtime_state (key, value, updated_at) "
+                "VALUES ('kelly_config_override', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                (_merged_scalar, _merged_scalar)
+            )
+
+        # Persist category_thresholds separately
+        for _ct_attr, _ct_state_key in (
+            ('category_thresholds', 'category_thresholds_override'),
+            ('futures_category_thresholds', 'futures_category_thresholds_override'),
+        ):
+            if _ct_attr in _applied:
+                _ct_payload = _json.dumps(getattr(settings, _ct_attr, {}))
+                db_client.execute_update(
+                    "INSERT INTO trading_runtime_state (key, value, updated_at) "
+                    "VALUES (%s, %s, NOW()) "
+                    "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                    (_ct_state_key, _ct_payload, _ct_payload)
+                )
+
+        # Audit trail
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+            "VALUES ('__config__', 'system', 'regime_params_applied', %s, false)",
+            (_json.dumps({
+                "regime": regime,
+                "applied": _applied,
+                "rejected": _rejected,
+                "state_key": _state_key,
+            }),)
+        )
+
+        _last_applied_regime_mode = regime
+        print(f"[RegimeParams] Applied {len(_applied)} overrides for {regime}")
+        return {"applied": _applied, "rejected": _rejected, "skipped": False}
+
+    except Exception as _re_err:
+        print(f"[RegimeParams] Error applying regime params for {regime}: {_re_err}")
+        return {"applied": {}, "rejected": {"_error": str(_re_err)}, "skipped": True, "reason": "exception"}
 
 
 def _apply_fng_kelly_boost(trade_allocation: float, fng_value: int, settings) -> float:
@@ -3528,6 +3689,15 @@ def execute_once(monitor_only: bool = False):
                 print(f"[Regime] execute_once warm-up (severe bear): {_regime_mode} | confirmed={_regime_exe.confirmed}")
         except Exception as _re_exe:
             print(f"[Regime] execute_once detection failed: {_re_exe}")
+
+        # ── Regime-specific parameter auto-loading (only on confirmed regime change) ─
+        if _regime_exe and _regime_exe.confirmed:
+            try:
+                _regime_apply_result = _apply_regime_params(settings, _regime_mode, _db_client_ref)
+                if not _regime_apply_result.get('skipped'):
+                    print(f"[RegimeParams] execute_once: applied={list(_regime_apply_result.get('applied', {}).keys())}")
+            except Exception as _rpe:
+                print(f"[RegimeParams] execute_once application failed: {_rpe}")
 
     # ── Auto BNB commission discount management (after regime detection) ───────────
     try:

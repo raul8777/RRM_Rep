@@ -2827,4 +2827,80 @@ docker exec crypto-agent-app pytest tests/test_config_governance.py -v
 curl -X POST http://localhost:8000/config/drift-check -H "X-API-Key: $DASHBOARD_API_KEY"
 ```
 
+---
+
+## Re-análisis agresivo del backtest + carga automática por régimen — 1 jul 2026
+
+### Filosofía
+Con los filtros estrictos de entrada actuales (vol_spike ≥ 1.5x, RSI 4h 35-55, precio en 20-40% del rango semanal, PnL predicho positivo), se puede ser **más agresivo en Kelly base** pero **más controlado en Kelly máximo y % de líquido** para evitar que unas pocas señales extremas consuman demasiado capital. El análisis usó el **top 10% por PnL absoluto** de cada escenario, no la métrica robusta.
+
+### Implementación técnica
+- Nueva función `_apply_regime_params()` en `run_trades.py` (línea ~339).
+- Se invoca en `execute_once()` cuando el régimen detectado está **confirmado**.
+- Lee overrides por régimen desde `trading_runtime_state` bajo claves `regime_params_<REGIMEN>`.
+- Aplica campos escalares y hace merge parcial de `category_thresholds` / `futures_category_thresholds`.
+- Persiste los cambios en `kelly_config_override`, `category_thresholds_override` y `futures_category_thresholds_override` para sobrevivir reinicios.
+- Registra auditoría en `trades_audit` (evento `regime_params_applied`) y `config_change_log`.
+
+### Parámetros globales aplicados
+| Parámetro | Valor anterior | Valor nuevo | Rationale |
+|---|---:|---:|---|
+| `kelly_base_usdt` | 76 | **120** | Mayor tamaño inicial en señales calificadas |
+| `kelly_max_usdt` | 663 | **500** | Evita over-bet en señales extremas |
+| `kelly_max_pct_liquid` | 0.621 | **0.50** | Reduce exposición máxima del capital |
+| `futures_kelly_max_usdt` | 1162 | **750** | Futuros con apalancamiento real no necesitan margen tan alto |
+| `min_signal_strength` | 0.359 | **0.55** | Más selectivo |
+| `min_success_probability` | 0.527 | **0.52** | Ligeramente más permisivo para no perder buenas señales |
+| `vol_spike_min` | 0.91 | **1.35** | Exige convicción de volumen |
+| `stop_loss_pct` | 1.03% | **1.7%** | Evita stops prematuros |
+| `take_profit_pct` | 5.83% | **5.6%** | Toma ganancias rápido |
+| `futures_sl_pct` | 1.42% | **2.5%** | Más aire con leverage |
+| `futures_tp_pct` | 2.81% | **5.5%** | Objetivo realista con leverage |
+| `slippage_pct` | 0.0006 | **0.0005** | Ligero ajuste a la baja |
+
+### Parámetros por régimen (almacenados en `trading_runtime_state`)
+| Régimen | `kelly_base` | `kelly_max` | `kelly_max_pct_liquid` | `futures_kelly_max` | `min_signal_strength` | `min_prob` | `vol_spike_min` | `stop_loss_pct` | `take_profit_pct` | `futures_sl_pct` | `futures_tp_pct` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **SPOT_BULL** | 120 | 480 | 0.48 | 760 | 0.58 | 0.52 | 1.45 | 1.8% | 5.8% | 2.6% | 5.8% |
+| **RANGE_SCALP** | 130 | 500 | 0.50 | 730 | 0.55 | 0.50 | 1.35 | 1.6% | 5.5% | 2.5% | 5.5% |
+| **PRESERVATION** | 100 | 450 | 0.45 | 800 | 0.50 | 0.52 | 1.20 | 1.5% | 5.6% | 2.7% | 6.0% |
+| **FUTURES_SHORT** | 90 | 550 | 0.55 | 600 | 0.45 | 0.55 | 1.15 | 2.0% | 4.0% | 2.3% | 2.2% |
+
+Nota: `min_prob` del backtest se mapea a `category_thresholds.*.min_prob` y `futures_category_thresholds.*.min_prob` en producción. Los valores anteriores se aplican por categoría.
+
+### Advertencias
+- **FUTURES_SHORT**: datos de backtest limitados (114 trades en 4 meses). Los parámetros son experimentales; monitorear en producción antes de confiar plenamente.
+- El mecanismo de carga por régimen solo aplica overrides cuando el régimen cambia y se confirma. El cambio actual de `SPOT_BULL` → `RANGE_SCALP` se reflejará automáticamente en el próximo ciclo confirmado.
+
+### Comandos de validación
+```bash
+# Verificar que los overrides globales están en BD
+docker exec crypto-agent-app python -c "
+import os, psycopg2, json
+conn=psycopg2.connect(os.environ['DB_URL'])
+cur=conn.cursor()
+cur.execute('SELECT value FROM trading_runtime_state WHERE key=%s', ('kelly_config_override',))
+v=cur.fetchone()
+print(json.dumps({k:v2.get('new') for k,v2 in json.loads(v[0]).items()}, indent=2))
+"
+
+# Verificar parámetros por régimen
+docker exec crypto-agent-app python -c "
+import os, psycopg2, json
+conn=psycopg2.connect(os.environ['DB_URL'])
+cur=conn.cursor()
+cur.execute('SELECT key FROM trading_runtime_state WHERE key LIKE %s', ('regime_params_%',))
+print([r[0] for r in cur.fetchall()])
+"
+
+# Verificar auditoría
+docker exec crypto-agent-app python -c "
+import os, psycopg2, json
+conn=psycopg2.connect(os.environ['DB_URL'])
+cur=conn.cursor()
+cur.execute('SELECT event, detail FROM trades_audit WHERE symbol=%s ORDER BY ts DESC LIMIT 3', ('__config__',))
+for r in cur.fetchall(): print(r)
+"
+```
+
 *Revisar este archivo al inicio de cada sesión de análisis o implementación.*
