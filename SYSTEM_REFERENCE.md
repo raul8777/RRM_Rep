@@ -3,6 +3,30 @@
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
 > Última actualización: jun 29 2026 14:20 UTC-6 | Sesión 28: HARDENING PRODUCTIVO SIN CAMBIOS DE CONFIG — sistema pausado vía `trading_runtime_state.pause_new_entries=true`; NO se tocaron valores de config/backtest-1000. Implementado: cierres SPOT/FUTURES atómicos en BD; webhook durable (sin ACK si señal no persiste); `signal_id` causal desde señal→ejecución; checkpoint temprano de estado volátil; reconciliación SPOT contra Binance en cada ciclo; snapshot/fallback persistente del screener; caché de precio por ciclo en trading + caché por request en dashboard; auditoría homogénea `signal_decision` en `trades_audit`; endpoints `/audit/consistency` y health/dashboard con cobertura de auditoría. `get_errors` limpio en archivos tocados. Tests agregados pero no ejecutados en shell actual por falta de intérprete Python utilizable.
 
+### ✅ Sesión 30 — Diagnóstico y reparación del ciclo detenido — jun 30 2026 18:20 UTC-6
+
+**Síntoma:** `/health/status` mostró `warning`, `trade_cycle` stale (>6 min), y logs con `Error in cycle: name 'sig' is not defined`.
+
+**Diagnóstico:**
+- El `orchestrator.py` capturaba excepciones sin traceback, ocultando la causa.
+- Con trazas habilitadas, el traceback apuntó a `run_trades.py:2982` en `_buy_top_symbols()`: se usaba `sig.get('signal_id')` pero la variable `sig` no existía en el path de compras spot.
+- El error ocurría en el path de SPOT (también afectaba RANGE_SCALP y SPOT_BULL); FUTURES_SHORT no se afectaba porque bifurca antes del punto del bug.
+- `position_sync` reportaba `futures_tracked=0`, lo cual es normal: futuros se rastrean en `futures_client._open_positions` y se persisten los cierres en `trades_closed`, no en la tabla `open_positions` de spot.
+
+**Fixes aplicados:**
+- `orchestrator.py`: se agregó `traceback.format_exc()` al log de `Error in cycle` para diagnóstico futuro.
+- `run_trades.py`: se corrigió `sig.get('signal_id')` → `signal_meta.get(symbol, {}).get('signal_id')`.
+- Se reinició el contenedor `crypto-agent-app` para cargar los cambios.
+
+**Verificación post-fix:**
+- `/health/status`: `overall=ok`, `errors_last_5min=0`, `warnings_last_5min=0`, `open_shorts=8`.
+- `/errors/recent`: sin registros activos.
+- El ciclo completó sin `Error in cycle`.
+
+**Commits:** `e0f87c8` (instrument orchestrator traceback), `e3dde0a` (fix NameError sig).
+
+---
+
 ### ✅ Sesión 28 — Hardening productivo sin drift de config — jun 29 2026 14:20 UTC-6
 
 **Restricción operacional:** ningún valor de configuración fue cambiado. Todas las mejoras son de proceso, trazabilidad, persistencia y rendimiento operativo.  
