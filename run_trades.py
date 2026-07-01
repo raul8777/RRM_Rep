@@ -73,6 +73,7 @@ def _infer_trade_type_from_reason(reason: str, explicit: Optional[str] = None) -
         'ADD_STR_LOW', 'ADD_EV_LOW', 'ADD_NO_BASELINE', 'LIQUIDEZ', 'FUNDING_RATE',
         'PRESERVATION', 'PRSV_RSI', 'RANGE_RSI', 'RANGE_BB', 'EXCLUIDO', 'BTC_DOM',
         'NARRATIVE_CD', 'PNL_BAJO', 'ERROR_PRECIO', 'WR_BLOCK_3SL', 'WR_BLOCK_4SL',
+        'EJECUTADO',
     } or reason.startswith('WR_BLOCK_'):
         return 'spot'
     return 'unknown'
