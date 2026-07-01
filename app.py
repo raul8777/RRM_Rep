@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
+from collections import Counter
 import asyncio
 import json
 import os
@@ -4581,6 +4582,195 @@ def _check_bnb_drift(_comp) -> Optional[Dict]:
     except Exception as e:
         print(f"[DriftAlert] BNB drift check failed: {e}")
         return None
+
+
+def _normalize_backtest_params(params: Any) -> Dict[str, Any]:
+    if isinstance(params, dict):
+        return params
+    if isinstance(params, str):
+        try:
+            parsed = json.loads(params)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _normalize_close_reason(reason: Any) -> str:
+    r = str(reason or '').strip().lower()
+    if not r:
+        return 'unknown'
+    if r.startswith('stop_loss') or r.startswith('sl_'):
+        return 'stop_loss'
+    if r.startswith('take_profit') or r.startswith('tp_') or r.startswith('smart_tp'):
+        return 'take_profit'
+    if r.startswith('trailing_stop'):
+        return 'trailing_stop'
+    if 'rebal' in r or r.startswith('reallocation_'):
+        return 'portfolio_rebalancing'
+    if r.startswith('manual'):
+        return 'manual'
+    return r
+
+
+def _trade_summary(rows: List[Dict], pnl_key: str = 'pnl') -> Dict[str, Any]:
+    total = len(rows)
+    pnl_total = sum(float(r.get(pnl_key, 0.0) or 0.0) for r in rows)
+    winners = sum(1 for r in rows if float(r.get(pnl_key, 0.0) or 0.0) > 0)
+    losses = total - winners
+    win_rate = (winners / total) if total else 0.0
+    avg_pnl = (pnl_total / total) if total else 0.0
+    by_trade_type = Counter(str((r.get('trade_type') or 'unknown')).lower() for r in rows)
+    by_reason = Counter(str(r.get('close_reason_norm') or _normalize_close_reason(r.get('close_reason')))
+                        for r in rows)
+    return {
+        'n_trades': total,
+        'n_wins': winners,
+        'n_losses': losses,
+        'win_rate': round(win_rate, 4),
+        'avg_pnl': round(avg_pnl, 6),
+        'pnl_total': round(pnl_total, 6),
+        'by_trade_type': dict(by_trade_type),
+        'close_reason_dist': dict(by_reason),
+    }
+
+
+def _parity_gap_pct(backtest_value: float, live_value: float) -> Optional[float]:
+    if live_value == 0:
+        return None
+    return round(((backtest_value - live_value) / abs(live_value)) * 100.0, 4)
+
+
+@app.get("/backtest/compare-vs-live")
+async def get_backtest_compare_vs_live(
+    run_id: int,
+    _auth=Depends(_require_api_key),
+) -> Dict:
+    """Compare one backtest run against live closed trades in the same window."""
+    try:
+        run_rows = db_client.execute_query(
+            "SELECT id, label, params, pnl_total, pnl_spot, pnl_futures, win_rate, n_trades, n_spot, n_futures, rank_pnl, window_start, window_end FROM backtest_run WHERE id = %s",
+            (run_id,)
+        )
+        if not run_rows:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+        run = run_rows[0]
+        params = _normalize_backtest_params(run.get('params'))
+        run_meta = _normalize_backtest_params(params.get('__run_meta', {}))
+        window_start = run.get('window_start')
+        window_end = run.get('window_end')
+        regime = run_meta.get('regime') or params.get('regime') or 'unknown'
+        session_id = run_meta.get('session_id')
+
+        backtest_trades = db_client.execute_query(
+            """
+            SELECT symbol, trade_type, side, entry_ts, exit_ts, entry_price, exit_price,
+                   usdt_size, pnl_usdt, pnl_pct, tier, regime, close_reason, kelly_mult
+            FROM backtest_trade
+            WHERE run_id = %s
+            ORDER BY entry_ts ASC
+            """,
+            (run_id,)
+        )
+        bt_symbols = sorted({r.get('symbol') for r in backtest_trades if r.get('symbol')})
+
+        live_rows = db_client.execute_query(
+            """
+            SELECT symbol, side, quantity, entry_time, exit_time, pnl, pnl_percentage,
+                   close_reason, metadata, entry_commission, exit_commission
+            FROM trades_closed
+            WHERE entry_time >= %s AND entry_time < %s
+            ORDER BY entry_time ASC
+            """,
+            (window_start, window_end)
+        )
+        live_trades: List[Dict[str, Any]] = []
+        for row in live_rows:
+            meta = row.get('metadata') or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            if bt_symbols and row.get('symbol') not in bt_symbols:
+                continue
+
+            inferred_type = str(meta.get('trade_type') or '').strip().lower()
+            if inferred_type not in ('spot', 'futures'):
+                # Most legacy rows without explicit type are SPOT; futures rows are expected
+                # to carry metadata.trade_type='futures' from futures_client persistence.
+                inferred_type = 'spot'
+
+            raw_reason = row.get('close_reason') or meta.get('close_reason') or 'unknown'
+            live_trades.append({
+                'symbol': row.get('symbol'),
+                'trade_type': inferred_type,
+                'side': row.get('side'),
+                'entry_time': row.get('entry_time'),
+                'exit_time': row.get('exit_time'),
+                'pnl': float(row.get('pnl') or 0.0),
+                'pnl_percentage': float(row.get('pnl_percentage') or 0.0),
+                'close_reason': raw_reason,
+                'close_reason_norm': _normalize_close_reason(raw_reason),
+                'metadata': meta,
+            })
+
+        bt_summary = _trade_summary(backtest_trades, pnl_key='pnl_usdt')
+        live_summary = _trade_summary(live_trades, pnl_key='pnl')
+        bt_by_type = {
+            trade_type: _trade_summary([r for r in backtest_trades if r.get('trade_type') == trade_type], pnl_key='pnl_usdt')
+            for trade_type in ('spot', 'futures')
+        }
+        live_by_type = {
+            trade_type: _trade_summary([r for r in live_trades if r.get('trade_type') == trade_type], pnl_key='pnl')
+            for trade_type in ('spot', 'futures')
+        }
+
+        parity = {
+            'pnl_total_gap_pct': _parity_gap_pct(bt_summary['pnl_total'], live_summary['pnl_total']),
+            'win_rate_gap_pct': round((bt_summary['win_rate'] - live_summary['win_rate']) * 100.0, 4),
+            'avg_pnl_gap_pct': _parity_gap_pct(bt_summary['avg_pnl'], live_summary['avg_pnl']),
+            'n_trades_gap': bt_summary['n_trades'] - live_summary['n_trades'],
+        }
+
+        return {
+            'ok': True,
+            'run_id': run_id,
+            'session_id': session_id,
+            'regime': regime,
+            'window_start': window_start.isoformat() if hasattr(window_start, 'isoformat') else str(window_start),
+            'window_end': window_end.isoformat() if hasattr(window_end, 'isoformat') else str(window_end),
+            'symbols': bt_symbols,
+            'backtest': {
+                'run': {
+                    'id': run.get('id'),
+                    'label': run.get('label'),
+                    'pnl_total': float(run.get('pnl_total') or 0.0),
+                    'pnl_spot': float(run.get('pnl_spot') or 0.0),
+                    'pnl_futures': float(run.get('pnl_futures') or 0.0),
+                    'win_rate': float(run.get('win_rate') or 0.0),
+                    'n_trades': int(run.get('n_trades') or 0),
+                    'n_spot': int(run.get('n_spot') or 0),
+                    'n_futures': int(run.get('n_futures') or 0),
+                    'rank_pnl': run.get('rank_pnl'),
+                },
+                'summary': bt_summary,
+                'by_trade_type': bt_by_type,
+            },
+            'live': {
+                'summary': live_summary,
+                'by_trade_type': live_by_type,
+            },
+            'parity': parity,
+            'ts': to_mexico_time(datetime.utcnow()).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/backtest/apply")

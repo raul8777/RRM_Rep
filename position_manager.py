@@ -195,6 +195,9 @@ class PositionManager:
         _esc_idx = len(self._open_positions[position.symbol]) + 1
         if position.metadata is None:
             position.metadata = {}
+        # Ensure trade_type is always persisted for parity/reporting.
+        if isinstance(position.metadata, dict):
+            position.metadata.setdefault('trade_type', 'spot')
         position.metadata['escalonamiento_index'] = _esc_idx
         position.metadata['es_escalonamiento'] = (_esc_idx > 1)
         # Update total_escalonamientos on all existing entries for this symbol
@@ -650,11 +653,16 @@ class PositionManager:
                 _meta = json.loads(_meta)
             except Exception:
                 _meta = {}
-        if isinstance(_meta, dict) and _meta.get('bounce_entry') is None:
-            # Propagate from position metadata if available
-            _pos_meta = position.metadata if isinstance(position.metadata, dict) else {}
-            if _pos_meta.get('bounce_entry'):
-                _meta['bounce_entry'] = True
+        if isinstance(_meta, dict):
+            # Keep trade_type/close_reason available in closed rows for parity and audits.
+            _meta.setdefault('trade_type', 'spot')
+            if closed_position.close_reason and not _meta.get('close_reason'):
+                _meta['close_reason'] = closed_position.close_reason
+            if _meta.get('bounce_entry') is None:
+                # Propagate from position metadata if available
+                _pos_meta = position.metadata if isinstance(position.metadata, dict) else {}
+                if _pos_meta.get('bounce_entry'):
+                    _meta['bounce_entry'] = True
         _meta_json = json.dumps(_meta) if isinstance(_meta, dict) else _to_json(_meta)
 
         insert_query = """

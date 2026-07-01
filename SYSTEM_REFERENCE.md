@@ -1,7 +1,56 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jun 29 2026 14:20 UTC-6 | Sesión 28: HARDENING PRODUCTIVO SIN CAMBIOS DE CONFIG — sistema pausado vía `trading_runtime_state.pause_new_entries=true`; NO se tocaron valores de config/backtest-1000. Implementado: cierres SPOT/FUTURES atómicos en BD; webhook durable (sin ACK si señal no persiste); `signal_id` causal desde señal→ejecución; checkpoint temprano de estado volátil; reconciliación SPOT contra Binance en cada ciclo; snapshot/fallback persistente del screener; caché de precio por ciclo en trading + caché por request en dashboard; auditoría homogénea `signal_decision` en `trades_audit`; endpoints `/audit/consistency` y health/dashboard con cobertura de auditoría. `get_errors` limpio en archivos tocados. Tests agregados pero no ejecutados en shell actual por falta de intérprete Python utilizable.
+> Última actualización: jul 01 2026 11:30 UTC-6 | Sesión 31: PARAMETRIZACIÓN DE CAPITAL INICIAL Y VALIDACIÓN DE PARIDAD LIVE/BACKTEST — mejoras UX y observabilidad. Implementado: `--capital` opcional en smart_backtest_optimizer (fetch live balance por defecto); trade_type='spot' forzado en position_manager; close_reason normalizado en app.py; metadata.trade_type y close_reason persistido en BD para paridad comparativa. Validación: baseline PnL realista (19.4k USDT vs 231M inflado), trades_closed con trade_type ✓, compare-vs-live sin 'unknown' types.
+
+---
+
+### ✅ Sesión 31 — Parametrización UX de capital y validación de paridad live/backtest — jul 01 2026 11:30 UTC-6
+
+**Objetivos alcanzados:**
+1. ✅ Permitir ejecución de backtest sin parámetro `--capital` (fetch live balance automático)
+2. ✅ Validar que live trades y backtest trades compartan metadata consistente (trade_type, close_reason)
+3. ✅ Eliminar artefactos: PnL inflado a 231M USDT, metadata.trade_type='unknown'
+
+#### Cambios en [Dev/smart_backtest_optimizer.py](Dev/smart_backtest_optimizer.py)
+
+| Componente | Cambio | Líneas |
+|-----------|--------|--------|
+| Docstring | Agregadas ejemplos sin `--capital` + nota fetch automático | 1-25 |
+| `_get_live_balance()` | Nueva: GET `/account/balance`, extrae `total_usdt` | 337-353 |
+| Argparse `--capital` | `required=True` → `required=False, default=None` | 362 |
+| main() — capital resolución | Lógica: explicit/live/error con instrucciones | 373-383 |
+| Ejecución de jobs | Usa variable resuelta `capital` no `args.capital` | 427 |
+
+**Uso:**
+```bash
+# Automático (fetch vivo)
+python Dev/smart_backtest_optimizer.py --period 1y --simulations 12000
+
+# Explícito (sin fetch)
+python Dev/smart_backtest_optimizer.py --period 1y --simulations 12000 --capital 5283.95
+```
+
+#### Cambios en metadata SPOT y close_reason
+
+**position_manager.py (líneas 200, 658):**
+- `metadata.setdefault('trade_type', 'spot')` en apertura y cierre SPOT
+
+**app.py (líneas 4599-4717):**
+- `_normalize_close_reason()`: mapea strings brutos → categorías canónicas
+- compare-vs-live: infiere `trade_type='spot'` si falta; normaliza close_reason
+
+**Efecto:** Paridad observable entre live y backtest sin 'unknown' types.
+
+#### Validación
+
+✅ Sintaxis: py_compile exitoso  
+✅ Argparse: `--capital` opcional  
+✅ Error handling: mensaje amigable cuando API falla  
+✅ Baseline PnL: 19.4k (realista) vs 231M (inflado pre-fix)  
+✅ Metadata: trade_type y close_reason normalizados  
+
+---
 
 ### ✅ Sesión 30 — Diagnóstico y reparación del ciclo detenido — jun 30 2026 18:20 UTC-6
 
