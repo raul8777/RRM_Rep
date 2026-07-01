@@ -83,6 +83,9 @@ def _audit_signal_decision(symbol: str, decision: str, reason: str, signal_id: O
                            trade_type: Optional[str] = None, binance_confirmed: bool = False) -> None:
     """Persist a signal decision into trades_audit and update signal_store."""
     inferred_trade_type = _infer_trade_type_from_reason(reason, explicit=trade_type)
+    if inferred_trade_type == 'unknown':
+        print(f"[Audit/Decision] WARNING: unknown trade_type for reason='{reason}' on {symbol} — defaulting to 'system'")
+        inferred_trade_type = 'system'
     try:
         if _db_client_ref:
             db_detail = {
