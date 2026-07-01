@@ -407,7 +407,8 @@ class Orchestrator:
                 else:
                     logger.debug("System stopped, skipping cycle")
             except Exception as e:
-                logger.error(f"Error in cycle: {e}")
+                import traceback
+                logger.error(f"Error in cycle: {e}\n{traceback.format_exc()}")
             else:
                 if cycle_func == getattr(self, '_trade_cycle_func', None):
                     self.last_trade_cycle_at = datetime.utcnow()
