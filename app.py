@@ -9,10 +9,12 @@ import asyncio
 import json
 import os
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 
 from config import get_settings
 from config_helpers import get_param as _cfg_param, dump_active_config, _PARAM_DEFAULTS
+import config_helpers
 from signal_store import add_signal, get_signals, get_recent_signals, set_db_client
 from strategy import parse_signal
 import run_trades
@@ -76,6 +78,15 @@ db_client = _comp.db_client
 position_manager = _comp.position_manager
 portfolio_manager = _comp.portfolio_manager
 orchestrator = _comp.orchestrator
+
+_HEALTH_RESULTS_CACHE: Dict[str, Any] = {
+    "snapshot": None,
+    "last_run_at": None,
+    "interval_seconds": 300,
+    "last_trigger": "startup",
+}
+_HEALTH_RESULTS_EVENT = asyncio.Event()
+_HEALTH_RESULTS_LEVEL = {"ok": 0, "inconclusive": 1, "warning": 2, "critical": 3, "error": 3}
 
 # Wire db_client into Signal Store
 if db_client:
@@ -217,13 +228,22 @@ def startup_event():
             for field, change in _ov.items():
                 if field == 'category_thresholds':
                     continue  # handled separately below
+                _new_value = None
                 if isinstance(change, dict) and 'new' in change:
-                    try:
-                        _cur = getattr(_live_s, field, None)
-                        setattr(_live_s, field, type(_cur)(change['new']) if _cur is not None else change['new'])
-                        _restored += 1
-                    except Exception:
-                        pass
+                    _new_value = change['new']
+                elif not isinstance(change, dict):
+                    # Backward compatibility: some legacy apply routes stored plain scalar values.
+                    _new_value = change
+                if _new_value is None:
+                    continue
+                try:
+                    if not hasattr(_live_s, field):
+                        continue
+                    _cur = getattr(_live_s, field, None)
+                    setattr(_live_s, field, type(_cur)(_new_value) if _cur is not None else _new_value)
+                    _restored += 1
+                except Exception:
+                    pass
             if _restored:
                 print(f"Config restore: {_restored} kelly overrides re-applied from DB")
 
@@ -283,6 +303,11 @@ def startup_event():
         asyncio.create_task(_config_drift_loop())
     except Exception as e:
         print(f"[ConfigGovernance] failed to start drift loop: {e}")
+    # Start SMART result-based health recheck loop
+    try:
+        asyncio.create_task(_health_results_recheck_loop())
+    except Exception as e:
+        print(f"[SMART-HEALTH] failed to start recheck loop: {e}")
 
 
 @app.post("/predictor/bootstrap")
@@ -319,7 +344,7 @@ async def reset_corrupted_trades(_auth: None = Depends(_require_api_key)) -> Dic
         comp = get_components()
         if not comp.db_client:
             raise HTTPException(status_code=503, detail="DB not initialized")
-        # Add is_corrupted column if it doesn't exist (idempotent)
+        # Add corruption flags if they don't exist (idempotent)
         try:
             comp.db_client.execute_update(
                 "ALTER TABLE trades_closed ADD COLUMN IF NOT EXISTS is_corrupted BOOLEAN DEFAULT FALSE",
@@ -327,24 +352,61 @@ async def reset_corrupted_trades(_auth: None = Depends(_require_api_key)) -> Dic
             )
         except Exception:
             pass
-        # Mark all rebalancing / manual-rebalance trades as corrupted
+        try:
+            comp.db_client.execute_update(
+                "ALTER TABLE trades_closed ADD COLUMN IF NOT EXISTS corrupt BOOLEAN DEFAULT FALSE",
+                ()
+            )
+        except Exception:
+            pass
+        # Mark operational/non-strategic exits as corrupted (legacy + runtime side effects).
+        # This keeps learning/parity clean from exits that do not represent strategy alpha.
         _CORRUPTED_REASONS = (
             'portfolio_rebalancing', 'manual_rebalance',
             'prediction_reallocation', 'prediction_realloc',
+            'active_replacement', 'regime_futures_short_spot_cleanup',
+            'excluded_symbol_cleanup', 'manual_liquidation_idle_capital',
+            'SL_BROKEN_EXCL',
         )
         placeholders = ', '.join(['%s'] * len(_CORRUPTED_REASONS))
+        rows_before = comp.db_client.execute_query(
+            "SELECT COUNT(*) AS n FROM trades_closed WHERE is_corrupted = TRUE OR corrupt = TRUE", ()
+        )
+        before = rows_before[0]['n'] if rows_before else 0
         sql_mark = f"""
             UPDATE trades_closed
-            SET is_corrupted = TRUE
+            SET is_corrupted = TRUE,
+                corrupt = TRUE
             WHERE close_reason IN ({placeholders})
-              AND (is_corrupted IS NULL OR is_corrupted = FALSE)
+              AND (
+                is_corrupted IS NULL OR is_corrupted = FALSE
+                OR corrupt IS NULL OR corrupt = FALSE
+              )
         """
         comp.db_client.execute_update(sql_mark, _CORRUPTED_REASONS)
         # Count how many are now marked
         rows = comp.db_client.execute_query(
-            "SELECT COUNT(*) AS n FROM trades_closed WHERE is_corrupted = TRUE", ()
+            "SELECT COUNT(*) AS n FROM trades_closed WHERE is_corrupted = TRUE OR corrupt = TRUE", ()
         )
-        marked = rows[0]['n'] if rows else 0
+        marked_total = rows[0]['n'] if rows else 0
+        newly_marked = max(0, marked_total - before)
+        try:
+            comp.db_client.execute_update(
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+                (
+                    '__config__',
+                    'system',
+                    'corrupted_trades_marked',
+                    json.dumps({
+                        'reasons': list(_CORRUPTED_REASONS),
+                        'newly_marked': newly_marked,
+                        'total_corrupted': marked_total,
+                    }, default=str),
+                    False,
+                ),
+            )
+        except Exception:
+            pass
         # Invalidate predictor weight cache
         try:
             from pnl_service import get_predictor
@@ -359,9 +421,11 @@ async def reset_corrupted_trades(_auth: None = Depends(_require_api_key)) -> Dic
             pass
         return {
             "status": "ok",
-            "corrupted_trades_marked": marked,
+            "newly_marked": newly_marked,
+            "corrupted_trades_marked": marked_total,
+            "reasons": list(_CORRUPTED_REASONS),
             "message": (
-                f"{marked} trades marked as corrupted (rebalancing-origin). "
+                f"{newly_marked} newly marked; {marked_total} total corrupted trades. "
                 "Run POST /predictor/bootstrap?days=1000 to re-train with clean data."
             )
         }
@@ -1202,6 +1266,11 @@ def _get_monte_carlo_projection(force: bool = False) -> Dict:
 
 # ── Market regime cache (5 min) ──────────────────────────────────────────────
 _regime_cache: Dict = {"data": None, "ts": 0.0}
+_PROFILE_ALIAS = {
+    "A": "Agresivo",
+    "B": "Balance",
+    "C": "Defensa",
+}
 
 
 def _get_market_regime() -> Dict:
@@ -1275,6 +1344,39 @@ def _get_market_regime() -> Dict:
     return result
 
 
+def _get_active_profile_summary(mode: str) -> Dict[str, Any]:
+    _mode = str(mode or "SPOT_BULL").strip().upper()
+    _profile = "A"
+    _updated_at = None
+    try:
+        _rows = db_client.execute_query(
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key=%s",
+            (f"regime_profile_active_{_mode}",),
+        )
+        if _rows:
+            _val = _rows[0].get("value")
+            if isinstance(_val, str):
+                try:
+                    _val = json.loads(_val)
+                except Exception:
+                    _val = {"raw": _val}
+            if isinstance(_val, dict):
+                _profile = str(_val.get("profile") or _profile).strip().upper() or "A"
+            _ts = _rows[0].get("updated_at")
+            _updated_at = _ts.isoformat() if _ts else None
+    except Exception:
+        pass
+
+    return {
+        "mode": _mode,
+        "label": _profile,
+        "alias": _PROFILE_ALIAS.get(_profile, _profile or "N/A"),
+        "legend": _PROFILE_ALIAS,
+        "legend_text": "A=Agresivo | B=Balance | C=Defensa",
+        "updated_at": _updated_at,
+    }
+
+
 @app.get("/dashboard/config")
 async def get_dashboard_config(request: Request) -> Dict:
     """Return frontend runtime config. Only serves API key to local/docker clients."""
@@ -1316,11 +1418,26 @@ async def get_dashboard_summary() -> Dict:
     except Exception as e:
         result["health"] = {"error": str(e)}
 
+    # Result-based SMART health (SPOT/FUTURES split + adaptive cadence)
+    try:
+        _cached_hr = _HEALTH_RESULTS_CACHE.get("snapshot")
+        if not isinstance(_cached_hr, dict):
+            _cached_hr = _load_persisted_health_results_snapshot()
+        result["health_results"] = _cached_hr or {"ok": False, "overall": "unknown", "source": "empty"}
+    except Exception as e:
+        result["health_results"] = {"ok": False, "overall": "unknown", "error": str(e)}
+
     # Audit consistency — mirrors signal decisions against trades_audit
     try:
         result["audit_consistency"] = check_signal_audit_consistency(comp.db_client, limit=100)
     except Exception as e:
         result["audit_consistency"] = {"available": False, "error": str(e)}
+
+    # Performance changepoint — compare current behavior to the Smart Backtest baseline marker
+    try:
+        result["performance_changepoint"] = _get_performance_changepoint_metrics()
+    except Exception as e:
+        result["performance_changepoint"] = {"available": False, "error": str(e)}
 
     # Portfolio config
     try:
@@ -2111,6 +2228,13 @@ async def get_dashboard_summary() -> Dict:
     except Exception as e:
         result["market_regime"] = {"regime": "?", "color": "#888", "btc_trend": "?", "day_change_pct": 0.0, "vol_ratio": 0.0}
 
+    # Active regime profile shown in dashboard status bar (A/B/C + compact semantic alias)
+    try:
+        _mode = result.get("market_regime", {}).get("trading_mode", "SPOT_BULL")
+        result["active_profile"] = _get_active_profile_summary(_mode)
+    except Exception as e:
+        result["active_profile"] = {"mode": "SPOT_BULL", "label": "A", "alias": "Agresivo", "legend": _PROFILE_ALIAS, "legend_text": "A=Agresivo | B=Balance | C=Defensa", "error": str(e)}
+
     # Market context: Fear & Greed + CoinGecko Trending
     try:
         _nc = news_client
@@ -2288,9 +2412,14 @@ async def get_dashboard_summary() -> Dict:
                 _ap = float(_p.pnl or 0)
                 _evr_details.append({
                     "symbol": _p.symbol,
+                    "side": _p.side,
                     "prediction_pnl": round(_ep, 4),
                     "actual_pnl": round(_ap, 4),
+                    "prediction_accuracy": float(_p.prediction_accuracy) if _p.prediction_accuracy is not None else None,
+                    "entry_time": to_mexico_time_str(_p.entry_time) if _p.entry_time else "",
+                    "opened_at": to_mexico_time_str(_p.entry_time) if _p.entry_time else "",
                     "exit_time": to_mexico_time_str(_p.exit_time) if _p.exit_time else "",
+                    "closed_at": to_mexico_time_str(_p.exit_time) if _p.exit_time else "",
                 })
         result["expectativa_vs_realidad"] = {
             "details": _evr_details[-50:],
@@ -2422,6 +2551,777 @@ async def get_override_performance() -> Dict:
         }
     except Exception as e:
         return {"error": str(e), "summary": {}, "by_symbol": {}, "recent_trades": [], "recommendations": ["Error cargando métricas"]}
+
+
+def _trade_scope_expr() -> str:
+    return (
+        "CASE "
+        "WHEN COALESCE(metadata->>'trade_type','') <> '' THEN lower(metadata->>'trade_type') "
+        "WHEN side IN ('BUY','SELL') THEN 'spot' "
+        "WHEN side IN ('LONG','SHORT') THEN 'futures' "
+        "ELSE 'system' END"
+    )
+
+
+def _summarize_closed_trades_range(start_ts: datetime, end_ts: Optional[datetime] = None) -> Dict[str, Any]:
+    _end_ts = end_ts or datetime.now(timezone.utc)
+    rows = db_client.execute_query(
+        f"""
+        SELECT
+            {_trade_scope_expr()} AS trade_scope,
+            COUNT(*)::bigint AS n_trades,
+            COALESCE(SUM(pnl), 0)::numeric AS pnl_sum,
+            COALESCE(AVG(pnl), 0)::numeric AS avg_pnl,
+            COALESCE(100.0 * AVG(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0)::numeric AS win_rate_pct,
+            COALESCE(SUM(COALESCE(entry_commission,0) + COALESCE(exit_commission,0)), 0)::numeric AS fees_sum,
+            COALESCE(AVG(pnl_percentage), 0)::numeric AS pnl_pct_avg
+        FROM trades_closed
+        WHERE exit_time >= %s AND exit_time < %s
+        GROUP BY trade_scope
+        ORDER BY trade_scope
+        """,
+        (start_ts, _end_ts),
+    )
+    by_scope: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        scope = str(r.get("trade_scope") or "system").lower()
+        by_scope[scope] = {
+            "n_trades": int(r.get("n_trades") or 0),
+            "pnl_sum": round(float(r.get("pnl_sum") or 0.0), 4),
+            "avg_pnl": round(float(r.get("avg_pnl") or 0.0), 4),
+            "win_rate_pct": round(float(r.get("win_rate_pct") or 0.0), 2),
+            "fees_sum": round(float(r.get("fees_sum") or 0.0), 4),
+            "pnl_pct_avg": round(float(r.get("pnl_pct_avg") or 0.0), 4),
+        }
+    return {"start_ts": start_ts.isoformat(), "end_ts": _end_ts.isoformat(), "by_scope": by_scope}
+
+
+def _trade_diagnostics_range(start_ts: datetime, end_ts: Optional[datetime] = None) -> Dict[str, Any]:
+    _end_ts = end_ts or datetime.now(timezone.utc)
+    rows = db_client.execute_query(
+        f"""
+        SELECT
+            {_trade_scope_expr()} AS trade_scope,
+            close_reason,
+            pnl,
+            pnl_percentage,
+            COALESCE(entry_commission, 0) AS entry_commission,
+            COALESCE(exit_commission, 0) AS exit_commission,
+            EXTRACT(EPOCH FROM (exit_time - entry_time))::numeric AS hold_seconds
+        FROM trades_closed
+        WHERE exit_time >= %s AND exit_time < %s
+        ORDER BY exit_time ASC
+        """,
+        (start_ts, _end_ts),
+    )
+
+    def _num(value: Any) -> float:
+        try:
+            return float(value or 0.0)
+        except Exception:
+            return 0.0
+
+    def _build_bucket() -> Dict[str, Any]:
+        return {
+            "n_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "pnl_sum": 0.0,
+            "fees_sum": 0.0,
+            "hold_seconds_sum": 0.0,
+            "pnl_pct_sum": 0.0,
+            "win_pnl_sum": 0.0,
+            "loss_pnl_sum": 0.0,
+            "by_reason": {},
+        }
+
+    buckets: Dict[str, Dict[str, Any]] = {"spot": _build_bucket(), "futures": _build_bucket()}
+
+    for row in rows:
+        scope = str(row.get("trade_scope") or "system").lower()
+        if scope not in buckets:
+            continue
+        bucket = buckets[scope]
+        pnl = _num(row.get("pnl"))
+        pnl_pct = _num(row.get("pnl_percentage"))
+        fees = _num(row.get("entry_commission")) + _num(row.get("exit_commission"))
+        hold_seconds = _num(row.get("hold_seconds"))
+        reason = _normalize_close_reason(row.get("close_reason"))
+
+        bucket["n_trades"] += 1
+        bucket["pnl_sum"] += pnl
+        bucket["fees_sum"] += fees
+        bucket["hold_seconds_sum"] += hold_seconds
+        bucket["pnl_pct_sum"] += pnl_pct
+        if pnl > 0:
+            bucket["wins"] += 1
+            bucket["win_pnl_sum"] += pnl
+        elif pnl < 0:
+            bucket["losses"] += 1
+            bucket["loss_pnl_sum"] += pnl
+
+        reason_bucket = bucket["by_reason"].setdefault(
+            reason,
+            {
+                "close_reason": reason,
+                "n_trades": 0,
+                "pnl_sum": 0.0,
+                "fees_sum": 0.0,
+                "hold_seconds_sum": 0.0,
+                "wins": 0,
+                "losses": 0,
+                "win_pnl_sum": 0.0,
+                "loss_pnl_sum": 0.0,
+            },
+        )
+        reason_bucket["n_trades"] += 1
+        reason_bucket["pnl_sum"] += pnl
+        reason_bucket["fees_sum"] += fees
+        reason_bucket["hold_seconds_sum"] += hold_seconds
+        if pnl > 0:
+            reason_bucket["wins"] += 1
+            reason_bucket["win_pnl_sum"] += pnl
+        elif pnl < 0:
+            reason_bucket["losses"] += 1
+            reason_bucket["loss_pnl_sum"] += pnl
+
+    def _finalize(raw: Dict[str, Any]) -> Dict[str, Any]:
+        n_trades = int(raw.get("n_trades") or 0)
+        wins = int(raw.get("wins") or 0)
+        losses = int(raw.get("losses") or 0)
+        pnl_sum = _num(raw.get("pnl_sum"))
+        fees_sum = _num(raw.get("fees_sum"))
+        hold_seconds_sum = _num(raw.get("hold_seconds_sum"))
+        pnl_pct_sum = _num(raw.get("pnl_pct_sum"))
+        reason_rows = []
+        for item in raw.get("by_reason", {}).values():
+            item_n = int(item.get("n_trades") or 0)
+            item_wins = int(item.get("wins") or 0)
+            item_losses = int(item.get("losses") or 0)
+            item_pnl = _num(item.get("pnl_sum"))
+            item_fees = _num(item.get("fees_sum"))
+            item_hold = _num(item.get("hold_seconds_sum"))
+            reason_rows.append({
+                "close_reason": item.get("close_reason"),
+                "n_trades": item_n,
+                "pnl_sum": round(item_pnl, 4),
+                "net_pnl": round(item_pnl - item_fees, 4),
+                "fees_sum": round(item_fees, 4),
+                "win_rate_pct": round((100.0 * item_wins / item_n), 2) if item_n else 0.0,
+                "avg_pnl": round(item_pnl / item_n, 4) if item_n else 0.0,
+                "avg_win": round(_num(item.get("win_pnl_sum")) / item_wins, 4) if item_wins else 0.0,
+                "avg_loss": round(_num(item.get("loss_pnl_sum")) / item_losses, 4) if item_losses else 0.0,
+                "avg_hold_hours": round((item_hold / item_n) / 3600.0, 2) if item_n else 0.0,
+            })
+        reason_rows.sort(key=lambda item: (-item["n_trades"], item["close_reason"]))
+        return {
+            "n_trades": n_trades,
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": round((100.0 * wins / n_trades), 2) if n_trades else 0.0,
+            "pnl_sum": round(pnl_sum, 4),
+            "net_pnl": round(pnl_sum - fees_sum, 4),
+            "fees_sum": round(fees_sum, 4),
+            "fees_pct_of_gross_pnl": round((100.0 * fees_sum / abs(pnl_sum)), 2) if pnl_sum else 0.0,
+            "avg_pnl": round(pnl_sum / n_trades, 4) if n_trades else 0.0,
+            "avg_win": round(_num(raw.get("win_pnl_sum")) / wins, 4) if wins else 0.0,
+            "avg_loss": round(_num(raw.get("loss_pnl_sum")) / losses, 4) if losses else 0.0,
+            "avg_hold_hours": round((hold_seconds_sum / n_trades) / 3600.0, 2) if n_trades else 0.0,
+            "avg_pnl_pct": round(pnl_pct_sum / n_trades, 4) if n_trades else 0.0,
+            "stop_loss_share_pct": round((100.0 * sum(1 for item in reason_rows if item["close_reason"] == "stop_loss" for _ in range(item["n_trades"])) / n_trades), 2) if n_trades else 0.0,
+            "by_reason": reason_rows,
+        }
+
+    by_scope = {scope: _finalize(bucket) for scope, bucket in buckets.items()}
+    aggregate = _build_bucket()
+    for scope in ("spot", "futures"):
+        bucket = buckets[scope]
+        aggregate["n_trades"] += bucket["n_trades"]
+        aggregate["wins"] += bucket["wins"]
+        aggregate["losses"] += bucket["losses"]
+        aggregate["pnl_sum"] += bucket["pnl_sum"]
+        aggregate["fees_sum"] += bucket["fees_sum"]
+        aggregate["hold_seconds_sum"] += bucket["hold_seconds_sum"]
+        aggregate["pnl_pct_sum"] += bucket["pnl_pct_sum"]
+        aggregate["win_pnl_sum"] += bucket["win_pnl_sum"]
+        aggregate["loss_pnl_sum"] += bucket["loss_pnl_sum"]
+        for reason, item in bucket["by_reason"].items():
+            agg_reason = aggregate["by_reason"].setdefault(
+                reason,
+                {
+                    "close_reason": reason,
+                    "n_trades": 0,
+                    "pnl_sum": 0.0,
+                    "fees_sum": 0.0,
+                    "hold_seconds_sum": 0.0,
+                    "wins": 0,
+                    "losses": 0,
+                    "win_pnl_sum": 0.0,
+                    "loss_pnl_sum": 0.0,
+                },
+            )
+            for key in ("n_trades", "pnl_sum", "fees_sum", "hold_seconds_sum", "wins", "losses", "win_pnl_sum", "loss_pnl_sum"):
+                agg_reason[key] += item.get(key, 0)
+
+    return {
+        "start_ts": start_ts.isoformat(),
+        "end_ts": _end_ts.isoformat(),
+        "summary": _finalize(aggregate),
+        "by_scope": by_scope,
+    }
+
+
+def _trade_throughput_exposure_range(
+    start_ts: datetime,
+    end_ts: Optional[datetime] = None,
+    cycle_minutes: int = 5,
+) -> Dict[str, Any]:
+    _end_ts = end_ts or datetime.now(timezone.utc)
+    if cycle_minutes <= 0:
+        raise ValueError("cycle_minutes must be > 0")
+
+    rows = db_client.execute_query(
+        f"""
+        SELECT
+            {_trade_scope_expr()} AS trade_scope,
+            symbol,
+            entry_time,
+            exit_time,
+            quantity,
+            entry_price,
+            pnl,
+            close_reason
+        FROM trades_closed
+        WHERE exit_time >= %s AND exit_time < %s
+        ORDER BY exit_time ASC
+        """,
+        (start_ts, _end_ts),
+    )
+
+    def _num(value: Any) -> float:
+        try:
+            return float(value or 0.0)
+        except Exception:
+            return 0.0
+
+    def _to_utc_dt(value: Any, fallback: datetime) -> datetime:
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+            except Exception:
+                return fallback
+        return fallback
+
+    def _floor_cycle(ts: datetime, minutes: int) -> datetime:
+        cycle_seconds = minutes * 60
+        epoch = int(ts.timestamp())
+        floored = epoch - (epoch % cycle_seconds)
+        return datetime.fromtimestamp(floored, tz=timezone.utc)
+
+    def _bucket() -> Dict[str, Any]:
+        return {
+            "n_trades": 0,
+            "cycle_counts": {},
+            "notional_values": [],
+            "hold_seconds_values": [],
+            "capital_time_usdt_hours": 0.0,
+            "intervals": [],
+            "reason_counts": {},
+            "symbol_capital_time": {},
+            "pnl_sum": 0.0,
+        }
+
+    buckets: Dict[str, Dict[str, Any]] = {"spot": _bucket(), "futures": _bucket()}
+    window_seconds = max((_end_ts - start_ts).total_seconds(), 1.0)
+
+    for row in rows:
+        scope = str(row.get("trade_scope") or "system").lower()
+        if scope not in buckets:
+            continue
+        bucket = buckets[scope]
+
+        exit_time = _to_utc_dt(row.get("exit_time"), _end_ts)
+        entry_time = _to_utc_dt(row.get("entry_time"), exit_time)
+        if entry_time > exit_time:
+            entry_time = exit_time
+
+        quantity = abs(_num(row.get("quantity")))
+        entry_price = abs(_num(row.get("entry_price")))
+        notional = quantity * entry_price
+        hold_seconds = max((exit_time - entry_time).total_seconds(), 0.0)
+        hold_hours = hold_seconds / 3600.0
+
+        cycle_key = _floor_cycle(exit_time, cycle_minutes).isoformat()
+        bucket["cycle_counts"][cycle_key] = int(bucket["cycle_counts"].get(cycle_key, 0)) + 1
+        bucket["n_trades"] += 1
+        bucket["notional_values"].append(notional)
+        bucket["hold_seconds_values"].append(hold_seconds)
+        bucket["capital_time_usdt_hours"] += notional * hold_hours
+        bucket["intervals"].append((entry_time, exit_time))
+        bucket["pnl_sum"] += _num(row.get("pnl"))
+
+        reason = _normalize_close_reason(row.get("close_reason"))
+        bucket["reason_counts"][reason] = int(bucket["reason_counts"].get(reason, 0)) + 1
+
+        symbol = str(row.get("symbol") or "").upper()
+        if symbol:
+            bucket["symbol_capital_time"][symbol] = _num(bucket["symbol_capital_time"].get(symbol)) + (notional * hold_hours)
+
+    def _avg_concurrency(intervals: List[Any]) -> Dict[str, float]:
+        if not intervals:
+            return {"avg": 0.0, "max": 0.0}
+        events = []
+        for start_i, end_i in intervals:
+            events.append((start_i, 1))
+            events.append((end_i, -1))
+        events.sort(key=lambda item: (item[0], item[1]))
+
+        concurrent = 0.0
+        max_concurrent = 0.0
+        area = 0.0
+        prev = start_ts
+        for ts, delta in events:
+            seg_start = prev if prev > start_ts else start_ts
+            seg_end = ts if ts < _end_ts else _end_ts
+            seg_seconds = max((seg_end - seg_start).total_seconds(), 0.0)
+            if seg_seconds > 0:
+                area += concurrent * seg_seconds
+            concurrent += float(delta)
+            if concurrent > max_concurrent:
+                max_concurrent = concurrent
+            prev = ts
+        if prev < _end_ts:
+            area += concurrent * max((_end_ts - prev).total_seconds(), 0.0)
+        avg = area / window_seconds
+        return {"avg": avg, "max": max_concurrent}
+
+    def _pctile(values: List[float], p: float) -> float:
+        if not values:
+            return 0.0
+        v = sorted(values)
+        idx = int(round((len(v) - 1) * p))
+        idx = max(0, min(idx, len(v) - 1))
+        return v[idx]
+
+    def _finalize(scope: str, raw: Dict[str, Any]) -> Dict[str, Any]:
+        n_trades = int(raw.get("n_trades") or 0)
+        cycle_counts = raw.get("cycle_counts") or {}
+        cycle_values = list(cycle_counts.values())
+        active_cycles = len(cycle_values)
+        notional_values = [abs(_num(v)) for v in (raw.get("notional_values") or [])]
+        hold_values = [max(_num(v), 0.0) for v in (raw.get("hold_seconds_values") or [])]
+        total_notional = sum(notional_values)
+
+        top_k = max(1, (n_trades * 20 + 99) // 100) if n_trades else 0
+        top_notional_share = 0.0
+        if n_trades and total_notional > 0:
+            top_notional_share = (sum(sorted(notional_values, reverse=True)[:top_k]) / total_notional) * 100.0
+
+        symbol_ct = raw.get("symbol_capital_time") or {}
+        symbol_ct_sum = sum(_num(v) for v in symbol_ct.values())
+        top_symbol = None
+        top_symbol_share = 0.0
+        if symbol_ct:
+            top_symbol = max(symbol_ct.items(), key=lambda item: _num(item[1]))[0]
+            if symbol_ct_sum > 0:
+                top_symbol_share = (_num(symbol_ct[top_symbol]) / symbol_ct_sum) * 100.0
+
+        concurrency = _avg_concurrency(raw.get("intervals") or [])
+        max_slots = int(_cfg_param(settings, "max_positions_spot_bull")) if scope == "spot" else int(_cfg_param(settings, "max_positions_futures_short"))
+        slot_util_pct = (concurrency["avg"] / max(max_slots, 1)) * 100.0
+
+        cycle_sorted = sorted(cycle_counts.items(), key=lambda item: (-int(item[1]), item[0]))
+        top_cycles = [{"cycle_start": k, "n_trades": int(v)} for k, v in cycle_sorted[:5]]
+
+        return {
+            "n_trades": n_trades,
+            "window_hours": round(window_seconds / 3600.0, 2),
+            "active_cycles": active_cycles,
+            "avg_trades_per_active_cycle": round((sum(cycle_values) / active_cycles), 3) if active_cycles else 0.0,
+            "max_trades_in_cycle": int(max(cycle_values)) if cycle_values else 0,
+            "trades_per_hour": round((n_trades / (window_seconds / 3600.0)), 3) if window_seconds > 0 else 0.0,
+            "rotation_per_24h": round((n_trades / (window_seconds / 3600.0)) * 24.0, 3) if window_seconds > 0 else 0.0,
+            "pnl_sum": round(_num(raw.get("pnl_sum")), 4),
+            "total_notional_usdt": round(total_notional, 4),
+            "avg_notional_usdt": round((total_notional / n_trades), 4) if n_trades else 0.0,
+            "p75_notional_usdt": round(_pctile(notional_values, 0.75), 4),
+            "avg_hold_hours": round((sum(hold_values) / n_trades) / 3600.0, 3) if n_trades else 0.0,
+            "capital_time_usdt_hours": round(_num(raw.get("capital_time_usdt_hours")), 4),
+            "avg_concurrent_positions": round(concurrency["avg"], 4),
+            "max_concurrent_positions": round(concurrency["max"], 4),
+            "max_slots_reference": max_slots,
+            "slot_utilization_pct": round(slot_util_pct, 3),
+            "top20_notional_share_pct": round(top_notional_share, 3),
+            "fragmentation_index_pct": round(100.0 - top_notional_share, 3) if n_trades else 0.0,
+            "top_symbol_by_capital_time": top_symbol,
+            "top_symbol_capital_time_share_pct": round(top_symbol_share, 3),
+            "close_reason_counts": raw.get("reason_counts") or {},
+            "top_cycles": top_cycles,
+        }
+
+    by_scope = {scope: _finalize(scope, raw) for scope, raw in buckets.items()}
+    summary = {
+        "n_trades": int(by_scope["spot"]["n_trades"] + by_scope["futures"]["n_trades"]),
+        "total_notional_usdt": round(by_scope["spot"]["total_notional_usdt"] + by_scope["futures"]["total_notional_usdt"], 4),
+        "capital_time_usdt_hours": round(by_scope["spot"]["capital_time_usdt_hours"] + by_scope["futures"]["capital_time_usdt_hours"], 4),
+        "avg_slot_utilization_pct": round((by_scope["spot"]["slot_utilization_pct"] + by_scope["futures"]["slot_utilization_pct"]) / 2.0, 3),
+    }
+    return {
+        "start_ts": start_ts.isoformat(),
+        "end_ts": _end_ts.isoformat(),
+        "cycle_minutes": cycle_minutes,
+        "summary": summary,
+        "by_scope": by_scope,
+    }
+
+
+def _quantify_spot_bull_root_causes(hours: int = 168, cycle_minutes: int = 5) -> Dict[str, Any]:
+    if hours <= 0:
+        raise ValueError("hours must be > 0")
+    if cycle_minutes <= 0:
+        raise ValueError("cycle_minutes must be > 0")
+
+    end_ts = datetime.now(timezone.utc)
+    start_ts = end_ts - timedelta(hours=hours)
+    diagnostics = _trade_diagnostics_range(start_ts, end_ts)
+    throughput = _trade_throughput_exposure_range(start_ts, end_ts, cycle_minutes=cycle_minutes)
+
+    early_exit_reasons = {
+        "portfolio_rebalancing",
+        "prediction_exit_deteriorated",
+        "sso_slow_crawl",
+        "manual",
+        "manual_rebalance",
+        "active_replacement",
+    }
+
+    scopes = {}
+    for scope in ("spot", "futures"):
+        d = (diagnostics.get("by_scope") or {}).get(scope) or {}
+        t = (throughput.get("by_scope") or {}).get(scope) or {}
+        n_trades = int(d.get("n_trades") or 0)
+        by_reason = d.get("by_reason") or []
+        reason_count_map = {str(item.get("close_reason")): int(item.get("n_trades") or 0) for item in by_reason}
+        early_exit_count = sum(reason_count_map.get(reason, 0) for reason in early_exit_reasons)
+        early_exit_share = (100.0 * early_exit_count / n_trades) if n_trades else 0.0
+
+        stop_loss_share = float(d.get("stop_loss_share_pct") or 0.0)
+        win_rate = float(d.get("win_rate_pct") or 0.0)
+        avg_win = abs(float(d.get("avg_win") or 0.0))
+        avg_loss = abs(float(d.get("avg_loss") or 0.0))
+        rr_ratio = (avg_win / avg_loss) if avg_loss > 0 else (1.0 if avg_win > 0 else 0.0)
+
+        entry_score = max(0.0, (stop_loss_share * 0.65) + (max(0.0, 50.0 - win_rate) * 0.35))
+        exit_score = max(0.0, (early_exit_share * 0.60) + (max(0.0, 1.20 - rr_ratio) * 40.0))
+        sizing_score = max(
+            0.0,
+            (float(t.get("fragmentation_index_pct") or 0.0) * 0.70)
+            + (max(0.0, 30.0 - float(t.get("slot_utilization_pct") or 0.0)) * 0.30),
+        )
+        total = entry_score + exit_score + sizing_score
+        if total <= 0:
+            contrib = {"entry_quality_pct": 0.0, "exit_policy_pct": 0.0, "sizing_fragmentation_pct": 0.0}
+        else:
+            contrib = {
+                "entry_quality_pct": round((entry_score / total) * 100.0, 2),
+                "exit_policy_pct": round((exit_score / total) * 100.0, 2),
+                "sizing_fragmentation_pct": round((sizing_score / total) * 100.0, 2),
+            }
+
+        scopes[scope] = {
+            "n_trades": n_trades,
+            "scores": {
+                "entry_quality": round(entry_score, 4),
+                "exit_policy": round(exit_score, 4),
+                "sizing_fragmentation": round(sizing_score, 4),
+            },
+            "contributions_pct": contrib,
+            "evidence": {
+                "stop_loss_share_pct": round(stop_loss_share, 2),
+                "win_rate_pct": round(win_rate, 2),
+                "early_exit_share_pct": round(early_exit_share, 2),
+                "reward_to_risk_ratio": round(rr_ratio, 4),
+                "fragmentation_index_pct": round(float(t.get("fragmentation_index_pct") or 0.0), 3),
+                "slot_utilization_pct": round(float(t.get("slot_utilization_pct") or 0.0), 3),
+            },
+        }
+
+    total_trades = sum(int((scopes.get(scope) or {}).get("n_trades") or 0) for scope in ("spot", "futures"))
+    weighted = {"entry_quality": 0.0, "exit_policy": 0.0, "sizing_fragmentation": 0.0}
+    for scope in ("spot", "futures"):
+        item = scopes.get(scope) or {}
+        w = (float(item.get("n_trades") or 0.0) / total_trades) if total_trades else 0.0
+        contrib = item.get("contributions_pct") or {}
+        weighted["entry_quality"] += w * float(contrib.get("entry_quality_pct") or 0.0)
+        weighted["exit_policy"] += w * float(contrib.get("exit_policy_pct") or 0.0)
+        weighted["sizing_fragmentation"] += w * float(contrib.get("sizing_fragmentation_pct") or 0.0)
+
+    return {
+        "ok": True,
+        "window": {
+            "hours": hours,
+            "cycle_minutes": cycle_minutes,
+            "start_ts": start_ts.isoformat(),
+            "end_ts": end_ts.isoformat(),
+        },
+        "scopes": scopes,
+        "overall_weighted_contributions_pct": {
+            "entry_quality_pct": round(weighted["entry_quality"], 2),
+            "exit_policy_pct": round(weighted["exit_policy"], 2),
+            "sizing_fragmentation_pct": round(weighted["sizing_fragmentation"], 2),
+        },
+        "diagnostics": diagnostics,
+        "throughput_exposure": throughput,
+    }
+
+
+_SPOT_BULL_CANDIDATE_V1: Dict[str, Any] = {
+    "candidate_label": "spot_bull_quality_v1",
+    "objective": "less marginal entries, higher conviction sizing, explicit mirror in futures",
+    "spot_changes": {
+        "min_signal_strength": 0.44,
+        "min_success_probability": 0.57,
+        "max_positions_spot_bull": 14,
+        "replace_ev_min_ratio": 1.2,
+        "overflow_min_strength": 0.85,
+        "overflow_min_prob": 0.68,
+        "kelly_conviction_max_pct": 0.12,
+    },
+    "futures_mirror_changes": {
+        "futures_min_prob": 0.54,
+        "futures_vol_spike_min": 1.05,
+        "futures_max_new_per_cycle": 3,
+        "futures_overflow_min_strength": 0.60,
+        "futures_overflow_min_vol_spike": 2.2,
+        "max_positions_futures_short": 10,
+    },
+    "notes": [
+        "Mirror is explicit: each quality-tightening move in SPOT has a bounded equivalent in FUTURES.",
+        "Candidate does not auto-apply runtime config; it must pass Smart Backtest validation gate.",
+        "Use with /smart-backtest/validation/start or /tuning/candidates/spot-bull-v1/validate-start.",
+    ],
+}
+
+
+def _build_spot_bull_candidate_snapshot() -> Dict[str, Any]:
+    current = dump_active_config(settings)
+    spot_changes = _SPOT_BULL_CANDIDATE_V1.get("spot_changes") or {}
+    futures_changes = _SPOT_BULL_CANDIDATE_V1.get("futures_mirror_changes") or {}
+
+    deltas: Dict[str, Dict[str, Any]] = {}
+    candidate_params: Dict[str, Any] = {}
+    for param, new_value in {**spot_changes, **futures_changes}.items():
+        old_value = current.get(param)
+        deltas[param] = {"current": old_value, "candidate": new_value}
+        candidate_params[param] = new_value
+
+    return {
+        **_SPOT_BULL_CANDIDATE_V1,
+        "candidate_params": candidate_params,
+        "deltas": deltas,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _get_performance_changepoint_metrics() -> Dict[str, Any]:
+    try:
+        marker_rows = db_client.execute_query(
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key='performance_changepoint_PERF_3Y60K_PRIORITY_2026-07-02'"
+        )
+        if not marker_rows:
+            return {"ok": False, "error": "performance changepoint marker not found"}
+
+        marker_row = marker_rows[0]
+        marker_value = marker_row.get("value") or {}
+        if isinstance(marker_value, str):
+            try:
+                marker_value = json.loads(marker_value)
+            except Exception:
+                marker_value = {}
+        marker_ts = marker_row.get("updated_at") or datetime.now(timezone.utc)
+        if isinstance(marker_ts, str):
+            marker_ts = datetime.fromisoformat(marker_ts.replace("Z", "+00:00"))
+        if marker_ts.tzinfo is None:
+            marker_ts = marker_ts.replace(tzinfo=timezone.utc)
+
+        now_ts = datetime.now(timezone.utc)
+        elapsed = max((now_ts - marker_ts).total_seconds(), 1.0)
+        previous_start = marker_ts - timedelta(seconds=elapsed)
+
+        since_marker = _summarize_closed_trades_range(marker_ts, now_ts)
+        prev_window = _summarize_closed_trades_range(previous_start, marker_ts)
+
+        def _aggregate_window(window: Dict[str, Any]) -> Dict[str, Any]:
+            scopes = window.get("by_scope", {}) or {}
+            total = {
+                "n_trades": 0,
+                "pnl_sum": 0.0,
+                "fees_sum": 0.0,
+                "weighted_win_numerator": 0.0,
+            }
+            for scope in ("spot", "futures"):
+                stats = scopes.get(scope, {})
+                n = int(stats.get("n_trades") or 0)
+                total["n_trades"] += n
+                total["pnl_sum"] += float(stats.get("pnl_sum") or 0.0)
+                total["fees_sum"] += float(stats.get("fees_sum") or 0.0)
+                total["weighted_win_numerator"] += n * float(stats.get("win_rate_pct") or 0.0)
+            total["win_rate_pct"] = round(total["weighted_win_numerator"] / total["n_trades"], 2) if total["n_trades"] else 0.0
+            total["pnl_sum"] = round(total["pnl_sum"], 4)
+            total["fees_sum"] = round(total["fees_sum"], 4)
+            total["net_pnl"] = round(total["pnl_sum"] - total["fees_sum"], 4)
+            return total
+
+        current_total = _aggregate_window(since_marker)
+        previous_total = _aggregate_window(prev_window)
+
+        return {
+            "ok": True,
+            "marker": {
+                "key": "performance_changepoint_PERF_3Y60K_PRIORITY_2026-07-02",
+                "changepoint_id": marker_value.get("changepoint_id"),
+                "base_run_id": marker_value.get("base_run_id"),
+                "root_session_id": marker_value.get("root_session_id"),
+                "updated_at": marker_ts.isoformat(),
+            },
+            "current_window": {**since_marker, "summary": current_total},
+            "previous_window": {**prev_window, "summary": previous_total},
+            "delta": {
+                "n_trades": current_total["n_trades"] - previous_total["n_trades"],
+                "pnl_sum": round(current_total["pnl_sum"] - previous_total["pnl_sum"], 4),
+                "fees_sum": round(current_total["fees_sum"] - previous_total["fees_sum"], 4),
+                "net_pnl": round(current_total["net_pnl"] - previous_total["net_pnl"], 4),
+                "win_rate_pct": round(current_total["win_rate_pct"] - previous_total["win_rate_pct"], 2),
+            },
+            "timestamp": now_ts.isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/metrics/performance-changepoint")
+async def get_performance_changepoint(_auth=Depends(_require_api_key)) -> Dict:
+    """Return before/after performance around the Smart Backtest changepoint, split by SPOT and FUTURES."""
+    return _get_performance_changepoint_metrics()
+
+
+@app.get("/metrics/trade-diagnostics")
+async def get_trade_diagnostics(hours: int = 168, _auth=Depends(_require_api_key)) -> Dict:
+    """Return close-reason, pnl, fees and hold-time diagnostics split by SPOT and FUTURES."""
+    if hours <= 0:
+        raise HTTPException(status_code=400, detail="hours must be > 0")
+    start_ts = datetime.now(timezone.utc) - timedelta(hours=hours)
+    return _trade_diagnostics_range(start_ts, datetime.now(timezone.utc))
+
+
+@app.get("/metrics/trade-throughput-exposure")
+async def get_trade_throughput_exposure(
+    hours: int = 168,
+    cycle_minutes: int = 5,
+    _auth=Depends(_require_api_key),
+) -> Dict:
+    """Return throughput and capital-exposure diagnostics by cycle, split by SPOT and FUTURES."""
+    if hours <= 0:
+        raise HTTPException(status_code=400, detail="hours must be > 0")
+    if cycle_minutes <= 0:
+        raise HTTPException(status_code=400, detail="cycle_minutes must be > 0")
+    start_ts = datetime.now(timezone.utc) - timedelta(hours=hours)
+    return _trade_throughput_exposure_range(start_ts, datetime.now(timezone.utc), cycle_minutes=cycle_minutes)
+
+
+@app.get("/metrics/spot-bull-root-cause")
+async def get_spot_bull_root_cause(
+    hours: int = 168,
+    cycle_minutes: int = 5,
+    _auth=Depends(_require_api_key),
+) -> Dict:
+    """Quantify relative contribution of entry-quality, exit-policy and sizing fragmentation for SPOT and FUTURES."""
+    if hours <= 0:
+        raise HTTPException(status_code=400, detail="hours must be > 0")
+    if cycle_minutes <= 0:
+        raise HTTPException(status_code=400, detail="cycle_minutes must be > 0")
+    return _quantify_spot_bull_root_causes(hours=hours, cycle_minutes=cycle_minutes)
+
+
+@app.get("/tuning/candidates/spot-bull-v1")
+async def get_spot_bull_candidate_v1(_auth=Depends(_require_api_key)) -> Dict:
+    """Return the first SPOT_BULL candidate package with explicit FUTURES mirror and current-vs-candidate deltas."""
+    payload = _build_spot_bull_candidate_snapshot()
+    latest_backup = None
+    try:
+        rows = db_client.execute_query(
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key='config_snapshot_futures_working_latest' LIMIT 1"
+        )
+        if rows:
+            latest_backup = rows[0]
+    except Exception:
+        latest_backup = None
+    return {
+        "ok": True,
+        "candidate": payload,
+        "latest_futures_backup": latest_backup,
+    }
+
+
+@app.post("/tuning/candidates/spot-bull-v1/validate-start")
+async def start_spot_bull_candidate_validation(
+    background_tasks: BackgroundTasks,
+    body: Dict,
+    _auth: None = Depends(_require_api_key),
+) -> Dict:
+    """Start Smart Backtest validation run for SPOT_BULL candidate v1 using explicit SPOT+FUTURES mirror params."""
+    candidate = _build_spot_bull_candidate_snapshot()
+    validation_body = {
+        "period": body.get("period", "1y"),
+        "simulations": int(body.get("simulations", 0) or 0),
+        "auto_recommend_sims": bool(body.get("auto_recommend_sims", True)),
+        "strict_data": bool(body.get("strict_data", False)),
+    }
+    if body.get("capital") is not None:
+        validation_body["capital"] = body.get("capital")
+
+    validation_context = {
+        "candidate_label": candidate.get("candidate_label"),
+        "candidate_params": candidate.get("candidate_params"),
+        "mirror": candidate.get("futures_mirror_changes"),
+        "notes": body.get("notes") or "spot_bull candidate validation",
+        "baseline_run_ids": dict(_SMART_BASELINE_RUN_IDS),
+    }
+    return _start_smart_backtest_task(background_tasks, validation_body, validation_context=validation_context)
+
+
+@app.get("/tuning/candidates/spot-bull-v1/decision/{root_session_id}")
+async def get_spot_bull_candidate_decision(
+    root_session_id: str,
+    min_pnl_delta_pct: float = -3.0,
+    min_win_rate_delta_pct: float = -5.0,
+    max_drawdown_delta_pct: float = 15.0,
+    _auth: None = Depends(_require_api_key),
+) -> Dict:
+    """Return PASS/FAIL/INCONCLUSIVE go-no-go decision for SPOT_BULL candidate validation run."""
+    validation = _evaluate_smart_backtest_validation(
+        root_session_id=root_session_id,
+        min_pnl_delta_pct=min_pnl_delta_pct,
+        min_win_rate_delta_pct=min_win_rate_delta_pct,
+        max_drawdown_delta_pct=max_drawdown_delta_pct,
+    )
+    overall = str(validation.get("overall") or "inconclusive")
+    go_no_go = "NO_GO"
+    if overall == "pass":
+        go_no_go = "GO"
+    elif overall == "inconclusive":
+        go_no_go = "CONDITIONAL"
+    return {
+        "ok": True,
+        "candidate_label": _SPOT_BULL_CANDIDATE_V1.get("candidate_label"),
+        "root_session_id": root_session_id,
+        "go_no_go": go_no_go,
+        "validation": validation,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.get("/positions/open/detail")
@@ -2722,7 +3622,16 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 7) -> Dict:
         _extra = list(_cfg_param(_s, 'futures_symbols'))
         try:
             from pair_screener import get_screened_pairs
-            _extra = list(dict.fromkeys(_extra + get_screened_pairs(settings=_s).get("futures", [])))
+            _regime_mode = str(getattr(_s, 'current_regime_mode', 'SPOT_BULL')).strip().upper()
+            _profile = _get_active_profile_summary(_regime_mode).get("label")
+            _extra = list(dict.fromkeys(
+                _extra + get_screened_pairs(
+                    settings=_s,
+                    regime_mode=_regime_mode,
+                    profile_label=_profile,
+                    db_client=db_client,
+                ).get("futures", [])
+            ))
         except Exception:
             pass
 
@@ -2820,6 +3729,326 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 7) -> Dict:
 # ── Backtest endpoints ────────────────────────────────────────────────────────
 
 _backtest_tasks: Dict[str, Dict] = {}  # run_id -> status dict
+_smart_backtest_tasks: Dict[str, Dict] = {}  # run_id -> status dict
+_SMART_BASELINE_RUN_IDS: Dict[str, int] = {
+    "spot_bull": 29600,
+    "range_scalp": 48412,
+    "preservation": 51631,
+    "futures_short": 61556,
+}
+
+
+def _append_recent_output(task: Dict, line: str, limit: int = 120) -> None:
+    """Store a bounded tail of process output lines for dashboard progress visibility."""
+    if not isinstance(task, dict):
+        return
+    buf = task.setdefault("recent_output", [])
+    if not isinstance(buf, list):
+        buf = []
+        task["recent_output"] = buf
+    buf.append((line or "").rstrip())
+    if len(buf) > limit:
+        del buf[:-limit]
+
+
+def _parse_optimizer_progress(line: str) -> Optional[Dict[str, Any]]:
+    """Parse canonical optimizer progress lines like: '100/1000 | elapsed=12.3s | best_pnl=+45.2'."""
+    import re
+
+    m = re.search(r"(\d+)\/(\d+)\s+\|\s+elapsed=([0-9.]+)s\s+\|\s+best_pnl=([+\-]?[0-9.]+)", line)
+    if not m:
+        return None
+    try:
+        done = int(m.group(1))
+        total = int(m.group(2))
+        elapsed = float(m.group(3))
+        best_pnl = float(m.group(4))
+        pct = round((done / max(total, 1)) * 100.0, 2)
+        return {
+            "completed_runs": done,
+            "total_runs": total,
+            "elapsed_sec": elapsed,
+            "best_pnl": best_pnl,
+            "progress_pct": pct,
+        }
+    except Exception:
+        return None
+
+
+def _parse_smart_scenario_start(line: str) -> Optional[Dict[str, Any]]:
+    """Parse smart runner scenario start lines."""
+    import re
+
+    m = re.search(r"\[Smart\]\s+Running\s+([a-z_]+):\s+regime=([A-Z_]+)\s+mode=([a-z\-]+)\s+runs=(\d+)", line)
+    if not m:
+        return None
+    try:
+        return {
+            "scenario": m.group(1),
+            "regime": m.group(2),
+            "mode": m.group(3),
+            "runs": int(m.group(4)),
+        }
+    except Exception:
+        return None
+
+
+def _fetch_backtest_checkpoints(session_id: str, limit: int = 40) -> List[Dict[str, Any]]:
+    """Read persisted optimizer checkpoints from trades_audit for a specific session_id."""
+    if not db_client or not session_id:
+        return []
+    try:
+        rows = db_client.execute_query(
+            """
+                        SELECT ts, detail
+            FROM trades_audit
+            WHERE event = 'backtest_run_checkpoint'
+              AND detail->>'session_id' = %s
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (session_id, limit),
+        )
+    except Exception:
+        return []
+
+    out = []
+    for r in reversed(rows or []):
+        d = r.get("detail") or {}
+        if isinstance(d, str):
+            try:
+                d = json.loads(d)
+            except Exception:
+                d = {}
+        out.append({
+            "created_at": to_mexico_time_str(str(r.get("ts"))) if r.get("ts") else None,
+            "run_index": d.get("run_index"),
+            "run_label": d.get("run_label"),
+            "status": d.get("status"),
+            "run_id": d.get("run_id"),
+            "pnl_total": d.get("pnl_total"),
+            "n_trades": d.get("n_trades"),
+            "duration_ms": d.get("duration_ms"),
+            "error": d.get("error"),
+        })
+    return out
+
+
+def _fetch_smart_checkpoint_summary(root_session_id: str) -> Dict[str, Any]:
+    """Aggregate optimizer checkpoints by smart scenario session suffix."""
+    if not db_client or not root_session_id:
+        return {"scenarios": []}
+    try:
+        rows = db_client.execute_query(
+            """
+            SELECT detail
+            FROM trades_audit
+            WHERE event = 'backtest_run_checkpoint'
+              AND detail->>'session_id' LIKE %s
+            ORDER BY id DESC
+            LIMIT 400
+            """,
+            (f"{root_session_id}_%",),
+        )
+    except Exception:
+        return {"scenarios": []}
+
+    scenarios: Dict[str, Dict[str, Any]] = {}
+    for r in rows or []:
+        d = r.get("detail") or {}
+        if isinstance(d, str):
+            try:
+                d = json.loads(d)
+            except Exception:
+                d = {}
+        sid = str(d.get("session_id") or "")
+        if not sid.startswith(f"{root_session_id}_"):
+            continue
+        suffix = sid[len(root_session_id) + 1:]
+        item = scenarios.setdefault(suffix, {
+            "scenario": suffix,
+            "completed_runs": 0,
+            "failed_runs": 0,
+            "last_status": None,
+            "best_pnl": None,
+            "best_run_id": None,
+        })
+        st = str(d.get("status") or "")
+        if st == "completed":
+            item["completed_runs"] += 1
+            try:
+                pnl = float(d.get("pnl_total")) if d.get("pnl_total") is not None else None
+            except Exception:
+                pnl = None
+            if pnl is not None and (item["best_pnl"] is None or pnl > float(item["best_pnl"])):
+                item["best_pnl"] = pnl
+                item["best_run_id"] = d.get("run_id")
+        elif st in ("failed", "persist_failed"):
+            item["failed_runs"] += 1
+        if item.get("last_status") is None:
+            item["last_status"] = st
+
+    return {"scenarios": sorted(scenarios.values(), key=lambda x: x["scenario"])}
+
+
+def _fetch_backtest_run_metrics(run_id: int) -> Optional[Dict[str, Any]]:
+    if not db_client:
+        return None
+    try:
+        rows = db_client.execute_query(
+            """
+            SELECT id, label, pnl_total, return_pct, win_rate, profit_factor,
+                   max_drawdown, n_trades, pnl_spot, pnl_futures, is_baseline
+            FROM backtest_run
+            WHERE id = %s
+            LIMIT 1
+            """,
+            (run_id,),
+        )
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def _fetch_best_backtest_run_for_session(session_id: str) -> Optional[Dict[str, Any]]:
+    if not db_client or not session_id:
+        return None
+    try:
+        rows = db_client.execute_query(
+            """
+            SELECT br.id, br.label, br.pnl_total, br.return_pct, br.win_rate, br.profit_factor,
+                   br.max_drawdown, br.n_trades, br.pnl_spot, br.pnl_futures, br.is_baseline
+            FROM backtest_run br
+            JOIN (
+                SELECT (detail->>'run_id')::int AS run_id
+                FROM trades_audit
+                WHERE event = 'backtest_run_checkpoint'
+                  AND detail->>'session_id' = %s
+                  AND detail->>'status' = 'completed'
+            ) ck ON ck.run_id = br.id
+            ORDER BY br.pnl_total DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        )
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def _delta_pct(candidate_value: Any, baseline_value: Any) -> Optional[float]:
+    try:
+        cand = float(candidate_value)
+        base = float(baseline_value)
+    except Exception:
+        return None
+    if base == 0:
+        return None
+    return round(((cand - base) / abs(base)) * 100.0, 4)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _evaluate_smart_backtest_validation(
+    root_session_id: str,
+    min_pnl_delta_pct: float = -3.0,
+    min_win_rate_delta_pct: float = -5.0,
+    max_drawdown_delta_pct: float = 15.0,
+) -> Dict[str, Any]:
+    scenarios: List[Dict[str, Any]] = []
+    scenario_statuses: List[str] = []
+
+    for scenario, baseline_run_id in _SMART_BASELINE_RUN_IDS.items():
+        candidate_session_id = f"{root_session_id}_{scenario}"
+        baseline = _fetch_backtest_run_metrics(baseline_run_id)
+        candidate = _fetch_best_backtest_run_for_session(candidate_session_id)
+
+        if not baseline or not candidate:
+            scenarios.append({
+                "scenario": scenario,
+                "baseline_run_id": baseline_run_id,
+                "candidate_session_id": candidate_session_id,
+                "status": "missing_data",
+                "baseline": baseline,
+                "candidate": candidate,
+                "checks": {},
+                "reasons": ["baseline or candidate run not found"],
+            })
+            scenario_statuses.append("missing_data")
+            continue
+
+        baseline_n_trades = int(baseline.get("n_trades") or 0)
+        candidate_n_trades = int(candidate.get("n_trades") or 0)
+        baseline_pnl_total = _safe_float(baseline.get("pnl_total"))
+        candidate_pnl_total = _safe_float(candidate.get("pnl_total"))
+        baseline_win_rate = _safe_float(baseline.get("win_rate"))
+        candidate_win_rate = _safe_float(candidate.get("win_rate"))
+        baseline_drawdown = _safe_float(baseline.get("max_drawdown"))
+        candidate_drawdown = _safe_float(candidate.get("max_drawdown"))
+        baseline_profit_factor = _safe_float(baseline.get("profit_factor"))
+        candidate_profit_factor = _safe_float(candidate.get("profit_factor"))
+
+        metrics = {
+            "pnl_total_delta_pct": _delta_pct(candidate_pnl_total, baseline_pnl_total),
+            "return_pct_delta_pct": _delta_pct(candidate.get("return_pct"), baseline.get("return_pct")),
+            "win_rate_delta_pct": round(candidate_win_rate - baseline_win_rate, 4),
+            "profit_factor_delta_pct": _delta_pct(candidate_profit_factor, baseline_profit_factor),
+            "max_drawdown_delta_pct": _delta_pct(candidate_drawdown, baseline_drawdown),
+            "pnl_per_trade_delta_pct": _delta_pct(
+                (candidate_pnl_total / candidate_n_trades) if candidate_n_trades else 0.0,
+                (baseline_pnl_total / baseline_n_trades) if baseline_n_trades else 0.0,
+            ),
+        }
+
+        checks = {
+            "pnl_total": (metrics["pnl_total_delta_pct"] is not None and metrics["pnl_total_delta_pct"] >= min_pnl_delta_pct),
+            "win_rate": metrics["win_rate_delta_pct"] >= min_win_rate_delta_pct,
+            "drawdown": (metrics["max_drawdown_delta_pct"] is None or metrics["max_drawdown_delta_pct"] <= max_drawdown_delta_pct),
+        }
+        reasons = []
+        if not checks["pnl_total"]:
+            reasons.append("pnl_total below threshold")
+        if not checks["win_rate"]:
+            reasons.append("win_rate below threshold")
+        if not checks["drawdown"]:
+            reasons.append("max_drawdown above threshold")
+        scenario_status = "pass" if all(checks.values()) else "fail"
+        scenario_statuses.append(scenario_status)
+        scenarios.append({
+            "scenario": scenario,
+            "baseline_run_id": baseline_run_id,
+            "candidate_session_id": candidate_session_id,
+            "status": scenario_status,
+            "baseline": baseline,
+            "candidate": candidate,
+            "metrics": metrics,
+            "checks": checks,
+            "reasons": reasons,
+        })
+
+    overall = "pass"
+    if any(status == "fail" for status in scenario_statuses):
+        overall = "fail"
+    elif any(status == "missing_data" for status in scenario_statuses):
+        overall = "inconclusive"
+
+    return {
+        "ok": True,
+        "root_session_id": root_session_id,
+        "overall": overall,
+        "thresholds": {
+            "min_pnl_delta_pct": min_pnl_delta_pct,
+            "min_win_rate_delta_pct": min_win_rate_delta_pct,
+            "max_drawdown_delta_pct": max_drawdown_delta_pct,
+        },
+        "scenarios": scenarios,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.post("/backtest/run")
@@ -2841,19 +4070,32 @@ async def run_backtest(
         raise HTTPException(status_code=400, detail="Invalid interval")
     import uuid
     run_id = str(uuid.uuid4())
-    _backtest_tasks[run_id] = {"status": "running", "symbol": symbol,
-                               "run_id": run_id, "started_at": datetime.utcnow().isoformat()}
+    _backtest_tasks[run_id] = {
+        "status": "running",
+        "type": "single",
+        "symbol": symbol,
+        "interval": interval,
+        "days_back": days_back,
+        "run_id": run_id,
+        "progress_pct": 0.0,
+        "phase": "fetching_klines",
+        "started_at": datetime.utcnow().isoformat(),
+    }
 
     def _do_backtest():
         try:
             bt = Backtester(initial_capital=10_000.0, db_client=db_client)
             klines = bt.fetch_klines_from_binance(symbol, interval, days_back)
+            _backtest_tasks[run_id].update({"progress_pct": 35.0, "phase": "running_backtest"})
             from param_optimizer import DEFAULT_GRID
             default_params = {k: v[len(v) // 2] for k, v in DEFAULT_GRID.items()}
             result = bt.run_backtest_with_params(klines, default_params, symbol=symbol)
+            _backtest_tasks[run_id].update({"progress_pct": 80.0, "phase": "persisting_result"})
             bt.persist_result(result, symbol, interval, days_back)
             _backtest_tasks[run_id].update({
                 "status": "completed",
+                "progress_pct": 100.0,
+                "phase": "completed",
                 "win_rate": result.win_rate,
                 "sharpe_ratio": result.sharpe_ratio,
                 "total_pnl": result.total_pnl,
@@ -2864,7 +4106,7 @@ async def run_backtest(
                 "completed_at": datetime.utcnow().isoformat(),
             })
         except Exception as e:
-            _backtest_tasks[run_id].update({"status": "error", "error": str(e)})
+            _backtest_tasks[run_id].update({"status": "error", "phase": "error", "error": str(e)})
 
     background_tasks.add_task(_do_backtest)
     return {"run_id": run_id, "status": "running",
@@ -2890,8 +4132,17 @@ async def run_backtest_optimizer(
         _backtest_tasks[_run_id] = {
             "status": "running",
             "type": "optimizer",
+            "run_id": _run_id,
+            "session_id": _run_id,
             "runs": _runs,
             "days": _days,
+            "completed_runs": 0,
+            "total_runs": _runs,
+            "progress_pct": 0.0,
+            "phase": "booting",
+            "elapsed_sec": 0.0,
+            "best_pnl": None,
+            "recent_output": [],
             "started_at": datetime.utcnow().isoformat(),
         }
 
@@ -2900,27 +4151,43 @@ async def run_backtest_optimizer(
         def _do_optimize():
             try:
                 _cmd = [
-                    "python", _script_path,
+                    "python", "-u", _script_path,
                     "--runs", str(_runs),
                     "--days", str(_days),
+                    "--session-id", _run_id,
                 ]
                 if _auto_apply:
                     _cmd.append("--auto-apply")
-                _proc = subprocess.run(
+                _proc = subprocess.Popen(
                     _cmd,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     text=True,
-                    timeout=600,
                 )
+                assert _proc.stdout is not None
+
+                _stdout_lines: List[str] = []
+                for _line in _proc.stdout:
+                    _line = _line.rstrip("\n")
+                    _stdout_lines.append(_line)
+                    _append_recent_output(_backtest_tasks[_run_id], _line)
+                    _backtest_tasks[_run_id]["phase"] = "running"
+                    _parsed = _parse_optimizer_progress(_line)
+                    if _parsed:
+                        _backtest_tasks[_run_id].update(_parsed)
+
+                _return_code = _proc.wait()
                 _backtest_tasks[_run_id].update({
-                    "status": "completed" if _proc.returncode == 0 else "error",
-                    "returncode": _proc.returncode,
-                    "stdout": _proc.stdout[-2000:] if _proc.stdout else "",
-                    "stderr": _proc.stderr[-1000:] if _proc.stderr else "",
+                    "status": "completed" if _return_code == 0 else "error",
+                    "phase": "completed" if _return_code == 0 else "error",
+                    "returncode": _return_code,
+                    "stdout": "\n".join(_stdout_lines[-160:]) if _stdout_lines else "",
+                    "completed_runs": _runs if _return_code == 0 else int(_backtest_tasks[_run_id].get("completed_runs", 0)),
+                    "progress_pct": 100.0 if _return_code == 0 else _backtest_tasks[_run_id].get("progress_pct", 0.0),
                     "completed_at": datetime.utcnow().isoformat(),
                 })
             except Exception as _e:
-                _backtest_tasks[_run_id].update({"status": "error", "error": str(_e)})
+                _backtest_tasks[_run_id].update({"status": "error", "phase": "error", "error": str(_e)})
 
         background_tasks.add_task(_do_optimize)
         return {
@@ -2957,6 +4224,283 @@ async def get_backtest_status(run_id: str) -> Dict:
     if task:
         return task
     raise HTTPException(status_code=404, detail=f"run_id {run_id} not found")
+
+
+@app.get("/backtest/progress/{run_id}")
+async def get_backtest_progress(run_id: str) -> Dict:
+    """Get rich progress for backtest tasks, including persisted checkpoints when available."""
+    task = _backtest_tasks.get(run_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"run_id {run_id} not found")
+
+    payload = dict(task)
+    checkpoints: List[Dict[str, Any]] = []
+
+    if payload.get("type") == "optimizer":
+        checkpoints = _fetch_backtest_checkpoints(session_id=payload.get("session_id") or run_id, limit=40)
+        payload["checkpoints"] = checkpoints
+        completed_db = sum(1 for c in checkpoints if c.get("status") == "completed")
+        failed_db = sum(1 for c in checkpoints if c.get("status") in ("failed", "persist_failed"))
+        payload["completed_runs_db"] = completed_db
+        payload["failed_runs_db"] = failed_db
+
+        total_runs = int(payload.get("total_runs") or payload.get("runs") or 0)
+        completed_mem = int(payload.get("completed_runs") or 0)
+        completed = max(completed_mem, completed_db)
+        payload["completed_runs"] = completed
+        if total_runs > 0:
+            payload["progress_pct"] = round((completed / total_runs) * 100.0, 2)
+
+    return payload
+
+
+def _start_smart_backtest_task(background_tasks: BackgroundTasks, body: Dict, validation_context: Optional[Dict[str, Any]] = None) -> Dict:
+    import uuid
+    import subprocess
+    import os
+
+    _period = str(body.get("period", "1y"))
+    _simulations = int(body.get("simulations", 0) or 0)
+    _auto_recommend = bool(body.get("auto_recommend_sims", _simulations <= 0))
+    _strict_data = bool(body.get("strict_data", False))
+    _capital = body.get("capital", None)
+
+    _run_id = str(uuid.uuid4())
+    _smart_backtest_tasks[_run_id] = {
+        "status": "running",
+        "type": "smart_backtest_validation" if validation_context else "smart_backtest",
+        "run_id": _run_id,
+        "session_id": _run_id,
+        "period": _period,
+        "simulations": _simulations,
+        "auto_recommend_sims": _auto_recommend,
+        "strict_data": _strict_data,
+        "capital": _capital,
+        "progress_pct": 0.0,
+        "scenario_total": 4,
+        "scenario_completed": 0,
+        "current_scenario": None,
+        "current_scenario_runs_total": 0,
+        "current_scenario_runs_completed": 0,
+        "phase": "booting",
+        "recent_output": [],
+        "started_at": datetime.utcnow().isoformat(),
+        "validation_context": validation_context,
+    }
+
+    if validation_context and db_client:
+        try:
+            db_client.execute_update(
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s,%s,%s,%s,%s)",
+                (
+                    "__config__",
+                    "system",
+                    "smart_backtest_validation_start",
+                    json.dumps({"run_id": _run_id, **validation_context}, default=str),
+                    False,
+                ),
+            )
+        except Exception:
+            pass
+
+    _script_path = os.path.join(os.path.dirname(__file__), "Dev", "smart_backtest_optimizer.py")
+
+    def _do_smart_backtest():
+        try:
+            _cmd = [
+                "python", "-u", _script_path,
+                "--period", _period,
+                "--session-id", _run_id,
+            ]
+            if _simulations > 0:
+                _cmd.extend(["--simulations", str(_simulations)])
+            if _auto_recommend:
+                _cmd.append("--auto-recommend-sims")
+            if _strict_data:
+                _cmd.append("--strict-data")
+            if _capital is not None:
+                _cmd.extend(["--capital", str(float(_capital))])
+
+            _proc = subprocess.Popen(
+                _cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            assert _proc.stdout is not None
+
+            _stdout_lines: List[str] = []
+            _seen_scenarios: List[str] = []
+            _current = None
+
+            for _line in _proc.stdout:
+                _line = _line.rstrip("\n")
+                _stdout_lines.append(_line)
+                _append_recent_output(_smart_backtest_tasks[_run_id], _line)
+                _smart_backtest_tasks[_run_id]["phase"] = "running"
+
+                _sc = _parse_smart_scenario_start(_line)
+                if _sc:
+                    if _current and _current in _seen_scenarios:
+                        _smart_backtest_tasks[_run_id]["scenario_completed"] = min(
+                            int(_smart_backtest_tasks[_run_id].get("scenario_total", 4)),
+                            len(_seen_scenarios),
+                        )
+                    _current = _sc["scenario"]
+                    if _current not in _seen_scenarios:
+                        _seen_scenarios.append(_current)
+                    _smart_backtest_tasks[_run_id].update({
+                        "current_scenario": _sc["scenario"],
+                        "current_regime": _sc["regime"],
+                        "current_mode": _sc["mode"],
+                        "current_scenario_runs_total": _sc["runs"],
+                        "current_scenario_runs_completed": 0,
+                    })
+
+                _op = _parse_optimizer_progress(_line)
+                if _op and _smart_backtest_tasks[_run_id].get("current_scenario"):
+                    _smart_backtest_tasks[_run_id].update({
+                        "current_scenario_runs_completed": _op.get("completed_runs", 0),
+                        "current_scenario_runs_total": _op.get("total_runs", 0),
+                        "current_scenario_elapsed_sec": _op.get("elapsed_sec", 0.0),
+                        "current_scenario_best_pnl": _op.get("best_pnl"),
+                    })
+                    _sc_total = int(_smart_backtest_tasks[_run_id].get("scenario_total", 4))
+                    _sc_done = max(0, len(_seen_scenarios) - 1)
+                    _local_ratio = (_op.get("completed_runs", 0) / max(_op.get("total_runs", 1), 1))
+                    _smart_backtest_tasks[_run_id]["progress_pct"] = round(((_sc_done + _local_ratio) / max(_sc_total, 1)) * 100.0, 2)
+
+            _return_code = _proc.wait()
+            _smart_backtest_tasks[_run_id].update({
+                "status": "completed" if _return_code == 0 else "error",
+                "phase": "completed" if _return_code == 0 else "error",
+                "returncode": _return_code,
+                "stdout": "\n".join(_stdout_lines[-260:]) if _stdout_lines else "",
+                "scenario_completed": int(_smart_backtest_tasks[_run_id].get("scenario_total", 4)) if _return_code == 0 else int(_smart_backtest_tasks[_run_id].get("scenario_completed", 0)),
+                "progress_pct": 100.0 if _return_code == 0 else float(_smart_backtest_tasks[_run_id].get("progress_pct", 0.0)),
+                "completed_at": datetime.utcnow().isoformat(),
+            })
+        except Exception as _e:
+            _smart_backtest_tasks[_run_id].update({
+                "status": "error",
+                "phase": "error",
+                "error": str(_e),
+                "completed_at": datetime.utcnow().isoformat(),
+            })
+
+    background_tasks.add_task(_do_smart_backtest)
+    return {
+        "ok": True,
+        "run_id": _run_id,
+        "status": "running",
+        "message": "Smart Backtest Optimizer iniciado",
+        "params": {
+            "period": _period,
+            "simulations": _simulations,
+            "auto_recommend_sims": _auto_recommend,
+            "strict_data": _strict_data,
+            "capital": _capital,
+        },
+        "validation_context": validation_context,
+    }
+
+
+@app.post("/smart-backtest/start")
+async def start_smart_backtest(
+    background_tasks: BackgroundTasks,
+    body: Dict,
+    _auth: None = Depends(_require_api_key),
+) -> Dict:
+    """Start Smart Backtest Optimizer orchestration in background."""
+    try:
+        return _start_smart_backtest_task(background_tasks, body)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/smart-backtest/validation/start")
+async def start_smart_backtest_validation(
+    background_tasks: BackgroundTasks,
+    body: Dict,
+    _auth: None = Depends(_require_api_key),
+) -> Dict:
+    """Start a Smart Backtest session explicitly marked as a pre-implementation validation run."""
+    try:
+        validation_context = {
+            "candidate_label": body.get("candidate_label") or "unnamed_candidate",
+            "candidate_params": body.get("candidate_params") or {},
+            "notes": body.get("notes"),
+            "baseline_run_ids": dict(_SMART_BASELINE_RUN_IDS),
+        }
+        return _start_smart_backtest_task(background_tasks, body, validation_context=validation_context)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/smart-backtest/status/{run_id}")
+async def get_smart_backtest_status(
+    run_id: str,
+    _auth: None = Depends(_require_api_key),
+) -> Dict:
+    """Get status for a Smart Backtest task started via API."""
+    task = _smart_backtest_tasks.get(run_id)
+    if task:
+        return task
+    raise HTTPException(status_code=404, detail=f"smart run_id {run_id} not found")
+
+
+@app.get("/smart-backtest/active")
+async def get_active_smart_backtest(
+    _auth: None = Depends(_require_api_key),
+) -> Dict:
+    """Return active smart backtest task (running only), or None if no running tasks."""
+    if not _smart_backtest_tasks:
+        return {"ok": True, "task": None}
+
+    def _sort_key(t: Dict[str, Any]) -> str:
+        return str(
+            t.get("started_at")
+            or t.get("completed_at")
+            or t.get("finished_at")
+            or ""
+        )
+
+    tasks = list(_smart_backtest_tasks.values())
+    running = [t for t in tasks if str(t.get("status")) == "running"]
+    picked = max(running, key=_sort_key) if running else None
+    return {"ok": True, "task": picked}
+
+
+@app.get("/smart-backtest/progress/{run_id}")
+async def get_smart_backtest_progress(
+    run_id: str,
+    _auth: None = Depends(_require_api_key),
+) -> Dict:
+    """Get rich smart progress + scenario checkpoint summary from DB."""
+    task = _smart_backtest_tasks.get(run_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"smart run_id {run_id} not found")
+
+    payload = dict(task)
+    payload["checkpoint_summary"] = _fetch_smart_checkpoint_summary(payload.get("session_id") or run_id)
+    return payload
+
+
+@app.get("/smart-backtest/validation/{root_session_id}")
+async def get_smart_backtest_validation(
+    root_session_id: str,
+    min_pnl_delta_pct: float = -3.0,
+    min_win_rate_delta_pct: float = -5.0,
+    max_drawdown_delta_pct: float = 15.0,
+    _auth: None = Depends(_require_api_key),
+) -> Dict:
+    """Evaluate a Smart Backtest root session against the 3y/60000 scenario baselines."""
+    return _evaluate_smart_backtest_validation(
+        root_session_id=root_session_id,
+        min_pnl_delta_pct=min_pnl_delta_pct,
+        min_win_rate_delta_pct=min_win_rate_delta_pct,
+        max_drawdown_delta_pct=max_drawdown_delta_pct,
+    )
 
 
 # ── Learning engine endpoints ─────────────────────────────────────────────────
@@ -3272,6 +4816,43 @@ async def get_health_status() -> Dict:
         "checks": checks,
         "timestamp": to_mexico_time(datetime.utcnow()).isoformat(),
     }
+
+
+@app.get("/health/results")
+async def get_health_results(force: bool = False) -> Dict:
+    """Result-scored health (SMART recheck) with SPOT/FUTURES split and adaptive cadence."""
+    try:
+        now_utc = datetime.now(timezone.utc)
+        cached = _HEALTH_RESULTS_CACHE.get("snapshot")
+        if isinstance(cached, dict) and not force:
+            ts_raw = cached.get("timestamp")
+            ts = None
+            if isinstance(ts_raw, str):
+                try:
+                    ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                except Exception:
+                    ts = None
+            if ts and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts and (now_utc - ts).total_seconds() <= 20:
+                return {**cached, "source": "cache"}
+
+        snapshot = _compute_health_results_snapshot(trigger="manual_force" if force else "manual")
+        _persist_health_results_snapshot(snapshot)
+        _HEALTH_RESULTS_CACHE["snapshot"] = snapshot
+        _HEALTH_RESULTS_CACHE["last_run_at"] = snapshot.get("timestamp")
+        _HEALTH_RESULTS_CACHE["interval_seconds"] = int(((snapshot.get("smart_recheck") or {}).get("interval_seconds") or 300))
+        _HEALTH_RESULTS_CACHE["last_trigger"] = "manual"
+        _HEALTH_RESULTS_EVENT.set()
+        return {**snapshot, "source": "fresh"}
+    except Exception as e:
+        ec.add_error(ec.SOURCE_SYSTEM, ec.LEVEL_ERROR, f"health/results failed: {e}")
+        return {
+            "ok": False,
+            "overall": "error",
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 
 
 @app.get("/errors/recent")
@@ -3600,8 +5181,16 @@ async def get_runtime_state(_auth=Depends(_require_api_key)) -> Dict:
         )
         result = {}
         for r in rows:
+            _value = r.get("value")
+            if isinstance(_value, str):
+                try:
+                    _value = json.loads(_value)
+                except Exception:
+                    _value = {"value": _value}
+            elif not isinstance(_value, dict):
+                _value = {"value": _value}
             result[r["key"]] = {
-                **r["value"],
+                **_value,
                 "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
             }
         # Enrich with live daily PnL from daily_pnl_tracker cache
@@ -3739,16 +5328,518 @@ _KELLY_EDITABLE_FIELDS = {
     "fng_extreme_fear_multiplier", "fng_extreme_greed_multiplier",
     "kelly_conviction_vol2x", "kelly_conviction_vol3x",
     "kelly_conviction_max_pct",
+    "kelly_conviction_enabled",
     "stop_loss_pct", "take_profit_pct", "smart_tp_max_pnl_pct",
     "futures_sl_pct", "futures_tp_pct",
     "min_signal_strength",
     "vol_spike_min",
     "futures_min_prob", "futures_vol_spike_min",
     "min_success_probability",
+    "min_hold_minutes_spot_bull", "min_hold_for_prediction_exit",
+    "min_cycles_before_close_shorts",
+    "futures_trailing_activation_pct", "futures_sl_cooldown_hours",
+    "futures_smart_tp_max_pnl_pct", "futures_smart_tp_max_extensions",
+    "sso_slow_velocity_threshold", "sso_slow_min_hours",
+    "sso_stagnant_min_hours", "sso_decay_min_hours",
+    "sso_decay_threshold_pct",
+    "sso_momentum_min_pnl_pct_spot", "sso_momentum_min_pnl_pct_futures",
     "slippage_pct",
     "use_bnb_for_commission",
     "hybrid_optimizer_enabled", "auto_apply_backtest", "backtest_safe_only",
 }
+
+_REGIME_MODES = {"SPOT_BULL", "RANGE_SCALP", "PRESERVATION", "FUTURES_SHORT"}
+_ALLOWED_CATEGORY_FIELDS = {
+    "min_prob", "min_pnl", "min_volspike",
+    "stop_loss_pct", "take_profit_pct",
+    "trailing_activation_pct", "trailing_distance_pct",
+    "tp_extension_pct",
+}
+_SELECTOR_CONFIG_DEFAULTS = {
+    "smart_total_enabled": True,
+    "mode_selector_enabled": True,
+    "mode_require_confirmed": True,
+    "mode_min_hold_cycles": 2,
+    "mode_min_confidence_delta": 0.03,
+    "mode_audit_every_cycle": True,
+    "profile_selector_enabled": True,
+    "enabled": True,
+    "min_hold_cycles": 3,
+    "min_score_delta": 0.05,
+    "profile_min_hold_cycles": 3,
+    "profile_min_score_delta": 0.05,
+    "audit_every_cycle": True,
+    "profile_rank": {"A": 1000.0, "B": 200.0, "C": 100.0},
+}
+
+
+def _normalize_regime_mode(mode: Any) -> str:
+    m = str(mode or "").strip().upper()
+    if m not in _REGIME_MODES:
+        raise ValueError(f"invalid regime '{mode}'")
+    return m
+
+
+def _normalize_profile_label(label: Any) -> str:
+    p = str(label or "").strip().upper()
+    if not p:
+        raise ValueError("profile label is required")
+    if len(p) > 24:
+        raise ValueError("profile label too long (max 24)")
+    return p
+
+
+def _validate_profile_params(params: Any) -> Dict[str, Dict]:
+    accepted: Dict[str, Any] = {}
+    rejected: Dict[str, str] = {}
+    if not isinstance(params, dict):
+        return {"accepted": accepted, "rejected": {"params": "must be an object"}}
+
+    for key, value in params.items():
+        if key in ("category_thresholds", "futures_category_thresholds"):
+            if not isinstance(value, dict):
+                rejected[key] = "must be a dict"
+                continue
+            _normalized_cat = {}
+            for cat, fields in value.items():
+                if not isinstance(fields, dict):
+                    rejected[f"{key}.{cat}"] = "must be a dict"
+                    continue
+                _cat_fields = {}
+                for f, v in fields.items():
+                    if f not in _ALLOWED_CATEGORY_FIELDS:
+                        rejected[f"{key}.{cat}.{f}"] = "field not allowed"
+                        continue
+                    try:
+                        _cat_fields[f] = float(v)
+                    except Exception:
+                        rejected[f"{key}.{cat}.{f}"] = "must be numeric"
+                if _cat_fields:
+                    _normalized_cat[str(cat)] = _cat_fields
+            if _normalized_cat:
+                accepted[key] = _normalized_cat
+            continue
+
+        if key not in _KELLY_EDITABLE_FIELDS:
+            rejected[key] = "not in whitelist"
+            continue
+        accepted[key] = value
+
+    return {"accepted": accepted, "rejected": rejected}
+
+
+def _extract_regime_profile_key_parts(key: str) -> Optional[Dict[str, str]]:
+    if not key:
+        return None
+    for mode in _REGIME_MODES:
+        _active_prefix = f"regime_profile_active_{mode}"
+        if key == _active_prefix:
+            return {"kind": "active", "regime": mode, "profile": ""}
+        _profile_prefix = f"regime_profile_{mode}_"
+        if key.startswith(_profile_prefix):
+            return {"kind": "profile", "regime": mode, "profile": key[len(_profile_prefix):]}
+    return None
+
+
+def _normalize_selector_config_payload(raw: Any) -> Dict[str, Any]:
+    cfg = dict(_SELECTOR_CONFIG_DEFAULTS)
+    if isinstance(raw, dict):
+        cfg.update(raw)
+    cfg["smart_total_enabled"] = bool(cfg.get("smart_total_enabled", True))
+    cfg["mode_selector_enabled"] = bool(cfg.get("mode_selector_enabled", True))
+    cfg["mode_require_confirmed"] = bool(cfg.get("mode_require_confirmed", True))
+    cfg["mode_audit_every_cycle"] = bool(cfg.get("mode_audit_every_cycle", True))
+    cfg["profile_selector_enabled"] = bool(cfg.get("profile_selector_enabled", cfg.get("enabled", True)))
+    cfg["enabled"] = bool(cfg.get("enabled", True))
+    cfg["audit_every_cycle"] = bool(cfg.get("audit_every_cycle", True))
+    try:
+        cfg["mode_min_hold_cycles"] = max(0, int(float(cfg.get("mode_min_hold_cycles", 2))))
+    except Exception:
+        cfg["mode_min_hold_cycles"] = 2
+    try:
+        cfg["mode_min_confidence_delta"] = max(0.0, float(cfg.get("mode_min_confidence_delta", 0.03)))
+    except Exception:
+        cfg["mode_min_confidence_delta"] = 0.03
+    try:
+        cfg["min_hold_cycles"] = max(0, int(float(cfg.get("min_hold_cycles", 3))))
+    except Exception:
+        cfg["min_hold_cycles"] = 3
+    try:
+        cfg["min_score_delta"] = max(0.0, float(cfg.get("min_score_delta", 0.05)))
+    except Exception:
+        cfg["min_score_delta"] = 0.05
+    try:
+        cfg["profile_min_hold_cycles"] = max(
+            0,
+            int(float(cfg.get("profile_min_hold_cycles", cfg.get("min_hold_cycles", 3))))
+        )
+    except Exception:
+        cfg["profile_min_hold_cycles"] = cfg["min_hold_cycles"]
+    try:
+        cfg["profile_min_score_delta"] = max(
+            0.0,
+            float(cfg.get("profile_min_score_delta", cfg.get("min_score_delta", 0.05)))
+        )
+    except Exception:
+        cfg["profile_min_score_delta"] = cfg["min_score_delta"]
+    _pr = cfg.get("profile_rank")
+    if not isinstance(_pr, dict):
+        _pr = {}
+    _norm_pr = {}
+    for k, v in _pr.items():
+        _k = str(k or "").strip().upper()
+        if not _k:
+            continue
+        try:
+            _norm_pr[_k] = float(v)
+        except Exception:
+            continue
+    if not _norm_pr:
+        _norm_pr = dict(_SELECTOR_CONFIG_DEFAULTS["profile_rank"])
+    cfg["profile_rank"] = _norm_pr
+    return cfg
+
+
+@app.get("/regime/profiles/selector-config")
+async def get_regime_profile_selector_config(_auth=Depends(_require_api_key)) -> Dict:
+    """Get current deterministic selector config + persisted per-regime selector state."""
+    try:
+        _cfg_rows = db_client.execute_query(
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key='regime_profile_selector_config'"
+        )
+        _cfg_raw = _cfg_rows[0].get("value") if _cfg_rows else None
+        if isinstance(_cfg_raw, str):
+            try:
+                _cfg_raw = json.loads(_cfg_raw)
+            except Exception:
+                _cfg_raw = {}
+        _cfg = _normalize_selector_config_payload(_cfg_raw if isinstance(_cfg_raw, dict) else {})
+
+        _state_rows = db_client.execute_query(
+            "SELECT key, value, updated_at FROM trading_runtime_state "
+            "WHERE key LIKE 'regime_profile_selector_state_%%' OR key LIKE 'smart_total_profile_selector_state_%%' "
+            "OR key LIKE 'regime_profile_active_%%' OR key='smart_total_mode_selector_state' OR key='smart_total_active_mode' "
+            "ORDER BY key"
+        )
+        _state: Dict[str, Any] = {
+            "mode_selector": {"selector_state": None, "active_mode": None},
+            "profiles": {m: {"selector_state": None, "active_profile": None} for m in _REGIME_MODES},
+        }
+        for r in _state_rows:
+            _key = str(r.get("key") or "")
+            _value = r.get("value")
+            if isinstance(_value, str):
+                try:
+                    _value = json.loads(_value)
+                except Exception:
+                    _value = {"raw": _value}
+            if _key == "smart_total_mode_selector_state":
+                _state["mode_selector"]["selector_state"] = {
+                    "value": _value,
+                    "updated_at": r.get("updated_at").isoformat() if r.get("updated_at") else None,
+                }
+                continue
+            if _key == "smart_total_active_mode":
+                _state["mode_selector"]["active_mode"] = {
+                    "value": _value,
+                    "updated_at": r.get("updated_at").isoformat() if r.get("updated_at") else None,
+                }
+                continue
+            for _mode in _REGIME_MODES:
+                _sk = f"regime_profile_selector_state_{_mode}"
+                _sk2 = f"smart_total_profile_selector_state_{_mode}"
+                _ak = f"regime_profile_active_{_mode}"
+                if _key == _sk or _key == _sk2:
+                    _state["profiles"][_mode]["selector_state"] = {
+                        "value": _value,
+                        "updated_at": r.get("updated_at").isoformat() if r.get("updated_at") else None,
+                    }
+                elif _key == _ak:
+                    _state["profiles"][_mode]["active_profile"] = {
+                        "value": _value,
+                        "updated_at": r.get("updated_at").isoformat() if r.get("updated_at") else None,
+                    }
+
+        return {
+            "ok": True,
+            "config": _cfg,
+            "state": _state,
+            "updated_at": _cfg_rows[0].get("updated_at").isoformat() if _cfg_rows and _cfg_rows[0].get("updated_at") else None,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/regime/profiles/selector-config")
+async def post_regime_profile_selector_config(body: Dict, _auth=Depends(_require_api_key)) -> Dict:
+    """Set deterministic selector config (hysteresis, ranking, audit cadence) with atomic persistence + audit."""
+    try:
+        _cfg = _normalize_selector_config_payload(body or {})
+        _cfg_json = json.dumps(_cfg)
+        _snapshot_id = _create_config_snapshot(get_components().settings)
+        _detail = {
+            "config": _cfg,
+            "snapshot_id": _snapshot_id,
+            "changed_by": str(_auth) if _auth else None,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        db_client.execute_transaction([
+            (
+                "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES ('regime_profile_selector_config', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                (_cfg_json, _cfg_json),
+            ),
+            (
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                "VALUES ('__config__', 'system', 'regime_profile_selector_config', %s, false)",
+                (json.dumps(_detail),),
+            ),
+        ])
+        _log_config_change(
+            source="regime_profile_selector_config",
+            changed_by=str(_auth) if _auth else None,
+            snapshot_id=_snapshot_id,
+            diff={"selector_config": _cfg},
+            full_config=None,
+        )
+        return {
+            "ok": True,
+            "config": _cfg,
+            "snapshot_id": _snapshot_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/regime/profiles/selector-decisions")
+async def get_regime_profile_selector_decisions(limit: int = 50, _auth=Depends(_require_api_key)) -> Dict:
+    """Read the latest auto-selector decisions from trades_audit."""
+    try:
+        _limit = max(1, min(int(limit), 500))
+        _rows = db_client.execute_query(
+            "SELECT id, event, detail, created_at FROM trades_audit "
+            "WHERE event IN ('regime_profile_selector_decision', 'smart_total_mode_selector_decision') "
+            "ORDER BY id DESC LIMIT %s",
+            (_limit,)
+        )
+        _decisions = []
+        for r in _rows:
+            _detail = r.get("detail")
+            if isinstance(_detail, str):
+                try:
+                    _detail = json.loads(_detail)
+                except Exception:
+                    _detail = {"raw": _detail}
+            _decisions.append({
+                "id": r.get("id"),
+                "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
+                "detail": _detail,
+            })
+        return {"ok": True, "decisions": _decisions, "count": len(_decisions)}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "decisions": []}
+
+
+@app.get("/regime/profiles")
+async def get_regime_profiles(regime: Optional[str] = None, _auth=Depends(_require_api_key)) -> Dict:
+    """List stored regime profiles and active profile pointers (SPOT+FUTURES unified)."""
+    try:
+        _regime_filter = _normalize_regime_mode(regime) if regime else None
+        rows = db_client.execute_query(
+            "SELECT key, value, updated_at FROM trading_runtime_state WHERE key LIKE 'regime_profile_%%' ORDER BY key"
+        )
+        result: Dict[str, Dict[str, Any]] = {}
+        for mode in _REGIME_MODES:
+            if _regime_filter and mode != _regime_filter:
+                continue
+            result[mode] = {"active": None, "profiles": {}}
+
+        for r in rows:
+            parts = _extract_regime_profile_key_parts(str(r.get("key") or ""))
+            if not parts:
+                continue
+            mode = parts["regime"]
+            if _regime_filter and mode != _regime_filter:
+                continue
+            payload = r.get("value")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = {"raw": payload}
+            if parts["kind"] == "active":
+                result[mode]["active"] = {
+                    "profile": (payload or {}).get("profile") if isinstance(payload, dict) else None,
+                    "payload": payload,
+                    "updated_at": r.get("updated_at").isoformat() if r.get("updated_at") else None,
+                }
+            else:
+                label = parts["profile"]
+                result[mode]["profiles"][label] = {
+                    "payload": payload,
+                    "updated_at": r.get("updated_at").isoformat() if r.get("updated_at") else None,
+                }
+
+        return {"ok": True, "regimes": result, "timestamp": datetime.now(timezone.utc).isoformat()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/regime/profiles")
+async def post_regime_profile(body: Dict, _auth=Depends(_require_api_key)) -> Dict:
+    """Create or update a named profile under a specific regime."""
+    try:
+        from init_components import get_components
+        _comp = get_components()
+        _s = _comp.settings
+
+        _regime = _normalize_regime_mode(body.get("regime"))
+        _profile = _normalize_profile_label(body.get("profile"))
+        _validation = _validate_profile_params(body.get("params", {}))
+        _accepted = _validation["accepted"]
+        _rejected = _validation["rejected"]
+
+        if not _accepted:
+            return {"ok": False, "error": "No valid params in profile", "rejected": _rejected}
+
+        _snapshot_id = _create_full_config_snapshot(_s)
+        _meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        _payload = {
+            "regime": _regime,
+            "profile": _profile,
+            "params": _accepted,
+            "meta": {
+                **_meta,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_by": str(_auth) if _auth else None,
+                "snapshot_id": _snapshot_id,
+            },
+        }
+        _key = f"regime_profile_{_regime}_{_profile}"
+        _payload_json = json.dumps(_payload)
+        db_client.execute_update(
+            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+            (_key, _payload_json, _payload_json)
+        )
+
+        _diff = {f"profile.{k}": {"old": None, "new": v} for k, v in _accepted.items()}
+        _log_config_change(
+            source="regime_profile_save",
+            changed_by=str(_auth) if _auth else None,
+            snapshot_id=_snapshot_id,
+            diff={"regime": _regime, "profile": _profile, "changes": _diff},
+            full_config=None,
+        )
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+            "VALUES ('__config__', 'system', 'regime_profile_saved', %s, false)",
+            (json.dumps({
+                "regime": _regime,
+                "profile": _profile,
+                "snapshot_id": _snapshot_id,
+                "accepted": _accepted,
+                "rejected": _rejected,
+            }),)
+        )
+
+        return {
+            "ok": True,
+            "regime": _regime,
+            "profile": _profile,
+            "snapshot_id": _snapshot_id,
+            "accepted": _accepted,
+            "rejected": _rejected,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/regime/profiles/activate")
+async def post_activate_regime_profile(body: Dict, _auth=Depends(_require_api_key)) -> Dict:
+    """Activate a profile for a regime, with audit trail and optional immediate apply."""
+    try:
+        from init_components import get_components
+        _comp = get_components()
+        _s = _comp.settings
+        _regime = _normalize_regime_mode(body.get("regime"))
+        _profile = _normalize_profile_label(body.get("profile"))
+        _reason = str(body.get("reason") or "manual_switch")
+
+        _profile_key = f"regime_profile_{_regime}_{_profile}"
+        _rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key=%s", (_profile_key,)
+        )
+        if not _rows or _rows[0].get("value") is None:
+            return {"ok": False, "error": f"Profile {_profile} for {_regime} not found"}
+
+        _snapshot_id = _create_full_config_snapshot(_s)
+        _active_key = f"regime_profile_active_{_regime}"
+        _active_payload = {
+            "regime": _regime,
+            "profile": _profile,
+            "reason": _reason,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": str(_auth) if _auth else None,
+            "snapshot_id": _snapshot_id,
+        }
+        _active_json = json.dumps(_active_payload)
+
+        db_client.execute_transaction([
+            (
+                "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                (_active_key, _active_json, _active_json),
+            ),
+            (
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                "VALUES ('__config__', 'system', 'regime_profile_activated', %s, false)",
+                (json.dumps({
+                    "regime": _regime,
+                    "profile": _profile,
+                    "reason": _reason,
+                    "snapshot_id": _snapshot_id,
+                }),),
+            ),
+        ])
+
+        _apply_now = bool(body.get("apply_now", True))
+        _applied = {"skipped": True, "reason": "not_requested"}
+        if _apply_now:
+            try:
+                import market_regime as _mr
+                _current = _mr.get_regime(_comp.binance_client, settings=_s)
+                if getattr(_current, "confirmed", False) and getattr(_current, "mode", None) == _regime:
+                    _applied = run_trades._apply_regime_params(_s, _regime, db_client)
+                else:
+                    _applied = {
+                        "skipped": True,
+                        "reason": "regime_not_active_or_unconfirmed",
+                        "current_mode": getattr(_current, "mode", None),
+                        "current_confirmed": bool(getattr(_current, "confirmed", False)),
+                    }
+            except Exception as _ae:
+                _applied = {"skipped": True, "reason": f"apply_failed: {_ae}"}
+
+        _log_config_change(
+            source="regime_profile_activate",
+            changed_by=str(_auth) if _auth else None,
+            snapshot_id=_snapshot_id,
+            diff={"regime": _regime, "profile": _profile, "reason": _reason, "apply": _applied},
+            full_config=None,
+        )
+
+        return {
+            "ok": True,
+            "regime": _regime,
+            "profile": _profile,
+            "snapshot_id": _snapshot_id,
+            "apply": _applied,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.patch("/config/kelly")
@@ -3963,14 +6054,17 @@ async def get_dashboard_screener(_auth=Depends(_require_api_key)) -> Dict:
         _comp = get_components()
         _s = _comp.settings
         _regime = getattr(_s, 'current_regime_mode', 'SPOT_BULL')
+        _profile = _get_active_profile_summary(_regime).get("label")
         _screened = get_screened_pairs(
             settings=_s,
             regime_mode=_regime,
+            profile_label=_profile,
             db_client=_comp.db_client,
         )
         return {
             "ok": True,
             "regime_mode": _regime,
+            "profile_label": _profile,
             "spot_count": len(_screened.get("spot", [])),
             "futures_count": len(_screened.get("futures", [])),
             "spot": _screened.get("spot", []),
@@ -4555,6 +6649,355 @@ async def _config_drift_loop() -> None:
             break
         except Exception as e:
             print(f"[DriftAlert] drift check failed: {e}")
+
+
+def _level_rank(status: str) -> int:
+    return _HEALTH_RESULTS_LEVEL.get(str(status or "unknown").lower(), 4)
+
+
+def _count_unacked_drift_alerts() -> Dict[str, int]:
+    try:
+        rows = db_client.execute_query(
+            "SELECT severity, COUNT(*) AS cnt FROM config_drift_alerts WHERE acknowledged=FALSE GROUP BY severity"
+        )
+        out = {"critical": 0, "warning": 0, "info": 0, "total": 0}
+        for row in rows or []:
+            sev = str(row.get("severity") or "warning").lower()
+            cnt = int(row.get("cnt") or 0)
+            out[sev] = out.get(sev, 0) + cnt
+            out["total"] += cnt
+        return out
+    except Exception:
+        return {"critical": 0, "warning": 0, "info": 0, "total": 0}
+
+
+def _extract_scope_stats(window: Dict[str, Any], scope: str) -> Dict[str, Any]:
+    try:
+        by_scope = ((window or {}).get("by_scope") or {})
+        stats = (by_scope.get(scope) or {})
+        n_trades = int(stats.get("n_trades") or 0)
+        pnl_sum = float(stats.get("pnl_sum") or 0.0)
+        fees_sum = float(stats.get("fees_sum") or 0.0)
+        return {
+            "n_trades": n_trades,
+            "pnl_sum": round(pnl_sum, 4),
+            "fees_sum": round(fees_sum, 4),
+            "net_pnl": round(pnl_sum - fees_sum, 4),
+            "win_rate_pct": float(stats.get("win_rate_pct") or 0.0),
+        }
+    except Exception:
+        return {"n_trades": 0, "pnl_sum": 0.0, "fees_sum": 0.0, "net_pnl": 0.0, "win_rate_pct": 0.0}
+
+
+def _compute_market_health(
+    market: str,
+    current_stats: Dict[str, Any],
+    previous_stats: Dict[str, Any],
+    audit_consistency: Dict[str, Any],
+    err_summary: Dict[str, Any],
+    drift_counts: Dict[str, int],
+) -> Dict[str, Any]:
+    score = 100
+    reasons: List[str] = []
+    critical_flags: List[str] = []
+
+    cur_trades = int(current_stats.get("n_trades") or 0)
+    cur_net = float(current_stats.get("net_pnl") or 0.0)
+    prev_net = float(previous_stats.get("net_pnl") or 0.0)
+    parity_gap_pct = None
+    if abs(prev_net) > 1e-8:
+        parity_gap_pct = round((cur_net - prev_net) / abs(prev_net) * 100.0, 2)
+
+    drift_critical = int(drift_counts.get("critical") or 0)
+    drift_warning = int(drift_counts.get("warning") or 0)
+    errors_5m = int(err_summary.get("errors_last_5min") or 0)
+    warnings_5m = int(err_summary.get("warnings_last_5min") or 0)
+    missing_audit = int((audit_consistency or {}).get("signals_missing_audit") or 0)
+    coverage_pct = float((audit_consistency or {}).get("coverage_pct") or 100.0)
+
+    if drift_critical > 0:
+        score -= 35
+        critical_flags.append("config_drift_critical")
+        reasons.append(f"{drift_critical} drift(s) críticos sin ack")
+    elif drift_warning > 0:
+        score -= 10
+        reasons.append(f"{drift_warning} drift(s) warning sin ack")
+
+    if errors_5m > 0:
+        score -= 25
+        critical_flags.append("errors_recent")
+        reasons.append(f"{errors_5m} error(es) en 5 min")
+    elif warnings_5m > 3:
+        score -= 8
+        reasons.append(f"{warnings_5m} warning(s) en 5 min")
+
+    if missing_audit > 0:
+        score -= 20
+        critical_flags.append("audit_gap")
+        reasons.append(f"{missing_audit} señales sin auditoría")
+    elif coverage_pct < 98.0:
+        score -= 8
+        reasons.append(f"cobertura de auditoría {coverage_pct:.2f}%")
+
+    if parity_gap_pct is not None:
+        abs_gap = abs(parity_gap_pct)
+        if abs_gap >= 15.0:
+            score -= 22
+            critical_flags.append("parity_gap")
+            reasons.append(f"parity gap {parity_gap_pct:.2f}%")
+        elif abs_gap >= 7.0:
+            score -= 10
+            reasons.append(f"parity gap moderado {parity_gap_pct:.2f}%")
+
+    if cur_trades < 3:
+        score -= 10
+        reasons.append("muestra post-ajuste insuficiente")
+    elif cur_trades < 8:
+        score -= 4
+        reasons.append("muestra post-ajuste limitada")
+
+    if cur_net < -20:
+        score -= 8
+        reasons.append(f"net_pnl negativo ({cur_net:.2f})")
+
+    score = max(0, min(100, score))
+    if critical_flags or score < 55:
+        status = "critical"
+    elif score < 80:
+        status = "warning"
+    else:
+        status = "ok"
+
+    if cur_trades < 3 and status == "ok":
+        status = "inconclusive"
+
+    return {
+        "market": market,
+        "status": status,
+        "score": score,
+        "reasons": reasons[:6],
+        "critical_flags": critical_flags,
+        "kpis": {
+            "n_trades": cur_trades,
+            "net_pnl": round(cur_net, 4),
+            "win_rate_pct": round(float(current_stats.get("win_rate_pct") or 0.0), 2),
+            "parity_gap_pct": parity_gap_pct,
+            "audit_coverage_pct": round(coverage_pct, 2),
+            "errors_last_5min": errors_5m,
+            "warnings_last_5min": warnings_5m,
+        },
+    }
+
+
+def _compute_health_results_snapshot(trigger: str = "manual") -> Dict[str, Any]:
+    now_utc = datetime.now(timezone.utc)
+    err_summary = ec.get_summary(minutes=5)
+    drift_counts = _count_unacked_drift_alerts()
+    audit_consistency = check_signal_audit_consistency(db_client, limit=150)
+    changepoint = _get_performance_changepoint_metrics()
+
+    current_window = (changepoint.get("current_window") or {}) if changepoint.get("ok") else {}
+    previous_window = (changepoint.get("previous_window") or {}) if changepoint.get("ok") else {}
+
+    spot_current = _extract_scope_stats(current_window, "spot")
+    futures_current = _extract_scope_stats(current_window, "futures")
+    spot_prev = _extract_scope_stats(previous_window, "spot")
+    futures_prev = _extract_scope_stats(previous_window, "futures")
+
+    spot_health = _compute_market_health(
+        market="spot",
+        current_stats=spot_current,
+        previous_stats=spot_prev,
+        audit_consistency=audit_consistency,
+        err_summary=err_summary,
+        drift_counts=drift_counts,
+    )
+    futures_health = _compute_market_health(
+        market="futures",
+        current_stats=futures_current,
+        previous_stats=futures_prev,
+        audit_consistency=audit_consistency,
+        err_summary=err_summary,
+        drift_counts=drift_counts,
+    )
+
+    overall_status = "ok"
+    if _level_rank(spot_health.get("status")) > _level_rank(overall_status):
+        overall_status = spot_health.get("status")
+    if _level_rank(futures_health.get("status")) > _level_rank(overall_status):
+        overall_status = futures_health.get("status")
+
+    if not changepoint.get("ok") and overall_status == "ok":
+        overall_status = "inconclusive"
+
+    if overall_status in ("critical", "error"):
+        interval_seconds = 45
+    elif overall_status == "warning":
+        interval_seconds = 120
+    elif overall_status == "inconclusive":
+        interval_seconds = 180
+    else:
+        interval_seconds = 600
+
+    if int(err_summary.get("errors_last_5min") or 0) > 0:
+        interval_seconds = max(30, min(interval_seconds, 60))
+
+    snapshot = {
+        "ok": True,
+        "overall": overall_status,
+        "spot": spot_health,
+        "futures": futures_health,
+        "errors": err_summary,
+        "audit_consistency": {
+            "available": bool(audit_consistency.get("available", True)),
+            "coverage_pct": round(float(audit_consistency.get("coverage_pct") or 0.0), 2),
+            "signals_missing_audit": int(audit_consistency.get("signals_missing_audit") or 0),
+            "auditable_signals": int(audit_consistency.get("auditable_signals") or 0),
+        },
+        "drift_alerts": drift_counts,
+        "changepoint": {
+            "ok": bool(changepoint.get("ok")),
+            "marker": (changepoint.get("marker") or {}),
+            "delta": (changepoint.get("delta") or {}),
+        },
+        "smart_recheck": {
+            "trigger": trigger,
+            "interval_seconds": interval_seconds,
+            "last_run_at": now_utc.isoformat(),
+            "next_run_eta_seconds": interval_seconds,
+        },
+        "timestamp": now_utc.isoformat(),
+    }
+    return snapshot
+
+
+def _persist_health_results_snapshot(snapshot: Dict[str, Any]) -> None:
+    try:
+        payload = json.dumps(snapshot)
+        db_client.execute_update(
+            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+            ("health_results_latest", payload, payload),
+        )
+    except Exception as e:
+        print(f"[SMART-HEALTH] failed to persist runtime snapshot: {e}")
+
+
+def _audit_health_event(event: str, detail: Dict[str, Any]) -> None:
+    try:
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+            ("__health__", "system", event, json.dumps(detail), False),
+        )
+    except Exception as e:
+        print(f"[SMART-HEALTH] failed to write audit event {event}: {e}")
+
+
+def _load_persisted_health_results_snapshot() -> Optional[Dict[str, Any]]:
+    try:
+        rows = db_client.execute_query(
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key='health_results_latest'"
+        )
+        if not rows:
+            return None
+        raw = rows[0].get("value")
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        if isinstance(raw, dict):
+            return raw
+    except Exception:
+        return None
+    return None
+
+
+def _consume_health_recheck_request() -> Optional[Dict[str, Any]]:
+    """Consume a DB-backed recheck trigger request emitted by runtime components."""
+    try:
+        rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key='health_results_recheck_request'"
+        )
+        if not rows:
+            return None
+        raw = rows[0].get("value")
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        db_client.execute_update(
+            "DELETE FROM trading_runtime_state WHERE key='health_results_recheck_request'"
+        )
+        return raw if isinstance(raw, dict) else {"reason": "runtime_request"}
+    except Exception:
+        return None
+
+
+async def _health_results_recheck_loop() -> None:
+    previous_overall = None
+    try:
+        restored = _load_persisted_health_results_snapshot()
+        if restored and isinstance(restored, dict):
+            _HEALTH_RESULTS_CACHE["snapshot"] = restored
+            _HEALTH_RESULTS_CACHE["last_run_at"] = restored.get("timestamp")
+            previous_overall = str(restored.get("overall") or "ok").lower()
+    except Exception:
+        previous_overall = None
+
+    while True:
+        try:
+            wait_seconds = int(_HEALTH_RESULTS_CACHE.get("interval_seconds") or 300)
+            trigger = "interval"
+            trigger_reason = None
+            _deadline = time.monotonic() + max(15, wait_seconds)
+            while True:
+                _req = _consume_health_recheck_request()
+                if _req:
+                    trigger = "event_db"
+                    trigger_reason = str(_req.get("reason") or "runtime_request")
+                    break
+                _remaining = _deadline - time.monotonic()
+                if _remaining <= 0:
+                    trigger = "interval"
+                    break
+                try:
+                    await asyncio.wait_for(_HEALTH_RESULTS_EVENT.wait(), timeout=min(5.0, _remaining))
+                    _HEALTH_RESULTS_EVENT.clear()
+                    trigger = "event"
+                    break
+                except asyncio.TimeoutError:
+                    continue
+
+            trigger_tag = f"{trigger}:{trigger_reason}" if trigger_reason else trigger
+            snapshot = _compute_health_results_snapshot(trigger=trigger_tag)
+            _persist_health_results_snapshot(snapshot)
+            _HEALTH_RESULTS_CACHE["snapshot"] = snapshot
+            _HEALTH_RESULTS_CACHE["last_run_at"] = snapshot.get("timestamp")
+            _HEALTH_RESULTS_CACHE["interval_seconds"] = int(((snapshot.get("smart_recheck") or {}).get("interval_seconds") or 300))
+            _HEALTH_RESULTS_CACHE["last_trigger"] = trigger
+
+            current_overall = str(snapshot.get("overall") or "ok").lower()
+            _audit_health_event("health_recheck_run", {
+                "overall": current_overall,
+                "spot": snapshot.get("spot", {}).get("status"),
+                "futures": snapshot.get("futures", {}).get("status"),
+                "interval_seconds": _HEALTH_RESULTS_CACHE.get("interval_seconds"),
+                "trigger": trigger,
+            })
+            if current_overall in ("critical", "error") and previous_overall not in ("critical", "error"):
+                _audit_health_event("health_recheck_alert", {
+                    "prev_overall": previous_overall,
+                    "current_overall": current_overall,
+                    "spot": snapshot.get("spot"),
+                    "futures": snapshot.get("futures"),
+                })
+            if current_overall == "ok" and previous_overall in ("critical", "error", "warning", "inconclusive"):
+                _audit_health_event("health_recheck_recovery", {
+                    "prev_overall": previous_overall,
+                    "current_overall": current_overall,
+                })
+            previous_overall = current_overall
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            ec.add_error(ec.SOURCE_SYSTEM, ec.LEVEL_ERROR, f"SMART health recheck loop failed: {e}")
+            await asyncio.sleep(30)
 
 
 _bnb_drift_cache: Dict[str, Any] = {"consecutive_off": 0}
@@ -5285,12 +7728,32 @@ async def post_config_apply(body: Dict, _auth=Depends(_require_api_key)) -> Dict
         _after = dump_active_config(_s)
         # Persist applied scalar overrides so they survive container restart
         if _applied:
-            _persist = json.dumps(_applied)
-            db_client.execute_update(
-                "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES ('kelly_config_override', %s, NOW()) "
-                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
-                (_persist, _persist)
-            )
+            _persist_obj = {
+                k: {
+                    "old": _diff.get(k, {}).get("old"),
+                    "new": _diff.get(k, {}).get("new"),
+                }
+                for k in _applied.keys()
+            }
+            _persist = json.dumps(_persist_obj)
+            _audit_detail = json.dumps({
+                "event": "config_apply",
+                "snapshot_id": _sid,
+                "applied": _persist_obj,
+                "rejected": _rejected,
+            })
+            db_client.execute_transaction([
+                (
+                    "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES ('kelly_config_override', %s, NOW()) "
+                    "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                    (_persist, _persist),
+                ),
+                (
+                    "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                    "VALUES ('__config__', 'system', 'config_apply', %s, false)",
+                    (_audit_detail,),
+                ),
+            ])
         _log_config_change(
             source="api",
             changed_by=str(_auth) if _auth else None,

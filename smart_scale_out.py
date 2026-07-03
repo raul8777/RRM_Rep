@@ -56,6 +56,8 @@ class SSOPositionData:
     today_realized_pnl: float = 0.0
     daily_target: float = 40.0
     trade_type: str = "futures"     # "futures" or "spot"
+    regime_mode: Optional[str] = None
+    profile_label: Optional[str] = None
     # For SSO-5
     current_strength: float = 0.5
     best_available_ev: float = 0.0

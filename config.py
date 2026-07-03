@@ -437,7 +437,7 @@ class Settings(BaseSettings):
     futures_symbols: list = Field(default=[
         'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT',
         'NEARUSDT', 'SUIUSDT', 'DOGEUSDT', 'AVAXUSDT', 'LINKUSDT', 'TAOUSDT',
-        'UNIUSDT', 'DOTUSDT', '1000PEPEUSDT', 'BCHUSDT', 'AAVEUSDT', 'FILUSDT',
+        'UNIUSDT', 'DOTUSDT', 'BCHUSDT', 'AAVEUSDT', 'FILUSDT',
         'INJUSDT',
     ], env="FUTURES_SYMBOLS")   # symbols eligible for shorting (run_0812 baseline)
     futures_largecap_symbols: list = Field(default=[

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Agent — Dashboard</title>
-    <link rel="stylesheet" href="/frontend/styles.css?v=23">
+    <link rel="stylesheet" href="/frontend/styles.css?v=29">
 </head>
 <body class="mode-FUTURES_SHORT" id="appBody">
 
@@ -52,9 +52,7 @@
         </div>
     </div>
     <div class="header-right">
-        <button id="pauseBtn" class="hdr-btn hdr-warn" title="Pausar sistema">⏸ PAUSAR</button>
-        <button id="stopBtn"  class="hdr-btn hdr-danger" title="Detener sistema">⏹ STOP</button>
-        <button id="startBtn" class="hdr-btn hdr-success" title="Iniciar sistema">▶ ON</button>
+        <button class="hdr-btn hdr-control" title="Abrir controles operativos" onclick="switchTab('tab-control')">🧭 CONTROL</button>
         <div class="system-dot-wrap">
             <span class="status-dot" id="sysDot"></span>
             <span class="status-text" id="sysText">...</span>
@@ -71,6 +69,11 @@
 
 <!-- ══ STATUS BAR ════════════════════════════════════════════════════════════ -->
 <div class="status-bar" id="statusBar">
+    <div class="sb-item" id="sbProfileItem" title="A=Agresivo | B=Balance | C=Defensa">
+        <span class="sb-label">Perfil</span>
+        <span class="sb-val" id="sbProfile">—</span>
+    </div>
+    <div class="sb-sep"></div>
     <div class="sb-item">
         <span class="sb-label">PnL Hoy</span>
         <span class="sb-val" id="sbPnlHoy">—</span>
@@ -118,7 +121,41 @@
     <button class="tab-btn"        data-tab="tab-system" onclick="switchTab('tab-system')">
         <span class="tab-icon">🔧</span> Sistema
     </button>
+    <button class="tab-btn"        data-tab="tab-control" onclick="switchTab('tab-control')">
+        <span class="tab-icon">🧭</span> Acciones
+    </button>
 </nav>
+
+<!-- Modal: confirmación reforzada para acciones sensibles -->
+<div id="sensitiveConfirmModal" class="sensitive-modal" aria-hidden="true">
+    <div class="sensitive-modal__backdrop" data-close-modal="1"></div>
+    <div class="sensitive-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="sensitiveModalTitle">
+        <div class="sensitive-modal__head">
+            <h3 id="sensitiveModalTitle">Confirmar acción sensible</h3>
+            <button id="sensitiveModalClose" class="btn btn-xs" type="button">✕</button>
+        </div>
+        <div class="sensitive-modal__body">
+            <p id="sensitiveModalMessage" class="sensitive-modal__message"></p>
+            <label class="sensitive-modal__check">
+                <input id="sensitiveCheck1" type="checkbox" />
+                <span>Revisé el estado de salud y no hay bloqueos críticos.</span>
+            </label>
+            <label class="sensitive-modal__check">
+                <input id="sensitiveCheck2" type="checkbox" />
+                <span>Entiendo el impacto de esta acción en ejecución real.</span>
+            </label>
+            <label class="sensitive-modal__field">
+                <span>Motivo operativo (mín. 8 caracteres)</span>
+                <textarea id="sensitiveReason" rows="3" placeholder="Ej: Ajuste por cambio de régimen y desvío de paridad."></textarea>
+            </label>
+            <div id="sensitiveModalHint" class="sensitive-modal__hint">Completa checklist y motivo para habilitar la ejecución.</div>
+        </div>
+        <div class="sensitive-modal__foot">
+            <button id="sensitiveCancelBtn" class="btn btn-warning" type="button">Cancelar</button>
+            <button id="sensitiveConfirmBtn" class="btn btn-danger" type="button" disabled>Confirmar y ejecutar</button>
+        </div>
+    </div>
+</div>
 
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
 <!-- TAB 1 — OPERACIONES                                                       -->
@@ -392,17 +429,17 @@
             </div>
         </div>
 
-        <!-- Backtest Optimizer Panel -->
+        <!-- Backtest Optimizer (solo lectura en rendimiento) -->
         <div class="card">
             <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
-                <h2>🔬 Backtest Optimizer — 1000 Corridas</h2>
+                <h2>🔬 Optimización (solo lectura)</h2>
                 <div style="display:flex;gap:8px;align-items:center">
-                    <button class="btn btn-success btn-xs" onclick="applyBestBacktestConfig()">⚡ Aplicar Óptimo</button>
+                    <button class="btn btn-primary btn-xs" onclick="switchTab('tab-control')">Ir a Acciones</button>
                     <button class="btn btn-primary btn-xs" onclick="fetchBacktestResults()">↻ Actualizar</button>
                 </div>
             </div>
-            <div id="backtestOptimizerPanel">
-                <p class="loading">Cargando resultados...</p>
+            <div id="backtestReadOnlyPanel">
+                <p class="loading">La optimización y aplicación de configuración se ejecuta en la pestaña Acciones/Control.</p>
             </div>
         </div>
 
@@ -459,7 +496,82 @@
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
-<!-- TAB 4 — SISTEMA                                                           -->
+<!-- TAB 4 — ACCIONES / CONTROL                                                -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-control">
+    <div class="control-layout">
+        <div class="card">
+            <div class="card-header">
+                <h2>🧨 Acciones sensibles del sistema</h2>
+                <span class="card-sub">operaciones mutantes (requiere API key)</span>
+            </div>
+            <div class="control-actions-row">
+                <button id="controlPauseBtn" class="btn btn-warning">⏸ Pausar Entradas</button>
+                <button id="controlStopBtn" class="btn btn-danger">⏹ Stop Ciclo</button>
+                <button id="controlStartBtn" class="btn btn-success">▶ Reanudar</button>
+            </div>
+            <div id="controlActionStatus" class="control-status-note">Sin acciones recientes.</div>
+            <div class="control-audit-head">
+                <strong>Bitácora de acciones sensibles</strong>
+                <span style="display:flex;gap:8px;align-items:center">
+                    <button id="controlAuditExportBtn" class="btn btn-primary btn-xs">Exportar JSON</button>
+                    <button id="controlAuditClearBtn" class="btn btn-xs">Limpiar</button>
+                </span>
+            </div>
+            <div id="controlAuditLog" class="control-audit-log">
+                <div class="control-audit-empty">Sin eventos de control.</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+                <h2>🧠 Smart Backtest (orquestador) + Backtest (motor)</h2>
+                <div style="display:flex;gap:8px;align-items:center">
+                    <button class="btn btn-primary btn-xs" id="runSmartBacktestBtn" title="Ejecuta smart_backtest_optimizer.py para múltiples escenarios">🚀 Ejecutar Smart</button>
+                    <button class="btn btn-primary btn-xs" onclick="fetchBacktestResults()">↻ Actualizar</button>
+                </div>
+            </div>
+            <div class="control-form-grid">
+                <label class="control-field">
+                    <span>Periodo</span>
+                    <select id="smartPeriod">
+                        <option value="3m">3m</option>
+                        <option value="1y" selected>1y</option>
+                        <option value="2y">2y</option>
+                        <option value="3y">3y</option>
+                    </select>
+                </label>
+                <label class="control-field">
+                    <span>Simulaciones</span>
+                    <input id="smartSimulations" type="number" min="1000" step="1000" value="12000" />
+                </label>
+                <label class="control-field">
+                    <span>Capital (opcional)</span>
+                    <input id="smartCapital" type="number" min="10" step="0.01" placeholder="auto/live balance" />
+                </label>
+                <label class="control-field control-field-check">
+                    <span>Strict data</span>
+                    <input id="smartStrictData" type="checkbox" />
+                </label>
+            </div>
+            <div class="control-status-note" id="optimizerContextInfo">
+                El panel usa resultados persistidos por el motor canónico backtest_optimizer.py. Smart Backtest Optimizer reutiliza ese motor por escenarios.
+            </div>
+            <div class="control-status-note" id="smartScenarioProgressPanel">
+                Escenarios Smart: sin ejecución activa.
+            </div>
+            <div id="backtestPrecheckPanel" class="control-status-note" title="Prechecks previos a aplicar configuración: régimen, antigüedad, paridad y health.">
+                Prechecks pendientes. Carga resultados y ejecuta “Aplicar seleccionados” para validar guardas de riesgo.
+            </div>
+            <div id="backtestOptimizerPanel">
+                <p class="loading">Cargando resultados...</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- TAB 5 — SISTEMA                                                           -->
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
 <div class="tab-content" id="tab-system">
     <div class="system-layout">
@@ -472,6 +584,7 @@
                     <button class="btn btn-success btn-xs" id="runFullHealthBtn" title="Ejecuta 80+ checks de todos los módulos">🩺 Full Health</button>
                 </div>
             </div>
+            <div id="healthResultsData" class="health-results-wrap"><p class="loading">Cargando SMART recheck...</p></div>
             <div id="healthChecksData"><p class="loading">Cargando...</p></div>
         </div>
         <div class="card" id="fullHealthCard" style="display:none">
@@ -498,6 +611,26 @@
 <!-- ══ MODAL DETALLE POSICIÓN ════════════════════════════════════════════════ -->
 <!-- Injected dynamically by JS -->
 
-<script src="/frontend/dashboard.js?v=25"></script>
+<div id="backtestProgressWidget" class="bt-progress-widget hidden" aria-live="polite">
+    <div class="bt-progress-head">
+        <div class="bt-progress-title-wrap">
+            <span class="bt-progress-dot" id="btProgressDot"></span>
+            <span class="bt-progress-title" id="btProgressTitle">Backtest en ejecución</span>
+        </div>
+        <span class="bt-progress-status" id="btProgressStatus">RUNNING</span>
+    </div>
+    <div class="bt-progress-main">
+        <div class="bt-progress-line">
+            <span id="btProgressDetail">Inicializando...</span>
+            <span id="btProgressPct">0%</span>
+        </div>
+        <div class="bt-progress-bar-bg">
+            <div class="bt-progress-bar" id="btProgressBar"></div>
+        </div>
+        <div class="bt-progress-meta" id="btProgressMeta">Esperando primer estado...</div>
+    </div>
+</div>
+
+<script src="/frontend/dashboard.js?v=101"></script>
 </body>
 </html>

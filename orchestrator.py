@@ -7,11 +7,32 @@ Coordinates all agents and manages system state including manual control (pause/
 import logging
 import threading
 import time
+import json
 from typing import Dict, Optional, Callable
 from datetime import datetime
 from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+
+def _request_smart_recheck(db_client, reason: str, context: Optional[Dict] = None) -> None:
+    """Emit an event-driven SMART health recheck request through runtime state."""
+    if not db_client:
+        return
+    try:
+        payload = json.dumps({
+            "requested_at": datetime.utcnow().isoformat() + "Z",
+            "source": "orchestrator",
+            "reason": str(reason or "orchestrator_event"),
+            "context": context or {},
+        })
+        db_client.execute_update(
+            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+            ("health_results_recheck_request", payload, payload),
+        )
+    except Exception as e:
+        logger.debug(f"[SMART-HEALTH] orchestrator trigger failed: {e}")
 
 
 class SystemState(Enum):
@@ -167,6 +188,7 @@ class Orchestrator:
             self.on_state_change(old_state, self.state)
         
         logger.info(f"System paused by {changed_by}: {reason}")
+        _request_smart_recheck(self.db_client, "orchestrator_pause", {"changed_by": changed_by, "reason": reason})
         return True
     
     def stop(self, changed_by: str = "user", reason: str = "Manual stop") -> bool:
@@ -198,6 +220,7 @@ class Orchestrator:
             self.on_state_change(old_state, self.state)
         
         logger.info(f"System stopped by {changed_by}: {reason}")
+        _request_smart_recheck(self.db_client, "orchestrator_stop", {"changed_by": changed_by, "reason": reason})
         return True
     
     def start(self, changed_by: str = "user", reason: str = "Manual start") -> bool:
@@ -229,6 +252,7 @@ class Orchestrator:
             self.on_state_change(old_state, self.state)
         
         logger.info(f"System started by {changed_by}: {reason}")
+        _request_smart_recheck(self.db_client, "orchestrator_start", {"changed_by": changed_by, "reason": reason})
         return True
     
     def is_running(self) -> bool:
@@ -412,6 +436,15 @@ class Orchestrator:
             else:
                 if cycle_func == getattr(self, '_trade_cycle_func', None):
                     self.last_trade_cycle_at = datetime.utcnow()
+                    _request_smart_recheck(
+                        self.db_client,
+                        "trade_cycle_completed",
+                        {
+                            "last_trade_cycle_at": self.last_trade_cycle_at.isoformat(),
+                            "cycle_minutes": self.current_cycle_minutes,
+                            "regime_mode": self.current_regime_mode,
+                        },
+                    )
     
     def stop_all_cycles(self) -> None:
         """Stop all background cycles."""

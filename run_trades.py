@@ -1,6 +1,7 @@
 import time
+import types
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import error_collector as ec
 from binance_client import BinanceClient
@@ -55,6 +56,24 @@ _non_short_regime_cycles: int = 0
 # Regime-specific parameter auto-loading: track the last regime we applied params for
 # to avoid re-applying the same params every cycle.
 _last_applied_regime_mode: Optional[str] = None
+_last_applied_regime_profile: Optional[str] = None
+
+_SELECTOR_CONFIG_DEFAULTS = {
+    "smart_total_enabled": True,
+    "mode_selector_enabled": True,
+    "mode_require_confirmed": True,
+    "mode_min_hold_cycles": 2,
+    "mode_min_confidence_delta": 0.03,
+    "mode_audit_every_cycle": True,
+    "profile_selector_enabled": True,
+    "enabled": True,
+    "min_hold_cycles": 3,
+    "min_score_delta": 0.05,
+    "profile_min_hold_cycles": 3,
+    "profile_min_score_delta": 0.05,
+    "audit_every_cycle": True,
+    "profile_rank": {"A": 1000.0, "B": 200.0, "C": 100.0},
+}
 
 
 _FUTURES_DECISION_REASONS = {
@@ -110,7 +129,7 @@ def _audit_signal_decision(symbol: str, decision: str, reason: str, signal_id: O
 update_signal_decision = _audit_signal_decision
 
 
-def _audit_screener_selection(db_client, regime_mode: str, screened: dict) -> None:
+def _audit_screener_selection(db_client, regime_mode: str, screened: dict, profile_label: Optional[str] = None) -> None:
     """Persist screener candidate selection to trades_audit for full traceability."""
     if not db_client:
         return
@@ -118,6 +137,7 @@ def _audit_screener_selection(db_client, regime_mode: str, screened: dict) -> No
         _meta = screened.get("_meta", {})
         _detail = {
             "regime_mode": regime_mode,
+            "profile_label": profile_label,
             "spot_count": _meta.get("spot_count", 0),
             "futures_count": _meta.get("futures_count", 0),
             "total_candidates": _meta.get("total_candidates", 0),
@@ -130,6 +150,18 @@ def _audit_screener_selection(db_client, regime_mode: str, screened: dict) -> No
             "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
             "VALUES (%s, %s, %s, %s, %s)",
             ("SCREENER", "system", "screener_selection", json.dumps(_detail), True)
+        )
+        _bridge_detail = {
+            "regime_mode": regime_mode,
+            "profile_label": profile_label,
+            "spot_count": _meta.get("spot_count", 0),
+            "futures_count": _meta.get("futures_count", 0),
+            "total_candidates": _meta.get("total_candidates", 0),
+        }
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            ("SCREENER", "system", "profile_screener_bridge", json.dumps(_bridge_detail), True)
         )
         print(f"[Audit/Screener] Persisted screener_selection for regime={regime_mode}")
     except Exception as _ae:
@@ -237,6 +269,26 @@ _db_client_ref = None
 _AUDIT_STARTUP_DONE: bool = False
 
 
+def _request_smart_recheck(reason: str, context: Optional[Dict[str, Any]] = None) -> None:
+    """Emit an event-driven SMART health recheck request through trading_runtime_state."""
+    if not _db_client_ref:
+        return
+    try:
+        _payload = json.dumps({
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "source": "run_trades",
+            "reason": str(reason or "cycle_event"),
+            "context": context or {},
+        })
+        _db_client_ref.execute_update(
+            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+            ("health_results_recheck_request", _payload, _payload),
+        )
+    except Exception as _rq_err:
+        print(f"[SMART-HEALTH] request from run_trades failed: {_rq_err}")
+
+
 def _get_spot_daily_pnl() -> float:
     """P1.1: Return today's realized SPOT PnL from BD via daily_pnl_tracker (thread-safe, restart-safe)."""
     try:
@@ -244,6 +296,32 @@ def _get_spot_daily_pnl() -> float:
         return _gdpnl(_db_client_ref, trade_type='spot')
     except Exception:
         return 0.0
+
+
+def _get_active_profile_label(db_client, regime: str) -> Optional[str]:
+    """Read active regime profile label (A/B/C) from runtime state."""
+    if db_client is None or not regime:
+        return None
+    try:
+        _rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key=%s",
+            (f"regime_profile_active_{regime}",),
+        )
+        if not _rows:
+            return None
+        _v = _rows[0].get('value')
+        if isinstance(_v, str):
+            try:
+                _v = json.loads(_v)
+            except Exception:
+                _v = _v.strip() if isinstance(_v, str) else _v
+        if isinstance(_v, dict):
+            _p = str(_v.get('profile') or _v.get('label') or '').strip().upper()
+            return _p or None
+        _p = str(_v or '').strip().upper()
+        return _p or None
+    except Exception:
+        return None
 
 
 def _set_cooldown(symbol: str, cooldown_type: str, hours: float, metadata: dict = None) -> None:
@@ -343,9 +421,7 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
     Persisted under keys like 'regime_params_SPOT_BULL'.
     Mirrors the audit trail used by PATCH /config/kelly.
     """
-    global _last_applied_regime_mode
-    if regime == _last_applied_regime_mode:
-        return {"applied": {}, "skipped": True, "reason": "already_active"}
+    global _last_applied_regime_mode, _last_applied_regime_profile
     if not regime:
         return {"applied": {}, "skipped": True, "reason": "no_regime"}
 
@@ -354,16 +430,55 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
 
     try:
         import json as _json
-        _state_key = f"regime_params_{regime}"
-        _rows = db_client.execute_query(
-            "SELECT value FROM trading_runtime_state WHERE key=%s", (_state_key,)
+        _active_profile = None
+        _active_profile_key = f"regime_profile_active_{regime}"
+        _active_rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key=%s", (_active_profile_key,)
         )
-        if not _rows or not _rows[0].get('value'):
-            return {"applied": {}, "skipped": True, "reason": "no_regime_params_stored"}
+        if _active_rows and _active_rows[0].get('value') is not None:
+            _av = _active_rows[0]['value']
+            if isinstance(_av, str):
+                try:
+                    _av = _json.loads(_av)
+                except Exception:
+                    pass
+            if isinstance(_av, dict):
+                _active_profile = str(_av.get('profile') or _av.get('label') or '').strip() or None
+            elif isinstance(_av, (int, float, bool)):
+                _active_profile = str(_av)
+            elif isinstance(_av, str):
+                _active_profile = _av.strip() or None
 
-        _raw = _rows[0]['value']
+        _profile_token = _active_profile or "__default__"
+        if regime == _last_applied_regime_mode and _profile_token == (_last_applied_regime_profile or "__default__"):
+            return {"applied": {}, "skipped": True, "reason": "already_active"}
+
+        _state_key = f"regime_params_{regime}"
+        _raw = None
+
+        # New profile-aware source (preferred): regime_profile_<REGIME>_<LABEL>
+        if _active_profile:
+            _profile_key = f"regime_profile_{regime}_{_active_profile}"
+            _profile_rows = db_client.execute_query(
+                "SELECT value FROM trading_runtime_state WHERE key=%s", (_profile_key,)
+            )
+            if _profile_rows and _profile_rows[0].get('value') is not None:
+                _raw = _profile_rows[0]['value']
+                _state_key = _profile_key
+
+        # Legacy fallback: regime_params_<REGIME>
+        if _raw is None:
+            _rows = db_client.execute_query(
+                "SELECT value FROM trading_runtime_state WHERE key=%s", (_state_key,)
+            )
+            if not _rows or _rows[0].get('value') is None:
+                return {"applied": {}, "skipped": True, "reason": "no_regime_params_stored", "profile": _active_profile}
+            _raw = _rows[0]['value']
+
         if isinstance(_raw, str):
             _raw = _json.loads(_raw)
+        if isinstance(_raw, dict) and isinstance(_raw.get('params'), dict):
+            _raw = _raw.get('params')
         if not isinstance(_raw, dict):
             return {"applied": {}, "skipped": True, "reason": "invalid_regime_params_format"}
 
@@ -374,6 +489,10 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'kelly_max_pct_liquid': 'kelly_max_pct_liquid',
             'futures_kelly_max_usdt': 'futures_kelly_max_usdt',
             'futures_kelly_base_usdt': 'futures_kelly_base_usdt',
+            'kelly_conviction_enabled': 'kelly_conviction_enabled',
+            'kelly_conviction_vol2x': 'kelly_conviction_vol2x',
+            'kelly_conviction_vol3x': 'kelly_conviction_vol3x',
+            'kelly_conviction_max_pct': 'kelly_conviction_max_pct',
             'min_signal_strength': 'min_signal_strength',
             'min_success_probability': 'min_success_probability',
             'vol_spike_min': 'vol_spike_min',
@@ -383,6 +502,20 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'take_profit_pct': 'take_profit_pct',
             'futures_sl_pct': 'futures_sl_pct',
             'futures_tp_pct': 'futures_tp_pct',
+            'min_hold_minutes_spot_bull': 'min_hold_minutes_spot_bull',
+            'min_hold_for_prediction_exit': 'min_hold_for_prediction_exit',
+            'min_cycles_before_close_shorts': 'min_cycles_before_close_shorts',
+            'futures_trailing_activation_pct': 'futures_trailing_activation_pct',
+            'futures_sl_cooldown_hours': 'futures_sl_cooldown_hours',
+            'futures_smart_tp_max_pnl_pct': 'futures_smart_tp_max_pnl_pct',
+            'futures_smart_tp_max_extensions': 'futures_smart_tp_max_extensions',
+            'sso_slow_velocity_threshold': 'sso_slow_velocity_threshold',
+            'sso_slow_min_hours': 'sso_slow_min_hours',
+            'sso_stagnant_min_hours': 'sso_stagnant_min_hours',
+            'sso_decay_min_hours': 'sso_decay_min_hours',
+            'sso_decay_threshold_pct': 'sso_decay_threshold_pct',
+            'sso_momentum_min_pnl_pct_spot': 'sso_momentum_min_pnl_pct_spot',
+            'sso_momentum_min_pnl_pct_futures': 'sso_momentum_min_pnl_pct_futures',
             'slippage_pct': 'slippage_pct',
         }
 
@@ -478,6 +611,7 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             "VALUES ('__config__', 'system', 'regime_params_applied', %s, false)",
             (_json.dumps({
                 "regime": regime,
+                "profile": _active_profile,
                 "applied": _applied,
                 "rejected": _rejected,
                 "state_key": _state_key,
@@ -485,12 +619,488 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
         )
 
         _last_applied_regime_mode = regime
+        _last_applied_regime_profile = _profile_token
         print(f"[RegimeParams] Applied {len(_applied)} overrides for {regime}")
-        return {"applied": _applied, "rejected": _rejected, "skipped": False}
+        return {"applied": _applied, "rejected": _rejected, "skipped": False, "profile": _active_profile}
 
     except Exception as _re_err:
         print(f"[RegimeParams] Error applying regime params for {regime}: {_re_err}")
         return {"applied": {}, "rejected": {"_error": str(_re_err)}, "skipped": True, "reason": "exception"}
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _parse_json_like(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
+
+
+def _load_regime_selector_config(db_client) -> Dict[str, Any]:
+    cfg = dict(_SELECTOR_CONFIG_DEFAULTS)
+    if db_client is None:
+        return cfg
+    try:
+        rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key='regime_profile_selector_config'"
+        )
+        if rows and rows[0].get('value') is not None:
+            raw = _parse_json_like(rows[0]['value'])
+            if isinstance(raw, dict):
+                cfg.update(raw)
+    except Exception as _cfg_err:
+        print(f"[RegimeSelector] config load failed: {_cfg_err}")
+
+    cfg['smart_total_enabled'] = bool(cfg.get('smart_total_enabled', True))
+    cfg['mode_selector_enabled'] = bool(cfg.get('mode_selector_enabled', True))
+    cfg['mode_require_confirmed'] = bool(cfg.get('mode_require_confirmed', True))
+    cfg['mode_min_hold_cycles'] = max(0, int(_safe_float(cfg.get('mode_min_hold_cycles', 2), 2)))
+    cfg['mode_min_confidence_delta'] = max(0.0, _safe_float(cfg.get('mode_min_confidence_delta', 0.03), 0.03))
+    cfg['mode_audit_every_cycle'] = bool(cfg.get('mode_audit_every_cycle', True))
+
+    cfg['profile_selector_enabled'] = bool(cfg.get('profile_selector_enabled', cfg.get('enabled', True)))
+    cfg['audit_every_cycle'] = bool(cfg.get('audit_every_cycle', True))
+    cfg['min_hold_cycles'] = max(0, int(_safe_float(cfg.get('min_hold_cycles', 3), 3)))
+    cfg['min_score_delta'] = max(0.0, _safe_float(cfg.get('min_score_delta', 0.05), 0.05))
+    cfg['profile_min_hold_cycles'] = max(
+        0,
+        int(_safe_float(cfg.get('profile_min_hold_cycles', cfg.get('min_hold_cycles', 3)), 3))
+    )
+    cfg['profile_min_score_delta'] = max(
+        0.0,
+        _safe_float(cfg.get('profile_min_score_delta', cfg.get('min_score_delta', 0.05)), 0.05)
+    )
+    _pr = cfg.get('profile_rank')
+    if not isinstance(_pr, dict):
+        _pr = {}
+    cfg['profile_rank'] = {
+        str(k).strip().upper(): _safe_float(v, 0.0)
+        for k, v in _pr.items()
+        if str(k).strip()
+    }
+    if not cfg['profile_rank']:
+        cfg['profile_rank'] = dict(_SELECTOR_CONFIG_DEFAULTS['profile_rank'])
+    return cfg
+
+
+def _run_smart_total_mode_selector(settings, regime_obj: Optional[MarketRegime], db_client=None) -> Dict[str, Any]:
+    """
+    SMART Total mode selector with dedicated hysteresis/cooldown state.
+    Persists state independently from profile selector.
+    """
+    if db_client is None:
+        return {"ok": False, "skipped": True, "reason": "no_db_client"}
+    if regime_obj is None:
+        return {"ok": False, "skipped": True, "reason": "no_regime"}
+
+    _cfg = _load_regime_selector_config(db_client)
+    if not bool(_cfg.get('smart_total_enabled', True)):
+        return {"ok": True, "skipped": True, "reason": "smart_total_disabled"}
+    if not bool(_cfg.get('mode_selector_enabled', True)):
+        return {"ok": True, "skipped": True, "reason": "mode_selector_disabled"}
+
+    _detected_mode = str(getattr(regime_obj, 'mode', '') or '').strip().upper()
+    if not _detected_mode:
+        return {"ok": False, "skipped": True, "reason": "invalid_detected_mode"}
+    _detected_confirmed = bool(getattr(regime_obj, 'confirmed', False))
+    _detected_confidence = _safe_float(getattr(regime_obj, 'confidence', 0.0), 0.0)
+
+    _active_key = 'smart_total_active_mode'
+    _state_key = 'smart_total_mode_selector_state'
+
+    _active_rows = db_client.execute_query(
+        "SELECT value FROM trading_runtime_state WHERE key=%s", (_active_key,)
+    )
+    _active_mode = None
+    if _active_rows and _active_rows[0].get('value') is not None:
+        _av = _parse_json_like(_active_rows[0]['value'])
+        if isinstance(_av, dict):
+            _active_mode = str(_av.get('mode') or _av.get('selected_mode') or '').strip().upper() or None
+        elif isinstance(_av, str):
+            _active_mode = _av.strip().upper() or None
+
+    _state_rows = db_client.execute_query(
+        "SELECT value FROM trading_runtime_state WHERE key=%s", (_state_key,)
+    )
+    _state = {}
+    if _state_rows and _state_rows[0].get('value') is not None:
+        _sv = _parse_json_like(_state_rows[0]['value'])
+        if isinstance(_sv, dict):
+            _state = _sv
+
+    _current_mode = _active_mode or str(_state.get('last_selected') or '').strip().upper() or None
+    _hold_cycles = int(_safe_float(_state.get('cycles_since_switch', 999), 999))
+    _current_score = _safe_float(_state.get('last_selected_score', 0.0), 0.0)
+    _min_hold = int(_cfg.get('mode_min_hold_cycles', 2))
+    _min_delta = _safe_float(_cfg.get('mode_min_confidence_delta', 0.03), 0.03)
+
+    _selected_mode = _current_mode or _detected_mode
+    _switch = False
+    _blocked = False
+    _reason = 'keep_current'
+
+    if _current_mode is None:
+        _selected_mode = _detected_mode
+        _switch = True
+        _reason = 'no_active_mode'
+    elif _detected_mode == _current_mode:
+        _selected_mode = _current_mode
+        _reason = 'detected_mode_already_active'
+    else:
+        if bool(_cfg.get('mode_require_confirmed', True)) and not _detected_confirmed:
+            _selected_mode = _current_mode
+            _blocked = True
+            _reason = 'blocked_unconfirmed_detected_mode'
+        elif _hold_cycles < _min_hold:
+            _selected_mode = _current_mode
+            _blocked = True
+            _reason = f'blocked_hold_cycles({_hold_cycles}<{_min_hold})'
+        elif (_detected_confidence - _current_score) < _min_delta:
+            _selected_mode = _current_mode
+            _blocked = True
+            _reason = (
+                f'blocked_confidence_delta('
+                f'{(_detected_confidence - _current_score):.4f}<{_min_delta:.4f})'
+            )
+        else:
+            _selected_mode = _detected_mode
+            _switch = True
+            _reason = (
+                f'switch_mode_confidence_delta('
+                f'{(_detected_confidence - _current_score):.4f}>={_min_delta:.4f})'
+            )
+
+    _now_iso = datetime.now(timezone.utc).isoformat()
+    _selected_score = _detected_confidence if _selected_mode == _detected_mode else _current_score
+    _new_cycles = 0 if _switch else (_hold_cycles + 1)
+    _state_payload = {
+        'last_selected': _selected_mode,
+        'last_selected_score': _selected_score,
+        'detected_mode': _detected_mode,
+        'detected_confirmed': _detected_confirmed,
+        'detected_confidence': _detected_confidence,
+        'active_before': _current_mode,
+        'switched': _switch,
+        'blocked': _blocked,
+        'decision_reason': _reason,
+        'cycles_since_switch': _new_cycles,
+        'last_decision_at': _now_iso,
+        'selector_config': {
+            'mode_min_hold_cycles': _min_hold,
+            'mode_min_confidence_delta': _min_delta,
+            'mode_require_confirmed': bool(_cfg.get('mode_require_confirmed', True)),
+            'mode_audit_every_cycle': bool(_cfg.get('mode_audit_every_cycle', True)),
+        },
+    }
+
+    _audit_detail = {
+        'active_before': _current_mode,
+        'selected_mode': _selected_mode,
+        'detected_mode': _detected_mode,
+        'detected_confirmed': _detected_confirmed,
+        'detected_confidence': _detected_confidence,
+        'current_score': _current_score,
+        'delta_vs_current': (_detected_confidence - _current_score),
+        'switched': _switch,
+        'blocked': _blocked,
+        'reason': _reason,
+        'state': _state_payload,
+    }
+
+    _writes = []
+    if _switch or _active_mode is None:
+        _active_payload = {
+            'mode': _selected_mode,
+            'reason': 'smart_total_mode_selector',
+            'updated_at': _now_iso,
+            'detected_mode': _detected_mode,
+            'detected_confirmed': _detected_confirmed,
+            'detected_confidence': _detected_confidence,
+            'decision_reason': _reason,
+        }
+        _active_json = json.dumps(_active_payload)
+        _writes.append((
+            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+            (_active_key, _active_json, _active_json),
+        ))
+
+    _state_json = json.dumps(_state_payload)
+    _writes.append((
+        "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+        "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+        (_state_key, _state_json, _state_json),
+    ))
+    if bool(_cfg.get('mode_audit_every_cycle', True)) or _switch:
+        _writes.append((
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+            "VALUES ('__config__', 'system', 'smart_total_mode_selector_decision', %s, false)",
+            (json.dumps(_audit_detail),),
+        ))
+
+    if len(_writes) == 1:
+        db_client.execute_update(_writes[0][0], _writes[0][1])
+    else:
+        db_client.execute_transaction(_writes)
+
+    return {
+        'ok': True,
+        'skipped': False,
+        'active_before': _current_mode,
+        'selected_mode': _selected_mode,
+        'detected_mode': _detected_mode,
+        'switched': _switch,
+        'blocked': _blocked,
+        'reason': _reason,
+        'delta_vs_current': (_detected_confidence - _current_score),
+    }
+
+
+def _score_profile_candidate(label: str, payload: Dict[str, Any], regime_obj: Optional[MarketRegime], cfg: Dict[str, Any]) -> Tuple[float, Dict[str, float]]:
+    _label = str(label or '').strip().upper()
+    _meta = payload.get('meta', {}) if isinstance(payload, dict) else {}
+    if not isinstance(_meta, dict):
+        _meta = {}
+
+    # Deterministic weighted score; explicit meta.score dominates, then profitability/risk proxies.
+    _parts = {
+        'rank_base': _safe_float(cfg.get('profile_rank', {}).get(_label, 0.0), 0.0),
+        'meta_score': _safe_float(_meta.get('score'), 0.0),
+        'expected_return_pct': _safe_float(_meta.get('expected_return_pct'), 0.0) * 1.50,
+        'expected_pnl_usd': _safe_float(_meta.get('expected_pnl_usd'), 0.0) * 0.01,
+        'win_rate_pct': _safe_float(_meta.get('win_rate_pct'), 0.0) * 0.40,
+        'sharpe': _safe_float(_meta.get('sharpe'), 0.0) * 25.0,
+        'max_drawdown_penalty': -abs(_safe_float(_meta.get('max_drawdown_pct'), 0.0)) * 0.80,
+    }
+    if regime_obj is not None:
+        _parts['regime_confidence_boost'] = _safe_float(getattr(regime_obj, 'confidence', 0.0), 0.0) * 5.0
+    else:
+        _parts['regime_confidence_boost'] = 0.0
+
+    _total = round(sum(_parts.values()), 6)
+    return _total, _parts
+
+
+def _run_regime_profile_auto_selector(settings, regime_obj: Optional[MarketRegime], db_client=None) -> Dict[str, Any]:
+    """
+    Deterministic profile selector with hysteresis.
+    - Reads all profiles for current regime.
+    - Scores candidates using deterministic weighted metadata.
+    - Applies anti-flap rules: min_hold_cycles + min_score_delta.
+    - Persists selector state in trading_runtime_state and writes audit decisions.
+    """
+    if db_client is None:
+        return {"ok": False, "skipped": True, "reason": "no_db_client"}
+    if regime_obj is None:
+        return {"ok": False, "skipped": True, "reason": "no_regime"}
+
+    _regime = str(getattr(regime_obj, 'mode', '') or '').strip().upper()
+    if not _regime:
+        return {"ok": False, "skipped": True, "reason": "invalid_regime"}
+    if not bool(getattr(regime_obj, 'confirmed', False)):
+        return {"ok": False, "skipped": True, "reason": "regime_unconfirmed", "regime": _regime}
+
+    _cfg = _load_regime_selector_config(db_client)
+    if not _cfg.get('profile_selector_enabled', _cfg.get('enabled', True)):
+        return {"ok": True, "skipped": True, "reason": "selector_disabled", "regime": _regime}
+
+    _prefix = f"regime_profile_{_regime}_"
+    _rows = db_client.execute_query(
+        "SELECT key, value, updated_at FROM trading_runtime_state WHERE key LIKE %s ORDER BY key",
+        (f"{_prefix}%",)
+    )
+    _profiles: Dict[str, Dict[str, Any]] = {}
+    for _r in _rows:
+        _key = str(_r.get('key') or '')
+        if not _key.startswith(_prefix):
+            continue
+        _label = _key[len(_prefix):].strip().upper()
+        if not _label:
+            continue
+        _val = _parse_json_like(_r.get('value'))
+        if isinstance(_val, dict):
+            _profiles[_label] = _val
+
+    if not _profiles:
+        return {"ok": True, "skipped": True, "reason": "no_profiles_for_regime", "regime": _regime}
+
+    _active_key = f"regime_profile_active_{_regime}"
+    _active_rows = db_client.execute_query(
+        "SELECT value FROM trading_runtime_state WHERE key=%s", (_active_key,)
+    )
+    _active_profile = None
+    if _active_rows and _active_rows[0].get('value') is not None:
+        _av = _parse_json_like(_active_rows[0]['value'])
+        if isinstance(_av, dict):
+            _active_profile = str(_av.get('profile') or _av.get('label') or '').strip().upper() or None
+        elif isinstance(_av, str):
+            _active_profile = _av.strip().upper() or None
+
+    _state_key = f"smart_total_profile_selector_state_{_regime}"
+    _state_rows = db_client.execute_query(
+        "SELECT value FROM trading_runtime_state WHERE key=%s", (_state_key,)
+    )
+    _state = {}
+    if not _state_rows:
+        # Backward-compatible fallback for previous selector state key.
+        _state_rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key=%s",
+            (f"regime_profile_selector_state_{_regime}",)
+        )
+    if _state_rows and _state_rows[0].get('value') is not None:
+        _sv = _parse_json_like(_state_rows[0]['value'])
+        if isinstance(_sv, dict):
+            _state = _sv
+
+    _scored = []
+    for _label, _payload in _profiles.items():
+        _score, _parts = _score_profile_candidate(_label, _payload, regime_obj, _cfg)
+        _scored.append((_label, _score, _parts))
+    _scored.sort(key=lambda x: (-x[1], x[0]))
+
+    _best_label, _best_score, _best_parts = _scored[0]
+    _score_map = {lbl: sc for (lbl, sc, _parts) in _scored}
+    _top3 = [{"profile": lbl, "score": sc, "parts": parts} for (lbl, sc, parts) in _scored[:3]]
+
+    _current = (_active_profile or '').strip().upper() or None
+    _current_score = _score_map.get(_current, None)
+    _hold_cycles = int(_safe_float(_state.get('cycles_since_switch', 999), 999))
+    _delta = (_best_score - (_current_score if _current_score is not None else -1e9))
+
+    _switch = False
+    _reason = "keep_current"
+    _selected = _current or _best_label
+    if _current is None:
+        _selected = _best_label
+        _switch = True
+        _reason = "no_active_profile"
+    elif _current not in _score_map:
+        _selected = _best_label
+        _switch = True
+        _reason = "active_profile_missing"
+    elif _best_label == _current:
+        _selected = _current
+        _reason = "best_already_active"
+    else:
+        _min_hold = int(_cfg.get('profile_min_hold_cycles', _cfg.get('min_hold_cycles', 3)))
+        _min_delta = _safe_float(
+            _cfg.get('profile_min_score_delta', _cfg.get('min_score_delta', 0.05)),
+            0.05,
+        )
+        if _hold_cycles < _min_hold:
+            _selected = _current
+            _reason = f"hysteresis_hold_cycles({_hold_cycles}<{_min_hold})"
+        elif _delta < _min_delta:
+            _selected = _current
+            _reason = f"hysteresis_score_delta({_delta:.4f}<{_min_delta:.4f})"
+        else:
+            _selected = _best_label
+            _switch = True
+            _reason = f"switch_better_score(delta={_delta:.4f})"
+
+    _now_iso = datetime.now(timezone.utc).isoformat()
+    _new_cycles = 0 if _switch else (_hold_cycles + 1)
+    _state_payload = {
+        "regime": _regime,
+        "last_selected": _selected,
+        "last_selected_score": _score_map.get(_selected, _best_score),
+        "best_candidate": _best_label,
+        "best_candidate_score": _best_score,
+        "active_before": _current,
+        "switched": _switch,
+        "decision_reason": _reason,
+        "cycles_since_switch": _new_cycles,
+        "last_decision_at": _now_iso,
+        "selector_config": {
+            "profile_min_hold_cycles": _cfg.get('profile_min_hold_cycles', _cfg.get('min_hold_cycles')),
+            "profile_min_score_delta": _cfg.get('profile_min_score_delta', _cfg.get('min_score_delta')),
+            "audit_every_cycle": _cfg.get('audit_every_cycle'),
+        },
+    }
+
+    _audit_detail = {
+        "regime": _regime,
+        "confirmed": bool(getattr(regime_obj, 'confirmed', False)),
+        "confidence": _safe_float(getattr(regime_obj, 'confidence', 0.0), 0.0),
+        "active_before": _current,
+        "selected_profile": _selected,
+        "best_candidate": _best_label,
+        "best_score": _best_score,
+        "best_parts": _best_parts,
+        "delta_vs_current": _delta,
+        "switched": _switch,
+        "reason": _reason,
+        "top_candidates": _top3,
+        "state": _state_payload,
+    }
+
+    _writes = []
+    if _switch:
+        _active_payload = {
+            "regime": _regime,
+            "profile": _selected,
+            "reason": "auto_selector",
+            "updated_at": _now_iso,
+            "updated_by": "system:auto_selector",
+            "best_candidate": _best_label,
+            "best_score": _best_score,
+            "delta_vs_current": _delta,
+            "decision_reason": _reason,
+        }
+        _active_json = json.dumps(_active_payload)
+        _writes.append((
+            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+            (_active_key, _active_json, _active_json),
+        ))
+
+    _state_json = json.dumps(_state_payload)
+    _writes.append((
+        "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+        "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+        (_state_key, _state_json, _state_json),
+    ))
+    # Backward-compatible mirrored write for old key used by existing dashboards/queries.
+    _legacy_state_key = f"regime_profile_selector_state_{_regime}"
+    _writes.append((
+        "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+        "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+        (_legacy_state_key, _state_json, _state_json),
+    ))
+    if bool(_cfg.get('audit_every_cycle', True)) or _switch:
+        _writes.append((
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+            "VALUES ('__config__', 'system', 'regime_profile_selector_decision', %s, false)",
+            (json.dumps(_audit_detail),),
+        ))
+
+    if len(_writes) == 1:
+        db_client.execute_update(_writes[0][0], _writes[0][1])
+    else:
+        db_client.execute_transaction(_writes)
+
+    return {
+        "ok": True,
+        "skipped": False,
+        "regime": _regime,
+        "active_before": _current,
+        "selected_profile": _selected,
+        "switched": _switch,
+        "reason": _reason,
+        "best_candidate": _best_label,
+        "best_score": _best_score,
+        "delta_vs_current": _delta,
+    }
 
 
 def _apply_fng_kelly_boost(trade_allocation: float, fng_value: int, settings) -> float:
@@ -662,6 +1272,29 @@ def _record_order_failure(settings) -> None:
                      f"pausing {pause_min} min until {_circuit_breaker_until.strftime('%H:%M')} UTC")
         print(f"[CircuitBreaker] TRIGGERED after {_consecutive_failures} failures — "
               f"pausing {pause_min} min")
+        _request_smart_recheck(
+            "circuit_breaker_triggered",
+            {"consecutive_failures": _consecutive_failures, "pause_minutes": pause_min},
+        )
+    else:
+        _request_smart_recheck(
+            "order_failure",
+            {"consecutive_failures": _consecutive_failures, "threshold": threshold},
+        )
+    if _db_client_ref:
+        try:
+            state_persistence.save_state(
+                _db_client_ref,
+                futures_sl_cooldown=_FUTURES_SL_COOLDOWN,
+                futures_mass_sl_cooldown_until=_FUTURES_MASS_SL_COOLDOWN_UNTIL,
+                volspike_cooldown=_VOLSPIKE_COOLDOWN,
+                volspike_positions=_VOLSPIKE_POSITIONS,
+                override_daily_count=_OVERRIDE_DAILY_COUNT,
+                circuit_breaker_until=_circuit_breaker_until,
+                consecutive_failures=_consecutive_failures,
+            )
+        except Exception as _cbp_err:
+            print(f"[CircuitBreaker] persist failure state failed: {_cbp_err}")
 
 
 def _record_order_success() -> None:
@@ -670,6 +1303,21 @@ def _record_order_success() -> None:
     if _consecutive_failures > 0:
         print(f"[CircuitBreaker] Resetting failure counter (was {_consecutive_failures})")
         _consecutive_failures = 0
+        _request_smart_recheck("order_success_recovery", {"reset_from": "consecutive_failures"})
+        if _db_client_ref:
+            try:
+                state_persistence.save_state(
+                    _db_client_ref,
+                    futures_sl_cooldown=_FUTURES_SL_COOLDOWN,
+                    futures_mass_sl_cooldown_until=_FUTURES_MASS_SL_COOLDOWN_UNTIL,
+                    volspike_cooldown=_VOLSPIKE_COOLDOWN,
+                    volspike_positions=_VOLSPIKE_POSITIONS,
+                    override_daily_count=_OVERRIDE_DAILY_COUNT,
+                    circuit_breaker_until=_circuit_breaker_until,
+                    consecutive_failures=_consecutive_failures,
+                )
+            except Exception as _cbp_ok_err:
+                print(f"[CircuitBreaker] persist success state failed: {_cbp_ok_err}")
 
 
 def _is_overflow_eligible(symbol: str, strength: float, prediction: dict, settings) -> bool:
@@ -929,6 +1577,7 @@ def _filter_by_quality(symbols: List[str], client, settings, target_count: int =
 
 
 def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClient, portfolio_manager=None, regime: str = "SPOT_BULL", db_client=None) -> List[Dict]:
+    _active_profile_label = _get_active_profile_label(db_client or _db_client_ref, regime)
     # Expire autonomous signals — TTL aligned to regime cycle (B-v2)
     _regime_for_ttl = regime if regime else "SPOT_BULL"
     _ttl_by_regime = {"SPOT_BULL": 45, "RANGE_SCALP": 15, "PRESERVATION": 90, "FUTURES_SHORT": 24}
@@ -978,6 +1627,7 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                         max_spot=settings.screener_top_n_count + 20,  # Request extra for filtering
                         settings=settings,
                         regime_mode=regime,
+                        profile_label=_active_profile_label,
                         db_client=db_client,
                     )
                     # Apply additional quality filters
@@ -996,7 +1646,12 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                     # Fallback to screener v1
                     if getattr(settings, 'screener_enabled', True):
                         from pair_screener import get_screened_pairs, merge_with_static
-                        _screened = get_screened_pairs(settings=settings, regime_mode=regime, db_client=db_client)
+                        _screened = get_screened_pairs(
+                            settings=settings,
+                            regime_mode=regime,
+                            profile_label=_active_profile_label,
+                            db_client=db_client,
+                        )
                         symbols = merge_with_static(
                             _screened["spot"],
                             _static_symbols,
@@ -1007,7 +1662,12 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
             elif getattr(settings, 'screener_enabled', True):
                 try:
                     from pair_screener import get_screened_pairs, merge_with_static
-                    _screened = get_screened_pairs(settings=settings, regime_mode=regime, db_client=db_client)
+                    _screened = get_screened_pairs(
+                        settings=settings,
+                        regime_mode=regime,
+                        profile_label=_active_profile_label,
+                        db_client=db_client,
+                    )
                     symbols = merge_with_static(
                         _screened["spot"],
                         _static_symbols,
@@ -1612,6 +2272,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             today_realized_pnl=_get_spot_daily_pnl(),  # P1.1: real from BD, thread-safe
                             daily_target=getattr(settings, 'sso_target_daily_usd', 40.0),
                             trade_type="spot",
+                            regime_mode=_regime_mode,
+                            profile_label=_active_profile_label,
                             bounce_entry=_spot_bounce_entry_flag,
                             rescue_prediction_ev=_sp_rescue_pred_ev,
                             rescue_signal=_sp_rescue_signal,
@@ -2059,6 +2721,13 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
         if symbol in _INVALID_SYMBOLS:
             continue
 
+        # Keep BNB out of orphan cleanup when commission discount is active.
+        if symbol == "BNBUSDT" and (
+            bool(_get_param(settings, 'use_bnb_for_commission'))
+            or bool(_get_param(settings, 'auto_bnb_for_commission'))
+        ):
+            continue
+
         # GATE: if there is ANY registered position for this symbol → NEVER touch it here.
         # SL/TP checker and Step 3 (slot-pressure) handle registered positions.
         if position_manager:
@@ -2238,10 +2907,13 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     elif _regime is not None:
         print(f"[Regime/cached] {_regime_mode} | {_regime.regime} | confirmed={_regime.confirmed}")
 
+    _active_profile_label = _get_active_profile_label(_db_client_ref, _regime_mode)
+
     # Persist active regime so the screener/dashboard always see the current mode
     if settings is not None:
         try:
             settings.current_regime_mode = _regime_mode
+            settings.current_regime_profile_label = _active_profile_label
         except Exception:
             pass
 
@@ -2367,7 +3039,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 elif getattr(settings, 'screener_enabled', True):
                     try:
                         from pair_screener import get_screened_pairs
-                        _futures_symbols = list(dict.fromkeys(_futures_symbols + get_screened_pairs(settings=settings, regime_mode=_regime_mode, db_client=db_client).get("futures", [])))
+                        _futures_symbols = list(dict.fromkeys(
+                            _futures_symbols + get_screened_pairs(
+                                settings=settings,
+                                regime_mode=_regime_mode,
+                                profile_label=_active_profile_label,
+                                db_client=_db_client_ref,
+                            ).get("futures", [])
+                        ))
                     except Exception:
                         pass
                 if symbol in _INVALID_FUTURES_SYMBOLS:
@@ -2498,6 +3177,17 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     cap_pct_override=_f_cap_ov,
                     db_client=_db_client_ref, symbol=symbol,
                     trade_type='futures', regime='FUTURES_SHORT')
+                if _get_param(settings, 'kelly_conviction_enabled'):
+                    _f_vs = float(_f_sig_meta.get('vol_spike', 0.0))
+                    _f_conv3x = _get_param(settings, 'kelly_conviction_vol3x')
+                    _f_conv2x = _get_param(settings, 'kelly_conviction_vol2x')
+                    _f_conv_max_pct = _get_param(settings, 'kelly_conviction_max_pct')
+                    _f_conv_mult = _f_conv3x if _f_vs >= 3.0 else (_f_conv2x if _f_vs >= 2.0 else 1.0)
+                    if _f_conv_mult > 1.0:
+                        _f_hard_cap = float(_f_kelly_liquid) * float(_f_conv_max_pct)
+                        _f_boosted = min(_f_usdt * _f_conv_mult, _f_hard_cap)
+                        print(f"[M3/F] {symbol}: vol_spike={_f_vs:.1f}x → conviction ×{_f_conv_mult} ${_f_usdt:.2f}→${_f_boosted:.2f} (cap=${_f_hard_cap:.2f})")
+                        _f_usdt = _f_boosted
                 # F4: Dynamic cap — max(per_trade_floor, futures_margin × kelly_cap_pct)
                 _futures_kelly_cap = getattr(settings, 'futures_kelly_cap_pct', 0.20)
                 _futures_margin_avail = _fc.get_available_usdt() if not _fc.dry_run else _f_kelly_liquid * 0.3
@@ -2802,7 +3492,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     elif getattr(settings, 'screener_enabled', True):
                         try:
                             from pair_screener import get_screened_pairs
-                            _f_sym_list = list(dict.fromkeys(_f_sym_list + get_screened_pairs(settings=settings, regime_mode=_regime_mode, db_client=db_client).get("futures", [])))
+                            _f_sym_list = list(dict.fromkeys(
+                                _f_sym_list + get_screened_pairs(
+                                    settings=settings,
+                                    regime_mode=_regime_mode,
+                                    profile_label=_active_profile_label,
+                                    db_client=_db_client_ref,
+                                ).get("futures", [])
+                            ))
                         except Exception:
                             pass
                     if symbol in _f_sym_list:
@@ -2835,7 +3532,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 elif getattr(settings, 'screener_enabled', True):
                     try:
                         from pair_screener import get_screened_pairs
-                        _l_sym_list = list(dict.fromkeys(_l_sym_list + get_screened_pairs(settings=settings, regime_mode=_regime_mode, db_client=db_client).get("futures", [])))
+                        _l_sym_list = list(dict.fromkeys(
+                            _l_sym_list + get_screened_pairs(
+                                settings=settings,
+                                regime_mode=_regime_mode,
+                                profile_label=_active_profile_label,
+                                db_client=_db_client_ref,
+                            ).get("futures", [])
+                        ))
                     except Exception:
                         pass
                 if symbol in _l_sym_list:
@@ -2865,6 +3569,17 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         sl_pct=_l_sl / _l_lev / 100, tp_pct=_l_tp / _l_lev / 100,
                         base_override=_l_base_ov, max_override=_l_max_ov,
                         cap_pct_override=_l_cap_ov)
+                    if _get_param(settings, 'kelly_conviction_enabled'):
+                        _l_vs = float(signal_meta.get(symbol, {}).get('vol_spike', 0.0))
+                        _l_conv3x = _get_param(settings, 'kelly_conviction_vol3x')
+                        _l_conv2x = _get_param(settings, 'kelly_conviction_vol2x')
+                        _l_conv_max_pct = _get_param(settings, 'kelly_conviction_max_pct')
+                        _l_conv_mult = _l_conv3x if _l_vs >= 3.0 else (_l_conv2x if _l_vs >= 2.0 else 1.0)
+                        if _l_conv_mult > 1.0:
+                            _l_hard_cap = float(_l_kelly_liq) * float(_l_conv_max_pct)
+                            _l_boosted = min(_l_usdt * _l_conv_mult, _l_hard_cap)
+                            print(f"[M3/LF] {symbol}: vol_spike={_l_vs:.1f}x → conviction ×{_l_conv_mult} ${_l_usdt:.2f}→${_l_boosted:.2f} (cap=${_l_hard_cap:.2f})")
+                            _l_usdt = _l_boosted
                     # Apply F&G boost (oversold + Fear = strong conviction entry)
                     _l_usdt = _apply_fng_kelly_boost(_l_usdt, _fng_value, settings)
                     # F4: dynamic cap — max(per_trade_floor, futures_margin × kelly_cap_pct)
@@ -3121,9 +3836,6 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             _conv3x = getattr(settings, 'kelly_conviction_vol3x', 2.0)
             _conv2x = getattr(settings, 'kelly_conviction_vol2x', 1.5)
             _conv_max_pct = getattr(settings, 'kelly_conviction_max_pct', 0.10)
-            # Smart Kelly: in confirmed SPOT_BULL, raise conviction cap to 15% (was 10%)
-            if _regime_mode == "SPOT_BULL" and _regime and _regime.confirmed:
-                _conv_max_pct = min(0.15, _conv_max_pct * 1.5)
             if _meta_vs >= 3.0:
                 _conv_mult = _conv3x
             elif _meta_vs >= 2.0:
@@ -3190,7 +3902,6 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             if position_manager:
                 try:
                     from position_manager import Position
-                    from datetime import datetime
                     from technical_indicators import TechnicalIndicators
                     entry_commission = compute_commission(qty, price, settings, trade_type='spot')
 
@@ -3538,6 +4249,7 @@ def _is_new_entries_paused(db_client) -> bool:
 
 def execute_once(monitor_only: bool = False):
     global _db_client_ref, _FUTURES_MASS_SL_COOLDOWN_UNTIL, _VOLSPIKE_POSITIONS, _OVERRIDE_DAILY_COUNT
+    global _consecutive_failures, _circuit_breaker_until
     from init_components import get_components
     comp = get_components()
     settings = comp.settings
@@ -3556,8 +4268,11 @@ def execute_once(monitor_only: bool = False):
             _FUTURES_MASS_SL_COOLDOWN_UNTIL = _loaded_state.get('futures_mass_sl_cooldown_until') or _FUTURES_MASS_SL_COOLDOWN_UNTIL
             _VOLSPIKE_POSITIONS = set(_loaded_state.get('volspike_positions', [])) or _VOLSPIKE_POSITIONS
             _OVERRIDE_DAILY_COUNT = _loaded_state.get('override_daily_count', {}) or _OVERRIDE_DAILY_COUNT
+            _consecutive_failures = int(_loaded_state.get('consecutive_failures', _consecutive_failures) or 0)
+            _circuit_breaker_until = _loaded_state.get('circuit_breaker_until') or _circuit_breaker_until
             print(f"[StatePersistence] Loaded volatile state: mass_sl={_FUTURES_MASS_SL_COOLDOWN_UNTIL}, "
-                  f"volspike_positions={len(_VOLSPIKE_POSITIONS)}, override_counts={len(_OVERRIDE_DAILY_COUNT)}")
+                f"volspike_positions={len(_VOLSPIKE_POSITIONS)}, override_counts={len(_OVERRIDE_DAILY_COUNT)}, "
+                f"cb_failures={_consecutive_failures}, cb_until={_circuit_breaker_until}")
 
     # SPOT reconciliation: keep DB aligned with Binance balance on every cycle.
     # This is intentionally run even when the system is paused so restart drift
@@ -3583,6 +4298,8 @@ def execute_once(monitor_only: bool = False):
                 volspike_cooldown=_VOLSPIKE_COOLDOWN,
                 volspike_positions=_VOLSPIKE_POSITIONS,
                 override_daily_count=_OVERRIDE_DAILY_COUNT,
+                circuit_breaker_until=_circuit_breaker_until,
+                consecutive_failures=_consecutive_failures,
             )
         except Exception as _sp_start_err:
             print(f"[StatePersistence] start checkpoint failed: {_sp_start_err}")
@@ -3670,6 +4387,7 @@ def execute_once(monitor_only: bool = False):
             if settings is not None:
                 try:
                     settings.current_regime_mode = _regime_mode
+                    settings.current_regime_profile_label = _get_active_profile_label(_db_client_ref, _regime_mode)
                 except Exception:
                     pass
             # F4 fix: on fresh start, anti-whipsaw needs 2 detections to confirm.
@@ -3684,14 +4402,59 @@ def execute_once(monitor_only: bool = False):
                 if settings is not None:
                     try:
                         settings.current_regime_mode = _regime_mode
+                        settings.current_regime_profile_label = _get_active_profile_label(_db_client_ref, _regime_mode)
                     except Exception:
                         pass
                 print(f"[Regime] execute_once warm-up (severe bear): {_regime_mode} | confirmed={_regime_exe.confirmed}")
         except Exception as _re_exe:
             print(f"[Regime] execute_once detection failed: {_re_exe}")
 
+        try:
+            _mode_selector_result = _run_smart_total_mode_selector(settings, _regime_exe, _db_client_ref)
+            if _mode_selector_result.get('ok') and not _mode_selector_result.get('skipped'):
+                _selected_mode = _mode_selector_result.get('selected_mode')
+                if _selected_mode and _selected_mode != _regime_mode:
+                    print(
+                        f"[SMART-Total/Mode] {_regime_mode} -> {_selected_mode} "
+                        f"switched={_mode_selector_result.get('switched')} "
+                        f"blocked={_mode_selector_result.get('blocked')} "
+                        f"reason={_mode_selector_result.get('reason')}"
+                    )
+                    _regime_mode = _selected_mode
+                if settings is not None:
+                    try:
+                        settings.current_regime_mode = _regime_mode
+                        settings.current_regime_profile_label = _get_active_profile_label(_db_client_ref, _regime_mode)
+                    except Exception:
+                        pass
+            elif _mode_selector_result.get('reason') not in (
+                'mode_selector_disabled', 'smart_total_disabled', 'no_regime'
+            ):
+                print(f"[SMART-Total/Mode] skipped: {_mode_selector_result.get('reason')}")
+        except Exception as _mse:
+            print(f"[SMART-Total/Mode] selector failed: {_mse}")
+
         # ── Regime-specific parameter auto-loading (only on confirmed regime change) ─
         if _regime_exe and _regime_exe.confirmed:
+            try:
+                _profile_regime_obj = _regime_exe
+                if _regime_mode != str(getattr(_regime_exe, 'mode', '') or '').strip().upper():
+                    _profile_regime_obj = types.SimpleNamespace(
+                        mode=_regime_mode,
+                        confirmed=bool(getattr(_regime_exe, 'confirmed', False)),
+                        confidence=_safe_float(getattr(_regime_exe, 'confidence', 0.0), 0.0),
+                    )
+                _selector_result = _run_regime_profile_auto_selector(settings, _profile_regime_obj, _db_client_ref)
+                if _selector_result.get('ok') and not _selector_result.get('skipped'):
+                    print(
+                        f"[RegimeSelector] {_selector_result.get('regime')} "
+                        f"{_selector_result.get('active_before')} -> {_selector_result.get('selected_profile')} "
+                        f"switched={_selector_result.get('switched')} reason={_selector_result.get('reason')}"
+                    )
+                elif _selector_result.get('reason') not in ('selector_disabled', 'no_profiles_for_regime', 'regime_unconfirmed'):
+                    print(f"[RegimeSelector] skipped: {_selector_result.get('reason')}")
+            except Exception as _rse:
+                print(f"[RegimeSelector] execute_once selector failed: {_rse}")
             try:
                 _regime_apply_result = _apply_regime_params(settings, _regime_mode, _db_client_ref)
                 if not _regime_apply_result.get('skipped'):
@@ -3970,9 +4733,20 @@ def execute_once(monitor_only: bool = False):
     if getattr(settings, 'screener_enabled', True):
         try:
             from pair_screener import get_screened_pairs as _gsp
-            _cached_screened_pairs = _gsp(settings=settings, regime_mode=_regime_mode, db_client=comp.db_client)
+            _active_profile_label = _get_active_profile_label(_db_client_ref, _regime_mode)
+            _cached_screened_pairs = _gsp(
+                settings=settings,
+                regime_mode=_regime_mode,
+                profile_label=_active_profile_label,
+                db_client=comp.db_client,
+            )
             # Persist screener candidate selection for full traceability
-            _audit_screener_selection(comp.db_client, _regime_mode, _cached_screened_pairs)
+            _audit_screener_selection(
+                comp.db_client,
+                _regime_mode,
+                _cached_screened_pairs,
+                profile_label=_active_profile_label,
+            )
         except Exception:
             pass
 
@@ -4080,6 +4854,8 @@ def execute_once(monitor_only: bool = False):
             volspike_cooldown=_VOLSPIKE_COOLDOWN,
             volspike_positions=_VOLSPIKE_POSITIONS,
             override_daily_count=_OVERRIDE_DAILY_COUNT,
+            circuit_breaker_until=_circuit_breaker_until,
+            consecutive_failures=_consecutive_failures,
         )
 
     return {"top_symbols": top_symbols, "sell_orders": sell_orders,

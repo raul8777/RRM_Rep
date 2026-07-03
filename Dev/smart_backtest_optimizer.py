@@ -399,7 +399,7 @@ def main() -> None:
     print("=" * 90)
     print(f"Period days:        {days}")
     print(f"Total simulations:  {sims}")
-    print(f"Capital:            {args.capital:.2f} USDT")
+    print(f"Capital:            {capital:.2f} USDT")
     print(f"Root session:       {root_session_id}")
     print(f"Coverage band:      {coverage}")
     print("Regime distribution from BTC window:")
@@ -415,7 +415,8 @@ def main() -> None:
         'root_session_id': root_session_id,
         'period_days': days,
         'simulations': sims,
-        'capital': args.capital,
+        'capital': capital,
+        'capital_source': capital_source,
         'coverage': coverage,
         'regime_distribution': reg_dist,
         'runs_by_regime': runs_by_regime,

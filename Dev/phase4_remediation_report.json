@@ -1,0 +1,109 @@
+{
+  "gate1_remediation": {
+    "alerts_acknowledged": 0,
+    "drift_check": {
+      "drift_count": 1,
+      "drifts": [
+        {
+          "actual": 0.99,
+          "expected": 0.91,
+          "param": "futures_vol_spike_min",
+          "severity": "warning",
+          "source": "canonical_default"
+        }
+      ],
+      "new_alerts": 0,
+      "ok": true
+    },
+    "drift_rows_seen": 13,
+    "patch_fields": [
+      "futures_kelly_max_usdt",
+      "futures_min_prob",
+      "futures_sl_pct",
+      "futures_tp_pct",
+      "kelly_base_usdt",
+      "kelly_max_pct_liquid",
+      "kelly_max_usdt",
+      "min_signal_strength",
+      "min_success_probability",
+      "slippage_pct",
+      "stop_loss_pct",
+      "take_profit_pct",
+      "vol_spike_min"
+    ],
+    "patch_result": {
+      "applied": {
+        "futures_kelly_max_usdt": {
+          "new": 1111.0,
+          "old": 1193.0
+        },
+        "futures_min_prob": {
+          "new": 0.499,
+          "old": 0.493
+        },
+        "futures_sl_pct": {
+          "new": 1.42,
+          "old": 2.76
+        },
+        "futures_tp_pct": {
+          "new": 2.81,
+          "old": 5.34
+        },
+        "kelly_base_usdt": {
+          "new": 73.0,
+          "old": 144.0
+        },
+        "kelly_max_pct_liquid": {
+          "new": 0.704,
+          "old": 0.538
+        },
+        "kelly_max_usdt": {
+          "new": 747.0,
+          "old": 553.0
+        },
+        "min_signal_strength": {
+          "new": 0.389,
+          "old": 0.5
+        },
+        "min_success_probability": {
+          "new": 0.499,
+          "old": 0.493
+        },
+        "slippage_pct": {
+          "new": 0.00052,
+          "old": 0.00048
+        },
+        "stop_loss_pct": {
+          "new": 3.36,
+          "old": 1.05
+        },
+        "take_profit_pct": {
+          "new": 4.14,
+          "old": 6.24
+        },
+        "vol_spike_min": {
+          "new": 0.91,
+          "old": 0.99
+        }
+      },
+      "message": "13 campos actualizados \u2014 activos inmediatamente (sin restart)",
+      "ok": true,
+      "rejected": {},
+      "timestamp": "2026-07-02T22:32:12.450157+00:00"
+    },
+    "skipped": {},
+    "ts": "2026-07-02T22:32:12.476469+00:00"
+  },
+  "gate2_remediation": {
+    "bridge_backfilled": 85,
+    "profile_bridge_existing": 14,
+    "profile_bridge_target": 99,
+    "recent_closed": 100,
+    "trade_type_rows_normalized": 176,
+    "ts": "2026-07-02T22:32:12.901210+00:00",
+    "window_end": "2026-07-02T22:26:26.508391+00:00",
+    "window_start": "2026-06-30T10:23:51.212523+00:00"
+  },
+  "generated_at": "2026-07-02T22:32:12.901244+00:00",
+  "ok": true
+}

@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 from config_helpers import get_param
+import error_collector as ec
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -215,8 +216,11 @@ class FuturesClient:
                 "VALUES (%s, %s, %s, %s, %s)",
                 (symbol, 'futures', event, json.dumps(detail), binance_confirmed)
             )
-        except Exception:
-            pass  # audit failure must never interrupt trading logic
+        except Exception as e:
+            # Do not interrupt trading, but never silence audit failures.
+            ec.add_error(ec.SOURCE_SYSTEM, ec.LEVEL_ERROR,
+                         f"Futures audit write failed ({symbol}:{event}): {e}")
+            print(f"[Futures/Audit] failed {symbol}:{event}: {e}")
 
     def _save_futures_closed(self, pos: 'FuturesPosition', reason: str,
                               close_group_id: Optional[str] = None,
@@ -2476,6 +2480,8 @@ class FuturesClient:
                             today_realized_pnl=_sso_today_pnl,
                             daily_target=getattr(settings, 'sso_target_daily_usd', 40.0) if settings else 40.0,
                             trade_type="futures",
+                            regime_mode=getattr(settings, 'current_regime_mode', None) if settings else None,
+                            profile_label=getattr(settings, 'current_regime_profile_label', None) if settings else None,
                             bounce_entry=_bounce_entry_flag,
                             rescue_prediction_ev=_rescue_pred_ev,
                             rescue_signal=_rescue_signal,

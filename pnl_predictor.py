@@ -183,12 +183,18 @@ class PnLPredictor:
         w_trend_4h    = weights.get("trend_4h",     0.15)
         w_weekly_rng  = weights.get("weekly_range", 0.08)
 
+        def _num(v, default=0.0) -> float:
+            try:
+                return float(v)
+            except Exception:
+                return default
+
         probability = 0.5  # Base probability
 
         # ── RSI analysis ────────────────────────────────────────────────────
         rsi = indicators.get('rsi', {})
         if rsi:
-            rsi_value = rsi.get('value', 50)
+            rsi_value = _num(rsi.get('value', 50), 50.0)
             if rsi_value < 30:
                 probability += w_rsi
             elif rsi_value < 40:
@@ -201,9 +207,9 @@ class PnLPredictor:
         # ── MACD analysis ───────────────────────────────────────────────────
         macd = indicators.get('macd', {})
         if macd:
-            macd_value = macd.get('macd', 0)
-            signal_value = macd.get('signal', 0)
-            histogram = macd.get('histogram', 0)
+            macd_value = _num(macd.get('macd', 0), 0.0)
+            signal_value = _num(macd.get('signal', 0), 0.0)
+            histogram = _num(macd.get('histogram', 0), 0.0)
             if macd_value > signal_value:
                 probability += w_macd
             if histogram > 0:
@@ -215,7 +221,7 @@ class PnLPredictor:
         sma = indicators.get('sma', {})
         ema = indicators.get('ema', {})
         if sma and ema:
-            if ema.get('value', 0) > sma.get('value', 0):
+            if _num(ema.get('value', 0), 0.0) > _num(sma.get('value', 0), 0.0):
                 probability += w_ema
             else:
                 probability -= w_ema * 0.5
@@ -223,9 +229,9 @@ class PnLPredictor:
         # ── Bollinger Bands ─────────────────────────────────────────────────
         bollinger = indicators.get('bollinger_bands', {})
         if bollinger:
-            upper  = bollinger.get('upper', 0)
-            lower  = bollinger.get('lower', 0)
-            middle = bollinger.get('middle', 0)
+            upper  = _num(bollinger.get('upper', 0), 0.0)
+            lower  = _num(bollinger.get('lower', 0), 0.0)
+            middle = _num(bollinger.get('middle', 0), 0.0)
             if lower > 0 and middle > 0 and upper > lower:
                 position_in_band = (middle - lower) / (upper - lower)
                 if position_in_band < 0.2:
@@ -236,7 +242,7 @@ class PnLPredictor:
         # ── Vol Spike (strongest validated predictor) ───────────────────────
         vol_spike_d = indicators.get('vol_spike', {})
         if vol_spike_d:
-            spike = vol_spike_d.get('value', 1.0)
+            spike = _num(vol_spike_d.get('value', 1.0), 1.0)
             if spike >= 2.0:
                 probability += w_vol_spike          # strong breakout confirmation
             elif spike >= 1.5:
@@ -249,7 +255,7 @@ class PnLPredictor:
         # ── ATR% — adjust for volatility regime ─────────────────────────────
         atr_d = indicators.get('atr_pct', {})
         if atr_d:
-            atr_pct = atr_d.get('value', 2.0)
+            atr_pct = _num(atr_d.get('value', 2.0), 2.0)
             if atr_pct >= 3.0:
                 probability += w_atr * 0.50    # high vol = bigger potential move
             elif atr_pct < 0.5:
@@ -258,7 +264,15 @@ class PnLPredictor:
         # ── Trend 4h (macro context) ─────────────────────────────────────────
         trend_d = indicators.get('trend_4h', {})
         if trend_d:
-            trend = trend_d.get('value', 0)
+            trend_raw = trend_d.get('value', 0)
+            if isinstance(trend_raw, str):
+                _t = trend_raw.strip().upper()
+                trend = 1.0 if _t in ('UP', 'BULL', 'BULLISH') else -1.0 if _t in ('DOWN', 'BEAR', 'BEARISH') else 0.0
+            else:
+                try:
+                    trend = float(trend_raw)
+                except Exception:
+                    trend = 0.0
             if trend > 0:                        # EMA9 > EMA21 on 4h → bullish
                 probability += w_trend_4h
             elif trend < 0:                      # bearish 4h context
@@ -267,7 +281,7 @@ class PnLPredictor:
         # ── Weekly range position (buy at support, not resistance) ────────────
         wr_d = indicators.get('weekly_range', {})
         if wr_d:
-            wr = wr_d.get('value', 0.5)
+            wr = _num(wr_d.get('value', 0.5), 0.5)
             if wr <= 0.30:
                 probability += w_weekly_rng         # near weekly support
             elif wr >= 0.85:

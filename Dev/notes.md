@@ -203,3 +203,30 @@ Sistema comprando con PnL esperado negativo (NEAR accuracy -378%). VolSpike Over
   - `volspike-ajuste-selectivo-completado.md`
   - `dashboard-pnl-visibilidad-completado.md`
   - `expansion-e1-completada.md`
+
+---
+
+## 03 Jul 2026 — SMART Total Fase 2 (selector dual)
+
+### Resumen
+- Implementado selector de modo SMART Total con persistencia dedicada y auditoría por ciclo.
+- Desacoplado selector de perfil para usar histéresis independiente por régimen.
+- Integrado orden de decisión en `execute_once`: modo efectivo primero, luego perfil del modo.
+
+### Claves de estado (runtime)
+- `smart_total_mode_selector_state`
+- `smart_total_active_mode`
+- `smart_total_profile_selector_state_<REGIME>`
+- Mirror de compatibilidad: `regime_profile_selector_state_<REGIME>`
+
+### Eventos de auditoría
+- `smart_total_mode_selector_decision`
+- `regime_profile_selector_decision`
+
+### Config nueva (selector dual)
+- Modo: `smart_total_enabled`, `mode_selector_enabled`, `mode_require_confirmed`, `mode_min_hold_cycles`, `mode_min_confidence_delta`, `mode_audit_every_cycle`
+- Perfil: `profile_selector_enabled`, `profile_min_hold_cycles`, `profile_min_score_delta`
+
+### Validación rápida ejecutada
+- `pytest -q tests/test_health_audit.py -k selector_config_normalization_supports_smart_total_mode_fields` → 1 passed
+- `pytest -q tests/test_system_health.py -k SmartTotalSelector` → 2 passed

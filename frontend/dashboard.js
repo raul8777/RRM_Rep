@@ -22,6 +22,7 @@ let _cachedFuturesPositions = [];  // Updated by renderFuturesPositions each cyc
 let _cachedFuturesClosed = [];     // Updated by renderFuturesClosed each cycle
 const CACHE_TTL_MS = 15000;   // 15 s frontend cache
 const POLL_INTERVAL_MS = 30000; // 30 s poll (was 5 s → 6× less traffic)
+const BACKTEST_PROGRESS_POLL_MS = 5000;
 let _fetchInProgress = false;
 
 async function fetchDashboardData() {
@@ -229,6 +230,8 @@ const MODE_CFG = {
     'FUTURES_SHORT':{ icon: '📉',  label: 'SHORT 2×',   color: '#9b59b6' },
 };
 
+const PROFILE_ALIAS = { A: 'Agresivo', B: 'Balance', C: 'Defensa' };
+
 // ── Tab switching ─────────────────────────────────────────────────────────────
 function switchTab(tabId) {
     document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
@@ -399,6 +402,7 @@ function renderKPIRow(data) {
     const cycle    = data.next_cycle    || {};
     const pnlH     = data.pnl_history   || {};
     const regime   = data.market_regime || {};
+    const activeProfile = data.active_profile || {};
 
     const totalUsdt  = parseFloat(balance.total_usdt || 0);
     const liquidUsdt = parseFloat(balance.usdt_available || balance.total_usdt || 0);
@@ -426,6 +430,9 @@ function renderKPIRow(data) {
     const ctx        = data.market_context || {};
     const fng        = ctx.fear_greed_value ?? 50;
     const fngLabel   = ctx.fear_greed_label || 'Neutral';
+    const profileLabel = String(activeProfile.label || '').toUpperCase();
+    const profileAlias = String(activeProfile.alias || PROFILE_ALIAS[profileLabel] || 'N/D');
+    const profileCls = profileLabel === 'A' ? 'profile-a' : profileLabel === 'B' ? 'profile-b' : profileLabel === 'C' ? 'profile-c' : '';
 
     const unrealCls  = unrealPnl >= 0 ? 'positive' : 'negative';
     const pnlHCls    = pnlToday  >= 0 ? 'positive' : 'negative';
@@ -462,6 +469,11 @@ function renderKPIRow(data) {
     setText('sbUnreal',    `${unrealPnl >= 0 ? '+' : ''}$${fmt(unrealPnl)} USDT`, unrealCls);
     setText('sbWr',        `${fmt(wr,1)}%`, wrCls);
     setText('sbPf',        fmt(pf), pfCls);
+    setText('sbProfile',   profileAlias, profileCls);
+    const sbProfileItem = document.getElementById('sbProfileItem');
+    if (sbProfileItem) {
+        sbProfileItem.title = activeProfile.legend_text || 'A=Agresivo | B=Balance | C=Defensa';
+    }
     // FIX-L6b: Multimodal position counter using unified counts
     const spotOverflow = spotCount > maxSpot;
     const futOverflow  = isFutShort && futCount > futMax;
@@ -2503,6 +2515,8 @@ function renderOptimizedParams(d) {
 const _healthIcon = s => s === 'ok' ? '✅' : s === 'warning' ? '⚠️' : s === 'error' ? '❌' : '❓';
 const _healthColor = s => s === 'ok' ? '#4caf50' : s === 'warning' ? '#ff9800' : s === 'error' ? '#f44336' : '#888';
 const _levelColor = l => l === 'ERROR' ? '#f44336' : l === 'WARNING' ? '#ff9800' : '#aaa';
+const _smartHealthColor = s => s === 'ok' ? '#4caf50' : s === 'warning' ? '#ff9800' : (s === 'critical' || s === 'error') ? '#f44336' : s === 'inconclusive' ? '#9e9e9e' : '#888';
+const _smartHealthIcon = s => s === 'ok' ? '✅' : s === 'warning' ? '⚠️' : (s === 'critical' || s === 'error') ? '⛔' : s === 'inconclusive' ? '➖' : '❓';
 
 function updateHealthBadge(overall, summary) {
     const dot = document.getElementById('healthDot');
@@ -2568,6 +2582,64 @@ function renderHealthChecks(data) {
         </div>`;
     }).join('');
     el.innerHTML = rows || '<p class="loading">Sin checks</p>';
+}
+
+function renderHealthResults(data) {
+    const el = document.getElementById('healthResultsData');
+    if (!el) return;
+    if (!data || data.ok === false) {
+        el.innerHTML = '<p class="loading">SMART recheck no disponible</p>';
+        return;
+    }
+
+    const overall = String(data.overall || 'unknown').toLowerCase();
+    const overallColor = _smartHealthColor(overall);
+    const spot = data.spot || {};
+    const futures = data.futures || {};
+    const sr = data.smart_recheck || {};
+    const spotStatus = String(spot.status || 'unknown').toLowerCase();
+    const futuresStatus = String(futures.status || 'unknown').toLowerCase();
+    const err5 = (data.errors && data.errors.errors_last_5min) || 0;
+    const warn5 = (data.errors && data.errors.warnings_last_5min) || 0;
+    const driftCritical = (data.drift_alerts && data.drift_alerts.critical) || 0;
+    const intervalSec = sr.interval_seconds || 0;
+    const lastRun = sr.last_run_at || data.timestamp;
+    const lastRunLabel = lastRun ? new Date(lastRun).toLocaleTimeString('es-MX') : '—';
+    const nextEta = sr.next_run_eta_seconds != null ? `${sr.next_run_eta_seconds}s` : '—';
+
+    const _renderReasons = (arr) => (Array.isArray(arr) && arr.length)
+        ? arr.slice(0, 2).map(r => `<span class="smart-health-reason">${r}</span>`).join('')
+        : '<span class="smart-health-reason muted">sin hallazgos críticos</span>';
+
+    el.innerHTML = `
+        <div class="smart-health-head" style="border-color:${overallColor}">
+            <div class="smart-health-title" style="color:${overallColor}">${_smartHealthIcon(overall)} SMART Recheck: ${overall.toUpperCase()}</div>
+            <div class="smart-health-meta">cada ${intervalSec}s · last ${lastRunLabel} · next ${nextEta}</div>
+        </div>
+        <div class="smart-health-grid">
+            <div class="smart-health-card">
+                <div class="smart-health-card-head">
+                    <span style="color:${_smartHealthColor(spotStatus)}">${_smartHealthIcon(spotStatus)} SPOT</span>
+                    <span class="smart-health-score">score ${spot.score ?? '—'}</span>
+                </div>
+                <div class="smart-health-kpi">trades: ${spot.kpis?.n_trades ?? 0} · win: ${spot.kpis?.win_rate_pct ?? 0}% · net: ${spot.kpis?.net_pnl ?? 0}</div>
+                <div class="smart-health-reasons">${_renderReasons(spot.reasons)}</div>
+            </div>
+            <div class="smart-health-card">
+                <div class="smart-health-card-head">
+                    <span style="color:${_smartHealthColor(futuresStatus)}">${_smartHealthIcon(futuresStatus)} FUTURES</span>
+                    <span class="smart-health-score">score ${futures.score ?? '—'}</span>
+                </div>
+                <div class="smart-health-kpi">trades: ${futures.kpis?.n_trades ?? 0} · win: ${futures.kpis?.win_rate_pct ?? 0}% · net: ${futures.kpis?.net_pnl ?? 0}</div>
+                <div class="smart-health-reasons">${_renderReasons(futures.reasons)}</div>
+            </div>
+        </div>
+        <div class="smart-health-foot">
+            <span>errors 5m: <b>${err5}</b></span>
+            <span>warnings 5m: <b>${warn5}</b></span>
+            <span>drifts críticos sin ack: <b style="color:${driftCritical > 0 ? '#f44336' : '#4caf50'}">${driftCritical}</b></span>
+        </div>
+    `;
 }
 
 function renderErrors(data) {
@@ -2657,15 +2729,23 @@ function renderFullHealthCheck(data) {
 
 async function updateHealthAndErrors() {
     try {
-        const [hRes, eRes] = await Promise.all([
-            fetch(`${API_BASE}/health/status`),
-            fetch(`${API_BASE}/errors/recent?limit=50`)
+        const [hRes, eRes, rRes] = await Promise.all([
+            fetch(`${API_BASE}/health/status`, { headers: _authHeaders() }),
+            fetch(`${API_BASE}/errors/recent?limit=50`, { headers: _authHeaders() }),
+            fetch(`${API_BASE}/health/results`, { headers: _authHeaders() })
         ]);
         const hData = hRes.ok ? await hRes.json() : null;
         const eData = eRes.ok ? await eRes.json() : null;
+        const rData = rRes.ok ? await rRes.json() : null;
         renderHealthChecks(hData);
+        renderHealthResults(rData);
         renderErrors(eData);
-        if (hData) updateHealthBadge(hData.overall, hData.checks && hData.checks.errors);
+        if (rData && rData.overall) {
+            const mapped = rData.overall === 'critical' ? 'error' : (rData.overall === 'inconclusive' ? 'warning' : rData.overall);
+            updateHealthBadge(mapped, hData && hData.checks && hData.checks.errors);
+        } else if (hData) {
+            updateHealthBadge(hData.overall, hData.checks && hData.checks.errors);
+        }
     } catch (e) {
         console.error('Health fetch error:', e);
     }
@@ -2681,7 +2761,410 @@ async function pollBacktestResults() {
         const data = await res.json();
         renderBacktestResults(data);
         _pendingBacktests = (data.pending || []).filter(p => p.status === 'running');
+        updateBacktestProgressWidget();
     } catch (e) { /* silent */ }
+}
+
+function _secondsSinceIso(isoStr) {
+    if (!isoStr) return 0;
+    const t = new Date(isoStr).getTime();
+    if (Number.isNaN(t)) return 0;
+    return Math.max(0, Math.floor((Date.now() - t) / 1000));
+}
+
+function _formatDuration(seconds) {
+    const s = Math.max(0, Math.floor(seconds || 0));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+    if (m > 0) return `${m}m ${String(r).padStart(2, '0')}s`;
+    return `${r}s`;
+}
+
+function _shortRunId(id) {
+    if (!id || typeof id !== 'string') return '—';
+    return id.length > 8 ? `${id.slice(0, 8)}...` : id;
+}
+
+function _formatScenarioName(name) {
+    const map = {
+        spot_bull: 'SPOT_BULL',
+        range_scalp: 'RANGE_SCALP',
+        preservation: 'PRESERVATION',
+        futures_short: 'FUTURES_SHORT',
+    };
+    return map[name] || String(name || '').toUpperCase() || 'SCENARIO';
+}
+
+function renderSmartScenarioProgress(task) {
+    const panel = document.getElementById('smartScenarioProgressPanel');
+    if (!panel) return;
+
+    if (!task || task.type !== 'smart_backtest') {
+        panel.innerHTML = 'Escenarios Smart: sin ejecución activa.';
+        return;
+    }
+
+    const summary = (task.checkpoint_summary && Array.isArray(task.checkpoint_summary.scenarios))
+        ? task.checkpoint_summary.scenarios
+        : [];
+
+    const known = ['spot_bull', 'range_scalp', 'preservation', 'futures_short'];
+    const byName = {};
+    for (const s of summary) {
+        if (!s || !s.scenario) continue;
+        byName[s.scenario] = s;
+    }
+
+    const rows = known.map((name) => {
+        const s = byName[name] || { scenario: name, completed_runs: 0, failed_runs: 0, last_status: 'waiting' };
+        const isCurrent = task.current_scenario === name && task.status === 'running';
+
+        let badge = 'waiting';
+        if (isCurrent) badge = 'running';
+        else if ((s.failed_runs || 0) > 0) badge = 'error';
+        else if ((s.completed_runs || 0) > 0 && s.last_status === 'completed') badge = 'completed';
+
+        if (task.status === 'completed' && (s.completed_runs || 0) > 0 && (s.failed_runs || 0) === 0) {
+            badge = 'completed';
+        }
+
+        const totalRuns = isCurrent
+            ? (task.current_scenario_runs_total || 0)
+            : ((s.completed_runs || 0) + (s.failed_runs || 0));
+        const doneRuns = isCurrent
+            ? (task.current_scenario_runs_completed || 0)
+            : (s.completed_runs || 0);
+        const localPct = totalRuns > 0 ? Math.round((doneRuns / totalRuns) * 100) : 0;
+        const etaSec = isCurrent && task.status === 'running' && task.current_scenario_elapsed_sec != null && doneRuns > 0
+            ? Math.max(0, Math.round((task.current_scenario_elapsed_sec / doneRuns) * Math.max(totalRuns - doneRuns, 0)))
+            : 0;
+        const bestPnl = (s.best_pnl != null) ? parseFloat(s.best_pnl) : null;
+        const bestText = bestPnl == null
+            ? 'best —'
+            : `best ${bestPnl >= 0 ? '+' : ''}${fmt(bestPnl)} U`;
+        const runText = `${doneRuns}/${totalRuns || '?'} (${localPct}%) · fail ${(s.failed_runs || 0)}${isCurrent ? ` · ETA ${_formatDuration(etaSec)}` : ''}`;
+        const bestCls = bestPnl == null ? '' : (bestPnl >= 0 ? 'positive' : 'negative');
+
+        return `
+            <div class="smart-scenario-row">
+                <span class="smart-scenario-name">${_formatScenarioName(name)}</span>
+                <span class="smart-scenario-metric">${runText}</span>
+                <span class="smart-scenario-metric smart-scenario-best ${bestCls}">${bestText}</span>
+                <span class="smart-scenario-badge ${badge}">${badge}</span>
+            </div>
+        `;
+    }).join('');
+
+    panel.innerHTML = `
+        <div class="smart-scenarios-wrap">
+            <div class="smart-scenarios-title">Progreso Smart por escenario</div>
+            <div class="smart-scenarios-grid">${rows}</div>
+            <div class="smart-scenarios-footnote">
+                Sesión ${_shortRunId(task.run_id || task.session_id)} · global ${Math.round(task.progress_pct || 0)}%
+            </div>
+        </div>
+    `;
+}
+
+function _periodToDays(period) {
+    const p = String(period || '').toLowerCase();
+    if (p === '3m' || p === '90d') return 90;
+    if (p === '1y' || p === '365d') return 365;
+    if (p === '2y' || p === '730d') return 730;
+    if (p === '3y' || p === '1095d') return 1095;
+    const parsed = parseInt(p, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 365;
+}
+
+function _recommendedSimulations(days) {
+    if (days <= 120) return 4000;
+    if (days <= 450) return 12000;
+    if (days <= 900) return 20000;
+    return 36000;
+}
+
+function _estimateTaskDurationSec(task) {
+    if (!task || !task.status) return 0;
+
+    const started = task.started_at;
+    const completed = task.completed_at;
+    if (started && completed) {
+        const startMs = new Date(started).getTime();
+        const endMs = new Date(completed).getTime();
+        if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+            return Math.floor((endMs - startMs) / 1000);
+        }
+    }
+
+    const type = task.type || 'single';
+    if (type === 'smart_backtest') {
+        const days = _periodToDays(task.period);
+        const simsRaw = parseInt(task.simulations || '0', 10);
+        const sims = simsRaw > 0 ? simsRaw : _recommendedSimulations(days);
+        const secPerSim = days >= 900 ? 0.80 : days >= 450 ? 0.60 : 0.45;
+        return Math.max(900, Math.round(sims * secPerSim));
+    }
+    if (type === 'optimizer') {
+        const runs = parseInt(task.runs || '0', 10);
+        const days = parseInt(task.days || '20', 10);
+        const secPerRun = days >= 365 ? 1.25 : days >= 90 ? 0.85 : 0.55;
+        return Math.max(240, Math.round(Math.max(runs, 1) * secPerRun));
+    }
+
+    const daysBack = parseInt(task.days_back || '30', 10);
+    return Math.max(90, Math.round(daysBack * 4.5));
+}
+
+function _taskTitle(task) {
+    if (!task) return 'Backtest en ejecución';
+    const status = String(task.status || 'running').toLowerCase();
+    if (task.type === 'smart_backtest') {
+        if (status === 'completed') return 'Smart Backtest completado';
+        if (status === 'error') return 'Smart Backtest con error';
+        return 'Smart Backtest en ejecución';
+    }
+    if (task.type === 'optimizer') {
+        if (status === 'completed') return 'Optimizer completado';
+        if (status === 'error') return 'Optimizer con error';
+        return 'Optimizer en ejecución';
+    }
+    if (status === 'completed') return 'Backtest completado';
+    if (status === 'error') return 'Backtest con error';
+    return 'Backtest en ejecución';
+}
+
+function _taskDetail(task) {
+    if (!task) return 'Inicializando...';
+    if (task.type === 'smart_backtest') {
+        const simsRaw = parseInt(task.simulations || '0', 10);
+        const sims = simsRaw > 0 ? simsRaw : `${_recommendedSimulations(_periodToDays(task.period))} (auto)`;
+        const sc = task.current_scenario ? ` · escenario ${task.current_scenario}` : '';
+        return `Periodo ${task.period || '1y'} · Simulaciones ${sims}${sc}`;
+    }
+    if (task.type === 'optimizer') {
+        const done = task.completed_runs != null ? `${task.completed_runs}/${task.total_runs || task.runs || '?'}` : `${task.runs || '?'} corridas`;
+        return `${done} corridas · ventana ${task.days || '?'}d`;
+    }
+    return `${task.symbol || '—'} · ${(task.interval || '1h')} · ${(task.days_back || '?')}d`;
+}
+
+function _pickPendingFallback() {
+    if (!_pendingBacktests.length) return null;
+    const sorted = [..._pendingBacktests].sort((a, b) => {
+        const ta = new Date(a.started_at || 0).getTime();
+        const tb = new Date(b.started_at || 0).getTime();
+        return tb - ta;
+    });
+    return sorted[0];
+}
+
+function _smartCurrentScenarioDone(task) {
+    const baseDone = parseInt(task?.current_scenario_runs_completed || '0', 10) || 0;
+    const current = String(task?.current_scenario || '');
+    const rows = task?.checkpoint_summary?.scenarios;
+    if (!current || !Array.isArray(rows)) return baseDone;
+    const row = rows.find(r => String(r?.scenario || '') === current);
+    const chkDone = parseInt(row?.completed_runs || '0', 10);
+    if (!Number.isFinite(chkDone)) return baseDone;
+    return Math.max(baseDone, chkDone);
+}
+
+function _renderBacktestProgressWidget(task) {
+    const widget = document.getElementById('backtestProgressWidget');
+    const titleEl = document.getElementById('btProgressTitle');
+    const statusEl = document.getElementById('btProgressStatus');
+    const detailEl = document.getElementById('btProgressDetail');
+    const pctEl = document.getElementById('btProgressPct');
+    const barEl = document.getElementById('btProgressBar');
+    const metaEl = document.getElementById('btProgressMeta');
+    if (!widget || !titleEl || !statusEl || !detailEl || !pctEl || !barEl || !metaEl) return;
+
+    if (!task) {
+        widget.classList.add('hidden');
+        widget.classList.remove('is-error', 'is-completed');
+        renderSmartScenarioProgress(null);
+        return;
+    }
+
+    widget.classList.remove('hidden');
+    widget.classList.remove('is-error', 'is-completed');
+    renderSmartScenarioProgress(task.type === 'smart_backtest' ? task : null);
+
+    const status = String(task.status || 'running').toLowerCase();
+    const elapsedSec = _secondsSinceIso(task.started_at);
+    const estimatedSec = _estimateTaskDurationSec(task);
+    const pctByTime = estimatedSec > 0 ? Math.round((elapsedSec / estimatedSec) * 100) : 0;
+    const pctByTask = Number.isFinite(parseFloat(task.progress_pct)) ? parseFloat(task.progress_pct) : null;
+    let pctBySmart = null;
+    const smartDone = _smartCurrentScenarioDone(task);
+    if (task.type === 'smart_backtest') {
+        const scTotal = parseInt(task.scenario_total || '4', 10);
+        const scDone = parseInt(task.scenario_completed || '0', 10);
+        const curTotal = parseInt(task.current_scenario_runs_total || '0', 10);
+        if (scTotal > 0 && curTotal > 0) {
+            const localRatio = Math.min(1, Math.max(0, smartDone / curTotal));
+            const globalDone = Math.min(Math.max(scDone, 0), Math.max(scTotal - 1, 0));
+            pctBySmart = ((globalDone + localRatio) / scTotal) * 100.0;
+        }
+    }
+
+    const pctCandidates = [pctByTime];
+    if (pctByTask != null) pctCandidates.push(pctByTask);
+    if (pctBySmart != null) pctCandidates.push(pctBySmart);
+    let pct = Math.max(...pctCandidates);
+    const hasLiveProgress = (pctByTask != null && pctByTask > 0) || (pctBySmart != null && pctBySmart > 0);
+
+    if (status === 'completed') pct = 100;
+    if (status === 'error') pct = Math.min(100, Math.max(8, pct));
+    if (status === 'running') {
+        pct = hasLiveProgress ? Math.min(95, Math.max(0, pct)) : Math.min(95, Math.max(3, pct));
+    }
+
+    const etaSec = estimatedSec > elapsedSec ? (estimatedSec - elapsedSec) : 0;
+    const taskRunId = task.run_id || task.id || _smartBacktestRunId || _activeOptimizerRunId || _activeBacktestRunId;
+
+    titleEl.textContent = _taskTitle(task);
+    detailEl.textContent = _taskDetail(task);
+    pctEl.textContent = `${pct}%`;
+    barEl.style.width = `${pct}%`;
+
+    if (status === 'completed') {
+        widget.classList.add('is-completed');
+        statusEl.textContent = 'COMPLETED';
+        metaEl.textContent = `Run ${_shortRunId(taskRunId)} · duración ${_formatDuration(_secondsSinceIso(task.started_at) || estimatedSec)}`;
+    } else if (status === 'error') {
+        widget.classList.add('is-error');
+        statusEl.textContent = 'ERROR';
+        metaEl.textContent = `Run ${_shortRunId(taskRunId)} · ${task.error || 'falló durante la ejecución'}`;
+    } else {
+        statusEl.textContent = 'RUNNING';
+        const liveMetrics = [];
+        if (task.phase) liveMetrics.push(`fase ${task.phase}`);
+        if (task.current_scenario && task.current_scenario_runs_total) {
+            liveMetrics.push(`esc ${smartDone}/${task.current_scenario_runs_total}`);
+        }
+        if (task.total_trades != null) liveMetrics.push(`trades ${task.total_trades}`);
+        if (task.win_rate != null) liveMetrics.push(`WR ${(parseFloat(task.win_rate || 0) * 100).toFixed(1)}%`);
+        if (task.total_pnl != null) {
+            const pnl = parseFloat(task.total_pnl || 0);
+            liveMetrics.push(`PnL ${pnl >= 0 ? '+' : ''}${fmt(pnl)} USDT`);
+        }
+        const metricsText = liveMetrics.length ? ` · ${liveMetrics.join(' · ')}` : '';
+        metaEl.textContent = `Run ${_shortRunId(taskRunId)} · transcurrido ${_formatDuration(elapsedSec)} · ETA ${_formatDuration(etaSec)}${metricsText}`;
+    }
+}
+
+async function updateBacktestProgressWidget() {
+    let activeTask = null;
+
+    const activeSmartTask = await _autoBindActiveSmartRun();
+
+    if (_smartBacktestRunId) {
+        try {
+            const res = await fetch(`${API_BASE}/smart-backtest/progress/${_smartBacktestRunId}`, { headers: _authHeaders() });
+            if (res.ok) {
+                const task = await res.json();
+                activeTask = { ...task, run_id: _smartBacktestRunId, type: task.type || 'smart_backtest' };
+                if (task.status === 'completed' || task.status === 'error') {
+                    _lastBacktestProgressSnapshot = { ...activeTask, _snapshotTs: Date.now() };
+                    _setSmartRunId(null);
+
+                    // Rebind immediately to a newer running smart task (if any), skipping throttle.
+                    const rebound = await _autoBindActiveSmartRun(true);
+                    const reboundRunId = rebound && (rebound.run_id || rebound.session_id);
+                    const reboundStatus = String((rebound && rebound.status) || '').toLowerCase();
+                    if (reboundRunId && reboundStatus === 'running') {
+                        try {
+                            const reboundRes = await fetch(`${API_BASE}/smart-backtest/progress/${reboundRunId}`, { headers: _authHeaders() });
+                            if (reboundRes.ok) {
+                                const reboundTask = await reboundRes.json();
+                                activeTask = { ...reboundTask, run_id: reboundRunId, type: reboundTask.type || 'smart_backtest' };
+                            }
+                        } catch (_e) {
+                            // keep snapshot as best effort
+                        }
+                    }
+                }
+            } else if (res.status === 404) {
+                _setSmartRunId(null);
+            }
+        } catch (_e) {
+            // best-effort widget; ignore transient status errors
+        }
+    }
+
+    if (!activeTask && _activeOptimizerRunId) {
+        try {
+            const res = await fetch(`${API_BASE}/backtest/progress/${_activeOptimizerRunId}`, { headers: _authHeaders() });
+            if (res.ok) {
+                const task = await res.json();
+                activeTask = { ...task, run_id: _activeOptimizerRunId, type: task.type || 'optimizer' };
+                if (task.status === 'completed' || task.status === 'error') {
+                    _lastBacktestProgressSnapshot = { ...activeTask, _snapshotTs: Date.now() };
+                    _activeOptimizerRunId = null;
+                }
+            } else if (res.status === 404) {
+                _activeOptimizerRunId = null;
+            }
+        } catch (_e) {
+            // ignore polling failures
+        }
+    }
+
+    if (!activeTask && _activeBacktestRunId) {
+        try {
+            const res = await fetch(`${API_BASE}/backtest/progress/${_activeBacktestRunId}`, { headers: _authHeaders() });
+            if (res.ok) {
+                const task = await res.json();
+                activeTask = { ...task, run_id: _activeBacktestRunId, type: task.type || 'single' };
+                if (task.status === 'completed' || task.status === 'error') {
+                    _lastBacktestProgressSnapshot = { ...activeTask, _snapshotTs: Date.now() };
+                    _activeBacktestRunId = null;
+                }
+            } else if (res.status === 404) {
+                _activeBacktestRunId = null;
+            }
+        } catch (_e) {
+            // ignore polling failures
+        }
+    }
+
+    if (!activeTask) {
+        const fallback = _pickPendingFallback();
+        if (fallback) {
+            activeTask = { ...fallback, type: fallback.type || 'single' };
+        }
+    }
+
+    // If active endpoint already reports a running smart task, prefer it over stale snapshot.
+    if (!activeTask && activeSmartTask) {
+        const runId = activeSmartTask.run_id || activeSmartTask.session_id || null;
+        const status = String(activeSmartTask.status || '').toLowerCase();
+        if (runId && status === 'running') {
+            try {
+                const res = await fetch(`${API_BASE}/smart-backtest/progress/${runId}`, { headers: _authHeaders() });
+                if (res.ok) {
+                    const task = await res.json();
+                    activeTask = { ...task, run_id: runId, type: task.type || 'smart_backtest' };
+                }
+            } catch (_e) {
+                // ignore transient failures
+            }
+        }
+    }
+
+    if (!activeTask && _lastBacktestProgressSnapshot) {
+        const age = Date.now() - (_lastBacktestProgressSnapshot._snapshotTs || 0);
+        if (age < 120000) {
+            activeTask = _lastBacktestProgressSnapshot;
+        } else {
+            _lastBacktestProgressSnapshot = null;
+        }
+    }
+
+    _renderBacktestProgressWidget(activeTask);
 }
 
 // ── F&G header badge ──────────────────────────────────────────────────────────────
@@ -3900,6 +4383,250 @@ async function applyKellyPatch() {
 // ── Backtest Optimizer Panel ──────────────────────────────────────────────────
 let _backtestCache = null;
 let _backtestBestCache = null;
+let _smartBacktestRunId = null;
+let _activeBacktestRunId = null;
+let _activeOptimizerRunId = null;
+let _lastBacktestProgressSnapshot = null;
+let _lastBacktestPrecheck = null;
+let _sensitiveModalWired = false;
+const _CONTROL_AUDIT_KEY = 'controlActionAuditV1';
+const _SMART_RUN_STORAGE_KEY = 'smartBacktestRunIdV1';
+const _SMART_RUN_STORAGE_TS_KEY = 'smartBacktestRunIdTsV1';
+const _SMART_RUN_BOOTSTRAP_CLEAN_KEY = 'smartBacktestRunBootstrapCleanV1';
+let _lastSmartAutoBindTs = 0;
+
+function _setSmartRunId(runId) {
+    _smartBacktestRunId = runId || null;
+    try {
+        if (_smartBacktestRunId) {
+            localStorage.setItem(_SMART_RUN_STORAGE_KEY, _smartBacktestRunId);
+            localStorage.setItem(_SMART_RUN_STORAGE_TS_KEY, String(Date.now()));
+        } else {
+            localStorage.removeItem(_SMART_RUN_STORAGE_KEY);
+            localStorage.removeItem(_SMART_RUN_STORAGE_TS_KEY);
+        }
+    } catch (_e) {
+        // localStorage best-effort only
+    }
+}
+
+function _restoreSmartRunId() {
+    try {
+        // One-time cleanup after deployment: avoid getting stuck on a stale completed run_id.
+        if (!localStorage.getItem(_SMART_RUN_BOOTSTRAP_CLEAN_KEY)) {
+            localStorage.removeItem(_SMART_RUN_STORAGE_KEY);
+            localStorage.removeItem(_SMART_RUN_STORAGE_TS_KEY);
+            localStorage.setItem(_SMART_RUN_BOOTSTRAP_CLEAN_KEY, '1');
+        }
+
+        const saved = localStorage.getItem(_SMART_RUN_STORAGE_KEY);
+        if (!saved) return;
+
+        const savedTsRaw = localStorage.getItem(_SMART_RUN_STORAGE_TS_KEY);
+        const savedTs = Number(savedTsRaw || 0);
+        const ageMs = Date.now() - (Number.isFinite(savedTs) ? savedTs : 0);
+        const maxAgeMs = 30 * 60 * 1000;
+
+        // Drop stale run bindings so auto-bind can attach to the real active run.
+        if (!savedTs || ageMs > maxAgeMs) {
+            localStorage.removeItem(_SMART_RUN_STORAGE_KEY);
+            localStorage.removeItem(_SMART_RUN_STORAGE_TS_KEY);
+            _smartBacktestRunId = null;
+            return;
+        }
+
+        _smartBacktestRunId = saved;
+    } catch (_e) {
+        // ignore localStorage failures
+    }
+}
+
+async function _autoBindActiveSmartRun(force = false) {
+    const now = Date.now();
+    if (!force && (now - _lastSmartAutoBindTs) < 15000) return null;
+    _lastSmartAutoBindTs = now;
+    try {
+        const res = await fetch(`${API_BASE}/smart-backtest/active`, { headers: _authHeaders() });
+        if (!res.ok) return null;
+        const payload = await res.json();
+        const task = payload && payload.task ? payload.task : null;
+        if (!task) return null;
+        const incomingRunId = (task && task.run_id) || (task && task.session_id) || null;
+        const incomingStatus = task ? String(task.status || '') : '';
+        
+        // Rebind if incoming is 'running' (prefer live run), or if we have no current binding
+        if (incomingRunId && incomingStatus === 'running') {
+            _setSmartRunId(incomingRunId);
+        } else if (!_smartBacktestRunId && incomingRunId && incomingStatus) {
+            _setSmartRunId(incomingRunId);
+        }
+        return task;
+    } catch (_e) {
+        // best-effort auto-bind
+        return null;
+    }
+}
+
+function escapeHtml(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function _loadControlAudit() {
+    try {
+        const raw = localStorage.getItem(_CONTROL_AUDIT_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (_e) {
+        return [];
+    }
+}
+
+function _saveControlAudit(rows) {
+    try {
+        localStorage.setItem(_CONTROL_AUDIT_KEY, JSON.stringify(rows || []));
+    } catch (_e) { /* silent */ }
+}
+
+function renderControlAuditLog() {
+    const el = document.getElementById('controlAuditLog');
+    if (!el) return;
+    const rows = _loadControlAudit();
+    if (!rows.length) {
+        el.innerHTML = '<div class="control-audit-empty">Sin eventos de control.</div>';
+        return;
+    }
+    el.innerHTML = rows.map(r => {
+        const ts = r.ts ? new Date(r.ts).toLocaleString() : '—';
+        const level = r.level || 'ok';
+        return `<div class="control-audit-item ${level}">
+            <div class="control-audit-line1">
+                <strong>${escapeHtml(r.action || 'acción')}</strong>
+                <span>${escapeHtml(ts)}</span>
+            </div>
+            <div class="control-audit-line2">${escapeHtml(r.detail || '')}</div>
+        </div>`;
+    }).join('');
+}
+
+function pushControlAudit(action, detail, level = 'ok') {
+    const rows = _loadControlAudit();
+    rows.unshift({ ts: new Date().toISOString(), action, detail, level });
+    const capped = rows.slice(0, 40);
+    _saveControlAudit(capped);
+    renderControlAuditLog();
+}
+
+function clearControlAuditLog() {
+    _saveControlAudit([]);
+    renderControlAuditLog();
+}
+
+function exportControlAuditLog() {
+    const rows = _loadControlAudit();
+    const statusEl = document.getElementById('controlActionStatus');
+    if (!rows.length) {
+        if (statusEl) statusEl.textContent = '⚠️ Sin eventos para exportar.';
+        return;
+    }
+    const payload = {
+        exported_at: new Date().toISOString(),
+        total_events: rows.length,
+        events: rows,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const fileName = `control_audit_${stamp}.json`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    if (statusEl) statusEl.textContent = `✅ Bitácora exportada (${rows.length} eventos).`;
+}
+
+function askSensitiveConfirmation(opts = {}) {
+    const modal = document.getElementById('sensitiveConfirmModal');
+    const titleEl = document.getElementById('sensitiveModalTitle');
+    const msgEl = document.getElementById('sensitiveModalMessage');
+    const check1 = document.getElementById('sensitiveCheck1');
+    const check2 = document.getElementById('sensitiveCheck2');
+    const reasonEl = document.getElementById('sensitiveReason');
+    const hintEl = document.getElementById('sensitiveModalHint');
+    const confirmBtn = document.getElementById('sensitiveConfirmBtn');
+    const cancelBtn = document.getElementById('sensitiveCancelBtn');
+    const closeBtn = document.getElementById('sensitiveModalClose');
+    if (!modal || !titleEl || !msgEl || !check1 || !check2 || !reasonEl || !hintEl || !confirmBtn || !cancelBtn || !closeBtn) {
+        const fallback = window.confirm(opts.message || '¿Confirmas ejecutar esta acción sensible?');
+        return Promise.resolve({ ok: !!fallback, reason: '' });
+    }
+
+    if (!_sensitiveModalWired) {
+        const _close = (ok) => {
+            if (!modal._resolver) return;
+            const reason = String(reasonEl.value || '').trim();
+            const resolver = modal._resolver;
+            modal._resolver = null;
+            modal.classList.remove('is-open');
+            modal.setAttribute('aria-hidden', 'true');
+            resolver({ ok, reason });
+        };
+        const _refresh = () => {
+            const minReason = Number(modal.dataset.minReason || 8);
+            const reason = String(reasonEl.value || '').trim();
+            const ready = check1.checked && check2.checked && reason.length >= minReason;
+            confirmBtn.disabled = !ready;
+            if (ready) {
+                hintEl.classList.add('ready');
+                hintEl.textContent = 'Checklist validado. Acción lista para ejecutar.';
+            } else {
+                hintEl.classList.remove('ready');
+                hintEl.textContent = `Completa checklist y motivo (mín. ${minReason} caracteres).`;
+            }
+        };
+
+        check1.addEventListener('change', _refresh);
+        check2.addEventListener('change', _refresh);
+        reasonEl.addEventListener('input', _refresh);
+        confirmBtn.addEventListener('click', () => _close(true));
+        cancelBtn.addEventListener('click', () => _close(false));
+        closeBtn.addEventListener('click', () => _close(false));
+        modal.addEventListener('click', (e) => {
+            const target = e.target;
+            if (target && target.dataset && target.dataset.closeModal === '1') _close(false);
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && modal.classList.contains('is-open')) _close(false);
+        });
+        modal._refreshState = _refresh;
+        _sensitiveModalWired = true;
+    }
+
+    titleEl.textContent = opts.title || 'Confirmar acción sensible';
+    msgEl.textContent = opts.message || 'Esta operación puede impactar el comportamiento en vivo.';
+    confirmBtn.textContent = opts.confirmLabel || 'Confirmar y ejecutar';
+    modal.dataset.minReason = String(opts.minReason || 8);
+
+    check1.checked = false;
+    check2.checked = false;
+    reasonEl.value = opts.defaultReason || '';
+    hintEl.classList.remove('ready');
+    modal.classList.add('is-open');
+    modal.setAttribute('aria-hidden', 'false');
+    if (typeof modal._refreshState === 'function') modal._refreshState();
+    reasonEl.focus();
+
+    return new Promise((resolve) => {
+        modal._resolver = resolve;
+    });
+}
 
 async function fetchBacktestResults() {
     try {
@@ -3910,7 +4637,30 @@ async function fetchBacktestResults() {
         if (runsRes.ok) { const d = await runsRes.json(); if (d.ok) _backtestCache = d; }
         if (bestRes.ok) { const d = await bestRes.json(); if (d.ok) _backtestBestCache = d; }
         renderBacktestPanel(_backtestCache, _backtestBestCache);
+        renderBacktestReadOnlyPanel(_backtestCache, _backtestBestCache);
+        if (_backtestBestCache && _backtestBestCache.best && _backtestBestCache.best.id) {
+            runBacktestApplyPrechecks(_backtestBestCache.best.id);
+        }
     } catch(e) { /* silent */ }
+}
+
+function renderBacktestReadOnlyPanel(data, best) {
+    const el = document.getElementById('backtestReadOnlyPanel');
+    if (!el) return;
+    if (!data || !best || !best.best || !data.baseline) {
+        el.innerHTML = '<p class="loading">Sin resultados aún. Ejecuta optimización desde Acciones/Control.</p>';
+        return;
+    }
+    const base = parseFloat(data.baseline.pnl_total || 0);
+    const opt = parseFloat(best.best.pnl_total || 0);
+    const imp = parseFloat(best.improvement_usdt || 0);
+    el.innerHTML = `
+        <div class="data-item"><span class="data-label">Fuente</span><span class="data-value" title="Motor canónico: backtest_optimizer.py. Smart optimiza múltiples escenarios reutilizando el motor.">Backtest Engine + Smart Orchestrator</span></div>
+        <div class="data-item"><span class="data-label">Baseline</span><span class="${base >= 0 ? 'positive' : 'negative'}">${base >= 0 ? '+' : ''}${base.toFixed(2)} USDT</span></div>
+        <div class="data-item"><span class="data-label">Mejor corrida</span><span class="positive">+${opt.toFixed(2)} USDT</span></div>
+        <div class="data-item"><span class="data-label">Mejora</span><span class="positive">+${imp.toFixed(2)} USDT</span></div>
+        <div class="control-status-note" style="margin-top:10px">La aplicación de parámetros y controles mutantes se centraliza en Acciones/Control para reducir riesgo operativo.</div>
+    `;
 }
 
 function renderBacktestPanel(data, best) {
@@ -3935,6 +4685,9 @@ function renderBacktestPanel(data, best) {
         const bpnl    = parseFloat(baseline.pnl_total || 0);
         const opnl    = parseFloat(best.best.pnl_total || 0);
         summaryHtml = `
+        <div class="control-status-note" style="margin-bottom:10px">
+            <strong>Fuente:</strong> motor <code>backtest_optimizer.py</code> (corridas persistidas en BD). <strong>Smart Backtest Optimizer</strong> orquesta escenarios múltiples reutilizando este motor.
+        </div>
         <div class="bt-summary">
             <div class="bt-sum-card">
                 <div class="bt-sum-label">Corridas totales</div>
@@ -4197,6 +4950,44 @@ async function applyBestBacktestConfig() {
     }
 
     const runId = _backtestBestCache.best.id;
+
+    const precheck = await runBacktestApplyPrechecks(runId);
+    const criticals = (precheck.items || []).filter(i => i.level === 'critical');
+    const warns = (precheck.items || []).filter(i => i.level === 'warn');
+    if (criticals.length > 0) {
+        if (statusEl) statusEl.textContent = `⛔ Bloqueado por prechecks críticos (${criticals.length}). Revisa panel de guardas.`;
+        pushControlAudit('Apply Backtest', `Bloqueado por prechecks críticos: ${criticals.map(i => i.title).join(', ')}`, 'error');
+        return;
+    }
+
+    const warnCodes = new Set(warns.map(i => i.code));
+    const comboA = warnCodes.has('regime_mismatch') && warnCodes.has('parity_gap_warn') && warnCodes.has('health_warning');
+    const comboB = warnCodes.has('run_stale') && warnCodes.has('parity_gap_warn');
+    if (comboA || comboB) {
+        const comboLabel = comboA
+            ? 'régimen mismatch + paridad alta + health warning'
+            : 'run desactualizado + paridad alta';
+        if (statusEl) statusEl.textContent = `⛔ Bloqueado por combinación de riesgo: ${comboLabel}.`;
+        pushControlAudit('Apply Backtest', `Bloqueado por combinación de riesgo: ${comboLabel}`, 'error');
+        return;
+    }
+
+    if (warns.length > 0) {
+        const warnMsg = warns.map(w => `- ${w.title}: ${w.value}`).join(' | ');
+        const confirmResult = await askSensitiveConfirmation({
+            title: 'Aplicar parámetros de Backtest',
+            message: `Hay advertencias activas en prechecks (${warns.length}). ${warnMsg}`,
+            confirmLabel: 'Aplicar seleccionados',
+            minReason: 10,
+            defaultReason: 'Aplicación manual con advertencias revisadas.',
+        });
+        if (!confirmResult.ok) {
+            if (statusEl) statusEl.textContent = '⚠️ Aplicación cancelada por usuario tras revisar prechecks.';
+            pushControlAudit('Apply Backtest', 'Cancelado por usuario tras advertencias de precheck', 'warn');
+            return;
+        }
+    }
+
     const fields = [];
     document.querySelectorAll('[id^="bt-chk-"]').forEach(chk => {
         if (chk.checked) fields.push(chk.dataset.param);
@@ -4240,12 +5031,15 @@ async function applyBestBacktestConfig() {
             if (skipped.length) msg += ` | ⛔ ${skipped.length} bloqueados`;
             if (statusEl) statusEl.textContent = msg;
             if (actionStatus) actionStatus.textContent = '';
+            pushControlAudit('Apply Backtest', `OK snapshot=${d.snapshot_id} applied=${applied.length} rejected=${rejected.length} skipped=${skipped.length}`, rejected.length || skipped.length ? 'warn' : 'ok');
             setTimeout(() => fetchBacktestResults(), 800);
         } else {
             if (statusEl) statusEl.textContent = `❌ Error: ${d.detail || d.error || JSON.stringify(d)}`;
+            pushControlAudit('Apply Backtest', `Error API: ${d.detail || d.error || 'sin detalle'}`, 'error');
         }
     } catch(e) {
         if (statusEl) statusEl.textContent = `❌ ${e.message}`;
+        pushControlAudit('Apply Backtest', `Error técnico: ${e.message}`, 'error');
     }
 }
 
@@ -4259,13 +5053,182 @@ async function runBacktestOptimizer() {
             body: JSON.stringify({ runs: 1000, days: 20, auto_apply: false }),
         });
         const d = await res.json();
+        if (d.ok && d.run_id) {
+            _activeOptimizerRunId = d.run_id;
+        }
         if (statusEl) statusEl.textContent = d.ok
-            ? `✅ Backtest iniciado: ${d.message || 'ver logs del servidor'}`
+            ? `✅ Backtest iniciado: ${d.message || 'ver logs del servidor'} (${_shortRunId(d.run_id)})`
             : `❌ Error: ${d.error || JSON.stringify(d)}`;
+        updateBacktestProgressWidget();
         setTimeout(() => fetchBacktestResults(), 5000);
     } catch(e) {
         if (statusEl) statusEl.textContent = `❌ ${e.message}`;
     }
+}
+
+async function runSmartBacktest() {
+    const statusEl = document.getElementById('bt-action-status');
+    const ctxEl = document.getElementById('optimizerContextInfo');
+    if (statusEl) statusEl.textContent = '⏳ Iniciando Smart Backtest...';
+    try {
+        const periodEl = document.getElementById('smartPeriod');
+        const simulationsEl = document.getElementById('smartSimulations');
+        const capitalEl = document.getElementById('smartCapital');
+        const strictEl = document.getElementById('smartStrictData');
+
+        const period = periodEl ? periodEl.value : '1y';
+        const simulations = simulationsEl ? parseInt(simulationsEl.value || '0', 10) : 0;
+        const capitalRaw = capitalEl ? String(capitalEl.value || '').trim() : '';
+        const capital = capitalRaw ? parseFloat(capitalRaw) : null;
+        const strictData = strictEl ? !!strictEl.checked : false;
+        const autoRecommend = !simulations || simulations <= 0;
+
+        const res = await fetch(`${API_BASE}/smart-backtest/start`, {
+            method: 'POST',
+            headers: { ..._authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                period,
+                simulations: simulations > 0 ? simulations : 0,
+                auto_recommend_sims: autoRecommend,
+                strict_data: strictData,
+                capital,
+            }),
+        });
+        const d = await res.json();
+        if (!res.ok || !d.ok) {
+            throw new Error(d.error || d.detail || `HTTP ${res.status}`);
+        }
+        _setSmartRunId(d.run_id);
+        if (statusEl) statusEl.textContent = `🚀 Smart iniciado (${_smartBacktestRunId.slice(0, 8)}...)`;
+        updateBacktestProgressWidget();
+        if (ctxEl) {
+            ctxEl.textContent = 'Smart Backtest en ejecución. Al finalizar, actualiza corridas para ver resultados consolidados en el panel.';
+        }
+
+        const _poll = async () => {
+            if (!_smartBacktestRunId) return;
+            try {
+                const sr = await fetch(`${API_BASE}/smart-backtest/status/${_smartBacktestRunId}`, { headers: _authHeaders() });
+                if (!sr.ok) return;
+                const st = await sr.json();
+                if (st.status === 'running') {
+                    if (statusEl) statusEl.textContent = '⏳ Smart Backtest corriendo...';
+                    updateBacktestProgressWidget();
+                    setTimeout(_poll, 5000);
+                    return;
+                }
+                if (st.status === 'completed') {
+                    if (statusEl) statusEl.textContent = '✅ Smart Backtest completado';
+                    if (ctxEl) ctxEl.textContent = 'Smart Backtest completado. Se actualizaron corridas del motor canónico para análisis y aplicación.';
+                    await fetchBacktestResults();
+                    updateBacktestProgressWidget();
+                } else {
+                    if (statusEl) statusEl.textContent = `❌ Smart falló (${st.error || 'sin detalle'})`;
+                    updateBacktestProgressWidget();
+                }
+            } catch (_e) {
+                if (statusEl) statusEl.textContent = `⚠️ Estado Smart no disponible (${_e.message})`;
+            }
+        };
+        setTimeout(_poll, 4000);
+    } catch (e) {
+        if (statusEl) statusEl.textContent = `❌ ${e.message}`;
+    }
+}
+
+async function runBacktestApplyPrechecks(runId) {
+    const panel = document.getElementById('backtestPrecheckPanel');
+    const _render = (items, summary) => {
+        if (!panel) return;
+        const rows = (items || []).map(it => `
+            <div class="precheck-item precheck-${it.level}" title="${it.hint || ''}">
+                <strong>${it.title}</strong>
+                <div>${it.value}</div>
+            </div>
+        `).join('');
+        panel.innerHTML = `${summary}<div class="precheck-grid">${rows}</div>`;
+    };
+
+    const result = { items: [] };
+    try {
+        const [sumRes, runRes, cmpRes, healthRes] = await Promise.all([
+            fetch(`${API_BASE}/dashboard/summary`, { headers: _authHeaders() }),
+            fetch(`${API_BASE}/backtest/runs/${runId}`, { headers: _authHeaders() }),
+            fetch(`${API_BASE}/backtest/compare-vs-live?run_id=${encodeURIComponent(runId)}`, { headers: _authHeaders() }),
+            fetch(`${API_BASE}/health/status`, { headers: _authHeaders() }),
+        ]);
+
+        const sumData = sumRes.ok ? await sumRes.json() : null;
+        const runData = runRes.ok ? await runRes.json() : null;
+        const cmpData = cmpRes.ok ? await cmpRes.json() : null;
+        const healthData = healthRes.ok ? await healthRes.json() : null;
+
+        const currentRegime = sumData?.market_regime?.trading_mode || 'unknown';
+        const runParams = runData?.run?.params || {};
+        const runMeta = runParams?.__run_meta || {};
+        const runRegime = runMeta?.regime || cmpData?.regime || 'unknown';
+        const runTsRaw = runData?.run?.ts || null;
+        const runTs = runTsRaw ? new Date(runTsRaw) : null;
+        const ageHours = runTs ? (Date.now() - runTs.getTime()) / (1000 * 60 * 60) : null;
+        const parityGapAbs = Math.abs(parseFloat(cmpData?.parity?.pnl_total_gap_pct ?? 0));
+        const healthOverall = (healthData?.overall || 'unknown').toLowerCase();
+
+        result.items.push({
+            title: 'Régimen Run vs Runtime',
+            value: `${runRegime} vs ${currentRegime}`,
+            level: (runRegime !== 'unknown' && currentRegime !== 'unknown' && runRegime !== currentRegime) ? 'warn' : 'ok',
+            code: (runRegime !== 'unknown' && currentRegime !== 'unknown' && runRegime !== currentRegime) ? 'regime_mismatch' : 'regime_aligned',
+            hint: 'Aplicar parámetros optimizados en régimen distinto puede degradar desempeño o riesgo.',
+        });
+
+        result.items.push({
+            title: 'Edad de corrida',
+            value: ageHours == null ? 'sin timestamp' : `${ageHours.toFixed(1)} h`,
+            level: ageHours == null ? 'warn' : ageHours > 72 ? 'warn' : 'ok',
+            code: ageHours == null ? 'run_age_unknown' : (ageHours > 72 ? 'run_stale' : 'run_fresh'),
+            hint: 'Corridas antiguas pierden validez si cambió el mercado.',
+        });
+
+        let parityLevel = 'ok';
+        if (parityGapAbs > 1000) parityLevel = 'critical';
+        else if (parityGapAbs > 300) parityLevel = 'warn';
+        result.items.push({
+            title: 'Paridad PnL vs Live',
+            value: Number.isFinite(parityGapAbs) ? `${parityGapAbs.toFixed(2)}% gap` : 'sin dato',
+            level: Number.isFinite(parityGapAbs) ? parityLevel : 'warn',
+            code: Number.isFinite(parityGapAbs)
+                ? (parityLevel === 'critical' ? 'parity_gap_critical' : (parityLevel === 'warn' ? 'parity_gap_warn' : 'parity_gap_ok'))
+                : 'parity_gap_unknown',
+            hint: 'Gap alto indica baja correspondencia entre backtest y comportamiento real.',
+        });
+
+        result.items.push({
+            title: 'Health del sistema',
+            value: healthOverall,
+            level: healthOverall === 'critical' ? 'critical' : (healthOverall === 'warning' ? 'warn' : 'ok'),
+            code: healthOverall === 'critical' ? 'health_critical' : (healthOverall === 'warning' ? 'health_warning' : 'health_ok'),
+            hint: 'No aplicar cambios con sistema inestable o degradado.',
+        });
+
+        const criticals = result.items.filter(i => i.level === 'critical').length;
+        const warns = result.items.filter(i => i.level === 'warn').length;
+        const summary = criticals > 0
+            ? `<strong style="color:#e74c3c">⛔ Precheck bloqueante: ${criticals} crítico(s), ${warns} advertencia(s)</strong>`
+            : warns > 0
+                ? `<strong style="color:#f39c12">⚠️ Precheck con advertencias: ${warns}</strong>`
+                : `<strong style="color:#4ecca3">✅ Precheck OK: sin bloqueos</strong>`;
+        _render(result.items, summary);
+    } catch (e) {
+        result.items.push({
+            title: 'Precheck técnico',
+            value: `falló: ${e.message}`,
+            level: 'critical',
+            hint: 'No se pudo validar guardas; se bloquea aplicación por seguridad.',
+        });
+        _render(result.items, `<strong style="color:#e74c3c">⛔ Precheck bloqueado por error técnico</strong>`);
+    }
+    _lastBacktestPrecheck = result;
+    return result;
 }
 
 async function rollbackLastConfig() {
@@ -4311,15 +5274,45 @@ function tickCountdown() {
 
 // ── Control buttons ───────────────────────────────────────────────────────────
 async function controlAction(path) {
+    const actionMap = {
+        '/control/pause': 'Pausar nuevas entradas',
+        '/control/stop': 'Detener ciclo',
+        '/control/start': 'Reanudar ciclo',
+    };
+    const actionLabel = actionMap[path] || path;
+    const confirmResult = await askSensitiveConfirmation({
+        title: 'Acción operativa sensible',
+        message: `${actionLabel}. Esta operación afecta ejecución en vivo del sistema.`,
+        confirmLabel: 'Ejecutar acción',
+        minReason: 8,
+        defaultReason: `Operación manual: ${actionLabel}`,
+    });
+    if (!confirmResult.ok) {
+        pushControlAudit(actionLabel, 'Cancelada por usuario', 'warn');
+        return;
+    }
+
+    const statusEl = document.getElementById('controlActionStatus');
+    if (statusEl) statusEl.textContent = `⏳ Ejecutando: ${actionLabel}...`;
     try {
-        await fetch(`${API_BASE}${path}`, {
+        const res = await fetch(`${API_BASE}${path}`, {
             method: 'POST',
             headers: _authHeaders(),
-            body: JSON.stringify({ reason: 'Manual action from dashboard' })
+            body: JSON.stringify({ reason: confirmResult.reason || 'Manual action from dashboard' })
         });
+        if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(txt || `HTTP ${res.status}`);
+        }
         _cachedData = null;
         await updateDashboard();
-    } catch (e) { console.error('Control error:', e); }
+        if (statusEl) statusEl.textContent = `✅ Acción ejecutada: ${actionLabel}`;
+        pushControlAudit(actionLabel, `Ejecutada. Motivo: ${confirmResult.reason || 'n/a'}`, 'ok');
+    } catch (e) {
+        if (statusEl) statusEl.textContent = `❌ Falló: ${actionLabel} (${e.message})`;
+        pushControlAudit(actionLabel, `Error: ${e.message}`, 'error');
+        console.error('Control error:', e);
+    }
 }
 
 // ── SVG PnL Chart (with hover tooltip + crosshair) ────────────────────────────
@@ -4466,23 +5459,23 @@ function renderBTCContext(regime) {
 
     el.innerHTML = `
         <div style="margin-bottom:10px">
-            <span class="btc-price-big">$${btcPrice ? btcPrice.toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0}) : '—'}</span>
-            <span class="btc-change ${priceCls}">${btc24h>=0?'+':''}${btc24h.toFixed(2)}% (24h)</span>
+            <span class="btc-price-big" title="Precio spot actual de BTCUSDT en el ciclo actual">$${btcPrice ? btcPrice.toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0}) : '—'}</span>
+            <span class="btc-change ${priceCls}" title="Cambio porcentual 24h = (precio actual - precio hace 24h) / precio hace 24h">${btc24h>=0?'+':''}${btc24h.toFixed(2)}% (24h)</span>
         </div>
         <div class="btc-metrics">
-            <div class="btc-metric">
+            <div class="btc-metric" title="Tendencia 4h por cruce EMA9 vs EMA21: UP si EMA9 > EMA21, DOWN si EMA9 < EMA21">
                 <div class="btc-metric-label">Tendencia 4h</div>
                 <div class="btc-metric-val ${trendCls}">${trend === 'UP' ? '⬆ UP' : trend === 'DOWN' ? '⬇ DOWN' : '→ FLAT'}</div>
             </div>
-            <div class="btc-metric">
+            <div class="btc-metric" title="RSI 4h (0-100). Umbrales: >70 sobrecompra, <30 sobreventa.">
                 <div class="btc-metric-label">RSI 4h</div>
                 <div class="btc-metric-val ${rsi>70?'negative':rsi<30?'positive':''}">${rsi ? rsi.toFixed(1) : '—'}</div>
             </div>
-            <div class="btc-metric">
+            <div class="btc-metric" title="Retorno acumulado de BTC en los últimos 7 días">
                 <div class="btc-metric-label">7d</div>
                 <div class="btc-metric-val ${btc7d>=0?'positive':'negative'}">${btc7d>=0?'+':''}${btc7d.toFixed(2)}%</div>
             </div>
-            <div class="btc-metric">
+            <div class="btc-metric" title="Retorno acumulado de BTC en los últimos 30 días; referencia para sesgo de régimen">
                 <div class="btc-metric-label">30d</div>
                 <div class="btc-metric-val ${btc30d>=0?'positive':'negative'}">${btc30d>=0?'+':''}${btc30d.toFixed(2)}%</div>
             </div>
@@ -4536,12 +5529,12 @@ function renderPairScanner(pairScreener) {
         const chgCls = chg24 >= 0 ? 'scanner-up' : 'scanner-down';
         const trendCls = trend === 'UP' ? 'scanner-up' : trend === 'DOWN' ? 'scanner-down' : 'scanner-flat';
         const scoreCls = score >= 60 ? 'positive' : score >= 40 ? '' : 'negative';
-        return `<div class="scanner-row">
+        return `<div class="scanner-row" title="Score combina fuerza técnica, RSI, volumen y contexto de régimen. Bias RAW es señal pura; RÉGIMEN aplica filtro por modo actual.">
             <span class="scanner-sym">${p.symbol || '—'}</span>
-            <span class="${scoreCls}">${score.toFixed(0)}</span>
-            <span style="color:${rsi>70?'#e74c3c':rsi<30?'#4ecca3':'#aaa'}">${rsi.toFixed(1)}</span>
-            <span style="color:${vol>1.5?'#4ecca3':'#888'}">${vol.toFixed(1)}x</span>
-            <span class="${chgCls}">${chg24>=0?'+':''}${chg24.toFixed(2)}%</span>
+            <span class="${scoreCls}" title="Score compuesto 0-100">${score.toFixed(0)}</span>
+            <span style="color:${rsi>70?'#e74c3c':rsi<30?'#4ecca3':'#aaa'}" title="RSI 4h. >70 sobrecompra, <30 sobreventa">${rsi.toFixed(1)}</span>
+            <span style="color:${vol>1.5?'#4ecca3':'#888'}" title="Vol Spike = volumen actual / volumen promedio. Umbral típico >1.5x">${vol.toFixed(1)}x</span>
+            <span class="${chgCls}" title="Cambio porcentual de precio en 24h">${chg24>=0?'+':''}${chg24.toFixed(2)}%</span>
             <span class="${trendCls}">${trend}</span>
             <span><span class="scanner-badge ${rawCls}" style="opacity:0.7">${rawBias}</span></span>
             <span><span class="scanner-badge ${rbCls}">${regimeBias}</span></span>
@@ -4566,10 +5559,10 @@ function renderPredEvalMarket(openPositions) {
         const ev = parseFloat(pred.ev_score ?? ep);
         const evCls = ev >= 0 ? 'positive' : 'negative';
         const statusLabel = ev >= 0.5 ? '🟢 Mantener' : ev >= 0 ? '🟡 Vigilar' : '🔴 Riesgo';
-        return `<div class="predeval-item">
+        return `<div class="predeval-item" title="PredEval: evaluación activa del predictor para posiciones abiertas. EV positivo favorece mantener; EV negativo eleva riesgo de salida.">
             <span class="predeval-sym">${p.symbol}</span>
             <span class="predeval-status">${statusLabel} <span style="color:#555;font-size:10px">(${(sp*100).toFixed(0)}%)</span></span>
-            <span class="predeval-ev ${evCls}">${ev>=0?'+':''}${ev.toFixed(3)}</span>
+            <span class="predeval-ev ${evCls}" title="EV score aproximado en USDT esperado: EV > 0 favorable, EV < 0 desfavorable">${ev>=0?'+':''}${ev.toFixed(3)}</span>
         </div>`;
     }).join('');
 }
@@ -4674,9 +5667,11 @@ function renderPredVsRealChart(containerId, expectativaData) {
         const real = parseFloat(d.actual_pnl).toFixed(2);
         const acc = d.prediction_accuracy != null ? parseFloat(d.prediction_accuracy).toFixed(0) + '%' : '—';
         const side = d.side || '';
+        const openedAt = d.entry_time || d.opened_at || '';
+        const closedAt = d.exit_time || d.closed_at || '';
         return `<circle cx="${cx}" cy="${cy}" r="5" fill="${color}" fill-opacity="0.8" stroke="${color}" stroke-width="1"
             class="scatter-dot" style="cursor:pointer"
-            data-sym="${sym}" data-pred="${pred}" data-real="${real}" data-acc="${acc}" data-side="${side}" data-idx="${idx}"/>`;
+            data-sym="${sym}" data-pred="${pred}" data-real="${real}" data-acc="${acc}" data-side="${side}" data-opened="${openedAt}" data-closed="${closedAt}" data-idx="${idx}"/>`;
     }).join('');
 
     container.innerHTML = `<div style="position:relative">
@@ -4707,11 +5702,15 @@ function renderPredVsRealChart(containerId, expectativaData) {
             const real = parseFloat(dot.dataset.real);
             const acc  = dot.dataset.acc;
             const side = dot.dataset.side ? ` <span style="color:#888">${dot.dataset.side}</span>` : '';
+            const openedAt = dot.dataset.opened || '—';
+            const closedAt = dot.dataset.closed || '—';
             const realColor = real >= 0 ? '#4ecca3' : '#e74c3c';
             const predColor = pred >= 0 ? '#4ecca3' : '#e74c3c';
             tipEl.innerHTML = `<strong style="color:#ddd">${sym}${side}</strong><br>
                 Predicción: <span style="color:${predColor};font-weight:700">${pred>=0?'+':''}${pred} USDT</span><br>
                 Real: <span style="color:${realColor};font-weight:700">${real>=0?'+':''}${real} USDT</span><br>
+                Apertura: <span style="color:#95a5a6">${openedAt}</span><br>
+                Cierre: <span style="color:#95a5a6">${closedAt}</span><br>
                 Accuracy: <span style="color:#f39c12">${acc}</span>`;
             const rect = svgEl.getBoundingClientRect();
             const dx = e.clientX - rect.left;
@@ -4731,6 +5730,8 @@ function renderPredVsRealChart(containerId, expectativaData) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+    _restoreSmartRunId();
+
     // ── Tab navigation ────────────────────────────────────────────────────────
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -4739,12 +5740,23 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    document.getElementById('pauseBtn').addEventListener('click', () => controlAction('/control/pause'));
-    document.getElementById('stopBtn').addEventListener('click', () => controlAction('/control/stop'));
-    document.getElementById('startBtn').addEventListener('click', () => controlAction('/control/start'));
+    const controlPauseBtn = document.getElementById('controlPauseBtn');
+    const controlStopBtn = document.getElementById('controlStopBtn');
+    const controlStartBtn = document.getElementById('controlStartBtn');
+    const controlAuditClearBtn = document.getElementById('controlAuditClearBtn');
+    const controlAuditExportBtn = document.getElementById('controlAuditExportBtn');
+    const runSmartBacktestBtn = document.getElementById('runSmartBacktestBtn');
+    if (controlPauseBtn) controlPauseBtn.addEventListener('click', () => controlAction('/control/pause'));
+    if (controlStopBtn) controlStopBtn.addEventListener('click', () => controlAction('/control/stop'));
+    if (controlStartBtn) controlStartBtn.addEventListener('click', () => controlAction('/control/start'));
+    if (controlAuditClearBtn) controlAuditClearBtn.addEventListener('click', () => clearControlAuditLog());
+    if (controlAuditExportBtn) controlAuditExportBtn.addEventListener('click', () => exportControlAuditLog());
+    if (runSmartBacktestBtn) runSmartBacktestBtn.addEventListener('click', () => runSmartBacktest());
+    renderControlAuditLog();
 
     // ── Backtest run button ──────────────────────────────────────────────────
-    document.getElementById('runBacktestBtn').addEventListener('click', async () => {
+    const runBacktestBtn = document.getElementById('runBacktestBtn');
+    if (runBacktestBtn) runBacktestBtn.addEventListener('click', async () => {
         const btn = document.getElementById('runBacktestBtn');
         const symbol = document.getElementById('backtestSymbol').value;
         const days = document.getElementById('backtestDays').value;
@@ -4756,7 +5768,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 { method: 'POST', headers: _authHeaders() }
             );
             if (res.ok) {
+                const payload = await res.json();
+                if (payload && payload.run_id) {
+                    _activeBacktestRunId = payload.run_id;
+                }
                 btn.textContent = '⏳ Corriendo...';
+                updateBacktestProgressWidget();
                 // Poll every 5s until done
                 const pollId = setInterval(async () => {
                     await pollBacktestResults();
@@ -4778,7 +5795,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ── Trigger learning button ──────────────────────────────────────────────
-    document.getElementById('triggerLearningBtn').addEventListener('click', async () => {
+    const triggerLearningBtn = document.getElementById('triggerLearningBtn');
+    if (triggerLearningBtn) triggerLearningBtn.addEventListener('click', async () => {
         const btn = document.getElementById('triggerLearningBtn');
         btn.disabled = true;
         btn.textContent = '⏳ Aprendiendo...';
@@ -4802,7 +5820,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ── Sync Balance button ──────────────────────────────────────
-    document.getElementById('syncBalanceBtn').addEventListener('click', async () => {
+    const syncBalanceBtn = document.getElementById('syncBalanceBtn');
+    if (syncBalanceBtn) syncBalanceBtn.addEventListener('click', async () => {
         const btn = document.getElementById('syncBalanceBtn');
         btn.disabled = true;
         btn.textContent = '⏳ Sincronizando...';
@@ -4825,7 +5844,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ── Bootstrap Predictor button ───────────────────────────────
-    document.getElementById('bootstrapBtn').addEventListener('click', async () => {
+    const bootstrapBtn = document.getElementById('bootstrapBtn');
+    if (bootstrapBtn) bootstrapBtn.addEventListener('click', async () => {
         const btn = document.getElementById('bootstrapBtn');
         btn.disabled = true;
         btn.textContent = '⏳ Cargando 90d...';
@@ -4847,16 +5867,19 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ── Refresh Health button ────────────────────────────────────
-    document.getElementById('refreshHealthBtn').addEventListener('click', () => updateHealthAndErrors());
+    const refreshHealthBtn = document.getElementById('refreshHealthBtn');
+    if (refreshHealthBtn) refreshHealthBtn.addEventListener('click', () => updateHealthAndErrors());
 
     // ── Clear Errors button ──────────────────────────────────────
-    document.getElementById('clearErrorsBtn').addEventListener('click', async () => {
+    const clearErrorsBtn = document.getElementById('clearErrorsBtn');
+    if (clearErrorsBtn) clearErrorsBtn.addEventListener('click', async () => {
         await fetch(`${API_BASE}/errors/clear`, { method: 'POST' });
         await updateHealthAndErrors();
     });
 
     // ── Full Health Check button ──────────────────────────────────
-    document.getElementById('runFullHealthBtn').addEventListener('click', async () => {
+    const runFullHealthBtn = document.getElementById('runFullHealthBtn');
+    if (runFullHealthBtn) runFullHealthBtn.addEventListener('click', async () => {
         const btn = document.getElementById('runFullHealthBtn');
         const card = document.getElementById('fullHealthCard');
         const dataEl = document.getElementById('fullHealthData');
@@ -4877,15 +5900,18 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ── Close Full Health panel ───────────────────────────────────
-    document.getElementById('closeFullHealthBtn').addEventListener('click', () => {
+    const closeFullHealthBtn = document.getElementById('closeFullHealthBtn');
+    if (closeFullHealthBtn) closeFullHealthBtn.addEventListener('click', () => {
         document.getElementById('fullHealthCard').style.display = 'none';
     });
 
     updateDashboard();
     updateHealthAndErrors();
     pollBacktestResults();
+    updateBacktestProgressWidget();
     setInterval(updateDashboard, POLL_INTERVAL_MS);
     setInterval(updateHealthAndErrors, 60000);  // Health & errors refresh every 60s
+    setInterval(updateBacktestProgressWidget, BACKTEST_PROGRESS_POLL_MS);
     // Toggle MXN re-renders open positions
     const toggleMxnEl = document.getElementById('toggleMxn');
     if (toggleMxnEl) toggleMxnEl.addEventListener('change', () => {

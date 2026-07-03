@@ -1,7 +1,88 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 01 2026 11:30 UTC-6 | Sesión 31: PARAMETRIZACIÓN DE CAPITAL INICIAL Y VALIDACIÓN DE PARIDAD LIVE/BACKTEST — mejoras UX y observabilidad. Implementado: `--capital` opcional en smart_backtest_optimizer (fetch live balance por defecto); trade_type='spot' forzado en position_manager; close_reason normalizado en app.py; metadata.trade_type y close_reason persistido en BD para paridad comparativa. Validación: baseline PnL realista (19.4k USDT vs 231M inflado), trades_closed con trade_type ✓, compare-vs-live sin 'unknown' types.
+> Última actualización: jul 03 2026 13:02 UTC-6 | Sesión 34: SMART Total Fase 2 completada (selector dual modo+perfil con histéresis separada y persistencia dedicada).
+
+---
+
+### ✅ Sesión 34 — SMART Total Fase 2 (modo + perfil) — jul 03 2026 13:02 UTC-6
+
+**Objetivo:** implementar decisión dual por ciclo (cambio de modo + cambio de perfil) con trazabilidad completa y estado restart-safe.
+
+**Implementación principal:**
+1. `run_trades.py` agrega selector de modo SMART Total con estado dedicado:
+  - `trading_runtime_state.key='smart_total_mode_selector_state'`
+  - `trading_runtime_state.key='smart_total_active_mode'`
+  - auditoría por ciclo: `trades_audit.event='smart_total_mode_selector_decision'`
+2. Selector de perfil desacoplado del selector de modo:
+  - nuevo estado: `smart_total_profile_selector_state_<REGIME>`
+  - mantiene mirror backward-compatible a `regime_profile_selector_state_<REGIME>`
+3. Orden de decisión en ciclo `execute_once`:
+  - primero selector SMART Total de modo
+  - después selector de perfil sobre modo efectivo
+  - actualización inmediata de `settings.current_regime_mode` y `settings.current_regime_profile_label`
+4. `app.py` amplía config/normalización del selector dual:
+  - campos nuevos de modo: `smart_total_enabled`, `mode_selector_enabled`, `mode_require_confirmed`, `mode_min_hold_cycles`, `mode_min_confidence_delta`, `mode_audit_every_cycle`
+  - campos nuevos de perfil: `profile_selector_enabled`, `profile_min_hold_cycles`, `profile_min_score_delta`
+  - `GET /regime/profiles/selector-decisions` ahora retorna decisiones de modo + perfil.
+
+**Validación ejecutada:**
+1. `tests/test_health_audit.py -k selector_config_normalization_supports_smart_total_mode_fields` → **1 passed**.
+2. `tests/test_system_health.py -k SmartTotalSelector` → **2 passed**.
+
+**Impacto operativo:**
+1. SMART Total ya decide por separado el cambio de modo y el cambio de perfil.
+2. Modo y perfil tienen histéresis/cooldown independientes.
+3. Estado y auditoría quedan persistidos para reinicio, diagnóstico y análisis forense.
+
+---
+
+### ✅ Sesión 33 — Performance Monitor 3y/60000 (API + dashboard) — jul 02 2026 10:28 UTC-6
+
+**Objetivo:** medir el efecto de los cambios desde el changepoint `PERF_3Y60K_PRIORITY_2026-07-02`.
+
+**Implementación:**
+1. Endpoint nuevo: [`GET /metrics/performance-changepoint`](s:/Tools/AI/crypto-agent/app.py) con comparación before/after.
+2. Dashboard summary ahora incluye `performance_changepoint`.
+3. Comparativa separa SPOT y FUTURES, y calcula `net_pnl`, `fees`, `win_rate` y `delta` contra la ventana previa equivalente.
+
+**Estado de validación:**
+1. Endpoint responde `ok=true`.
+2. Dashboard summary ya incorpora el bloque `performance_changepoint`.
+3. El marker persiste en BD y está auditado.
+
+---
+
+### ✅ Sesión 32 — Performance Changepoint 3y/60000 (prioridad absoluta) — jul 02 2026 10:20 UTC-6
+
+**Changepoint ID:** `PERF_3Y60K_PRIORITY_2026-07-02`
+
+**Centro de verdad (prioritario):**
+1. Smart Backtest 3y / 60000 simulaciones (`root_session_id=c684eab3-a968-4822-8b15-8b75c7e956b4`).
+2. Toda decisión de configuración posterior se compara contra este baseline.
+
+**Baseline aplicado en sistema (SPOT + FUTURES):**
+1. Base global de mayor retorno: `backtest_run.id=61556`.
+2. Perfiles activos por escenario (Profile A):
+  - `SPOT_BULL -> run 29600`
+  - `RANGE_SCALP -> run 48412`
+  - `PRESERVATION -> run 51631`
+  - `FUTURES_SHORT -> run 61556`
+3. Selector automático determinístico activo:
+  - `enabled=true`
+  - `min_hold_cycles=3`
+  - `min_score_delta=0.05`
+  - `profile_rank: A > B > C`
+
+**Protocolo de medición post-cambio (obligatorio):**
+1. Comparativa before/after desde el changepoint para ambos tipos de trading: SPOT y FUTURES.
+2. KPIs mínimos: `pnl_total neto`, `pnl_diario`, `win_rate`, `profit_factor`, `max_drawdown`, `n_trades`, `fees`, `latencia de ciclo`, `calidad de cierre (SL/TP/trailing/rebalance)`.
+3. Criterio de priorización: maximizar ganancias en el menor tiempo posible sin perder integridad operativa.
+
+**Gobierno, trazabilidad y persistencia:**
+1. Toda mutación de configuración debe generar evento auditable en `trades_audit`.
+2. Todo estado activo/configuración debe persistirse en `trading_runtime_state` para supervivencia a reinicios.
+3. Regla universal: cualquier implementación/análisis debe cubrir explícitamente SPOT y FUTURES (o documentar por qué no aplica).
 
 ---
 

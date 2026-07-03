@@ -101,8 +101,11 @@ class PositionManager:
                 "VALUES (%s, %s, %s, %s, %s)",
                 (symbol, 'spot', event, json.dumps(detail), binance_confirmed)
             )
-        except Exception:
-            pass  # audit failure must never interrupt trading logic
+        except Exception as e:
+            # Keep trading flow alive, but surface traceability persistence failures.
+            logger.error(f"SPOT audit write failed ({symbol}:{event}): {e}")
+            ec.add_error(ec.SOURCE_SYSTEM, ec.LEVEL_ERROR,
+                         f"SPOT audit write failed ({symbol}:{event}): {e}")
 
     def _load_positions_from_db(self) -> None:
         """Load open positions from database."""

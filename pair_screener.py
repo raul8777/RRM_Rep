@@ -217,6 +217,73 @@ def _load_screener_snapshot(db_client) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _load_profile_screener_overrides(
+    db_client,
+    regime_mode: str,
+    profile_label: Optional[str],
+) -> Dict[str, Any]:
+    """Load optional screener overrides from active regime profile params in runtime state."""
+    if db_client is None or not profile_label:
+        return {}
+    try:
+        key = f"regime_profile_{regime_mode}_{str(profile_label).strip().upper()}"
+        rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key = %s",
+            (key,),
+        )
+        if not rows:
+            return {}
+        raw = rows[0].get("value")
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        if isinstance(raw, dict) and isinstance(raw.get("params"), dict):
+            raw = raw.get("params")
+        if not isinstance(raw, dict):
+            return {}
+        out: Dict[str, Any] = {}
+        for src in (
+            "screener_min_vol_usdt",
+            "screener_futures_min_vol",
+            "screener_max_pairs",
+            "screener_max_futures_pairs",
+            "screener_cache_minutes",
+            "screener_snapshot_max_age_minutes",
+        ):
+            if src in raw:
+                out[src] = raw[src]
+        return out
+    except Exception as e:
+        print(f"[Screener] profile override load failed: {e}")
+        return {}
+
+
+def _snapshot_is_usable(
+    snapshot: Dict[str, Any],
+    regime_mode: str,
+    profile_label: Optional[str],
+    max_age_seconds: int,
+) -> bool:
+    """Validate fallback snapshot alignment with current regime/profile and freshness."""
+    meta = (snapshot or {}).get("_meta", {}) if isinstance(snapshot, dict) else {}
+    snap_regime = str(meta.get("regime_mode") or "").strip().upper()
+    if snap_regime and snap_regime != str(regime_mode or "").strip().upper():
+        return False
+
+    req_profile = str(profile_label or "").strip().upper()
+    snap_profile = str(meta.get("profile_label") or "").strip().upper()
+    if req_profile and snap_profile and req_profile != snap_profile:
+        return False
+
+    snap_ts = meta.get("fetched_at_ts")
+    try:
+        snap_ts = float(snap_ts)
+    except Exception:
+        snap_ts = 0.0
+    if snap_ts <= 0:
+        return False
+    return (time.time() - snap_ts) <= max(0, int(max_age_seconds))
+
+
 def get_screened_pairs(
     spot_min_vol: float = 10_000_000,       # $10M min for spot eligibility
     futures_min_vol: float = 100_000_000,   # $100M min for futures eligibility
@@ -225,6 +292,7 @@ def get_screened_pairs(
     cache_seconds: int = 900,               # 15 min default TTL
     settings=None,                          # optional: override defaults from settings
     regime_mode: str = "SPOT_BULL",         # active market regime
+    profile_label: Optional[str] = None,    # active profile label (A/B/C)
     db_client=None,                         # optional DB client for audit persistence
 ) -> Dict[str, List[str]]:
     """
@@ -243,11 +311,41 @@ def get_screened_pairs(
         cache_seconds   = int(get_param(settings, 'screener_cache_minutes') * 60)
         regime_mode     = get_param(settings, 'current_regime_mode', regime_mode)
 
+    _snapshot_max_age_seconds = max(60, int(cache_seconds * 3))
+    if settings is not None:
+        try:
+            from config_helpers import get_param
+            _snapshot_max_age_seconds = int(get_param(settings, 'screener_snapshot_max_age_minutes', _snapshot_max_age_seconds / 60) * 60)
+        except Exception:
+            pass
+
+    # Profile-aware overrides (if present in runtime-state profile params)
+    _profile_overrides = _load_profile_screener_overrides(db_client, regime_mode, profile_label)
+    if _profile_overrides:
+        try:
+            if 'screener_min_vol_usdt' in _profile_overrides:
+                spot_min_vol = float(_profile_overrides['screener_min_vol_usdt'])
+            if 'screener_futures_min_vol' in _profile_overrides:
+                futures_min_vol = float(_profile_overrides['screener_futures_min_vol'])
+            if 'screener_max_pairs' in _profile_overrides:
+                max_spot = int(_profile_overrides['screener_max_pairs'])
+            if 'screener_max_futures_pairs' in _profile_overrides:
+                max_futures = int(_profile_overrides['screener_max_futures_pairs'])
+            if 'screener_cache_minutes' in _profile_overrides:
+                cache_seconds = max(60, int(float(_profile_overrides['screener_cache_minutes']) * 60))
+            if 'screener_snapshot_max_age_minutes' in _profile_overrides:
+                _snapshot_max_age_seconds = max(60, int(float(_profile_overrides['screener_snapshot_max_age_minutes']) * 60))
+        except Exception as e:
+            print(f"[Screener] profile override parse failed: {e}")
+
     # ── Cache hit ─────────────────────────────────────────────────────────────
     now = time.time()
     if _screener_cache["data"] is not None and (now - _screener_cache["ts"]) < cache_seconds:
         cached = _screener_cache["data"]
-        if cached.get("_meta", {}).get("regime_mode") == regime_mode:
+        _cm = cached.get("_meta", {})
+        _cached_profile = str(_cm.get("profile_label") or "").strip().upper()
+        _req_profile = str(profile_label or "").strip().upper()
+        if _cm.get("regime_mode") == regime_mode and (not _req_profile or _cached_profile == _req_profile):
             return cached
         # Regime changed — invalidate cache
         invalidate_cache()
@@ -261,8 +359,48 @@ def get_screened_pairs(
     except Exception as e:
         print(f"[Screener] ticker/24hr fetch failed: {e} — trying DB snapshot fallback")
         snapshot = _load_screener_snapshot(db_client)
-        if snapshot:
+        _fb_params = {
+            "spot_min_vol": spot_min_vol,
+            "futures_min_vol": futures_min_vol,
+            "max_spot": max_spot,
+            "max_futures": max_futures,
+            "cache_seconds": cache_seconds,
+            "profile_label": (str(profile_label).strip().upper() if profile_label else None),
+            "snapshot_max_age_seconds": _snapshot_max_age_seconds,
+        }
+        if snapshot and _snapshot_is_usable(snapshot, regime_mode, profile_label, _snapshot_max_age_seconds):
+            print(
+                f"[Screener] using snapshot fallback "
+                f"(regime={regime_mode}, profile={profile_label or '-'}, max_age_s={_snapshot_max_age_seconds})"
+            )
+            _persist_screener_decision(
+                db_client,
+                regime_mode,
+                snapshot,
+                _fb_params,
+                rejected_reason="ticker_fetch_failed_snapshot_used",
+            )
             return snapshot
+        if snapshot:
+            print(
+                f"[Screener] snapshot rejected (regime/profile/age mismatch) "
+                f"for regime={regime_mode}, profile={profile_label or '-'}"
+            )
+            _persist_screener_decision(
+                db_client,
+                regime_mode,
+                {"spot": [], "futures": [], "all": [], "_meta": {"regime_mode": regime_mode, "profile_label": profile_label}},
+                _fb_params,
+                rejected_reason="ticker_fetch_failed_snapshot_rejected",
+            )
+        else:
+            _persist_screener_decision(
+                db_client,
+                regime_mode,
+                {"spot": [], "futures": [], "all": [], "_meta": {"regime_mode": regime_mode, "profile_label": profile_label}},
+                _fb_params,
+                rejected_reason="ticker_fetch_failed_no_snapshot",
+            )
         return {"spot": [], "futures": [], "all": []}
 
     # ── Best-effort indicator cache enrichment (no extra API calls) ───────────
@@ -349,6 +487,7 @@ def get_screened_pairs(
         "all":     [c["symbol"] for c in candidates],
         "_meta": {
             "regime_mode": regime_mode,
+            "profile_label": (str(profile_label).strip().upper() if profile_label else None),
             "fetched_at": fetched_at,
             "fetched_at_ts": now,
             "total_candidates": len(candidates),
@@ -372,6 +511,8 @@ def get_screened_pairs(
         "max_spot": max_spot,
         "max_futures": max_futures,
         "cache_seconds": cache_seconds,
+        "profile_label": (str(profile_label).strip().upper() if profile_label else None),
+        "snapshot_max_age_seconds": _snapshot_max_age_seconds,
     }
     rejected_reason = None
     if regime_mode in ("PRESERVATION", "FUTURES_SHORT") and not spot_pairs:

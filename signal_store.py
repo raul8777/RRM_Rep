@@ -14,11 +14,34 @@ _signals: List[Dict[str, Any]] = []
 _db_client = None
 
 
+def _expire_unprocessed_signals_on_startup(max_age_minutes: int = 90) -> int:
+    """Mark stale unprocessed signals as processed to avoid replay after restart."""
+    if not _db_client:
+        return 0
+    try:
+        query = """
+            UPDATE market_data
+            SET data = jsonb_set(data, '{processed}', 'true')
+            WHERE data_type = 'signal'
+              AND COALESCE(data->>'processed', 'false') <> 'true'
+              AND timestamp < NOW() - make_interval(mins => %s)
+        """
+        updated = _db_client.execute_update(query, (max_age_minutes,))
+        if updated:
+            logger.info(f"Startup replay-guard: expired {updated} stale signals (> {max_age_minutes} min)")
+        return int(updated or 0)
+    except Exception as e:
+        logger.error(f"Startup replay-guard failed: {e}")
+        ec.add_error(ec.SOURCE_DB, ec.LEVEL_WARNING, f"signal startup replay-guard failed: {e}")
+        return 0
+
+
 def set_db_client(db_client):
     """Set the database client for persistent storage."""
     global _db_client
     _db_client = db_client
     logger.info("Database client set for signal store")
+    _expire_unprocessed_signals_on_startup(max_age_minutes=90)
 
 
 def add_signal(signal: Dict[str, Any], strict_persistence: bool = False) -> Dict[str, Any]:
@@ -102,17 +125,26 @@ def get_signals(include_processed: bool = False) -> List[Dict[str, Any]]:
     """
     if _db_client:
         try:
-            query = """
-                SELECT data FROM market_data 
-                WHERE data_type = 'signal' 
-                ORDER BY timestamp DESC 
-                LIMIT 100
-            """
-            results = _db_client.execute_query(query)
+            if include_processed:
+                query = """
+                    SELECT data FROM market_data
+                    WHERE data_type = 'signal'
+                    ORDER BY timestamp DESC
+                    LIMIT 100
+                """
+                results = _db_client.execute_query(query)
+            else:
+                query = """
+                    SELECT data FROM market_data
+                    WHERE data_type = 'signal'
+                      AND COALESCE(data->>'processed', 'false') <> 'true'
+                    ORDER BY timestamp DESC
+                    LIMIT 100
+                """
+                results = _db_client.execute_query(query)
             signals = [row["data"] for row in results]
-            
-            # Filter out processed signals if requested
             if not include_processed:
+                # Defense-in-depth for legacy rows or malformed payloads
                 signals = [s for s in signals if not s.get("processed", False)]
             
             return signals

@@ -88,7 +88,13 @@ def format_indicators_for_predictor(indicators: dict, price: float) -> dict:
     if "atr_pct" in indicators:
         formatted["atr_pct"] = {"value": float(indicators["atr_pct"])}
     if "trend_4h" in indicators:
-        formatted["trend_4h"] = {"value": float(indicators["trend_4h"])}
+        _trend_raw = indicators["trend_4h"]
+        if isinstance(_trend_raw, str):
+            _trend_norm = _trend_raw.strip().upper()
+            _trend_val = 1.0 if _trend_norm in ("UP", "BULL", "BULLISH") else -1.0 if _trend_norm in ("DOWN", "BEAR", "BEARISH") else 0.0
+        else:
+            _trend_val = float(_trend_raw)
+        formatted["trend_4h"] = {"value": _trend_val}
     if "weekly_range" in indicators:
         formatted["weekly_range"] = {"value": float(indicators["weekly_range"])}
     return formatted

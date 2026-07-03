@@ -674,6 +674,103 @@ class TestCat5_KellySizing:
         assert result <= cap
 
 
+class TestCat5b_SmartTotalSelector:
+    """SMART Total mode selector must persist decisions and respect hysteresis."""
+
+    class _DB:
+        def __init__(self, runtime_state=None):
+            self.runtime_state = runtime_state or {}
+            self.audit_events = []
+
+        def execute_query(self, sql, params=None):
+            if "WHERE key='regime_profile_selector_config'" in sql:
+                v = self.runtime_state.get('regime_profile_selector_config')
+                return [] if v is None else [{"value": v}]
+            if "FROM trading_runtime_state WHERE key=%s" in sql and params:
+                key = params[0]
+                v = self.runtime_state.get(key)
+                return [] if v is None else [{"value": v}]
+            return []
+
+        def execute_update(self, sql, params=None):
+            if "trading_runtime_state" in sql and params and len(params) >= 2:
+                self.runtime_state[params[0]] = params[1]
+                return 1
+            if "trades_audit" in sql and params:
+                event = 'unknown'
+                if 'smart_total_mode_selector_decision' in sql:
+                    event = 'smart_total_mode_selector_decision'
+                self.audit_events.append({"event": event, "detail": params[0]})
+                return 1
+            return 0
+
+        def execute_transaction(self, stmts):
+            for sql, params in stmts:
+                self.execute_update(sql, params)
+            return True
+
+    def test_mode_selector_blocks_switch_during_hold(self):
+        import run_trades
+
+        db = self._DB(runtime_state={
+            'regime_profile_selector_config': {
+                'smart_total_enabled': True,
+                'mode_selector_enabled': True,
+                'mode_min_hold_cycles': 3,
+                'mode_min_confidence_delta': 0.01,
+                'mode_require_confirmed': True,
+            },
+            'smart_total_active_mode': {'mode': 'SPOT_BULL'},
+            'smart_total_mode_selector_state': {
+                'last_selected': 'SPOT_BULL',
+                'last_selected_score': 0.70,
+                'cycles_since_switch': 1,
+            },
+        })
+        regime = types.SimpleNamespace(mode='FUTURES_SHORT', confirmed=True, confidence=0.95)
+
+        result = run_trades._run_smart_total_mode_selector(make_settings(), regime, db)
+
+        assert result['ok'] is True
+        assert result['selected_mode'] == 'SPOT_BULL'
+        assert result['blocked'] is True
+        assert result['switched'] is False
+        assert 'blocked_hold_cycles' in result['reason']
+        assert db.audit_events, "Selector must audit each cycle by default"
+
+    def test_mode_selector_switches_on_confident_delta(self):
+        import run_trades
+
+        db = self._DB(runtime_state={
+            'regime_profile_selector_config': {
+                'smart_total_enabled': True,
+                'mode_selector_enabled': True,
+                'mode_min_hold_cycles': 2,
+                'mode_min_confidence_delta': 0.05,
+                'mode_require_confirmed': True,
+            },
+            'smart_total_active_mode': {'mode': 'SPOT_BULL'},
+            'smart_total_mode_selector_state': {
+                'last_selected': 'SPOT_BULL',
+                'last_selected_score': 0.60,
+                'cycles_since_switch': 5,
+            },
+        })
+        regime = types.SimpleNamespace(mode='FUTURES_SHORT', confirmed=True, confidence=0.80)
+
+        result = run_trades._run_smart_total_mode_selector(make_settings(), regime, db)
+
+        assert result['ok'] is True
+        assert result['selected_mode'] == 'FUTURES_SHORT'
+        assert result['switched'] is True
+        assert result['blocked'] is False
+        assert 'switch_mode_confidence_delta' in result['reason']
+
+        active_mode_payload = db.runtime_state.get('smart_total_active_mode')
+        assert isinstance(active_mode_payload, str), "Active mode must persist as JSON payload"
+        assert 'FUTURES_SHORT' in active_mode_payload
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # CAT 6 — Position Manager
 # ═════════════════════════════════════════════════════════════════════════════

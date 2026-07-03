@@ -50,7 +50,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'futures_symbols': [
         'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT',
         'NEARUSDT', 'SUIUSDT', 'DOGEUSDT', 'AVAXUSDT', 'LINKUSDT', 'TAOUSDT',
-        'UNIUSDT', 'DOTUSDT', '1000PEPEUSDT', 'BCHUSDT', 'AAVEUSDT', 'FILUSDT',
+        'UNIUSDT', 'DOTUSDT', 'BCHUSDT', 'AAVEUSDT', 'FILUSDT',
         'INJUSDT',
     ],
     'futures_largecap_symbols': ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT'],

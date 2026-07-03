@@ -9,6 +9,7 @@ de trading para que sobreviva a reinicios del contenedor app:
 - Cooldown de VolSpike override (_VOLSPIKE_COOLDOWN)
 - Posiciones con override activo (_VOLSPIKE_POSITIONS)
 - Contador diario de overrides (_OVERRIDE_DAILY_COUNT)
+- Estado del circuit breaker (_circuit_breaker_until, _consecutive_failures)
 
 El módulo expuye save_state() / load_state() para ser invocado desde run_trades.py
 al final de cada ciclo y durante el startup del sistema.
@@ -53,6 +54,8 @@ def save_state(
     volspike_cooldown: Dict[str, datetime],
     volspike_positions: set,
     override_daily_count: Dict[str, int],
+    circuit_breaker_until: Optional[datetime] = None,
+    consecutive_failures: int = 0,
 ) -> None:
     """Persist volatile in-memory state to trading_runtime_state."""
     if not db_client:
@@ -64,6 +67,8 @@ def save_state(
             "volspike_cooldown": _serialize_dt(volspike_cooldown),
             "volspike_positions": _serialize_dt(volspike_positions),
             "override_daily_count": override_daily_count,
+            "circuit_breaker_until": _serialize_dt(circuit_breaker_until),
+            "consecutive_failures": int(consecutive_failures or 0),
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         db_client.execute_update(
