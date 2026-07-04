@@ -20,8 +20,8 @@ let _cachedData = null;
 let _futuresUnrealPnl = 0;  // Updated by renderFuturesPositions each cycle
 let _cachedFuturesPositions = [];  // Updated by renderFuturesPositions each cycle
 let _cachedFuturesClosed = [];     // Updated by renderFuturesClosed each cycle
-const CACHE_TTL_MS = 15000;   // 15 s frontend cache
-const POLL_INTERVAL_MS = 30000; // 30 s poll (was 5 s → 6× less traffic)
+const CACHE_TTL_MS = 5000;    // 5 s frontend cache for fresher mode/profile
+const POLL_INTERVAL_MS = 15000; // 15 s poll for near-real-time status
 const BACKTEST_PROGRESS_POLL_MS = 5000;
 let _fetchInProgress = false;
 
@@ -258,6 +258,7 @@ function renderExecutiveSummary(data) {
 
     const balance  = data.balance       || {};
     const regime   = data.market_regime || {};
+    const effective = data.effective_runtime || {};
     const ctx      = data.market_context|| {};
     const openPos  = data.open_positions|| {};
     const perf     = data.performance   || {};
@@ -273,7 +274,7 @@ function renderExecutiveSummary(data) {
     const unrealPnl   = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
     const lockedPnl   = positions.reduce((s, p) => s + (p.scale_out_done ? parseFloat(p.scale_out_pnl || 0) : 0), 0);
     const pnlToday    = parseFloat((pnlH.day && pnlH.day.total_pnl) || 0);
-    const mode        = regime.trading_mode || 'SPOT_BULL';
+    const mode        = effective.mode || regime.trading_mode || 'SPOT_BULL';
     const modeInfo    = MODE_CFG[mode] || MODE_CFG['SPOT_BULL'];
     const fng         = ctx.fear_greed_value ?? 50;
     const fngLabel    = ctx.fear_greed_label || 'Neutral';
@@ -402,6 +403,7 @@ function renderKPIRow(data) {
     const cycle    = data.next_cycle    || {};
     const pnlH     = data.pnl_history   || {};
     const regime   = data.market_regime || {};
+    const effective = data.effective_runtime || {};
     const activeProfile = data.active_profile || {};
 
     const totalUsdt  = parseFloat(balance.total_usdt || 0);
@@ -417,7 +419,7 @@ function renderKPIRow(data) {
     const pf         = parseFloat(m.profit_factor || 0);
     const cycleMins  = cycle.interval_minutes || '—';
     const secsLeft   = cycle.seconds_until_next;
-    const mode       = regime.trading_mode || 'SPOT_BULL';
+    const mode       = effective.mode || regime.trading_mode || 'SPOT_BULL';
     // FIX-L6b: derive counts from unified open_positions array (not stale cache)
     const isFutShort = mode === 'FUTURES_SHORT';
     const maxSpot    = openPos.max_positions || 12;
@@ -430,7 +432,7 @@ function renderKPIRow(data) {
     const ctx        = data.market_context || {};
     const fng        = ctx.fear_greed_value ?? 50;
     const fngLabel   = ctx.fear_greed_label || 'Neutral';
-    const profileLabel = String(activeProfile.label || '').toUpperCase();
+    const profileLabel = String(effective.profile_label || activeProfile.label || '').toUpperCase();
     const profileAlias = String(activeProfile.alias || PROFILE_ALIAS[profileLabel] || 'N/D');
     const profileCls = profileLabel === 'A' ? 'profile-a' : profileLabel === 'B' ? 'profile-b' : profileLabel === 'C' ? 'profile-c' : '';
 
@@ -2642,6 +2644,51 @@ function renderHealthResults(data) {
     `;
 }
 
+function renderOperatorFocus(data) {
+    const el = document.getElementById('operatorFocusData');
+    if (!el) return;
+    if (!data || !Array.isArray(data.items)) {
+        el.innerHTML = '<p class="loading">Sin cola operativa</p>';
+        return;
+    }
+    const items = data.items;
+    if (!items.length) {
+        el.innerHTML = '<p class="loading">Sin acciones críticas por ahora</p>';
+        return;
+    }
+
+    const sevColor = (s) => {
+        const v = String(s || 'ok').toLowerCase();
+        if (v === 'critical') return '#f44336';
+        if (v === 'warning') return '#ff9800';
+        if (v === 'info') return '#64b5f6';
+        return '#4caf50';
+    };
+
+    const rows = items.map((it, idx) => {
+        const sev = String(it.severity || 'ok').toLowerCase();
+        const color = sevColor(sev);
+        return `
+            <div class="op-focus-item" style="border-left-color:${color}">
+                <div class="op-focus-head">
+                    <span class="op-focus-rank">#${idx + 1}</span>
+                    <span class="op-focus-sev" style="color:${color}">${sev.toUpperCase()}</span>
+                    <span class="op-focus-title">${it.title || 'Sin título'}</span>
+                </div>
+                <div class="op-focus-detail">${it.detail || 'Sin detalle'}</div>
+                <div class="op-focus-action">Acción: ${it.action || 'Monitorear'}</div>
+            </div>
+        `;
+    }).join('');
+
+    const mode = data.mode || '—';
+    const profile = data.profile || '—';
+    el.innerHTML = `
+        <div class="op-focus-meta">Modo ${mode} · Perfil ${profile} · ${new Date(data.timestamp || Date.now()).toLocaleTimeString('es-MX')}</div>
+        <div class="op-focus-list">${rows}</div>
+    `;
+}
+
 function renderErrors(data) {
     const el = document.getElementById('errorsData');
     if (!data) { el.innerHTML = '<p class="loading">Cargando...</p>'; return; }
@@ -4040,6 +4087,7 @@ async function updateDashboard() {
     renderFngBadge(data.market_context);
     renderMarketContext(data.market_context);
     renderTickerBar(data.daily_ticker);
+    renderOperatorFocus(data.operator_focus);
 
     // ── New tab renders ────────────────────────────────────────────────────────
     renderBTCContext(data.market_regime);
@@ -4105,6 +4153,7 @@ function renderRuntimeState(state, mission) {
         const spot    = state.daily_pnl_spot    || {};
         const learn   = state.last_learning_run  || {};
         const cache   = state.analysis_cache_freshness || {};
+        const eff     = state.effective_runtime || {};
 
         const fPnl  = parseFloat(futures.live_pnl ?? futures.pnl ?? 0);
         const sPnl  = parseFloat(spot.live_pnl    ?? spot.pnl    ?? 0);
@@ -4123,6 +4172,10 @@ function renderRuntimeState(state, mission) {
         const cacheSym = Array.isArray(cache.symbols) ? cache.symbols.length : '—';
         const learnSym = Array.isArray(learn.symbols)  ? learn.symbols.length : '—';
         const pnlCls   = c => parseFloat(c) >= 0 ? 'positive' : 'negative';
+        const effMode = String(eff.mode || 'SPOT_BULL').trim();
+        const effProfile = String(eff.profile_label || 'A').trim();
+        const effModeSrc = String(eff.mode_source || 'n/a').trim();
+        const effProfSrc = String(eff.profile_source || 'n/a').trim();
 
         stateHtml = `
         <div class="runtime-card">
@@ -4143,6 +4196,11 @@ function renderRuntimeState(state, mission) {
           <div class="runtime-label">Learning Engine</div>
           <div class="runtime-value">${learnSym} actualizados</div>
           <div class="runtime-sub">Hace ${learnTs} | trigger: ${learn.trigger || '—'}</div>
+                </div>
+                <div class="runtime-card">
+                    <div class="runtime-label">Modo/Perfil Efectivo</div>
+                    <div class="runtime-value">${effMode} · ${effProfile}</div>
+                    <div class="runtime-sub">mode:${effModeSrc} | profile:${effProfSrc}</div>
         </div>`;
     }
 

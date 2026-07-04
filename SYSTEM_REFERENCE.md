@@ -1,7 +1,37 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 03 2026 13:02 UTC-6 | Sesión 34: SMART Total Fase 2 completada (selector dual modo+perfil con histéresis separada y persistencia dedicada).
+> Última actualización: jul 03 2026 19:40 UTC-6 | Sesión 35: hardening F1-F6 completado (inyección futures estricta, snapshot atómico efectivo, gate de health crítico y dashboard Operator Focus).
+
+---
+
+### ✅ Sesión 35 — Hardening F1-F6 + Dashboard Value Review — jul 03 2026 19:40 UTC-6
+
+**Objetivo:** cerrar implementación integral del plan agresivo-inteligente sin desviar motores, reforzando calidad de entrada, resiliencia operacional y visibilidad accionable.
+
+**Implementación principal:**
+1. `run_trades.py`:
+  - persistencia de snapshot atómico por ciclo en `trading_runtime_state.key='effective_runtime_selection_snapshot'` con modo/perfil efectivos, selector y claves aplicadas;
+  - inyección en `FUTURES_SHORT` endurecida: requiere análisis fresco y `signal=SELL`, eliminando fallback permisivo por `HOLD/no dirección`;
+  - helper de edad de análisis + política de frescura unificada para bloquear inyecciones stale;
+  - filtro de calidad del screener con relajación adaptativa controlada para evitar colapso de cobertura en mercado estresado;
+  - gate defensivo: si `health_results_latest` está `critical/error` (reciente), `execute_once` entra en `monitor_only`.
+2. `pnl_service.py`:
+  - detector de salida degenerada del predictor (`expected_pnl≈0` + probabilidad neutra fuera de bootstrap) y rechazo explícito en validación.
+3. `app.py`:
+  - nuevo bloque `operator_focus` en `/dashboard/summary` con cola priorizada (critical/warning/info), acciones sugeridas y contexto de transición/runtime.
+4. Frontend (`frontend/index.html`, `frontend/dashboard.js`, `frontend/styles.css`):
+  - nuevo panel **Operator Focus** en tab Sistema con ranking, severidad, detalle y acción operativa por item.
+
+**Validación ejecutada:**
+1. Revisión de errores de edición en archivos modificados (`run_trades.py`, `pnl_service.py`, `app.py`, `dashboard.js`, `index.html`, `styles.css`) → **sin errores**.
+2. Runner de validación enfocada reciente (`Dev/focused_validation_runner.py`) reportado en verde (`Exit Code: 0`).
+
+**Impacto operativo esperado:**
+1. Menos entradas FUTURES_SHORT incoherentes y menor ruido por análisis viejo.
+2. Protección automática ante degradación crítica de health por resultados.
+3. Trazabilidad completa de selección modo/perfil/params por ciclo.
+4. Dashboard centrado en decisiones accionables (no solo métricas descriptivas).
 
 ---
 

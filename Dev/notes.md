@@ -219,6 +219,35 @@ Sistema comprando con PnL esperado negativo (NEAR accuracy -378%). VolSpike Over
 - `smart_total_profile_selector_state_<REGIME>`
 - Mirror de compatibilidad: `regime_profile_selector_state_<REGIME>`
 
+---
+
+## 03 Jul 2026 — Cierre implementación integral F1-F6
+
+### Resumen
+- Se completó hardening del plan en flujo core + dashboard sin reemplazar motores inteligentes.
+- Se dejó trazabilidad explícita en runtime state para modo/perfil/params efectivos por ciclo.
+- Se reforzó protección operativa para degradación crítica de health y para predicciones degeneradas.
+
+### Cambios clave
+1. `run_trades.py`
+- Snapshot atómico por ciclo: `effective_runtime_selection_snapshot` con selector+apply_result.
+- Inyección `FUTURES_SHORT` ahora exige señal `SELL` y análisis fresco; elimina inyecciones `HOLD/no alineadas`.
+- Gate de frescura reforzado + helper de edad de cache.
+- Filtro de calidad screener con relajación adaptativa controlada para preservar cobertura operable.
+- Safety gate: si `health_results_latest` está `critical/error`, ciclo pasa a `monitor_only`.
+
+2. `pnl_service.py`
+- Detección de salida degenerada (`expected_pnl≈0` y probabilidad neutra) fuera de bootstrap.
+- Rechazo explícito de esas predicciones para evitar entrada con EV artificialmente plano.
+
+3. `app.py` + frontend
+- Nuevo bloque `operator_focus` en `/dashboard/summary`.
+- Panel `Operator Focus` en TAB Sistema con cola priorizada por severidad y acción sugerida.
+
+### Verificación rápida
+- Archivos modificados revisados sin errores de análisis estático en editor.
+- Runner enfocado `Dev/focused_validation_runner.py` reportado `Exit Code: 0`.
+
 ### Eventos de auditoría
 - `smart_total_mode_selector_decision`
 - `regime_profile_selector_decision`

@@ -1,5 +1,6 @@
 import time
 import types
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,6 +28,7 @@ _INVALID_FUTURES_SYMBOLS: set = {
     "USD1USDT", "PAXGUSDT", "XAUTUSDT", "RLUSDUSDT", "USDCUSDT", "BUSDUSDT",
     "TUSDUSDT", "FDUSDUSDT", "DAIUSDT", "USDDUSDT", "GUSDUSDT", "UUSDUSDT",
 }
+_INVALID_SYMBOLS_STATE_LOADED: bool = False
 
 # VolSpike override cooldown: {symbol: datetime_of_last_override_entry}
 # Prevents re-entering the same narrative token breakout every 5min cycle
@@ -52,11 +54,13 @@ _asg_cycle_id: int = 0  # incremented each cycle to know when to reset
 # Whipsaw protection: count consecutive cycles where regime is NOT a short-friendly mode.
 # Shorts are only closed when this counter reaches min_cycles_before_close_shorts (config).
 _non_short_regime_cycles: int = 0
+_transition_deadline_hits: int = 0
 
 # Regime-specific parameter auto-loading: track the last regime we applied params for
 # to avoid re-applying the same params every cycle.
 _last_applied_regime_mode: Optional[str] = None
 _last_applied_regime_profile: Optional[str] = None
+_regime_param_baseline: Optional[Dict[str, Any]] = None
 
 _SELECTOR_CONFIG_DEFAULTS = {
     "smart_total_enabled": True,
@@ -414,6 +418,24 @@ def _get_max_positions_for_regime(settings, regime: str) -> int:
     return _mapping.get(regime, _get_param(settings, 'max_positions'))
 
 
+def _ensure_regime_param_baseline(settings, scalar_targets: List[str]) -> Dict[str, Any]:
+    """Capture immutable baseline values used to reset absent regime/profile params.
+
+    This prevents parameter bleed-through when a profile only defines a partial payload.
+    """
+    global _regime_param_baseline
+    if _regime_param_baseline is None:
+        _regime_param_baseline = {
+            'scalars': {},
+            'category_thresholds': deepcopy(getattr(settings, 'category_thresholds', {}) or {}),
+            'futures_category_thresholds': deepcopy(getattr(settings, 'futures_category_thresholds', {}) or {}),
+        }
+    for _attr in scalar_targets:
+        if _attr not in _regime_param_baseline['scalars']:
+            _regime_param_baseline['scalars'][_attr] = deepcopy(getattr(settings, _attr, None))
+    return _regime_param_baseline
+
+
 def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
     """
     Load regime-specific parameter overrides from trading_runtime_state and apply them
@@ -522,88 +544,82 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
         _applied = {}
         _rejected = {}
 
+        _scalar_targets = list(dict.fromkeys(_scalar_map.values()))
+        _baseline = _ensure_regime_param_baseline(settings, _scalar_targets)
+        _baseline_scalars = _baseline.get('scalars', {})
+
         for _src, _dst in _scalar_map.items():
-            if _src not in _raw:
-                continue
-            _val = _raw[_src]
             try:
                 _cur = getattr(settings, _dst, None)
-                setattr(settings, _dst, type(_cur)(_val) if _cur is not None else _val)
-                _applied[_dst] = {"old": _cur, "new": _val}
+                _target = _raw.get(_src, _baseline_scalars.get(_dst, _cur))
+                if _cur is None:
+                    _new_val = _target
+                elif _target is None:
+                    _new_val = None
+                else:
+                    _new_val = type(_cur)(_target)
+                if _new_val != _cur:
+                    setattr(settings, _dst, _new_val)
+                    _applied[_dst] = {"old": _cur, "new": _new_val}
             except Exception as _ae:
                 _rejected[_dst] = str(_ae)
 
-        # Category thresholds (spot and futures) — partial merge
+        # Category thresholds (spot and futures) — reset to baseline + optional profile patch.
         for _ct_attr, _ct_key in (
             ('category_thresholds', 'category_thresholds'),
             ('futures_category_thresholds', 'futures_category_thresholds'),
         ):
-            if _ct_key not in _raw:
-                continue
-            _ct_patch = _raw[_ct_key]
-            if not isinstance(_ct_patch, dict):
-                _rejected[_ct_attr] = "must be dict"
-                continue
-            _current_ct = dict(getattr(settings, _ct_attr, {}))
-            _merged = {}
-            for _cat, _fields in _ct_patch.items():
-                if not isinstance(_fields, dict):
-                    _rejected[f"{_ct_attr}.{_cat}"] = "must be dict"
-                    continue
-                _cat_old = dict(_current_ct.get(_cat, {}))
-                for _cf, _cv in _fields.items():
-                    _cat_old[_cf] = float(_cv)
-                    _merged[f"{_cat}.{_cf}"] = {"old": _current_ct.get(_cat, {}).get(_cf), "new": float(_cv)}
-                _current_ct[_cat] = _cat_old
-            if _merged:
-                setattr(settings, _ct_attr, _current_ct)
-                _applied[_ct_attr] = {"merged": _merged}
+            _base_ct = deepcopy(_baseline.get(_ct_attr, {}) or {})
+            _ct_patch = _raw.get(_ct_key)
+            _patched = {}
+            if _ct_patch is not None:
+                if not isinstance(_ct_patch, dict):
+                    _rejected[_ct_attr] = "must be dict"
+                else:
+                    for _cat, _fields in _ct_patch.items():
+                        if not isinstance(_fields, dict):
+                            _rejected[f"{_ct_attr}.{_cat}"] = "must be dict"
+                            continue
+                        _cat_old = dict(_base_ct.get(_cat, {}))
+                        for _cf, _cv in _fields.items():
+                            _cat_old[_cf] = float(_cv)
+                            _patched[f"{_cat}.{_cf}"] = {"new": float(_cv)}
+                        _base_ct[_cat] = _cat_old
+            _current_ct = deepcopy(getattr(settings, _ct_attr, {}) or {})
+            if _current_ct != _base_ct:
+                setattr(settings, _ct_attr, _base_ct)
+                _applied[_ct_attr] = {"reset_to_baseline": True, "patched": _patched}
 
         if not _applied:
             return {"applied": {}, "skipped": True, "reason": "no_applicable_fields"}
 
-        # Persist the merged scalar overrides to kelly_config_override so they survive restart
-        # and are visible to the dashboard / drift checker.
-        _scalar_payload = {
-            k: {"old": v.get("old"), "new": v.get("new")}
-            for k, v in _applied.items()
-            if k not in ('category_thresholds', 'futures_category_thresholds')
+        # Persist complete scalar snapshot (replace, never merge) for restart safety.
+        _scalar_snapshot = {
+            _dst: {"new": getattr(settings, _dst, None)}
+            for _dst in _scalar_targets
         }
-        if _scalar_payload:
-            _existing_rows = db_client.execute_query(
-                "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
-            )
-            _existing = {}
-            if _existing_rows and _existing_rows[0].get('value'):
-                _ev = _existing_rows[0]['value']
-                if isinstance(_ev, str):
-                    _ev = _json.loads(_ev)
-                if isinstance(_ev, dict):
-                    _existing = _ev
-            # Merge regime overrides on top of existing scalar overrides
-            for k, change in _scalar_payload.items():
-                _existing[k] = change
-            _merged_scalar = _json.dumps(_existing)
-            db_client.execute_update(
+        _persist_writes = [
+            (
                 "INSERT INTO trading_runtime_state (key, value, updated_at) "
                 "VALUES ('kelly_config_override', %s, NOW()) "
                 "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
-                (_merged_scalar, _merged_scalar)
+                (_json.dumps(_scalar_snapshot), _json.dumps(_scalar_snapshot)),
             )
+        ]
 
-        # Persist category_thresholds separately
+        # Persist full current category thresholds for both SPOT and FUTURES.
         for _ct_attr, _ct_state_key in (
             ('category_thresholds', 'category_thresholds_override'),
             ('futures_category_thresholds', 'futures_category_thresholds_override'),
         ):
-            if _ct_attr in _applied:
-                _ct_payload = _json.dumps(getattr(settings, _ct_attr, {}))
-                db_client.execute_update(
-                    "INSERT INTO trading_runtime_state (key, value, updated_at) "
-                    "VALUES (%s, %s, NOW()) "
-                    "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
-                    (_ct_state_key, _ct_payload, _ct_payload)
-                )
+            _ct_payload = _json.dumps(getattr(settings, _ct_attr, {}) or {})
+            _persist_writes.append((
+                "INSERT INTO trading_runtime_state (key, value, updated_at) "
+                "VALUES (%s, %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                (_ct_state_key, _ct_payload, _ct_payload),
+            ))
+        db_client.execute_transaction(_persist_writes)
 
         # Audit trail
         db_client.execute_update(
@@ -635,6 +651,181 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _persist_transition_state(db_client, payload: Dict[str, Any]) -> None:
+    if db_client is None:
+        return
+    try:
+        _raw = json.dumps(payload)
+        db_client.execute_update(
+            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+            ("regime_transition_state", _raw, _raw),
+        )
+    except Exception as _pt_err:
+        print(f"[Transition] state persist failed: {_pt_err}")
+
+
+def _persist_runtime_selection_snapshot(db_client, payload: Dict[str, Any]) -> None:
+    """Persist the effective mode/profile/params selection atomically per cycle."""
+    if db_client is None:
+        return
+    try:
+        _raw = json.dumps(payload)
+        db_client.execute_update(
+            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+            ("effective_runtime_selection_snapshot", _raw, _raw),
+        )
+    except Exception as _prs_err:
+        print(f"[RuntimeSelection] snapshot persist failed: {_prs_err}")
+
+
+def _load_invalid_symbol_state(db_client) -> None:
+    global _INVALID_SYMBOLS_STATE_LOADED, _INVALID_SYMBOLS, _INVALID_FUTURES_SYMBOLS
+    if _INVALID_SYMBOLS_STATE_LOADED or db_client is None:
+        return
+    try:
+        _rows = db_client.execute_query(
+            "SELECT key, value FROM trading_runtime_state WHERE key IN ('invalid_spot_symbols', 'invalid_futures_symbols')"
+        )
+        for _row in _rows or []:
+            _key = _row.get('key')
+            _value = _row.get('value') or []
+            if isinstance(_value, str):
+                try:
+                    _value = json.loads(_value)
+                except Exception:
+                    _value = []
+            if not isinstance(_value, list):
+                continue
+            if _key == 'invalid_spot_symbols':
+                _INVALID_SYMBOLS.update(str(v).strip().upper() for v in _value if str(v).strip())
+            elif _key == 'invalid_futures_symbols':
+                _INVALID_FUTURES_SYMBOLS.update(str(v).strip().upper() for v in _value if str(v).strip())
+        _INVALID_SYMBOLS_STATE_LOADED = True
+    except Exception as _is_err:
+        print(f"[InvalidSymbols] load failed: {_is_err}")
+
+
+def _persist_invalid_symbol_state(db_client) -> None:
+    if db_client is None:
+        return
+    try:
+        _spot = json.dumps(sorted(_INVALID_SYMBOLS))
+        _fut = json.dumps(sorted(_INVALID_FUTURES_SYMBOLS))
+        db_client.execute_transaction([
+            (
+                "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                ('invalid_spot_symbols', _spot, _spot),
+            ),
+            (
+                "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                ('invalid_futures_symbols', _fut, _fut),
+            ),
+        ])
+    except Exception as _pis_err:
+        print(f"[InvalidSymbols] persist failed: {_pis_err}")
+
+
+def _build_transition_id(from_mode: Optional[str], to_mode: Optional[str], profile_label: Optional[str] = None) -> str:
+    _ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    _from = str(from_mode or "UNKNOWN").strip().upper() or "UNKNOWN"
+    _to = str(to_mode or "UNKNOWN").strip().upper() or "UNKNOWN"
+    _profile = str(profile_label or "").strip().upper()
+    return f"{_from}__{_to}__{_profile or 'NA'}__{_ts}"
+
+
+def _get_transition_policy(from_mode: Optional[str], to_mode: Optional[str]) -> Dict[str, Any]:
+    """Return operational policy for inherited positions across regime transitions."""
+    _from = str(from_mode or "").strip().upper()
+    _to = str(to_mode or "").strip().upper()
+    _default = {
+        "spot": "keep",
+        "futures_short": "keep",
+        "deadline_cycles": int(getattr(settings, 'min_cycles_before_close_shorts', 3)) if 'settings' in globals() else 3,
+        "protect_profit": True,
+    }
+    _matrix = {
+        ("FUTURES_SHORT", "RANGE_SCALP"): {"spot": "keep", "futures_short": "deadline_close", "deadline_cycles": 2, "protect_profit": True},
+        ("FUTURES_SHORT", "SPOT_BULL"): {"spot": "keep", "futures_short": "deadline_close", "deadline_cycles": 1, "protect_profit": False},
+        ("PRESERVATION", "SPOT_BULL"): {"spot": "keep", "futures_short": "deadline_close", "deadline_cycles": 1, "protect_profit": False},
+        ("PRESERVATION", "RANGE_SCALP"): {"spot": "keep", "futures_short": "deadline_close", "deadline_cycles": 2, "protect_profit": True},
+        ("SPOT_BULL", "FUTURES_SHORT"): {"spot": "trim_profit_only", "futures_short": "keep", "deadline_cycles": 0, "protect_profit": True},
+        ("RANGE_SCALP", "FUTURES_SHORT"): {"spot": "trim_profit_only", "futures_short": "keep", "deadline_cycles": 0, "protect_profit": True},
+    }
+    return dict(_default, **_matrix.get((_from, _to), {}))
+
+
+def _reevaluate_open_spot_positions(position_manager, settings, regime_mode: str, profile_label: str, switch_id: Optional[str] = None) -> int:
+    """Refresh SPOT open-position metadata and thresholds after a mode/profile change."""
+    if not position_manager:
+        return 0
+    _token_categories = getattr(settings, 'token_categories', {}) or {}
+    _cat_thresholds = getattr(settings, 'category_thresholds', {}) or {}
+    _updated = 0
+    for _symbol, _positions in position_manager.get_all_positions().items():
+        if not _positions:
+            continue
+        _cat_beh = _token_categories.get(_symbol, {}).get('market_behavior', 'MIDCAP_ALT')
+        _cat_th = _cat_thresholds.get(_cat_beh, {})
+        _sl_pct = float(_cat_th.get('stop_loss_pct', _get_param(settings, 'stop_loss_pct')) or 0.0) / 100.0
+        _tp_pct = float(_cat_th.get('take_profit_pct', _get_param(settings, 'take_profit_pct')) or 0.0) / 100.0
+        for _pos in _positions:
+            try:
+                _new_sl = float(_pos.entry_price) * (1 - _sl_pct)
+                _new_tp = float(_pos.entry_price) * (1 + _tp_pct)
+                position_manager.update_position_sl(_pos.position_id, _new_sl)
+                position_manager.update_position_tp(_pos.position_id, _new_tp)
+                _meta = dict(_pos.metadata or {}) if isinstance(_pos.metadata, dict) else {}
+                _meta['current_regime_mode'] = regime_mode
+                _meta['current_profile_label'] = profile_label
+                _meta['last_transition_switch_id'] = switch_id
+                _meta['_meta_version'] = int(_meta.get('_meta_version', 0) or 0) + 1
+                _meta['_meta_updated_at'] = datetime.now(timezone.utc).isoformat()
+                position_manager.update_position_metadata(_pos.position_id, _meta)
+                _updated += 1
+            except Exception as _re_pos_err:
+                print(f"[Transition] spot re-eval failed for {_symbol}: {_re_pos_err}")
+    return _updated
+
+
+def _build_pre_switch_state(mode_selector_result: Dict[str, Any], regime_obj: Optional[MarketRegime]) -> Dict[str, Any]:
+    """Build a reversible pre-switch state from selector/regime signals.
+
+    We only activate when a switch is blocked by confirmation/hysteresis but confidence is already elevated.
+    """
+    _state = {
+        "active": False,
+        "from_mode": None,
+        "to_mode": None,
+        "reason": None,
+        "confidence": 0.0,
+        "block_new_shorts": False,
+    }
+    if not mode_selector_result:
+        return _state
+
+    _blocked = bool(mode_selector_result.get("blocked"))
+    _detected = str(mode_selector_result.get("detected_mode") or "").strip().upper()
+    _selected = str(mode_selector_result.get("selected_mode") or "").strip().upper()
+    _reason = str(mode_selector_result.get("reason") or "")
+    _conf = _safe_float(getattr(regime_obj, "confidence", 0.0), 0.0)
+
+    if _blocked and _detected and _selected and _detected != _selected and _conf >= 0.60:
+        _state.update({
+            "active": True,
+            "from_mode": _selected,
+            "to_mode": _detected,
+            "reason": _reason,
+            "confidence": _conf,
+            # If we're currently short-friendly but detection points to a non-short mode, stop adding new shorts.
+            "block_new_shorts": _selected in ("FUTURES_SHORT", "PRESERVATION") and _detected not in ("FUTURES_SHORT", "PRESERVATION"),
+        })
+    return _state
 
 
 def _parse_json_like(value: Any) -> Any:
@@ -1508,7 +1699,16 @@ def _try_replace_weakest_position(
                 return False
             _exit_price = _get_cycle_price(client, _worst_sym)
             commission_rate = _get_commission_config(settings).rate_for('spot')
-            position_manager.close_all_positions_for_symbol(_worst_sym, _exit_price, "active_replacement", commission_rate)
+            position_manager.close_all_positions_for_symbol(
+                _worst_sym,
+                _exit_price,
+                "active_replacement",
+                commission_rate,
+                exit_context={
+                    'regime_mode': regime_mode,
+                    'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                },
+            )
             _overflow_positions.discard(_worst_sym)   # INEF-4: free overflow slot if used
             _VOLSPIKE_POSITIONS.discard(_worst_sym)   # INEF-3: free volspike slot if used
             add_signal({"symbol": _worst_sym, "action": "SELL", "price": _exit_price,
@@ -1573,7 +1773,70 @@ def _filter_by_quality(symbols: List[str], client, settings, target_count: int =
             if len(filtered) >= target_count:
                 break
     
-    return filtered
+    # Adaptive relaxation to avoid collapsing coverage in stressed markets.
+    # Keep quality-first behavior, but if too few symbols pass, do one relaxed pass.
+    _min_required = max(10, int(target_count * 0.30))
+    if len(filtered) >= _min_required:
+        return filtered
+
+    relaxed = list(filtered)
+    relaxed_volatility = min(0.90, max_volatility + 0.25)
+    for symbol in symbols:
+        if symbol in relaxed:
+            continue
+        try:
+            ticker = client.get_client().get_ticker(symbol=symbol)
+            price_change_pct = abs(float(ticker.get('priceChangePercent', 0))) / 100
+            last_price = float(ticker.get('lastPrice', 0))
+            if price_change_pct > relaxed_volatility:
+                continue
+            if last_price < min_price:
+                continue
+            relaxed.append(symbol)
+            if len(relaxed) >= target_count:
+                break
+        except Exception:
+            continue
+
+    if len(relaxed) > len(filtered):
+        print(
+            f"[Screener v2] quality relax enabled: {len(filtered)} -> {len(relaxed)} "
+            f"(target={target_count}, max_vol={max_volatility:.2f}->{relaxed_volatility:.2f})"
+        )
+    return relaxed
+
+
+def _analysis_cache_age_minutes(symbol: str) -> Optional[float]:
+    _entry = analysis_cache.get(symbol)
+    if not isinstance(_entry, dict):
+        return None
+    _ts = _entry.get('timestamp')
+    if not _ts:
+        return None
+    try:
+        _dt = datetime.fromisoformat(str(_ts).replace('Z', '+00:00'))
+        if _dt.tzinfo is None:
+            _dt = _dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - _dt).total_seconds() / 60.0
+    except Exception:
+        return None
+
+
+def _signal_max_age_minutes_for_regime(regime: str) -> int:
+    _ttl = {
+        'SPOT_BULL': 10,
+        'RANGE_SCALP': 5,
+        'PRESERVATION': 20,
+        'FUTURES_SHORT': 3,
+    }
+    return int(_ttl.get(str(regime or 'SPOT_BULL').strip().upper(), 10))
+
+
+def _is_analysis_cache_fresh(symbol: str, regime: str) -> bool:
+    _age_min = _analysis_cache_age_minutes(symbol)
+    if _age_min is None:
+        return False
+    return _age_min <= _signal_max_age_minutes_for_regime(regime)
 
 
 def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClient, portfolio_manager=None, regime: str = "SPOT_BULL", db_client=None) -> List[Dict]:
@@ -1591,16 +1854,17 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
     all_signals = get_signals(include_processed=False)
     external_signals = [s for s in all_signals if s.get('source') != 'autonomous']
 
-    # ── Mejora D: TTL filter — discard external signals older than 15 min ─────────
+    # Regime-aware freshness gate — discard external signals that are too old for the active mode.
     fresh_external = []
+    _max_signal_age_min = _signal_max_age_minutes_for_regime(regime)
     for sig in external_signals:
         received_raw = sig.get('received_at')
         if received_raw:
             try:
                 received_dt = datetime.fromisoformat(received_raw.replace('Z', '+00:00'))
                 age_min = (datetime.now(timezone.utc) - received_dt).total_seconds() / 60
-                if age_min > 15:
-                    print(f"Discarding stale external signal for {sig.get('symbol')} (age={age_min:.1f}min > 15min)")
+                if age_min > _max_signal_age_min:
+                    print(f"Discarding stale external signal for {sig.get('symbol')} (age={age_min:.1f}min > {_max_signal_age_min}min, regime={regime})")
                     mark_signal_as_processed(sig.get('symbol'))
                     continue
             except Exception:
@@ -2184,7 +2448,10 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         _sso_spot_total = _sso_spot_at_open or _sso_spot_live
                         if _sso_spot_at_open and _sso_spot_live and abs(_sso_spot_live - _sso_spot_at_open) > 20:
                             print(f"[SSO/S] {symbol} using spot_total_at_open=${_sso_spot_at_open:.0f} (current=${_sso_spot_live:.0f}) — balance changed")
-                        _sso_spot = SmartScaleOut(settings, spot_total=_sso_spot_total)
+                        _sso_spot = SmartScaleOut(
+                            settings,
+                            spot_total=_sso_spot_total,
+                        )
                         # Velocity tracking
                         _sso_s_snap = metadata.get('sso_pnl_snapshot')
                         _sso_s_vel, _sso_s_new_snap = compute_pnl_velocity(pnl_pct, _sso_s_snap)
@@ -2653,7 +2920,11 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
                                      f"SL/TP exit {symbol}: {close_reason} @ {current_price:.4f}")
                         position_manager.close_all_positions_for_symbol(
-                            symbol, current_price, close_reason.split(" ")[0], commission_rate
+                            symbol, current_price, close_reason.split(" ")[0], commission_rate,
+                            exit_context={
+                                'regime_mode': regime,
+                                'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                            }
                         )
                         _overflow_positions.discard(symbol)  # free overflow slot if used
                         # V2: Tracking métricas VolSpike Override (jun 16 2026)
@@ -2745,6 +3016,7 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
         except Exception as exc:
             if "-1121" in str(exc):
                 _INVALID_SYMBOLS.add(symbol)
+                _persist_invalid_symbol_state(_db_client_ref)
             else:
                 print(f"[Cleanup] Skip {symbol}: {exc}")
             continue
@@ -2867,7 +3139,7 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
     return final
 
 
-def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: List, portfolio_manager=None, position_manager=None, precomputed_predictions: Dict = None, news_client=None, regime_obj: "MarketRegime" = None, regime_mode_override: str = None, screened_pairs_cache: dict = None) -> List[Dict]:
+def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: List, portfolio_manager=None, position_manager=None, precomputed_predictions: Dict = None, news_client=None, regime_obj: "MarketRegime" = None, regime_mode_override: str = None, screened_pairs_cache: dict = None, pre_switch_state: Optional[Dict[str, Any]] = None) -> List[Dict]:
     # Accept either plain symbol strings or dicts with metadata (for aggressive mode)
     if top_signals_with_meta and isinstance(top_signals_with_meta[0], dict):
         top_symbols = [s['symbol'] for s in top_signals_with_meta]
@@ -3027,6 +3299,12 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         # by the spot max_positions counter (which fills up with open spot trades).
         if _regime and _regime.confirmed and _regime_mode == "FUTURES_SHORT":
             if getattr(settings, 'futures_enabled', True):
+                if isinstance(pre_switch_state, dict) and pre_switch_state.get("active") and pre_switch_state.get("block_new_shorts"):
+                    _ps_to = pre_switch_state.get("to_mode")
+                    _ps_conf = _safe_float(pre_switch_state.get("confidence"), 0.0)
+                    print(f"[Futures/PreSwitch] SHORT {symbol} SKIPPED: pre_switch to {_ps_to} (confidence={_ps_conf:.2f})")
+                    update_signal_decision(symbol, "rejected", "PRE_SWITCH")
+                    continue
                 # PB2: Mass SL circuit breaker — skip ALL new shorts during global cooldown
                 if _FUTURES_MASS_SL_COOLDOWN_UNTIL and datetime.now(timezone.utc) < _FUTURES_MASS_SL_COOLDOWN_UNTIL:
                     _cd_rem = (_FUTURES_MASS_SL_COOLDOWN_UNTIL - datetime.now(timezone.utc)).total_seconds() / 3600
@@ -3305,6 +3583,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 elif _pos is None and "-1121" in str(getattr(_fc, '_last_error', '')):
                     # Auto-learn: symbol invalid on Binance Futures — block permanently this session
                     _INVALID_FUTURES_SYMBOLS.add(symbol)
+                    _persist_invalid_symbol_state(_db_client_ref)
                     print(f"[Futures] {symbol}: auto-added to _INVALID_FUTURES_SYMBOLS (-1121)")
                     update_signal_decision(symbol, "rejected", "INVALID_FUTURES_SYM")
                 else:
@@ -4035,6 +4314,28 @@ def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, 
             if pred:
                 predictions[symbol] = pred
                 print(f"Prediction for {symbol}: {pred['expected_pnl']:.2f} USDT")
+        if predictions:
+            _all_zero = all(abs(float((pred or {}).get('expected_pnl', 0.0) or 0.0)) < 1e-9 for pred in predictions.values())
+            if _all_zero:
+                _warn = {
+                    'trade_type': trade_type,
+                    'symbols': list(top_symbols),
+                    'prediction_count': len(predictions),
+                    'detected_at': datetime.now(timezone.utc).isoformat(),
+                }
+                print(f"[Pred/WARN] All predictions returned 0.00 USDT for {trade_type}: {top_symbols[:10]}")
+                ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_WARNING,
+                             f"All predictions returned 0.00 USDT for {trade_type}")
+                if _db_client_ref:
+                    try:
+                        _raw = json.dumps(_warn)
+                        _db_client_ref.execute_update(
+                            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                            ('prediction_zero_warning', _raw, _raw),
+                        )
+                    except Exception as _pz_err:
+                        print(f"[Pred/WARN] persist failed: {_pz_err}")
     except Exception as e:
         print(f"Error generating predictions: {e}")
     return predictions
@@ -4102,6 +4403,7 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
             _min_hold_min = _get_param(settings, 'min_hold_minutes')
         _protect = getattr(settings, 'protect_profitable_positions', True)
         _protect_pct = getattr(settings, 'protect_profit_min_pct', 0.3) / 100.0
+        _rebalance_max_abs_pnl_pct = float(getattr(settings, 'rebalance_max_abs_pnl_pct', 0.5)) / 100.0
         _excluded_syms = set(getattr(settings, 'rebalance_excluded_symbols', []))  # F4: stablecoins etc.
         approved = []
         for sym in symbols_to_close:
@@ -4132,6 +4434,12 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
             # protect_profit check
             ep = float(pos.entry_price)
             pnl_pct = (current_price - ep) / ep if ep > 0 else 0.0
+            if abs(pnl_pct) > _rebalance_max_abs_pnl_pct:
+                print(
+                    f"[SlotPressure] {sym}: abs pnl {pnl_pct*100:.2f}% > rebalance cap "
+                    f"{_rebalance_max_abs_pnl_pct*100:.2f}% — leave to SL/TP/SSO"
+                )
+                continue
             if _protect and pnl_pct >= _protect_pct:
                 print(f"[SlotPressure] {sym}: profitable {pnl_pct*100:.2f}% >= protect {_protect_pct*100:.1f}% — skipping")
                 continue
@@ -4211,13 +4519,16 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
                     continue
                 exit_price_sp = float((order.get("fills") or [{}])[0].get("price", 0) or exit_price_sp)
                 for pos in position_manager.get_all_positions().get(sym, []):
-                    ep = float(pos.entry_price)
-                    pnl = (exit_price_sp - ep) * float(pos.quantity)
                     position_manager.close_position(
+                        symbol=sym,
                         position_id=pos.position_id,
                         exit_price=exit_price_sp,
-                        pnl=pnl,
                         close_reason=_close_reason,
+                        commission_rate=_get_commission_config(settings).rate_for('spot'),
+                        exit_context={
+                            'regime_mode': regime_mode,
+                            'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                        },
                     )
                 _overflow_positions.discard(sym)
                 _VOLSPIKE_POSITIONS.discard(sym)
@@ -4245,6 +4556,45 @@ def _is_new_entries_paused(db_client) -> bool:
     except Exception as e:
         print(f"[PauseCheck] error reading pause_new_entries: {e}")
     return False
+
+
+def _is_health_results_critical(db_client, max_age_minutes: int = 20) -> bool:
+    """Return True when latest SMART health snapshot is critical and still fresh."""
+    if db_client is None:
+        return False
+    try:
+        rows = db_client.execute_query(
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key='health_results_latest'"
+        )
+        if not rows:
+            return False
+        payload = rows[0].get('value') or {}
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if not isinstance(payload, dict):
+            return False
+        status = str(payload.get('overall') or '').strip().lower()
+        if status not in ('critical', 'error'):
+            return False
+
+        ts_raw = payload.get('timestamp')
+        ts = None
+        if isinstance(ts_raw, str):
+            try:
+                ts = datetime.fromisoformat(ts_raw.replace('Z', '+00:00'))
+            except Exception:
+                ts = None
+        if ts is None:
+            ts = rows[0].get('updated_at')
+        if ts is None:
+            return True
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age_min = (datetime.now(timezone.utc) - ts).total_seconds() / 60.0
+        return age_min <= max_age_minutes
+    except Exception as _he:
+        print(f"[HealthGate] error reading health_results_latest: {_he}")
+        return False
 
 
 def execute_once(monitor_only: bool = False):
@@ -4307,6 +4657,11 @@ def execute_once(monitor_only: bool = False):
     # ── K2: Pause new entries if requested via trading_runtime_state (survives restart) ─
     if not monitor_only and _is_new_entries_paused(_db_client_ref):
         print("[execute_once] pause_new_entries=True — running SL/TP monitor only")
+        monitor_only = True
+
+    # Safety gate: when SMART health is critical, avoid new entries until recovery.
+    if not monitor_only and _is_health_results_critical(_db_client_ref):
+        print("[execute_once] health_results_latest=critical — switching to monitor_only")
         monitor_only = True
 
     # ── PAUSED / monitor_only: solo ejecutar SL/TP y retornar ───────────────────
@@ -4375,9 +4730,22 @@ def execute_once(monitor_only: bool = False):
         print("Agent mode is not auto. Skipping execute_once.")
         return {"top_symbols": [], "sell_orders": [], "buy_orders": []}
 
+    _load_invalid_symbol_state(_db_client_ref)
+
     # ── Regime detection for execute_once (needed by Step 0.5 and Step 1) ──────
     _regime_exe: MarketRegime = None
     _regime_mode = "SPOT_BULL"
+    _active_mode_before = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
+    _active_profile_before = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
+    _transition_policy: Dict[str, Any] = {}
+    _pre_switch_state: Dict[str, Any] = {
+        "active": False,
+        "from_mode": None,
+        "to_mode": None,
+        "reason": None,
+        "confidence": 0.0,
+        "block_new_shorts": False,
+    }
     if getattr(settings, 'market_regime_enabled', True):
         try:
             _regime_exe = get_regime(client, settings=settings)
@@ -4387,7 +4755,6 @@ def execute_once(monitor_only: bool = False):
             if settings is not None:
                 try:
                     settings.current_regime_mode = _regime_mode
-                    settings.current_regime_profile_label = _get_active_profile_label(_db_client_ref, _regime_mode)
                 except Exception:
                     pass
             # F4 fix: on fresh start, anti-whipsaw needs 2 detections to confirm.
@@ -4402,7 +4769,6 @@ def execute_once(monitor_only: bool = False):
                 if settings is not None:
                     try:
                         settings.current_regime_mode = _regime_mode
-                        settings.current_regime_profile_label = _get_active_profile_label(_db_client_ref, _regime_mode)
                     except Exception:
                         pass
                 print(f"[Regime] execute_once warm-up (severe bear): {_regime_mode} | confirmed={_regime_exe.confirmed}")
@@ -4412,6 +4778,12 @@ def execute_once(monitor_only: bool = False):
         try:
             _mode_selector_result = _run_smart_total_mode_selector(settings, _regime_exe, _db_client_ref)
             if _mode_selector_result.get('ok') and not _mode_selector_result.get('skipped'):
+                _pre_switch_state = _build_pre_switch_state(_mode_selector_result, _regime_exe)
+                if _pre_switch_state.get("active"):
+                    print(
+                        f"[Transition/PreSwitch] {_pre_switch_state.get('from_mode')} -> {_pre_switch_state.get('to_mode')} "
+                        f"confidence={_pre_switch_state.get('confidence'):.2f} reason={_pre_switch_state.get('reason')}"
+                    )
                 _selected_mode = _mode_selector_result.get('selected_mode')
                 if _selected_mode and _selected_mode != _regime_mode:
                     print(
@@ -4424,9 +4796,20 @@ def execute_once(monitor_only: bool = False):
                 if settings is not None:
                     try:
                         settings.current_regime_mode = _regime_mode
-                        settings.current_regime_profile_label = _get_active_profile_label(_db_client_ref, _regime_mode)
                     except Exception:
                         pass
+                _persist_transition_state(
+                    _db_client_ref,
+                    {
+                        "active": bool(_pre_switch_state.get("active")),
+                        "pre_switch": _pre_switch_state,
+                        "selected_mode": _regime_mode,
+                        "detected_mode": _mode_selector_result.get("detected_mode"),
+                        "blocked": _mode_selector_result.get("blocked"),
+                        "switched": _mode_selector_result.get("switched"),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
             elif _mode_selector_result.get('reason') not in (
                 'mode_selector_disabled', 'smart_total_disabled', 'no_regime'
             ):
@@ -4436,6 +4819,7 @@ def execute_once(monitor_only: bool = False):
 
         # ── Regime-specific parameter auto-loading (only on confirmed regime change) ─
         if _regime_exe and _regime_exe.confirmed:
+            _selected_profile_label = None
             try:
                 _profile_regime_obj = _regime_exe
                 if _regime_mode != str(getattr(_regime_exe, 'mode', '') or '').strip().upper():
@@ -4446,6 +4830,7 @@ def execute_once(monitor_only: bool = False):
                     )
                 _selector_result = _run_regime_profile_auto_selector(settings, _profile_regime_obj, _db_client_ref)
                 if _selector_result.get('ok') and not _selector_result.get('skipped'):
+                    _selected_profile_label = str(_selector_result.get('selected_profile') or '').strip().upper() or None
                     print(
                         f"[RegimeSelector] {_selector_result.get('regime')} "
                         f"{_selector_result.get('active_before')} -> {_selector_result.get('selected_profile')} "
@@ -4459,6 +4844,79 @@ def execute_once(monitor_only: bool = False):
                 _regime_apply_result = _apply_regime_params(settings, _regime_mode, _db_client_ref)
                 if not _regime_apply_result.get('skipped'):
                     print(f"[RegimeParams] execute_once: applied={list(_regime_apply_result.get('applied', {}).keys())}")
+                if settings is not None:
+                    try:
+                        settings.current_regime_mode = _regime_mode
+                        _active_profile_label = str(
+                            _regime_apply_result.get('profile')
+                            or _selected_profile_label
+                            or _get_active_profile_label(_db_client_ref, _regime_mode)
+                            or 'A'
+                        ).strip().upper() or 'A'
+                        settings.current_regime_profile_label = _active_profile_label
+                    except Exception:
+                        pass
+                _persist_runtime_selection_snapshot(
+                    _db_client_ref,
+                    {
+                        "selected_mode": _regime_mode,
+                        "selected_profile": str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                        "detected_mode": str(getattr(_regime_exe, 'mode', '') or '').strip().upper() or None,
+                        "mode_selector": _mode_selector_result if isinstance(_mode_selector_result, dict) else {},
+                        "profile_selector": _selector_result if isinstance(_selector_result, dict) else {},
+                        "apply_result": {
+                            "skipped": bool(_regime_apply_result.get('skipped')),
+                            "applied_keys": list((_regime_apply_result.get('applied') or {}).keys()),
+                            "rejected_keys": list((_regime_apply_result.get('rejected') or {}).keys()),
+                        },
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                _switch_id = None
+                _mode_changed = bool(_active_mode_before and _active_mode_before != _regime_mode)
+                _profile_changed = bool(_active_profile_before and _active_profile_before != settings.current_regime_profile_label)
+                if _mode_changed or _profile_changed:
+                    _switch_id = _build_transition_id(_active_mode_before, _regime_mode, settings.current_regime_profile_label)
+                    _transition_policy = _get_transition_policy(_active_mode_before, _regime_mode)
+                    _updated_positions = _reevaluate_open_spot_positions(
+                        position_manager,
+                        settings,
+                        _regime_mode,
+                        settings.current_regime_profile_label,
+                        switch_id=_switch_id,
+                    )
+                    _updated_futures_positions = 0
+                    try:
+                        _fc_reval = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None))
+                        _updated_futures_positions = _fc_reval.reevaluate_open_positions(
+                            settings,
+                            _regime_mode,
+                            settings.current_regime_profile_label,
+                            switch_id=_switch_id,
+                            transition_policy=_transition_policy,
+                        )
+                    except Exception as _reval_fut_err:
+                        print(f"[Transition] futures re-eval failed: {_reval_fut_err}")
+                    _persist_transition_state(
+                        _db_client_ref,
+                        {
+                            "active": False,
+                            "switch_id": _switch_id,
+                            "from_mode": _active_mode_before,
+                            "to_mode": _regime_mode,
+                            "from_profile": _active_profile_before,
+                            "to_profile": settings.current_regime_profile_label,
+                            "policy": _transition_policy,
+                            "updated_positions": _updated_positions,
+                            "updated_futures_positions": _updated_futures_positions,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        },
+                    )
+                    print(
+                        f"[Transition] switch_id={_switch_id} mode_changed={_mode_changed} "
+                        f"profile_changed={_profile_changed} updated_spot_positions={_updated_positions} "
+                        f"updated_futures_positions={_updated_futures_positions}"
+                    )
             except Exception as _rpe:
                 print(f"[RegimeParams] execute_once application failed: {_rpe}")
 
@@ -4510,7 +4968,15 @@ def execute_once(monitor_only: bool = False):
                             continue
                         _exit_p = float((_ord_excl.get('fills') or [{}])[0].get('price', 0) or _price_excl)
                         if position_manager:
-                            position_manager.close_all_positions_for_symbol(_excl_sym, _exit_p, 'excluded_symbol_cleanup')
+                            position_manager.close_all_positions_for_symbol(
+                                _excl_sym,
+                                _exit_p,
+                                'excluded_symbol_cleanup',
+                                exit_context={
+                                    'regime_mode': _regime_mode,
+                                    'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                },
+                            )
                         _overflow_positions.discard(_excl_sym)
                         _VOLSPIKE_POSITIONS.discard(_excl_sym)
                         ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
@@ -4651,7 +5117,16 @@ def execute_once(monitor_only: bool = False):
                                         print(f"[WARN] B2 SELL {_b2_sym}: order NOT confirmed filled — skipping")
                                         continue
                                     _b2_exit = float(((_b2_order.get("fills") or [{}])[0]).get("price", 0) or _b2_price)
-                                    position_manager.close_all_positions_for_symbol(_b2_sym, _b2_exit, "regime_futures_short_spot_cleanup", _commission_rate_b2)
+                                    position_manager.close_all_positions_for_symbol(
+                                        _b2_sym,
+                                        _b2_exit,
+                                        "regime_futures_short_spot_cleanup",
+                                        _commission_rate_b2,
+                                        exit_context={
+                                            'regime_mode': _regime_mode,
+                                            'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                        },
+                                    )
                                     _overflow_positions.discard(_b2_sym)
                                     _VOLSPIKE_POSITIONS.discard(_b2_sym)
                                     print(f"[B2] Closed spot LONG {_b2_sym} @ {_b2_exit:.4f} pnl_pct={_b2_pnl_pct:+.2f}% — FUTURES_SHORT regime, in profit")
@@ -4661,8 +5136,13 @@ def execute_once(monitor_only: bool = False):
                     print(f"[B2] Spot residual close error: {_b2_outer}")
 
             if _open_short_keys and _regime_mode not in ("PRESERVATION", "FUTURES_SHORT"):
-                if _non_short_regime_cycles >= _min_cycles:
-                    _protect_threshold = _get_param(settings, 'futures_protect_profit_usdt')
+                _transition_target_mode = None
+                if isinstance(_pre_switch_state, dict) and _pre_switch_state.get("active"):
+                    _transition_target_mode = _pre_switch_state.get("to_mode")
+                _deadline_cycles = int(_transition_policy.get('deadline_cycles', _min_cycles) or _min_cycles)
+                _protect_threshold = _get_param(settings, 'futures_protect_profit_usdt')
+                _protect_profit = bool(_transition_policy.get('protect_profit', True))
+                if _non_short_regime_cycles >= _deadline_cycles:
                     _closed_count = 0
                     for _key in _open_short_keys:
                         _pos = _fc._open_positions.get(_key)
@@ -4674,7 +5154,7 @@ def execute_once(monitor_only: bool = False):
                             _unr_pnl = _pos.unrealized_pnl(_cur_price)
                         except Exception:
                             _unr_pnl = 0.0
-                        if _unr_pnl >= _protect_threshold:
+                        if _protect_profit and _unr_pnl >= _protect_threshold:
                             print(f"[Futures] SHORT {_sym}: PnL=${_unr_pnl:.2f} >= ${_protect_threshold} — PROTECTING (regime={_regime_mode}, letting SL/TP resolve)")
                         else:
                             try:
@@ -4689,7 +5169,13 @@ def execute_once(monitor_only: bool = False):
                         _non_short_regime_cycles = 0
                     print(f"[Futures] Regime change {_regime_mode}: closed {_closed_count}/{len(_open_short_keys)} shorts (protected profitable ones)")
                 else:
-                    print(f"[Futures] Regime is {_regime_mode} ({_non_short_regime_cycles}/{_min_cycles} cycles) — holding shorts (whipsaw guard)")
+                    if _transition_target_mode and _transition_target_mode not in ("PRESERVATION", "FUTURES_SHORT"):
+                        print(
+                            f"[Futures] Pre-switch to {_transition_target_mode} active "
+                            f"({_non_short_regime_cycles}/{_deadline_cycles} cycles) — holding shorts with deadline"
+                        )
+                    else:
+                        print(f"[Futures] Regime is {_regime_mode} ({_non_short_regime_cycles}/{_deadline_cycles} cycles) — holding shorts (whipsaw guard)")
 
             # CapBridge handles idle-funds return via smart_rebalance_capital (Case 3 above)
 
@@ -4767,7 +5253,18 @@ def execute_once(monitor_only: bool = False):
             try:
                 # Use AutonomousSignalGenerator which correctly fetches klines and runs analysis
                 _ta = _asg.analyze_symbol(_fsym, interval=getattr(settings, 'interval', '1h'))
-                if _ta and isinstance(_ta, dict) and _ta.get('signal') != 'HOLD':
+                _ta_signal = str((_ta or {}).get('signal') or '').strip().upper()
+                _cache_fresh = _is_analysis_cache_fresh(_fsym, _regime_mode)
+                _cache_age_min = _analysis_cache_age_minutes(_fsym)
+                if not _cache_fresh:
+                    _age_txt = f"{_cache_age_min:.1f}m" if _cache_age_min is not None else "unknown"
+                    print(
+                        f"[Futures/Inject] {_fsym}: analysis cache stale for regime={_regime_mode} "
+                        f"(age={_age_txt}) — skipping injection"
+                    )
+                    continue
+                # FUTURES_SHORT requires bearish technical direction only.
+                if _ta and isinstance(_ta, dict) and _ta_signal == 'SELL':
                     _ta_strength = float(_ta.get("strength", 0.5))
                     _ta_ind      = _ta.get("indicators", {})
                     _fsig["strength"]       = _ta_strength
@@ -4776,19 +5273,17 @@ def execute_once(monitor_only: bool = False):
                     _fsig["change_24h_pct"] = float(_ta.get("change_24h_pct", 0.0))
                     _fsig["score"]          = int(_ta_strength * 100)
                     _fsig["reason"]         = _ta.get("reason", "FUTURES_SHORT_AUTO")
-                    print(f"[Futures/Inject] {_fsym}: strength={_ta_strength:.2f} rsi={_fsig['rsi']:.1f} signal={_ta.get('signal')}")
-                elif _ta and _ta.get('signal') == 'HOLD':
-                    _ta_strength = float(_ta.get("strength", 0.3))
-                    _fsig["strength"] = _ta_strength
-                    _fsig["score"]    = int(_ta_strength * 100)
-                    _fsig["rsi"]      = float(_ta.get("indicators", {}).get("rsi", 50.0))
-                    print(f"[Futures/Inject] {_fsym}: HOLD (strength={_ta_strength:.2f}) — kept at low strength")
+                    print(f"[Futures/Inject] {_fsym}: strength={_ta_strength:.2f} rsi={_fsig['rsi']:.1f} signal=SELL")
+                else:
+                    if _ta_signal:
+                        print(f"[Futures/Inject] {_fsym}: skipped signal={_ta_signal} (requires SELL in FUTURES_SHORT)")
+                    continue
             except Exception as _te:
-                print(f"[Futures/Inject] {_fsym}: analysis failed ({_te}) — using default strength=0.50")
-            # M1: Skip HOLD signals too weak to ever open a position (strength < 0.4)
-            # They can't pass overflow threshold and consume evaluation time uselessly
+                print(f"[Futures/Inject] {_fsym}: analysis failed ({_te}) — skipping")
+                continue
+            # M1: Skip weak signals — avoid noisy injections
             _min_inject_strength = getattr(settings, 'futures_min_inject_strength', 0.40)
-            if _fsig.get("strength", 0.0) < _min_inject_strength and _fsig.get("score", 50) < 40:
+            if _fsig.get("strength", 0.0) < _min_inject_strength:
                 continue
             _new_futures.append(_fsig)
         if _new_futures:
@@ -4833,7 +5328,7 @@ def execute_once(monitor_only: bool = False):
         print("Balances after sells:", balances)
 
     # ── Step 5: Buy top symbols — pass full signal dicts for aggressive mode ───
-    buy_orders = _buy_top_symbols(client, settings, top_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client, regime_obj=_regime_exe, regime_mode_override=_regime_mode, screened_pairs_cache=_cached_screened_pairs)
+    buy_orders = _buy_top_symbols(client, settings, top_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client, regime_obj=_regime_exe, regime_mode_override=_regime_mode, screened_pairs_cache=_cached_screened_pairs, pre_switch_state=_pre_switch_state)
 
     # ── Dynamic cycle scheduling — return next interval based on active regime ──
     _cycle_by_regime = {

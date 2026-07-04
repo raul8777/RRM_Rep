@@ -1264,6 +1264,62 @@ body {
     }
 }
 
+.op-focus-meta {
+    font-size: 11px;
+    color: #9ca2b8;
+    margin-bottom: 8px;
+}
+
+.op-focus-list {
+    display: grid;
+    gap: 8px;
+}
+
+.op-focus-item {
+    border: 1px solid var(--border2);
+    border-left: 4px solid #4caf50;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.18);
+    padding: 8px 10px;
+}
+
+.op-focus-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+    flex-wrap: wrap;
+}
+
+.op-focus-rank {
+    color: #8e95a8;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.op-focus-sev {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.4px;
+}
+
+.op-focus-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #d6dbeb;
+}
+
+.op-focus-detail {
+    font-size: 12px;
+    color: #b2b9cd;
+    margin-bottom: 4px;
+}
+
+.op-focus-action {
+    font-size: 11px;
+    color: #d8dde9;
+}
+
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    MODAL DETAIL
    â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */

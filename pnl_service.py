@@ -83,6 +83,19 @@ def predict_for_symbol(
             trade_type=trade_type,
             settings=settings,
         )
+        if isinstance(prediction, dict) and not prediction.get("bootstrap_mode"):
+            _ev = float(prediction.get("expected_pnl", 0.0) or 0.0)
+            _prob = float(prediction.get("success_probability", 0.5) or 0.5)
+            # Degenerate output detector: repeated near-zero EV + neutral probability
+            # usually means stale/insufficient model state and should not pass silently.
+            if abs(_ev) < 1e-6 and 0.48 <= _prob <= 0.52:
+                prediction["degenerate_output"] = True
+                logger.warning(
+                    "Predictor degenerate output for %s (ev=%.6f prob=%.3f)",
+                    symbol,
+                    _ev,
+                    _prob,
+                )
         return prediction, formatted
     except Exception as exc:
         logger.warning(f"PnL prediction failed for {symbol}: {exc}")
@@ -104,6 +117,8 @@ def validate(prediction: Dict, settings, symbol: str = None,
     # system can execute trades and accumulate the history needed for learning.
     if prediction.get("bootstrap_mode"):
         return True, "bootstrap mode – thresholds relaxed until trade history builds"
+    if prediction.get("degenerate_output"):
+        return False, "degenerate predictor output (near-zero EV with neutral probability)"
     predictor = get_predictor()
     min_pnl  = getattr(settings, "min_expected_pnl", 0.0)
     min_prob = get_param(settings, "min_success_probability")

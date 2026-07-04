@@ -1266,6 +1266,19 @@ def _get_monte_carlo_projection(force: bool = False) -> Dict:
 
 # ── Market regime cache (5 min) ──────────────────────────────────────────────
 _regime_cache: Dict = {"data": None, "ts": 0.0}
+_REGIME_CACHE_TTL_SECONDS = 60
+_MODE_DESC = {
+    "SPOT_BULL": "Compras en breakout con Kelly dinamico. Trailing stop activo. Scale-out en TP.",
+    "RANGE_SCALP": "Compras en soporte BB inferior (RSI<40), venta en BB superior. TP ajustado 1.5%.",
+    "PRESERVATION": "Capital 80%+ en USDT. Solo NARRATIVE con VolSpike>=2x. Kelly x0.5.",
+    "FUTURES_SHORT": "Shorts 2x en pares Tier A (BTCUSDT, ETHUSDT, SOLUSDT...). LONG en soporte. SL SHORT 3% / LONG 2.5% | TP 7%. Hedge mode activo.",
+}
+_MODE_COLOR = {
+    "SPOT_BULL": "#4ecca3",
+    "RANGE_SCALP": "#f39c12",
+    "PRESERVATION": "#e74c3c",
+    "FUTURES_SHORT": "#9b59b6",
+}
 _PROFILE_ALIAS = {
     "A": "Agresivo",
     "B": "Balance",
@@ -1273,33 +1286,223 @@ _PROFILE_ALIAS = {
 }
 
 
+def _decode_runtime_state_value(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
+
+
+def _get_effective_runtime_selection(summary_mode: Optional[str] = None) -> Dict[str, Any]:
+    """Return effective mode/profile used by the live engine whenever possible."""
+    _fallback_mode = str(summary_mode or "SPOT_BULL").strip().upper() or "SPOT_BULL"
+    _mode = str(getattr(orchestrator, 'current_regime_mode', '') or '').strip().upper()
+    _mode_source = "orchestrator" if _mode else "summary"
+    _profile = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper()
+    _profile_source = "settings" if _profile else "runtime_state"
+    _profile_updated_at = None
+
+    try:
+        _rows = db_client.execute_query(
+            "SELECT key, value, updated_at FROM trading_runtime_state "
+            "WHERE key IN ('smart_total_active_mode', %s)",
+            (f"regime_profile_active_{_mode or _fallback_mode}",),
+        )
+        _state = {str(r.get('key') or ''): r for r in (_rows or [])}
+
+        if not _mode and _state.get('smart_total_active_mode'):
+            _mv = _decode_runtime_state_value(_state['smart_total_active_mode'].get('value'))
+            if isinstance(_mv, dict):
+                _mode = str(_mv.get('mode') or _mv.get('selected_mode') or _mv.get('value') or '').strip().upper()
+            elif isinstance(_mv, str):
+                _mode = _mv.strip().upper()
+            _mode_source = "runtime_state" if _mode else _mode_source
+
+        if not _mode:
+            _mode = _fallback_mode
+
+        _profile_key = f"regime_profile_active_{_mode}"
+        _pr_row = _state.get(_profile_key)
+        if _pr_row is None:
+            _pr_rows = db_client.execute_query(
+                "SELECT value, updated_at FROM trading_runtime_state WHERE key=%s",
+                (_profile_key,),
+            )
+            if _pr_rows:
+                _pr_row = _pr_rows[0]
+        if _pr_row and not _profile:
+            _pv = _decode_runtime_state_value(_pr_row.get('value'))
+            if isinstance(_pv, dict):
+                _profile = str(_pv.get('profile') or _pv.get('label') or '').strip().upper()
+            elif isinstance(_pv, str):
+                _profile = _pv.strip().upper()
+            _profile_source = "runtime_state" if _profile else _profile_source
+            _ts = _pr_row.get('updated_at')
+            _profile_updated_at = _ts.isoformat() if _ts else None
+    except Exception:
+        if not _mode:
+            _mode = _fallback_mode
+
+    if not _profile:
+        _profile = "A"
+        _profile_source = "default"
+
+    return {
+        "mode": _mode,
+        "mode_source": _mode_source,
+        "profile_label": _profile,
+        "profile_alias": _PROFILE_ALIAS.get(_profile, _profile),
+        "profile_source": _profile_source,
+        "profile_updated_at": _profile_updated_at,
+    }
+
+
+def _build_operator_focus(health: Dict[str, Any], health_results: Dict[str, Any], effective_runtime: Dict[str, Any]) -> Dict[str, Any]:
+    """Create an actionable operator queue from health/runtime signals."""
+    items: List[Dict[str, Any]] = []
+    checks = (health or {}).get("checks") or {}
+
+    def _push(code: str, severity: str, title: str, detail: str, action: str) -> None:
+        items.append({
+            "code": code,
+            "severity": severity,
+            "title": title,
+            "detail": detail,
+            "action": action,
+        })
+
+    _overall = str((health or {}).get("overall") or "unknown").lower()
+    _hr_overall = str((health_results or {}).get("overall") or "unknown").lower()
+    _mode = str((effective_runtime or {}).get("mode") or "SPOT_BULL").upper()
+    _profile = str((effective_runtime or {}).get("profile_label") or "A").upper()
+
+    _cycle_fail = int((checks.get("cycle_failures") or {}).get("consecutive") or 0)
+    if _cycle_fail >= 3:
+        _push(
+            "cycle_failures",
+            "critical",
+            "Fallos de ciclo consecutivos",
+            f"Se detectaron {_cycle_fail} fallos consecutivos en execute_once.",
+            "Revisar errores recientes y pausar nuevas entradas hasta recuperar estabilidad.",
+        )
+
+    _fapi = checks.get("futures_api") or {}
+    if str(_fapi.get("status") or "").lower() == "error":
+        _push(
+            "futures_api",
+            "critical",
+            "Futures API degradada",
+            str(_fapi.get("detail") or "No hay latencia válida para fapi.binance.com."),
+            "Bloquear nuevas operaciones FUTURES_SHORT y mantener solo gestión defensiva.",
+        )
+
+    _exposure = checks.get("portfolio_exposure") or {}
+    _exp_pct = float(_exposure.get("exposure_pct") or 0.0)
+    _exp_max = float(_exposure.get("max_exposure_pct") or 75.0)
+    if _exp_pct >= _exp_max:
+        _push(
+            "exposure_cap",
+            "critical",
+            "Cap de exposición alcanzado",
+            f"Exposición actual {_exp_pct:.1f}% >= cap {_exp_max:.1f}%.",
+            "Priorizar reducción de riesgo antes de abrir nuevas posiciones.",
+        )
+    elif _exp_pct >= (_exp_max * 0.85):
+        _push(
+            "exposure_high",
+            "warning",
+            "Exposición alta",
+            f"Exposición actual {_exp_pct:.1f}% cerca del cap {_exp_max:.1f}%.",
+            "Aplicar criterio estricto de calidad en nuevas entradas.",
+        )
+
+    if _hr_overall in ("critical", "error"):
+        _push(
+            "smart_health",
+            "critical",
+            "SMART Recheck crítico",
+            "El health por resultados detecta deterioro de performance reciente.",
+            "Reducir agresividad: priorizar perfil C y evitar expansión de riesgo.",
+        )
+    elif _hr_overall == "warning":
+        _push(
+            "smart_health_warn",
+            "warning",
+            "SMART Recheck en warning",
+            "Se detectan señales de deriva o caída de calidad operativa.",
+            "Monitorear métricas de SPOT/FUTURES y confirmar en próximo ciclo.",
+        )
+
+    _sel_rows = db_client.execute_query(
+        "SELECT value, updated_at FROM trading_runtime_state WHERE key=%s LIMIT 1",
+        ("effective_runtime_selection_snapshot",),
+    )
+    _selection_snapshot = None
+    if _sel_rows:
+        _selection_snapshot = _decode_runtime_state_value(_sel_rows[0].get("value"))
+        if isinstance(_selection_snapshot, dict):
+            _selection_snapshot["updated_at"] = _sel_rows[0].get("updated_at").isoformat() if _sel_rows[0].get("updated_at") else None
+
+    _transition_rows = db_client.execute_query(
+        "SELECT value, updated_at FROM trading_runtime_state WHERE key=%s LIMIT 1",
+        ("regime_transition_state",),
+    )
+    _transition_state = None
+    if _transition_rows:
+        _transition_state = _decode_runtime_state_value(_transition_rows[0].get("value"))
+        if isinstance(_transition_state, dict):
+            _transition_state["updated_at"] = _transition_rows[0].get("updated_at").isoformat() if _transition_rows[0].get("updated_at") else None
+            if bool(_transition_state.get("active")):
+                _pre = _transition_state.get("pre_switch") or {}
+                _push(
+                    "transition_active",
+                    "info",
+                    "Transición de régimen activa",
+                    f"{_pre.get('from_mode') or '?'} -> {_pre.get('to_mode') or '?'} (conf={_pre.get('confidence') or 0}).",
+                    "Verificar cierres defensivos y evitar entradas no confirmadas.",
+                )
+
+    if not items:
+        _push(
+            "all_clear",
+            "ok",
+            "Sistema estable",
+            f"Modo {_mode} / Perfil {_profile} sin bloqueos críticos activos.",
+            "Mantener ejecución normal con monitoreo periódico.",
+        )
+
+    _severity_rank = {"critical": 0, "warning": 1, "info": 2, "ok": 3}
+    items.sort(key=lambda x: _severity_rank.get(str(x.get("severity") or "ok"), 99))
+
+    return {
+        "overall": _overall,
+        "smart_overall": _hr_overall,
+        "mode": _mode,
+        "profile": _profile,
+        "items": items[:5],
+        "selection_snapshot": _selection_snapshot or {},
+        "transition_state": _transition_state or {},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def _get_market_regime() -> Dict:
     """
     Return regime data sourced from the real trading engine (market_regime.get_regime()).
     Dashboard is now always consistent with run_trades.py decisions.
-    Cache TTL = 240s (matches market_regime._CACHE_TTL_SECONDS).
+    Cache TTL = 60s for fresher dashboard consistency with live execution.
     """
     import time as _time
     now = _time.monotonic()
-    if _regime_cache["data"] and now - _regime_cache["ts"] < 240:
+    if _regime_cache["data"] and now - _regime_cache["ts"] < _REGIME_CACHE_TTL_SECONDS:
         return _regime_cache["data"]
 
     try:
         comp = get_components()
         from market_regime import get_regime as _get_regime
         r = _get_regime(comp.binance_client, settings=comp.settings)
-
-        # Mode descriptions (single source of truth)
-        _MODE_DESC = {
-            "SPOT_BULL":     "Compras en breakout con Kelly dinamico. Trailing stop activo. Scale-out en TP.",
-            "RANGE_SCALP":   "Compras en soporte BB inferior (RSI<40), venta en BB superior. TP ajustado 1.5%.",
-            "PRESERVATION":  "Capital 80%+ en USDT. Solo NARRATIVE con VolSpike>=2x. Kelly x0.5.",
-            "FUTURES_SHORT": "Shorts 2x en pares Tier A (BTCUSDT, ETHUSDT, SOLUSDT...). LONG en soporte. SL SHORT 3% / LONG 2.5% | TP 7%. Hedge mode activo.",
-        }
-        _MODE_COLOR = {
-            "SPOT_BULL": "#4ecca3", "RANGE_SCALP": "#f39c12",
-            "PRESERVATION": "#e74c3c", "FUTURES_SHORT": "#9b59b6",
-        }
 
         # Fetch BTC current price for dashboard context
         _btc_price = 0.0
@@ -2228,12 +2431,53 @@ async def get_dashboard_summary() -> Dict:
     except Exception as e:
         result["market_regime"] = {"regime": "?", "color": "#888", "btc_trend": "?", "day_change_pct": 0.0, "vol_ratio": 0.0}
 
+    # Effective runtime mode/profile (source of truth from live engine when available)
+    try:
+        _detected_mode = str(result.get("market_regime", {}).get("trading_mode") or "SPOT_BULL").strip().upper() or "SPOT_BULL"
+        _effective = _get_effective_runtime_selection(_detected_mode)
+        _effective_mode = str(_effective.get("mode") or _detected_mode).strip().upper() or _detected_mode
+        _mr = result.get("market_regime", {})
+        if _effective_mode != _detected_mode:
+            _mr["detected_mode"] = _detected_mode
+            _prev_reason = str(_mr.get("mode_reason") or "").strip()
+            _mr["mode_reason"] = (
+                f"{_prev_reason} | effective_mode={_effective_mode} source={_effective.get('mode_source')}"
+                if _prev_reason else
+                f"effective_mode={_effective_mode} source={_effective.get('mode_source')}"
+            )
+        _mr["trading_mode"] = _effective_mode
+        _mr["mode_color"] = _MODE_COLOR.get(_effective_mode, _mr.get("mode_color", "#888"))
+        _mr["mode_desc"] = _MODE_DESC.get(_effective_mode, _mr.get("mode_desc", ""))
+        _mr["mode_effective_source"] = _effective.get("mode_source")
+        result["market_regime"] = _mr
+        result["effective_runtime"] = _effective
+    except Exception as e:
+        result["effective_runtime"] = {"mode": "SPOT_BULL", "profile_label": "A", "error": str(e)}
+
     # Active regime profile shown in dashboard status bar (A/B/C + compact semantic alias)
     try:
-        _mode = result.get("market_regime", {}).get("trading_mode", "SPOT_BULL")
-        result["active_profile"] = _get_active_profile_summary(_mode)
+        _effective = result.get("effective_runtime", {})
+        _mode = str(_effective.get("mode") or result.get("market_regime", {}).get("trading_mode") or "SPOT_BULL").strip().upper() or "SPOT_BULL"
+        _active = _get_active_profile_summary(_mode)
+        _eff_profile = str(_effective.get("profile_label") or "").strip().upper()
+        if _eff_profile:
+            _active["label"] = _eff_profile
+            _active["alias"] = _PROFILE_ALIAS.get(_eff_profile, _eff_profile)
+            _active["source"] = _effective.get("profile_source")
+            _active["updated_at"] = _active.get("updated_at") or _effective.get("profile_updated_at")
+        result["active_profile"] = _active
     except Exception as e:
         result["active_profile"] = {"mode": "SPOT_BULL", "label": "A", "alias": "Agresivo", "legend": _PROFILE_ALIAS, "legend_text": "A=Agresivo | B=Balance | C=Defensa", "error": str(e)}
+
+    # Operator Focus: concise actionable queue for live operation
+    try:
+        result["operator_focus"] = _build_operator_focus(
+            result.get("health", {}),
+            result.get("health_results", {}),
+            result.get("effective_runtime", {}),
+        )
+    except Exception as e:
+        result["operator_focus"] = {"items": [], "error": str(e)}
 
     # Market context: Fear & Greed + CoinGecko Trending
     try:
@@ -3232,6 +3476,149 @@ async def get_trade_throughput_exposure(
     return _trade_throughput_exposure_range(start_ts, datetime.now(timezone.utc), cycle_minutes=cycle_minutes)
 
 
+@app.get("/metrics/transition-health")
+async def get_transition_health(_auth=Depends(_require_api_key)) -> Dict:
+    """Return lightweight transition-health KPIs from runtime state and orchestrator memory."""
+    try:
+        _rows = db_client.execute_query(
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key='regime_transition_state' LIMIT 1"
+        )
+        _payload = {}
+        _updated_at = None
+        if _rows:
+            _payload = _rows[0].get('value') or {}
+            if isinstance(_payload, str):
+                try:
+                    _payload = json.loads(_payload)
+                except Exception:
+                    _payload = {"raw": _payload}
+            _updated_at = _rows[0].get('updated_at')
+        _pre = _payload.get('pre_switch') or {}
+        return {
+            "ok": True,
+            "transition_active": bool(_payload.get('active')),
+            "from_mode": _pre.get('from_mode'),
+            "to_mode": _pre.get('to_mode'),
+            "confidence": _pre.get('confidence'),
+            "block_new_shorts": bool(_pre.get('block_new_shorts')),
+            "cycle_failures": getattr(orchestrator, 'consecutive_cycle_failures', 0),
+            "last_cycle_error": getattr(orchestrator, 'last_cycle_error', None),
+            "updated_at": _updated_at.isoformat() if _updated_at else None,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/metrics/transition-kpis")
+async def get_transition_kpis(hours: int = 168, _auth=Depends(_require_api_key)) -> Dict:
+    """Return transition-quality KPIs from closed trades metadata.
+
+    KPIs include switch-loss, regime/profile mismatches, hold-time lag, and close-reason mix.
+    """
+    if hours <= 0:
+        raise HTTPException(status_code=400, detail="hours must be > 0")
+    try:
+        _rows = db_client.execute_query(
+            """
+            SELECT pnl, close_reason, entry_time, exit_time, metadata
+            FROM trades_closed
+            WHERE exit_time > NOW() - (%s || ' hours')::interval
+            ORDER BY exit_time DESC
+            """,
+            (int(hours),),
+        )
+        _total = len(_rows or [])
+        _switch_trades = 0
+        _switch_loss_sum = 0.0
+        _cross_regime = 0
+        _cross_profile = 0
+        _lag_minutes = []
+        _reason_mix: Dict[str, int] = {}
+
+        for _r in _rows or []:
+            _pnl = float(_r.get('pnl') or 0.0)
+            _reason = str(_r.get('close_reason') or 'unknown')
+            _reason_mix[_reason] = _reason_mix.get(_reason, 0) + 1
+
+            _meta = _r.get('metadata') or {}
+            if isinstance(_meta, str):
+                try:
+                    _meta = json.loads(_meta)
+                except Exception:
+                    _meta = {}
+            if not isinstance(_meta, dict):
+                _meta = {}
+
+            _entry_reg = str(_meta.get('regime_at_entry') or '').strip().upper()
+            _exit_reg = str(_meta.get('regime_at_exit') or '').strip().upper()
+            _entry_prof = str(_meta.get('profile_at_entry') or '').strip().upper()
+            _exit_prof = str(_meta.get('profile_at_exit') or '').strip().upper()
+            _switch_id = str(_meta.get('switch_id') or '').strip()
+
+            if _entry_reg and _exit_reg and _entry_reg != _exit_reg:
+                _cross_regime += 1
+            if _entry_prof and _exit_prof and _entry_prof != _exit_prof:
+                _cross_profile += 1
+
+            if _switch_id:
+                _switch_trades += 1
+                if _pnl < 0:
+                    _switch_loss_sum += _pnl
+
+            try:
+                _et = _r.get('entry_time')
+                _xt = _r.get('exit_time')
+                if isinstance(_et, str):
+                    _et = datetime.fromisoformat(_et.replace('Z', '+00:00'))
+                if isinstance(_xt, str):
+                    _xt = datetime.fromisoformat(_xt.replace('Z', '+00:00'))
+                if _et is not None and _xt is not None:
+                    if getattr(_et, 'tzinfo', None) is None:
+                        _et = _et.replace(tzinfo=timezone.utc)
+                    if getattr(_xt, 'tzinfo', None) is None:
+                        _xt = _xt.replace(tzinfo=timezone.utc)
+                    _mins = (_xt - _et).total_seconds() / 60.0
+                    if _mins >= 0:
+                        _lag_minutes.append(_mins)
+            except Exception:
+                pass
+
+        _sorted_reason_mix = sorted(_reason_mix.items(), key=lambda kv: kv[1], reverse=True)
+        _avg_lag = (sum(_lag_minutes) / len(_lag_minutes)) if _lag_minutes else 0.0
+        _p95_lag = 0.0
+        if _lag_minutes:
+            _s = sorted(_lag_minutes)
+            _idx = int(max(0, min(len(_s) - 1, round(0.95 * (len(_s) - 1)))))
+            _p95_lag = _s[_idx]
+
+        return {
+            "ok": True,
+            "hours": int(hours),
+            "sample": {
+                "closed_trades": _total,
+                "switch_tagged_trades": _switch_trades,
+            },
+            "kpis": {
+                "switch_loss_total_usdt": round(_switch_loss_sum, 4),
+                "switch_loss_avg_usdt": round((_switch_loss_sum / _switch_trades), 4) if _switch_trades else 0.0,
+                "cross_regime_count": _cross_regime,
+                "cross_profile_count": _cross_profile,
+                "regime_mismatch_rate": round((_cross_regime / _total), 4) if _total else 0.0,
+                "profile_mismatch_rate": round((_cross_profile / _total), 4) if _total else 0.0,
+                "avg_hold_minutes": round(_avg_lag, 2),
+                "p95_hold_minutes": round(_p95_lag, 2),
+            },
+            "close_reason_mix": [
+                {"reason": _k, "count": int(_v), "share": round((_v / _total), 4) if _total else 0.0}
+                for _k, _v in _sorted_reason_mix
+            ],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "hours": int(hours)}
+
+
 @app.get("/metrics/spot-bull-root-cause")
 async def get_spot_bull_root_cause(
     hours: int = 168,
@@ -3381,6 +3768,13 @@ async def get_futures_positions() -> Dict:
         _s = _get_s()
         if not getattr(_s, 'futures_enabled', True):
             return {"enabled": False, "positions": [], "count": 0}
+        if bool(getattr(_s, 'dry_run', False)):
+            return {
+                "enabled": True,
+                "positions": [],
+                "count": 0,
+                "source": "dry_run",
+            }
         _fc = _get_futures_client(_s)
 
         # Query Binance directly — single source of truth
@@ -3615,6 +4009,13 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 7) -> Dict:
         _s = _get_s()
         if not getattr(_s, 'futures_enabled', True):
             return {"enabled": False, "positions": [], "count": 0}
+        if bool(getattr(_s, 'dry_run', False)):
+            return {
+                "enabled": True,
+                "trades": [],
+                "count": 0,
+                "source": "dry_run",
+            }
 
         _fc = _get_futures_client(_s)
 
@@ -4590,18 +4991,25 @@ async def get_health_status() -> Dict:
         overall = "error"
 
     # Binance check
-    try:
-        import time as _time
-        t0 = _time.monotonic()
-        binance_client.get_account_balance()
-        latency_ms = round((_time.monotonic() - t0) * 1000, 1)
-        checks["binance"] = {"status": "ok", "latency_ms": latency_ms,
-                              "testnet": settings.binance_use_testnet}
-    except Exception as e:
-        checks["binance"] = {"status": "error", "detail": str(e)}
-        ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_ERROR, f"Binance health check failed: {e}")
-        if overall != "error":
-            overall = "warning"
+    if bool(getattr(settings, 'dry_run', False)):
+        checks["binance"] = {
+            "status": "skipped",
+            "detail": "dry_run mode",
+            "testnet": settings.binance_use_testnet,
+        }
+    else:
+        try:
+            import time as _time
+            t0 = _time.monotonic()
+            binance_client.get_account_balance()
+            latency_ms = round((_time.monotonic() - t0) * 1000, 1)
+            checks["binance"] = {"status": "ok", "latency_ms": latency_ms,
+                                  "testnet": settings.binance_use_testnet}
+        except Exception as e:
+            checks["binance"] = {"status": "error", "detail": str(e)}
+            ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_ERROR, f"Binance health check failed: {e}")
+            if overall != "error":
+                overall = "warning"
 
     # Trade cycle freshness
     last_cycle = orchestrator.last_trade_cycle_at
@@ -4630,11 +5038,23 @@ async def get_health_status() -> Dict:
     else:
         checks["trade_cycle"] = {"status": "unknown", "detail": "No cycle completed yet"}
 
+    _cycle_failures = int(getattr(orchestrator, 'consecutive_cycle_failures', 0) or 0)
+    checks["cycle_failures"] = {
+        "status": "error" if _cycle_failures >= 3 else ("warning" if _cycle_failures > 0 else "ok"),
+        "consecutive": _cycle_failures,
+        "last_error": getattr(orchestrator, 'last_cycle_error', None),
+        "last_error_at": getattr(orchestrator, 'last_cycle_error_at', None).isoformat() if getattr(orchestrator, 'last_cycle_error_at', None) else None,
+    }
+    if _cycle_failures >= 3:
+        overall = "error"
+    elif _cycle_failures > 0 and overall != "error":
+        overall = "warning"
+
     # Position sync: compare tracked symbols in DB vs their balances in Binance
     try:
         all_pos = position_manager.get_all_positions()
         db_count = sum(len(v) for v in all_pos.values())
-        balances = binance_client.get_account_balance()
+        balances = {} if bool(getattr(settings, 'dry_run', False)) else binance_client.get_account_balance()
         # Only check SPOT positions — futures positions (trade_type='futures') have no spot balance
         def _is_futures_pos(pos_list):
             return any(
@@ -4656,12 +5076,17 @@ async def get_health_status() -> Dict:
             if float(balances.get(_sym_to_asset(sym), 0)) > 0
         )
         # mismatch: DB has SPOT entries for symbols with no Binance spot balance
-        symbols_missing_in_binance = [
-            sym for sym in tracked_symbols
-            if float(balances.get(_sym_to_asset(sym), 0)) == 0
-        ]
-        mismatch = len(symbols_missing_in_binance)
-        sync_status = "ok" if mismatch == 0 else "warning"
+        if bool(getattr(settings, 'dry_run', False)):
+            symbols_missing_in_binance = []
+            mismatch = 0
+            sync_status = "skipped"
+        else:
+            symbols_missing_in_binance = [
+                sym for sym in tracked_symbols
+                if float(balances.get(_sym_to_asset(sym), 0)) == 0
+            ]
+            mismatch = len(symbols_missing_in_binance)
+            sync_status = "ok" if mismatch == 0 else "warning"
         checks["position_sync"] = {
             "status": sync_status,
             "db_open_positions": db_count,
@@ -5193,6 +5618,21 @@ async def get_runtime_state(_auth=Depends(_require_api_key)) -> Dict:
                 **_value,
                 "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
             }
+        if "regime_transition_state" in result:
+            _transition_state = result.get("regime_transition_state") or {}
+            result["transition_summary"] = {
+                "active": bool(_transition_state.get("active")),
+                "from_mode": _transition_state.get("pre_switch", {}).get("from_mode"),
+                "to_mode": _transition_state.get("pre_switch", {}).get("to_mode"),
+                "confidence": _transition_state.get("pre_switch", {}).get("confidence"),
+                "block_new_shorts": bool(_transition_state.get("pre_switch", {}).get("block_new_shorts")),
+                "updated_at": _transition_state.get("updated_at"),
+            }
+        try:
+            _summary_mode = str(getattr(orchestrator, 'current_regime_mode', '') or 'SPOT_BULL').strip().upper() or 'SPOT_BULL'
+            result["effective_runtime"] = _get_effective_runtime_selection(_summary_mode)
+        except Exception:
+            pass
         # Enrich with live daily PnL from daily_pnl_tracker cache
         try:
             from daily_pnl_tracker import get_daily_realized_pnl as _gdpnl
@@ -5203,6 +5643,22 @@ async def get_runtime_state(_auth=Depends(_require_api_key)) -> Dict:
         return {"ok": True, "state": result, "timestamp": datetime.now(timezone.utc).isoformat()}
     except Exception as e:
         return {"ok": False, "error": str(e), "state": {}}
+
+
+@app.get("/system/effective-runtime")
+async def get_effective_runtime(_auth=Depends(_require_api_key)) -> Dict:
+    """Lightweight endpoint for near-real-time mode/profile truth from live engine state."""
+    try:
+        _summary_mode = str(getattr(orchestrator, 'current_regime_mode', '') or 'SPOT_BULL').strip().upper() or 'SPOT_BULL'
+        _effective = _get_effective_runtime_selection(_summary_mode)
+        return {
+            "ok": True,
+            "effective_runtime": _effective,
+            "cycle_minutes": getattr(orchestrator, 'current_cycle_minutes', None),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "effective_runtime": {}}
 
 
 @app.get("/config/kelly")
