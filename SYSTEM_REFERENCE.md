@@ -1,7 +1,155 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 03 2026 19:40 UTC-6 | Sesión 35: hardening F1-F6 completado (inyección futures estricta, snapshot atómico efectivo, gate de health crítico y dashboard Operator Focus).
+> Última actualización: jul 04 2026 18:10 UTC-6 | Sesión 36: mode/profile harmony + KPI gates de rollout/parity/promotion documentados como modelo operativo.
+
+---
+
+### ✅ Sesión 36 — Mode/Profile Harmony + KPI Governance (manual operativo) — jul 04 2026 18:10 UTC-6
+
+**Objetivo:** convertir la implementación de hoy en un modelo formal para siguientes iteraciones: máxima ganancia con control operativo, trazabilidad y criterio explícito de aceptación/rollback.
+
+**Implementación principal (hoy):**
+1. `run_trades.py`:
+  - overlay armónico modo/perfil (`_apply_mode_profile_harmony`) con firma idempotente para evitar drift por reaplicación;
+  - persistencia del estado efectivo (`_persist_mode_profile_harmony_snapshot`) en `trading_runtime_state`;
+  - Smart Kelly con doble contexto: multiplicador por modo/perfil (`_get_kelly_context_multiplier`) + multiplicador por salud KPI (`_get_kpi_context_multiplier`).
+2. `smart_scale_out.py`:
+  - SSO perfil-aware: escalado por perfil A/B/C y por régimen para SSO-1..SSO-6;
+  - ajuste coherente entre agresividad de entrada (Kelly) y salida inteligente (SSO).
+3. `app.py`:
+  - snapshot de armonía y drift (`_get_mode_profile_harmony_snapshot`, `_get_mode_profile_harmony_drift`);
+  - gate de rollout (`_get_rollout_readiness_snapshot`) con causas bloqueantes explícitas;
+  - validación de paridad live/backtest (`_get_parity_validation_snapshot`);
+  - criterio de promoción post-cambio (`_get_promotion_criteria_snapshot`);
+  - exposición en dashboard/health de `mode_profile_harmony`, `rollout_readiness`, `parity_validation`, `promotion_criteria`.
+
+**Estado operativo actual (al cierre de sesión):**
+1. La plomería de gobernanza quedó implementada y visible.
+2. La promoción automática se mantiene condicionada por evidencia (sample + parity), no por intuición.
+3. Drift activo crítico de armonía se redujo a 0 en validaciones de runtime; deuda histórica puede seguir visible como contexto de auditoría.
+
+---
+
+## MODELO OPERATIVO DE REFERENCIA (BASE DE FUNCIONAMIENTO)
+
+### 0) Flujo canónico del sistema (orden obligatorio)
+
+1. Detectar régimen de mercado.
+2. Ejecutar selector SMART Total de modo (si está habilitado).
+3. Ejecutar selector de perfil A/B/C para el modo efectivo.
+4. Aplicar parámetros de régimen/perfil (`_apply_regime_params`).
+5. Aplicar overlay de armonía modo/perfil (`_apply_mode_profile_harmony`).
+6. Persistir snapshot efectivo en runtime state.
+7. Ejecutar decisiones de entrada/salida con Smart Kelly + SSO.
+8. Evaluar salud, drift, paridad y readiness para gobierno de rollout.
+
+Este orden no se negocia: cualquier cambio futuro debe preservar esta secuencia o justificar explícitamente la variación.
+
+### 1) KPI Gates como criterio de aceptación y rollback
+
+Los gates no son decorativos: son el contrato operativo entre implementación y producción.
+
+**Gate A — Harmony Drift (coherencia de parámetros):**
+1. Fuente: `mode_profile_harmony_snapshot` vs runtime actual.
+2. Si hay drift activo crítico, `rollout_readiness` debe ser `blocked`.
+3. Drift histórico no reconocido permanece visible para auditoría, pero se separa del drift activo para evitar bloqueos falsos.
+
+**Gate B — Health Crítico (estabilidad operativa):**
+1. Fuente: `health_results_latest`.
+2. Si estado reciente es `critical/error`, el motor prioriza protección; en runtime puede entrar en `monitor_only`.
+
+**Gate C — Performance Changepoint (before/after):**
+1. Fuente: `performance_changepoint_*` contra baseline 3y/60000.
+2. Deterioro severo post-cambio bloquea promoción y activa rollback selectivo.
+
+**Gate D — Parity Live vs Backtest:**
+1. Fuente: compare-vs-live del run baseline activo.
+2. Gap crítico en PnL/win-rate bloquea rollout final aunque el sistema esté estable.
+
+**Gate E — Promotion Criteria (evidencia mínima):**
+1. Requiere muestra mínima post-cambio, paridad aceptable y ausencia de drift activo crítico.
+2. Estados esperados: `promote`, `observe`, `hold`.
+
+**Protocolo de rollback (modelo obligatorio):**
+1. Rollback siempre es selectivo (modo/perfil/parámetro afectado), no desmontaje global.
+2. Si falla Gate A/B: rollback inmediato al último snapshot estable.
+3. Si falla Gate C/D/E: mantener observación y revertir solo los parámetros responsables del gap.
+4. Toda reversión debe quedar auditada en `trades_audit` y persistida en `trading_runtime_state`.
+
+### 2) Smart Kelly (arquitectura aplicada hoy)
+
+Smart Kelly queda definido como sizing contextual, no estático:
+
+1. Base por configuración (spot/futures) con límites duros (`base_usdt`, `max_usdt`, `max_pct_liquid`).
+2. Multiplicador por contexto de mercado y perfil:
+  - Profile A: más agresivo para capturar velocidad de capitalización.
+  - Profile B: balance riesgo/retorno.
+  - Profile C: defensivo para preservación.
+3. Multiplicador por salud KPI (`health_results_latest`) para evitar sobreexposición en degradación.
+4. Aplicación antes de cap final para mantener el control de riesgo dentro de límites globales.
+5. Trazabilidad en logs/snapshot para explicar por qué un size fue mayor o menor.
+
+### 3) SSO (Smart Scale-Out) como motor de salida inteligente
+
+SSO es la capa que convierte ventaja estadística en velocidad de reciclaje de capital:
+
+1. SSO-1 estancamiento de beneficio.
+2. SSO-2 agotamiento de momentum.
+3. SSO-3 escalado por ATR/multi-nivel.
+4. SSO-4 contribución a objetivo diario.
+5. SSO-5 upgrade por mejor oportunidad.
+6. SSO-6 rescue de rebote con smart gate.
+
+Aplicación por perfil:
+1. A deja correr más los ganadores y tolera más variación táctica.
+2. B intermedio para equilibrio de captura/protección.
+3. C acelera protección y reciclaje defensivo.
+
+Regla de coherencia: nunca ajustar SSO aislado de Kelly; entrada y salida deben permanecer armónicas por modo/perfil.
+
+### 4) Política de SL: lógico vs Binance (modelo definitivo)
+
+1. **SL lógico (software)** es el control primario de ejecución y gestión dinámica.
+2. **SL Binance (exchange)** es red de seguridad de último recurso (backstop), no trigger principal de estrategia.
+3. El SL Binance no debe endurecerse por debajo del piso operativo seguro definido por análisis histórico de stops.
+4. Si hay desalineación, se corrige con criterio conservador y trazabilidad, evitando crear riesgo adicional por sobreajuste.
+
+Esta separación es obligatoria en nuevos fixes: optimizar el SL lógico no autoriza degradar la función defensiva del SL de Binance.
+
+### 5) Baseline 3y/60000 + changepoints como centro de verdad
+
+1. Toda mejora debe referenciar baseline 3y/60000 y su `base_run_id` activo.
+2. Todo cambio relevante debe marcar changepoint para medición before/after.
+3. Aceptación final requiere evidencia combinada: performance + paridad + estabilidad operativa.
+4. Si mejora una métrica y empeora cierre/SL/drift crítico, no se promueve.
+
+### 6) Estado persistente y observabilidad obligatorios
+
+Toda funcionalidad nueva debe exponer:
+1. Estado persistente restart-safe en `trading_runtime_state`.
+2. Evento auditable en `trades_audit` cuando cambie decisiones o parámetros.
+3. Superficie de observabilidad en API/dashboard para diagnóstico operativo.
+
+Endpoints de control/observación que forman parte del modelo:
+1. `/metrics/performance-changepoint`
+2. `/metrics/rollout-readiness`
+3. `/metrics/promotion-criteria`
+4. `/backtest/compare-vs-live`
+5. `/dashboard/summary` (bloques de harmony/parity/readiness/promotion)
+
+### 7) Plantilla obligatoria para siguientes implementaciones y fixes
+
+Antes de merge en producción, cada cambio debe responder explícitamente:
+
+1. ¿Cómo impacta SPOT y FUTURES?
+2. ¿Cómo impacta perfiles A/B/C?
+3. ¿Qué gate valida aceptación y cuál gatilla rollback?
+4. ¿Qué estado se persiste y qué evento se audita?
+5. ¿Cómo se mide contra baseline/changepoint?
+6. ¿Qué endpoint/dashboard mostrará la salud del cambio?
+
+Si una propuesta no responde estos 6 puntos, no está lista para rollout.
 
 ---
 
