@@ -71,6 +71,9 @@ class Orchestrator:
         self.last_trade_cycle_at: Optional[datetime] = None
         self.current_cycle_minutes: int = 5  # updated dynamically per regime
         self.current_regime_mode: str = 'SPOT_BULL'  # updated dynamically per cycle
+        self.consecutive_cycle_failures: int = 0
+        self.last_cycle_error: Optional[str] = None
+        self.last_cycle_error_at: Optional[datetime] = None
         
         # Callbacks
         self.on_state_change: Optional[Callable] = None
@@ -403,6 +406,8 @@ class Orchestrator:
             if not first_run:
                 time.sleep(max(1, _next_interval) * 60)
             first_run = False
+            _cycle_ok = False
+            _cycle_error = None
             try:
                 if self.can_execute_trades():
                     result = cycle_func()
@@ -416,6 +421,7 @@ class Orchestrator:
                                 self.current_regime_mode = result['regime_mode']
                     else:
                         _next_interval = interval_minutes
+                    _cycle_ok = True
                 elif self.can_monitor_positions():
                     # PAUSED: run trade cycle in monitor-only mode to protect open positions
                     _is_trade_cycle = cycle_func == getattr(self, '_trade_cycle_func', None)
@@ -423,18 +429,23 @@ class Orchestrator:
                         try:
                             result = cycle_func(monitor_only=True)
                             logger.debug("System paused — monitor-only SL/TP cycle executed")
+                            _cycle_ok = True
                         except TypeError:
                             # cycle_func does not accept monitor_only kwarg (e.g. analysis cycle)
                             logger.debug("System paused, skipping non-trade cycle")
+                            _cycle_ok = True
                     else:
                         logger.debug("System paused, skipping non-trade cycle")
+                        _cycle_ok = True
                 else:
                     logger.debug("System stopped, skipping cycle")
+                    _cycle_ok = True
             except Exception as e:
                 import traceback
                 logger.error(f"Error in cycle: {e}\n{traceback.format_exc()}")
+                _cycle_error = str(e)
             else:
-                if cycle_func == getattr(self, '_trade_cycle_func', None):
+                if _cycle_ok and cycle_func == getattr(self, '_trade_cycle_func', None):
                     self.last_trade_cycle_at = datetime.utcnow()
                     _request_smart_recheck(
                         self.db_client,
@@ -445,6 +456,24 @@ class Orchestrator:
                             "regime_mode": self.current_regime_mode,
                         },
                     )
+            finally:
+                if _cycle_ok:
+                    self.consecutive_cycle_failures = 0
+                    self.last_cycle_error = None
+                    self.last_cycle_error_at = None
+                elif _cycle_error is not None:
+                    self.consecutive_cycle_failures += 1
+                    self.last_cycle_error = _cycle_error
+                    self.last_cycle_error_at = datetime.utcnow()
+                    if self.consecutive_cycle_failures >= 3:
+                        logger.error(
+                            "Pausing orchestrator after %s consecutive cycle failures",
+                            self.consecutive_cycle_failures,
+                        )
+                        self.pause(
+                            changed_by="system",
+                            reason=f"consecutive_cycle_failures:{self.consecutive_cycle_failures}",
+                        )
     
     def stop_all_cycles(self) -> None:
         """Stop all background cycles."""
@@ -478,5 +507,8 @@ class Orchestrator:
             "position_manager_active": self.position_manager is not None,
             "backtester_active": self.backtester is not None,
             "last_trade_cycle_at": self.last_trade_cycle_at.isoformat() if self.last_trade_cycle_at else None,
+            "consecutive_cycle_failures": self.consecutive_cycle_failures,
+            "last_cycle_error": self.last_cycle_error,
+            "last_cycle_error_at": self.last_cycle_error_at.isoformat() if self.last_cycle_error_at else None,
             "timestamp": datetime.utcnow().isoformat()
         }

@@ -13,7 +13,9 @@ Usage:
     sl_pct = get_spot_param(settings, 'sl_pct')
 """
 
+from copy import deepcopy
 from typing import Any, Dict, Optional
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -412,3 +414,77 @@ def validate_config(settings) -> Dict[str, Any]:
 def dump_active_config(settings) -> Dict[str, Any]:
     """Return a snapshot of all canonical parameters for persistence."""
     return {name: get_param(settings, name) for name in _PARAM_DEFAULTS}
+
+
+def load_runtime_overrides_from_db(settings, db_client) -> Dict[str, Any]:
+    """Reload persisted hot-config overrides from DB into the live settings object.
+
+    This function is intentionally non-fatal: any parse/apply failure is logged and skipped.
+    """
+    result = {
+        "ok": True,
+        "applied_scalars": 0,
+        "applied_thresholds": [],
+        "errors": [],
+    }
+    if settings is None or db_client is None:
+        result["ok"] = False
+        result["errors"].append("missing settings or db_client")
+        return result
+
+    try:
+        rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
+        )
+        if rows and rows[0].get("value") is not None:
+            raw = rows[0].get("value")
+            if isinstance(raw, str):
+                raw = json.loads(raw)
+            if isinstance(raw, dict):
+                for field, change in raw.items():
+                    if field == "category_thresholds":
+                        continue
+                    if not hasattr(settings, field):
+                        continue
+                    new_value = None
+                    if isinstance(change, dict) and "new" in change:
+                        new_value = change.get("new")
+                    elif not isinstance(change, dict):
+                        new_value = change
+                    if new_value is None:
+                        continue
+                    try:
+                        cur = getattr(settings, field, None)
+                        if cur is None:
+                            setattr(settings, field, new_value)
+                        else:
+                            setattr(settings, field, type(cur)(new_value))
+                        result["applied_scalars"] += 1
+                    except Exception as e:
+                        result["errors"].append(f"scalar {field}: {e}")
+    except Exception as e:
+        result["errors"].append(f"load kelly_config_override: {e}")
+
+    for attr, state_key in (
+        ("category_thresholds", "category_thresholds_override"),
+        ("futures_category_thresholds", "futures_category_thresholds_override"),
+    ):
+        try:
+            rows = db_client.execute_query(
+                "SELECT value FROM trading_runtime_state WHERE key=%s",
+                (state_key,),
+            )
+            if not rows or rows[0].get("value") is None:
+                continue
+            raw = rows[0].get("value")
+            if isinstance(raw, str):
+                raw = json.loads(raw)
+            if isinstance(raw, dict):
+                setattr(settings, attr, deepcopy(raw))
+                result["applied_thresholds"].append(attr)
+        except Exception as e:
+            result["errors"].append(f"{state_key}: {e}")
+
+    if result["errors"]:
+        logger.warning("Runtime override restore completed with warnings: %s", result["errors"])
+    return result

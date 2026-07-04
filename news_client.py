@@ -1,4 +1,7 @@
-import feedparser
+try:
+    import feedparser
+except Exception:
+    feedparser = None
 import urllib.request
 import json
 import os
@@ -225,6 +228,8 @@ class NewsClient:
         return base in self.get_trending_symbols()
 
     def fetch_feed(self, url: str) -> List[Dict[str, str]]:
+        if feedparser is None:
+            return []
         feed = feedparser.parse(url)
         articles = []
         for entry in feed.entries:

@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from risk_calculator import RiskCalculator
 from config import Settings
 from pnl_predictor import PnLPredictor
+from pnl_service import get_predictor
+import pnl_service
 
 
 def _get_bnb_reserve_usdt(settings) -> float:
@@ -63,7 +65,7 @@ class PortfolioManager:
         self.settings = settings
         self.risk_calculator = RiskCalculator()
         self.position_manager = position_manager
-        self.pnl_predictor = PnLPredictor()
+        self.pnl_predictor = get_predictor()
         
         # Portfolio configuration
         self.allocation_pct = settings.portfolio_allocation_pct / 100.0
@@ -396,40 +398,18 @@ class PortfolioManager:
                     
                     # Get technical indicators
                     signal_data = signal_gen.analyze_symbol(symbol, interval='1h')
-                    indicators = signal_data.get('indicators', {})
-                    
-                    # Format indicators for predictor
-                    formatted_indicators = {
-                        'rsi': {'value': indicators.get('rsi', 50)},
-                        'macd': {
-                            'macd': indicators.get('macd', 0),
-                            'signal': indicators.get('signal', 0),
-                            'histogram': indicators.get('histogram', 0)
-                        },
-                        'sma': {'value': indicators.get('middle_band', current_price)},
-                        'ema': {'value': indicators.get('middle_band', current_price)},
-                        'bollinger_bands': {
-                            'upper': indicators.get('upper_band', current_price * 1.02),
-                            'middle': indicators.get('middle_band', current_price),
-                            'lower': indicators.get('lower_band', current_price * 0.98)
-                        }
-                    }
-                    
-                    # Calculate prediction — use dynamic cycle from orchestrator if available
-                    try:
-                        from app import orchestrator as _orch
-                        cycle_duration = _orch.current_cycle_minutes
-                    except Exception:
-                        cycle_duration = getattr(self.settings, 'trade_cycle_minutes', 5)
                     position_size = position_data.get('quantity', 0) * current_price
-                    
-                    prediction = self.pnl_predictor.predict_pnl(
+                    prediction, _ = pnl_service.predict_for_symbol(
                         symbol=symbol,
+                        client=self.binance_client,
+                        settings=self.settings,
+                        position_size_usdt=position_size,
+                        precomputed_signal=signal_data,
+                        trade_type='spot',
                         current_price=current_price,
-                        indicators=formatted_indicators,
-                        cycle_duration_minutes=cycle_duration,
-                        position_size_usdt=position_size
                     )
+                    if prediction is None:
+                        continue
                     
                     predictions[symbol] = prediction
                     logger.debug(f"Prediction for {symbol}: {prediction['expected_pnl']:.2f} USDT")

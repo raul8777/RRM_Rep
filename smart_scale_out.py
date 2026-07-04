@@ -139,6 +139,23 @@ class SmartScaleOut:
             return getattr(self._s, key, default)
         return default
 
+    def _profile_scale(self, pos: SSOPositionData, aggressive: float = 1.0, balanced: float = 1.0, defensive: float = 1.0) -> float:
+        profile = str(getattr(pos, 'profile_label', '') or '').strip().upper()
+        if profile == 'A':
+            return aggressive
+        if profile == 'C':
+            return defensive
+        return balanced
+
+    def _regime_scale(self, pos: SSOPositionData, spot_bull: float = 1.0, range_scalp: float = 1.0, preservation: float = 1.0, futures_short: float = 1.0) -> float:
+        regime = str(getattr(pos, 'regime_mode', '') or '').strip().upper()
+        return {
+            'SPOT_BULL': spot_bull,
+            'RANGE_SCALP': range_scalp,
+            'PRESERVATION': preservation,
+            'FUTURES_SHORT': futures_short,
+        }.get(regime, 1.0)
+
     def evaluate(self, pos: SSOPositionData) -> SSOAction:
         """
         Evaluate all SSO triggers in priority order.
@@ -191,6 +208,8 @@ class SmartScaleOut:
             _max_peak = self._cfg('spot_bounce_rescue_max_peak_pct', 0.8) / 100.0
             _min_hours = self._cfg('spot_bounce_rescue_min_hours', 8.0)
             _target_pnl = self._cfg('spot_bounce_rescue_target_pnl', -0.30)
+        _min_hours *= self._profile_scale(pos, aggressive=1.12, balanced=1.0, defensive=0.90)
+        _target_pnl *= self._profile_scale(pos, aggressive=1.10, balanced=1.0, defensive=0.90)
 
         # Determine if this position qualifies as a bounce entry
         _is_bounce = pos.bounce_entry
@@ -320,11 +339,19 @@ class SmartScaleOut:
         age_hours = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
         _lifetime_vel = (pos.pnl_pct / age_hours) if age_hours > 0 else 0.0
         _snap_vel = pos.pnl_velocity_1h
+        _regime = str(pos.regime_mode or '').strip().upper()
+        _profile = str(pos.profile_label or '').strip().upper()
 
         # ── SSO-1b: Profit Decay — giving back gains ──────────────────────────
         _decay_threshold = self._cfg('sso_decay_threshold_pct', 0.004)
         _decay_min_profit = self._dyn_decay_min_profit if self._dyn_decay_min_profit else self._cfg('sso_decay_min_profit_usd', 2.0)
         _decay_min_hours = self._cfg('sso_decay_min_hours', 1.5)
+        if _regime == 'SPOT_BULL':
+            _decay_min_hours *= 1.15
+        elif _regime == 'RANGE_SCALP':
+            _decay_min_hours *= 0.85
+        _decay_min_hours *= self._profile_scale(pos, aggressive=1.12, balanced=1.0, defensive=0.90)
+        _decay_min_profit *= self._profile_scale(pos, aggressive=1.10, balanced=1.0, defensive=0.92)
         decay_pct = pos.peak_pnl_pct - pos.pnl_pct
         _1b_reasons = []
         if decay_pct < _decay_threshold:
@@ -351,6 +378,17 @@ class SmartScaleOut:
         _slow_t2 = self._cfg('sso_slow_tier2_hours', 4.0)
         _slow_t3 = self._cfg('sso_slow_tier3_hours', 6.0)
         _slow_t4 = self._cfg('sso_slow_tier4_hours', 8.0)
+        if _regime == 'SPOT_BULL':
+            _slow_vel_base *= 0.6
+            _slow_min_hours *= 1.4
+        elif _regime == 'RANGE_SCALP':
+            _slow_vel_base *= 1.2
+            _slow_min_hours *= 0.8
+            _slow_min_profit *= 0.8
+        elif _regime == 'PRESERVATION':
+            _slow_vel_base *= 0.8
+        _slow_vel_base *= self._profile_scale(pos, aggressive=0.90, balanced=1.0, defensive=1.10)
+        _slow_min_hours *= self._profile_scale(pos, aggressive=1.10, balanced=1.0, defensive=0.92)
 
         _1c_reasons = []
         if pos.pnl_usdt < _slow_min_profit:
@@ -390,11 +428,18 @@ class SmartScaleOut:
         # ── SSO-1: Original Stagnant — velocity zero or negative ──────────────
         min_profit = max(self.stagnant_min_profit_floor,
                          pos.position_size_usdt * self.stagnant_min_profit_factor)
+        _stagnant_min_hours = self.stagnant_min_hours
+        if _regime == 'SPOT_BULL':
+            _stagnant_min_hours *= 1.5
+        elif _regime == 'RANGE_SCALP':
+            _stagnant_min_hours *= 0.8
+        min_profit *= self._profile_scale(pos, aggressive=1.08, balanced=1.0, defensive=0.92)
+        _stagnant_min_hours *= self._profile_scale(pos, aggressive=1.08, balanced=1.0, defensive=0.92)
         _1_reasons = []
         if pos.pnl_usdt < min_profit:
             _1_reasons.append(f"${pos.pnl_usdt:.1f}<${min_profit:.0f}")
-        if age_hours < self.stagnant_min_hours:
-            _1_reasons.append(f"age={age_hours:.1f}h<{self.stagnant_min_hours:.1f}h")
+        if age_hours < _stagnant_min_hours:
+            _1_reasons.append(f"age={age_hours:.1f}h<{_stagnant_min_hours:.1f}h")
         if _snap_vel is None:
             _1_reasons.append("vel=None")
         elif _snap_vel > 0.001:
@@ -421,6 +466,12 @@ class SmartScaleOut:
         """Close 75% if RSI exhausted + volume dying."""
         # Min PnL gate
         min_pnl = self.momentum_min_pnl_futures if pos.trade_type == "futures" else self.momentum_min_pnl_spot
+        _regime = str(pos.regime_mode or '').strip().upper()
+        if _regime == 'FUTURES_SHORT' and pos.trade_type == 'futures':
+            min_pnl *= 0.9
+        elif _regime == 'RANGE_SCALP' and pos.trade_type != 'futures':
+            min_pnl *= 0.8
+        min_pnl *= self._profile_scale(pos, aggressive=1.10, balanced=1.0, defensive=0.90)
         if pos.pnl_pct < min_pnl:
             return None
 
@@ -461,32 +512,34 @@ class SmartScaleOut:
 
         atr = pos.atr_4h_pct  # e.g., 0.008 = 0.8%
         levels_done = set(pos.sso_levels_done or [])
+        _atr_gate_mult = self._profile_scale(pos, aggressive=1.10, balanced=1.0, defensive=0.90)
+        _close_mult = self._profile_scale(pos, aggressive=0.85, balanced=1.0, defensive=1.10)
 
         # Check levels in order (highest first for best close %)
-        if 3 not in levels_done and pos.pnl_pct >= atr * self.ml_l3_mult:
+        if 3 not in levels_done and pos.pnl_pct >= atr * self.ml_l3_mult * _atr_gate_mult:
             return SSOAction(
                 should_close=True,
-                close_pct=self.ml_l3_close,
+                close_pct=min(1.0, self.ml_l3_close * _close_mult),
                 reason="sso_multilevel_l3",
-                detail=f"Level 3: pnl={pos.pnl_pct*100:.2f}% >= {atr*self.ml_l3_mult*100:.2f}% (3.5×ATR)",
+                detail=f"Level 3: pnl={pos.pnl_pct*100:.2f}% >= {atr*self.ml_l3_mult*_atr_gate_mult*100:.2f}% (3.5×ATR)",
                 trigger="SSO-3",
                 priority=3,
             )
-        if 2 not in levels_done and pos.pnl_pct >= atr * self.ml_l2_mult:
+        if 2 not in levels_done and pos.pnl_pct >= atr * self.ml_l2_mult * _atr_gate_mult:
             return SSOAction(
                 should_close=True,
-                close_pct=self.ml_l2_close,
+                close_pct=min(1.0, self.ml_l2_close * _close_mult),
                 reason="sso_multilevel_l2",
-                detail=f"Level 2: pnl={pos.pnl_pct*100:.2f}% >= {atr*self.ml_l2_mult*100:.2f}% (2×ATR)",
+                detail=f"Level 2: pnl={pos.pnl_pct*100:.2f}% >= {atr*self.ml_l2_mult*_atr_gate_mult*100:.2f}% (2×ATR)",
                 trigger="SSO-3",
                 priority=3,
             )
-        if 1 not in levels_done and pos.pnl_pct >= atr * self.ml_l1_mult:
+        if 1 not in levels_done and pos.pnl_pct >= atr * self.ml_l1_mult * _atr_gate_mult:
             return SSOAction(
                 should_close=True,
-                close_pct=self.ml_l1_close,
+                close_pct=min(1.0, self.ml_l1_close * _close_mult),
                 reason="sso_multilevel_l1",
-                detail=f"Level 1: pnl={pos.pnl_pct*100:.2f}% >= {atr*self.ml_l1_mult*100:.2f}% (1×ATR)",
+                detail=f"Level 1: pnl={pos.pnl_pct*100:.2f}% >= {atr*self.ml_l1_mult*_atr_gate_mult*100:.2f}% (1×ATR)",
                 trigger="SSO-3",
                 priority=3,
             )
@@ -496,7 +549,23 @@ class SmartScaleOut:
     def _check_sso4_target_contribution(self, pos: SSOPositionData) -> Optional[SSOAction]:
         """Close 100% if profit contributes meaningfully toward daily target."""
         target = pos.daily_target or self.target_daily_usd
-        min_contribution = target * self.target_contribution_pct
+        _target_contribution_pct = self.target_contribution_pct
+        _target_min_hours = self.target_min_hours
+        _regime = str(pos.regime_mode or '').strip().upper()
+        _profile = str(pos.profile_label or '').strip().upper()
+        if _regime == 'RANGE_SCALP':
+            target = min(target, self.target_daily_usd * 0.5)
+            _target_contribution_pct *= 0.8
+            _target_min_hours *= 0.8
+        elif _regime == 'PRESERVATION':
+            target = min(target, self.target_daily_usd * 0.4)
+            _target_contribution_pct *= 0.9
+        elif _regime == 'SPOT_BULL':
+            _target_contribution_pct *= 1.1
+            _target_min_hours *= 1.15
+        _target_contribution_pct *= self._profile_scale(pos, aggressive=1.10, balanced=1.0, defensive=0.90)
+        _target_min_hours *= self._profile_scale(pos, aggressive=1.10, balanced=1.0, defensive=0.90)
+        min_contribution = target * _target_contribution_pct
 
         if pos.pnl_usdt < min_contribution:
             return None
@@ -504,7 +573,7 @@ class SmartScaleOut:
         # Time gate
         if pos.opened_at:
             age_hours = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
-            if age_hours < self.target_min_hours:
+            if age_hours < _target_min_hours:
                 return None
 
         # If already close to target, be more patient (let winners run)
@@ -544,7 +613,8 @@ class SmartScaleOut:
 
         # Check if there's a significantly better signal
         strength_diff = pos.best_available_ev - pos.current_strength
-        if strength_diff < self.reentry_min_strength_diff:
+        strength_threshold = self.reentry_min_strength_diff * self._profile_scale(pos, aggressive=1.12, balanced=1.0, defensive=0.88)
+        if strength_diff < strength_threshold:
             return None
 
         return SSOAction(

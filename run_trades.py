@@ -509,8 +509,19 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'kelly_base_usdt': 'kelly_base_usdt',
             'kelly_max_usdt': 'kelly_max_usdt',
             'kelly_max_pct_liquid': 'kelly_max_pct_liquid',
+            'kelly_dynamic_base_pct': 'kelly_dynamic_base_pct',
+            'kelly_max_pct_cap': 'kelly_max_pct_cap',
             'futures_kelly_max_usdt': 'futures_kelly_max_usdt',
             'futures_kelly_base_usdt': 'futures_kelly_base_usdt',
+            'futures_kelly_max_pct_liquid': 'futures_kelly_max_pct_liquid',
+            'futures_kelly_cap_pct': 'futures_kelly_cap_pct',
+            'fng_capitulation_threshold': 'fng_capitulation_threshold',
+            'fng_extreme_fear_threshold': 'fng_extreme_fear_threshold',
+            'fng_extreme_greed_threshold': 'fng_extreme_greed_threshold',
+            'fng_capitulation_multiplier': 'fng_capitulation_multiplier',
+            'fng_extreme_fear_multiplier': 'fng_extreme_fear_multiplier',
+            'fng_extreme_greed_multiplier': 'fng_extreme_greed_multiplier',
+            'fng_kelly_boost_enabled': 'fng_kelly_boost_enabled',
             'kelly_conviction_enabled': 'kelly_conviction_enabled',
             'kelly_conviction_vol2x': 'kelly_conviction_vol2x',
             'kelly_conviction_vol3x': 'kelly_conviction_vol3x',
@@ -522,8 +533,31 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'futures_vol_spike_min': 'futures_vol_spike_min',
             'stop_loss_pct': 'stop_loss_pct',
             'take_profit_pct': 'take_profit_pct',
+            'smart_tp_max_pnl_pct': 'smart_tp_max_pnl_pct',
+            'smart_tp_enabled': 'smart_tp_enabled',
+            'smart_tp_max_extensions': 'smart_tp_max_extensions',
+            'smart_tp_extend_score_threshold': 'smart_tp_extend_score_threshold',
+            'scale_out_enabled': 'scale_out_enabled',
+            'scale_out_first_close_pct': 'scale_out_first_close_pct',
             'futures_sl_pct': 'futures_sl_pct',
             'futures_tp_pct': 'futures_tp_pct',
+            'futures_smart_tp_enabled': 'futures_smart_tp_enabled',
+            'futures_max_new_per_cycle': 'futures_max_new_per_cycle',
+            'futures_confirm_red_candle': 'futures_confirm_red_candle',
+            'futures_no_short_btc_4h_threshold': 'futures_no_short_btc_4h_threshold',
+            'futures_no_short_btc_3h_threshold': 'futures_no_short_btc_3h_threshold',
+            'futures_no_short_btc_1h_threshold': 'futures_no_short_btc_1h_threshold',
+            'futures_mass_sl_threshold': 'futures_mass_sl_threshold',
+            'futures_mass_sl_cooldown_hours': 'futures_mass_sl_cooldown_hours',
+            'max_positions_spot_bull': 'max_positions_spot_bull',
+            'max_positions_range_scalp': 'max_positions_range_scalp',
+            'max_positions_preservation': 'max_positions_preservation',
+            'max_positions_futures_short': 'max_positions_futures_short',
+            'max_total_exposure_pct': 'max_total_exposure_pct',
+            'max_total_exposure_spot_bull_fear': 'max_total_exposure_spot_bull_fear',
+            'min_hold_minutes': 'min_hold_minutes',
+            'min_hold_minutes_range_scalp': 'min_hold_minutes_range_scalp',
+            'max_rebalance_per_cycle': 'max_rebalance_per_cycle',
             'min_hold_minutes_spot_bull': 'min_hold_minutes_spot_bull',
             'min_hold_for_prediction_exit': 'min_hold_for_prediction_exit',
             'min_cycles_before_close_shorts': 'min_cycles_before_close_shorts',
@@ -531,6 +565,52 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'futures_sl_cooldown_hours': 'futures_sl_cooldown_hours',
             'futures_smart_tp_max_pnl_pct': 'futures_smart_tp_max_pnl_pct',
             'futures_smart_tp_max_extensions': 'futures_smart_tp_max_extensions',
+            'futures_smart_tp_extend_score_threshold': 'futures_smart_tp_extend_score_threshold',
+            'futures_bounce_rescue_enabled': 'futures_bounce_rescue_enabled',
+            'futures_bounce_rescue_max_peak_pct': 'futures_bounce_rescue_max_peak_pct',
+            'futures_bounce_rescue_min_hours': 'futures_bounce_rescue_min_hours',
+            'futures_bounce_rescue_target_pnl': 'futures_bounce_rescue_target_pnl',
+            'spot_bounce_rescue_enabled': 'spot_bounce_rescue_enabled',
+            'spot_bounce_rescue_max_peak_pct': 'spot_bounce_rescue_max_peak_pct',
+            'spot_bounce_rescue_min_hours': 'spot_bounce_rescue_min_hours',
+            'spot_bounce_rescue_target_pnl': 'spot_bounce_rescue_target_pnl',
+            'futures_momentum_reversal_enabled': 'futures_momentum_reversal_enabled',
+            'futures_momentum_reversal_min_peak': 'futures_momentum_reversal_min_peak',
+            'futures_momentum_reversal_drawback': 'futures_momentum_reversal_drawback',
+            'rescue_smart_gate_enabled': 'rescue_smart_gate_enabled',
+            'rescue_stay_strength_min': 'rescue_stay_strength_min',
+            'rescue_stay_ev_multiplier': 'rescue_stay_ev_multiplier',
+            'rescue_velocity_min_pct': 'rescue_velocity_min_pct',
+            'rescue_gate_min_concurrent': 'rescue_gate_min_concurrent',
+            'rescue_gate_g1_min_pct': 'rescue_gate_g1_min_pct',
+            'rescue_gate_g1_spot_min_pct': 'rescue_gate_g1_spot_min_pct',
+            'rescue_gate_vol_min_spike': 'rescue_gate_vol_min_spike',
+            'rescue_gate_max_blocks': 'rescue_gate_max_blocks',
+            'rescue_gate_min_pnl_improvement': 'rescue_gate_min_pnl_improvement',
+            'volspike_override_enabled': 'volspike_override_enabled',
+            'volspike_override_min_spike': 'volspike_override_min_spike',
+            'volspike_override_max_rsi': 'volspike_override_max_rsi',
+            'volspike_override_trend_required': 'volspike_override_trend_required',
+            'volspike_override_narrative_only': 'volspike_override_narrative_only',
+            'volspike_override_min_strength': 'volspike_override_min_strength',
+            'volspike_override_max_positions': 'volspike_override_max_positions',
+            'volspike_override_daily_limit': 'volspike_override_daily_limit',
+            'btc_dominance_filter_enabled': 'btc_dominance_filter_enabled',
+            'btc_dominance_altcoin_threshold': 'btc_dominance_altcoin_threshold',
+            'liquidity_filter_enabled': 'liquidity_filter_enabled',
+            'min_liquidity_vol_usdt': 'min_liquidity_vol_usdt',
+            'wr_screener_enabled': 'wr_screener_enabled',
+            'wr_screener_consecutive_sl_block': 'wr_screener_consecutive_sl_block',
+            'sso_target_daily_usd': 'sso_target_daily_usd',
+            'circuit_breaker_enabled': 'circuit_breaker_enabled',
+            'circuit_breaker_consecutive_failures': 'circuit_breaker_consecutive_failures',
+            'circuit_breaker_pause_minutes': 'circuit_breaker_pause_minutes',
+            'screener_min_vol_usdt': 'screener_min_vol_usdt',
+            'screener_futures_min_vol': 'screener_futures_min_vol',
+            'screener_max_pairs': 'screener_max_pairs',
+            'screener_max_futures_pairs': 'screener_max_futures_pairs',
+            'screener_cache_minutes': 'screener_cache_minutes',
+            'screener_snapshot_max_age_minutes': 'screener_snapshot_max_age_minutes',
             'sso_slow_velocity_threshold': 'sso_slow_velocity_threshold',
             'sso_slow_min_hours': 'sso_slow_min_hours',
             'sso_stagnant_min_hours': 'sso_stagnant_min_hours',
@@ -539,6 +619,10 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'sso_momentum_min_pnl_pct_spot': 'sso_momentum_min_pnl_pct_spot',
             'sso_momentum_min_pnl_pct_futures': 'sso_momentum_min_pnl_pct_futures',
             'slippage_pct': 'slippage_pct',
+            'use_bnb_for_commission': 'use_bnb_for_commission',
+            'hybrid_optimizer_enabled': 'hybrid_optimizer_enabled',
+            'auto_apply_backtest': 'auto_apply_backtest',
+            'backtest_safe_only': 'backtest_safe_only',
         }
 
         _applied = {}
@@ -653,6 +737,301 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _get_kelly_context_multiplier(settings, regime: str = None, trade_type: str = 'spot') -> float:
+    """Return a conservative profile/mode multiplier for Kelly sizing."""
+    _profile = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or 'B'
+    _regime = str(regime or getattr(settings, 'current_regime_mode', '') or '').strip().upper()
+
+    _profile_mult = {
+        'A': 1.12,
+        'B': 1.00,
+        'C': 0.88,
+    }.get(_profile, 1.00)
+    _regime_mult = {
+        'SPOT_BULL': 1.05,
+        'RANGE_SCALP': 0.95,
+        'PRESERVATION': 0.85,
+        'FUTURES_SHORT': 1.00,
+    }.get(_regime, 1.00)
+
+    if str(trade_type).strip().lower() == 'futures':
+        _profile_mult *= 1.02 if _profile == 'A' else (0.98 if _profile == 'C' else 1.0)
+    return max(0.75, min(1.20, _profile_mult * _regime_mult))
+
+
+def _get_kpi_context_multiplier(db_client) -> float:
+    """Return a health-aware multiplier derived from KPI/health gates.
+
+    Warning or inconclusive health should slow new risk deployment even if the
+    strategy is still trading; critical/error is already handled elsewhere, but
+    this keeps the Kelly path aligned with the system health state.
+    """
+    if db_client is None:
+        return 1.0
+    try:
+        rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key='health_results_latest'"
+        )
+        if not rows or rows[0].get('value') is None:
+            return 1.0
+        raw = rows[0].get('value')
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                return 1.0
+        if not isinstance(raw, dict):
+            return 1.0
+        overall = str(raw.get('overall') or '').strip().lower()
+        if overall in ('error', 'critical'):
+            return 0.70
+        if overall == 'warning':
+            return 0.88
+        if overall == 'inconclusive':
+            return 0.95
+    except Exception:
+        return 1.0
+    return 1.0
+
+
+def _clamp_value(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str, Any]:
+    """Apply an idempotent mode/profile overlay on top of the base regime params."""
+    _regime = str(regime or '').strip().upper()
+    _profile = str(profile or '').strip().upper() or 'B'
+    if settings is None:
+        return {"applied": {}, "regime": _regime, "profile": _profile}
+
+    _signature = f"{_regime}:{_profile}"
+    _last_signature = str(getattr(settings, '_mode_profile_harmony_signature', '') or '')
+    if _last_signature == _signature:
+        return {"applied": {}, "regime": _regime, "profile": _profile, "signature": _signature, "skipped": True, "reason": "already_applied"}
+
+    _regime_mult = {
+        'SPOT_BULL': {
+            'trailing_stop_activation_pct': 1.08,
+            'trailing_stop_distance_pct': 1.10,
+            'futures_trailing_activation_pct': 1.05,
+            'futures_trailing_distance_pct': 1.08,
+            'max_positions_spot_bull': 1.08,
+            'min_hold_minutes_spot_bull': 1.08,
+            'max_rebalance_per_cycle': 0.95,
+            'futures_long_sl_pct': 1.00,
+            'futures_long_tp_pct': 1.02,
+            'sso_target_daily_usd': 1.05,
+            'sso_stagnant_min_hours': 1.05,
+            'sso_slow_velocity_threshold': 0.95,
+            'sso_reentry_min_strength_diff': 1.03,
+            'spot_bounce_rescue_target_pnl': 1.00,
+            'futures_bounce_rescue_target_pnl': 1.00,
+        },
+        'RANGE_SCALP': {
+            'trailing_stop_activation_pct': 0.95,
+            'trailing_stop_distance_pct': 0.90,
+            'futures_trailing_activation_pct': 0.95,
+            'futures_trailing_distance_pct': 0.92,
+            'max_positions_range_scalp': 0.92,
+            'min_hold_minutes_range_scalp': 0.88,
+            'max_rebalance_per_cycle': 1.10,
+            'futures_long_sl_pct': 0.95,
+            'futures_long_tp_pct': 0.92,
+            'sso_target_daily_usd': 0.90,
+            'sso_stagnant_min_hours': 0.92,
+            'sso_slow_velocity_threshold': 1.06,
+            'sso_reentry_min_strength_diff': 0.98,
+            'range_scalp_sl_pct': 0.95,
+            'range_scalp_tp_pct': 0.92,
+        },
+        'PRESERVATION': {
+            'trailing_stop_activation_pct': 0.92,
+            'trailing_stop_distance_pct': 0.88,
+            'futures_trailing_activation_pct': 0.90,
+            'futures_trailing_distance_pct': 0.88,
+            'max_positions_preservation': 0.88,
+            'min_hold_minutes': 1.12,
+            'max_rebalance_per_cycle': 0.85,
+            'futures_long_sl_pct': 0.94,
+            'futures_long_tp_pct': 0.96,
+            'sso_target_daily_usd': 0.85,
+            'sso_stagnant_min_hours': 0.90,
+            'sso_slow_velocity_threshold': 1.10,
+            'sso_reentry_min_strength_diff': 0.95,
+            'preservation_sl_pct': 0.94,
+            'preservation_tp_pct': 0.96,
+        },
+        'FUTURES_SHORT': {
+            'trailing_stop_activation_pct': 1.00,
+            'trailing_stop_distance_pct': 1.00,
+            'futures_trailing_activation_pct': 1.05,
+            'futures_trailing_distance_pct': 1.06,
+            'max_positions_futures_short': 1.05,
+            'futures_max_new_per_cycle': 1.00,
+            'futures_long_sl_pct': 0.98,
+            'futures_long_tp_pct': 1.00,
+            'sso_target_daily_usd': 0.95,
+            'sso_stagnant_min_hours': 0.95,
+            'sso_slow_velocity_threshold': 1.02,
+            'sso_reentry_min_strength_diff': 1.00,
+        },
+    }.get(_regime, {})
+
+    _profile_mult = {
+        'A': {
+            'trailing_stop_activation_pct': 1.06,
+            'trailing_stop_distance_pct': 1.08,
+            'futures_trailing_activation_pct': 1.04,
+            'futures_trailing_distance_pct': 1.05,
+            'max_positions_spot_bull': 1.12,
+            'max_positions_range_scalp': 1.10,
+            'max_positions_preservation': 1.00,
+            'max_positions_futures_short': 1.10,
+            'futures_max_new_per_cycle': 1.10,
+            'min_hold_minutes': 0.92,
+            'min_hold_minutes_spot_bull': 0.94,
+            'min_hold_minutes_range_scalp': 0.90,
+            'sso_target_daily_usd': 1.10,
+            'sso_stagnant_min_hours': 1.08,
+            'sso_slow_velocity_threshold': 0.92,
+            'sso_reentry_min_strength_diff': 1.05,
+            'spot_bounce_rescue_target_pnl': 1.05,
+            'futures_bounce_rescue_target_pnl': 1.05,
+            'futures_long_sl_pct': 1.04,
+            'futures_long_tp_pct': 1.05,
+        },
+        'B': {},
+        'C': {
+            'trailing_stop_activation_pct': 0.94,
+            'trailing_stop_distance_pct': 0.90,
+            'futures_trailing_activation_pct': 0.92,
+            'futures_trailing_distance_pct': 0.92,
+            'max_positions_spot_bull': 0.88,
+            'max_positions_range_scalp': 0.90,
+            'max_positions_preservation': 0.82,
+            'max_positions_futures_short': 0.88,
+            'futures_max_new_per_cycle': 0.90,
+            'min_hold_minutes': 1.10,
+            'min_hold_minutes_spot_bull': 1.08,
+            'min_hold_minutes_range_scalp': 1.05,
+            'sso_target_daily_usd': 0.90,
+            'sso_stagnant_min_hours': 0.92,
+            'sso_slow_velocity_threshold': 1.08,
+            'sso_reentry_min_strength_diff': 0.90,
+            'spot_bounce_rescue_target_pnl': 0.92,
+            'futures_bounce_rescue_target_pnl': 0.92,
+            'futures_long_sl_pct': 0.96,
+            'futures_long_tp_pct': 0.95,
+        },
+    }.get(_profile, {})
+
+    _applied: Dict[str, Dict[str, float]] = {}
+
+    def _apply_field(field: str, minimum: float = None, maximum: float = None, base_key: Optional[str] = None) -> None:
+        cur = getattr(settings, field, None)
+        if cur is None:
+            return
+        mult = 1.0
+        if field in _regime_mult:
+            mult *= _regime_mult[field]
+        if field in _profile_mult:
+            mult *= _profile_mult[field]
+        if mult == 1.0:
+            return
+        new_val = float(cur) * mult
+        if minimum is not None and maximum is not None:
+            new_val = _clamp_value(new_val, minimum, maximum)
+        elif minimum is not None:
+            new_val = max(minimum, new_val)
+        elif maximum is not None:
+            new_val = min(maximum, new_val)
+        setattr(settings, field, type(cur)(new_val))
+        _applied[field] = {"old": float(cur), "new": float(getattr(settings, field, None)), "mult": round(mult, 4)}
+
+    for _f, _bounds in (
+        ('trailing_stop_activation_pct', (0.5, 6.0)),
+        ('trailing_stop_distance_pct', (0.4, 4.0)),
+        ('futures_trailing_activation_pct', (0.5, 6.0)),
+        ('futures_trailing_distance_pct', (0.4, 4.0)),
+        ('sso_target_daily_usd', (10.0, 250.0)),
+        ('sso_stagnant_min_hours', (0.5, 12.0)),
+        ('sso_slow_velocity_threshold', (0.0003, 0.01)),
+        ('sso_reentry_min_strength_diff', (0.05, 1.0)),
+        ('spot_bounce_rescue_target_pnl', (-2.0, -0.05)),
+        ('futures_bounce_rescue_target_pnl', (-2.0, -0.05)),
+        ('range_scalp_sl_pct', (0.5, 3.0)),
+        ('range_scalp_tp_pct', (0.8, 4.0)),
+        ('preservation_sl_pct', (0.8, 4.0)),
+        ('preservation_tp_pct', (1.0, 6.0)),
+        ('max_positions_spot_bull', (5, 40)),
+        ('max_positions_range_scalp', (3, 20)),
+        ('max_positions_preservation', (1, 12)),
+        ('max_positions_futures_short', (4, 24)),
+        ('futures_max_new_per_cycle', (1, 10)),
+        ('min_hold_minutes', (30, 360)),
+        ('min_hold_minutes_spot_bull', (30, 360)),
+        ('min_hold_minutes_range_scalp', (15, 180)),
+        ('futures_long_sl_pct', (1.0, 5.0)),
+        ('futures_long_tp_pct', (2.0, 10.0)),
+        ('max_rebalance_per_cycle', (1, 5)),
+    ):
+        _apply_field(_f, minimum=_bounds[0], maximum=_bounds[1])
+
+    for _ct_attr in ('category_thresholds', 'futures_category_thresholds'):
+        _ct = getattr(settings, _ct_attr, None)
+        if not isinstance(_ct, dict):
+            continue
+        _ct_updates = {}
+        for _cat, _vals in _ct.items():
+            if not isinstance(_vals, dict):
+                continue
+            _new_vals = dict(_vals)
+            if 'stop_loss_pct' in _new_vals:
+                _new_vals['stop_loss_pct'] = float(_new_vals['stop_loss_pct'])
+            if 'take_profit_pct' in _new_vals:
+                _new_vals['take_profit_pct'] = float(_new_vals['take_profit_pct'])
+            if 'trailing_activation_pct' in _new_vals:
+                _new_vals['trailing_activation_pct'] = float(_new_vals['trailing_activation_pct'])
+            if 'trailing_distance_pct' in _new_vals:
+                _new_vals['trailing_distance_pct'] = float(_new_vals['trailing_distance_pct'])
+            _mult = 1.0
+            if _regime == 'SPOT_BULL':
+                _mult *= 1.04
+            elif _regime == 'RANGE_SCALP':
+                _mult *= 0.95
+            elif _regime == 'PRESERVATION':
+                _mult *= 0.92
+            elif _regime == 'FUTURES_SHORT':
+                _mult *= 1.02
+            if _profile == 'A':
+                _mult *= 1.06
+            elif _profile == 'C':
+                _mult *= 0.92
+            if 'stop_loss_pct' in _new_vals:
+                _new_vals['stop_loss_pct'] = round(_clamp_value(float(_new_vals['stop_loss_pct']) * _mult, 0.5, 12.0), 4)
+            if 'take_profit_pct' in _new_vals:
+                _new_vals['take_profit_pct'] = round(_clamp_value(float(_new_vals['take_profit_pct']) * (1.0 + ((_mult - 1.0) * 0.6)), 0.8, 20.0), 4)
+            if 'trailing_activation_pct' in _new_vals:
+                _new_vals['trailing_activation_pct'] = round(_clamp_value(float(_new_vals['trailing_activation_pct']) * (_mult if _mult > 1.0 else 1.0), 0.5, 20.0), 4)
+            if 'trailing_distance_pct' in _new_vals:
+                _new_vals['trailing_distance_pct'] = round(_clamp_value(float(_new_vals['trailing_distance_pct']) * (_mult if _mult > 1.0 else 1.0), 0.4, 20.0), 4)
+            _ct_updates[_cat] = _new_vals
+        if _ct_updates:
+            setattr(settings, _ct_attr, _ct_updates)
+            _applied[_ct_attr] = {"categories": list(_ct_updates.keys())}
+
+    setattr(settings, '_mode_profile_harmony_signature', _signature)
+
+    return {
+        "applied": _applied,
+        "regime": _regime,
+        "profile": _profile,
+        "signature": _signature,
+        "skipped": False,
+    }
+
+
 def _persist_transition_state(db_client, payload: Dict[str, Any]) -> None:
     if db_client is None:
         return
@@ -680,6 +1059,21 @@ def _persist_runtime_selection_snapshot(db_client, payload: Dict[str, Any]) -> N
         )
     except Exception as _prs_err:
         print(f"[RuntimeSelection] snapshot persist failed: {_prs_err}")
+
+
+def _persist_mode_profile_harmony_snapshot(db_client, payload: Dict[str, Any]) -> None:
+    """Persist the effective Kelly/KPI/SSO harmony state for post-run analysis."""
+    if db_client is None:
+        return
+    try:
+        _raw = json.dumps(payload)
+        db_client.execute_update(
+            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+            ("mode_profile_harmony_snapshot", _raw, _raw),
+        )
+    except Exception as _harmony_err:
+        print(f"[Harmony] snapshot persist failed: {_harmony_err}")
 
 
 def _load_invalid_symbol_state(db_client) -> None:
@@ -1044,6 +1438,13 @@ def _run_smart_total_mode_selector(settings, regime_obj: Optional[MarketRegime],
     else:
         db_client.execute_transaction(_writes)
 
+    if _switch:
+        try:
+            from pair_screener import invalidate_cache as _invalidate_screener_cache
+            _invalidate_screener_cache()
+        except Exception:
+            pass
+
     return {
         'ok': True,
         'skipped': False,
@@ -1279,6 +1680,13 @@ def _run_regime_profile_auto_selector(settings, regime_obj: Optional[MarketRegim
         db_client.execute_update(_writes[0][0], _writes[0][1])
     else:
         db_client.execute_transaction(_writes)
+
+    if _switch:
+        try:
+            from pair_screener import invalidate_cache as _invalidate_screener_cache
+            _invalidate_screener_cache()
+        except Exception:
+            pass
 
     return {
         "ok": True,
@@ -3112,18 +3520,28 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
         scaled = amount * min(1.0, kelly_f * 10)
         sized = max(base * 0.5, scaled)  # floor at 50% of base, not full base
 
+    _context_mult = _get_kelly_context_multiplier(settings, regime=regime, trade_type=trade_type)
+    _kpi_mult = _get_kpi_context_multiplier(db_client)
+    _context_mult *= _kpi_mult
+    if _context_mult != 1.0:
+        sized *= _context_mult
+
     # Hard cap: fraction of liquid USDT
     liquid_cap = usdt_liquid * cap_pct
     final = min(sized, liquid_cap, max_usdt)
 
     print(f"Kelly sizing: prob={prob:.2f}, strength={strength:.2f}, kelly_f={kelly_f:.3f} "
-          f"→ tier={tier}, sized=${sized:.2f}, cap=${liquid_cap:.2f} → final=${final:.2f} USDT")
+          f"ctx={_context_mult:.3f} → tier={tier}, sized=${sized:.2f}, cap=${liquid_cap:.2f} → final=${final:.2f} USDT")
 
     # C3: Persist kelly decision to kelly_sizing_log for 100% traceability
     if db_client and symbol:
         try:
             import json as _json
-            _mults = extra_multipliers or {}
+            _mults = dict(extra_multipliers or {})
+            _mults.setdefault('context_multiplier', round(_context_mult, 4))
+            _mults.setdefault('kpi_multiplier', round(_kpi_mult, 4))
+            _mults.setdefault('current_regime_mode', str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None)
+            _mults.setdefault('current_regime_profile_label', str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None)
             db_client.execute_update(
                 "INSERT INTO kelly_sizing_log "
                 "(symbol, trade_type, regime, prob, strength, tier, "
@@ -4856,6 +5274,7 @@ def execute_once(monitor_only: bool = False):
                         settings.current_regime_profile_label = _active_profile_label
                     except Exception:
                         pass
+                _harmony_result = _apply_mode_profile_harmony(settings, _regime_mode, getattr(settings, 'current_regime_profile_label', None))
                 _persist_runtime_selection_snapshot(
                     _db_client_ref,
                     {
@@ -4869,9 +5288,43 @@ def execute_once(monitor_only: bool = False):
                             "applied_keys": list((_regime_apply_result.get('applied') or {}).keys()),
                             "rejected_keys": list((_regime_apply_result.get('rejected') or {}).keys()),
                         },
+                        "harmony_result": _harmony_result,
                         "updated_at": datetime.now(timezone.utc).isoformat(),
                     },
                 )
+                try:
+                    _kelly_ctx_mult = _get_kelly_context_multiplier(settings, regime=_regime_mode, trade_type='spot')
+                    _kpi_ctx_mult = _get_kpi_context_multiplier(_db_client_ref)
+                    _persist_mode_profile_harmony_snapshot(
+                        _db_client_ref,
+                        {
+                            "selected_mode": _regime_mode,
+                            "selected_profile": str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                            "detected_mode": str(getattr(_regime_exe, 'mode', '') or '').strip().upper() or None,
+                            "kelly_context_multiplier": round(_kelly_ctx_mult, 4),
+                            "kpi_multiplier": round(_kpi_ctx_mult, 4),
+                            "combined_multiplier": round(_kelly_ctx_mult * _kpi_ctx_mult, 4),
+                            "harmony_result": _harmony_result,
+                            "sso_target_daily_usd": float(getattr(settings, 'sso_target_daily_usd', 40.0) or 40.0),
+                            "sso_stagnant_min_hours": float(getattr(settings, 'sso_stagnant_min_hours', 2.0) or 2.0),
+                            "sso_slow_velocity_threshold": float(getattr(settings, 'sso_slow_velocity_threshold', 0.001) or 0.001),
+                            "sso_reentry_min_strength_diff": float(getattr(settings, 'sso_reentry_min_strength_diff', 0.3) or 0.3),
+                            "max_positions_spot_bull": int(getattr(settings, 'max_positions_spot_bull', 20) or 20),
+                            "max_positions_range_scalp": int(getattr(settings, 'max_positions_range_scalp', 10) or 10),
+                            "max_positions_preservation": int(getattr(settings, 'max_positions_preservation', 5) or 5),
+                            "max_positions_futures_short": int(getattr(settings, 'max_positions_futures_short', 12) or 12),
+                            "futures_max_new_per_cycle": int(getattr(settings, 'futures_max_new_per_cycle', 3) or 3),
+                            "min_hold_minutes": int(getattr(settings, 'min_hold_minutes', 120) or 120),
+                            "min_hold_minutes_spot_bull": int(getattr(settings, 'min_hold_minutes_spot_bull', 120) or 120),
+                            "min_hold_minutes_range_scalp": int(getattr(settings, 'min_hold_minutes_range_scalp', 30) or 30),
+                            "futures_long_sl_pct": float(getattr(settings, 'futures_long_sl_pct', 2.5) or 2.5),
+                            "futures_long_tp_pct": float(getattr(settings, 'futures_long_tp_pct', 5.0) or 5.0),
+                            "max_rebalance_per_cycle": int(getattr(settings, 'max_rebalance_per_cycle', 2) or 2),
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        },
+                    )
+                except Exception as _harmony_err:
+                    print(f"[Harmony] execute_once snapshot failed: {_harmony_err}")
                 _switch_id = None
                 _mode_changed = bool(_active_mode_before and _active_mode_before != _regime_mode)
                 _profile_changed = bool(_active_profile_before and _active_profile_before != settings.current_regime_profile_label)

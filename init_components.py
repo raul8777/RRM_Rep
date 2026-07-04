@@ -75,6 +75,17 @@ def _build() -> Components:
             from db_client import get_db_client
             c.db_client = get_db_client(db_url)
             logger.info("DatabaseClient initialised")
+            try:
+                from config_helpers import load_runtime_overrides_from_db
+                _restore = load_runtime_overrides_from_db(settings, c.db_client)
+                if _restore.get("applied_scalars") or _restore.get("applied_thresholds"):
+                    logger.info(
+                        "Runtime overrides restored: scalars=%s thresholds=%s",
+                        _restore.get("applied_scalars"),
+                        _restore.get("applied_thresholds"),
+                    )
+            except Exception as _re:
+                logger.warning("Runtime override restore skipped: %s", _re)
     except Exception as e:
         logger.error(f"DatabaseClient init failed: {e}")
 

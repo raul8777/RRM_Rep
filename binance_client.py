@@ -1,7 +1,16 @@
 import os
 import time
-from binance.client import Client
-from binance.exceptions import BinanceAPIException, BinanceRequestException
+try:
+    from binance.client import Client
+    from binance.exceptions import BinanceAPIException, BinanceRequestException
+except Exception:
+    Client = None
+
+    class BinanceAPIException(Exception):
+        pass
+
+    class BinanceRequestException(Exception):
+        pass
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 
@@ -15,6 +24,8 @@ class BinanceClient:
         self.api_secret = api_secret
         self.testnet = testnet
         self.dry_run = dry_run
+        if Client is None and not self.dry_run:
+            raise RuntimeError("python-binance is required for live BinanceClient usage")
         self.client = Client(self.api_key, self.api_secret)
         if self.testnet:
             self.client.API_URL = "https://testnet.binance.vision/api"

@@ -137,6 +137,9 @@ class FuturesClient:
                 'escalonamiento_index': _esc_index,
                 'es_escalonamiento': _es_esc,
                 'entry_commission': _entry_comm,
+                'regime_at_entry': pos._smart_meta.get('regime_at_entry'),
+                'profile_at_entry': pos._smart_meta.get('profile_at_entry'),
+                'signal_id': pos._smart_meta.get('signal_id', ''),
             })
             _pnl_pred_json = json.dumps(pos.pnl_prediction) if pos.pnl_prediction else None
             _ind_json      = json.dumps(pos.indicators_at_entry) if pos.indicators_at_entry else None
@@ -198,6 +201,8 @@ class FuturesClient:
                 _meta = _row.get('metadata') or {}
                 if isinstance(_meta, str):
                     _meta = json.loads(_meta)
+                _meta['_meta_version'] = int(_meta.get('_meta_version', 0) or 0) + 1
+                _meta['_meta_updated_at'] = datetime.now(timezone.utc).isoformat()
                 _meta['smart_meta'] = pos._smart_meta
                 self.db_client.execute_update(
                     "UPDATE trades_open SET metadata = %s, stop_loss = %s, take_profit = %s WHERE id = %s",
@@ -205,6 +210,42 @@ class FuturesClient:
                 )
         except Exception as e:
             print(f'[Futures/DB] persist_smart_meta {pos.symbol} failed: {e}')
+
+    def reevaluate_open_positions(self, settings, regime_mode: str, profile_label: str,
+                                  switch_id: Optional[str] = None,
+                                  transition_policy: Optional[Dict] = None) -> int:
+        """Refresh active futures positions after a regime/profile switch.
+
+        Updates metadata context for all open futures positions and realigns software SL/TP
+        for positions that are not already in breakeven/trailing management.
+        """
+        _updated = 0
+        _regime_mode = str(regime_mode or '').strip().upper() or 'SPOT_BULL'
+        _profile_label = str(profile_label or '').strip().upper() or 'A'
+        _sl_pct = float(get_param(settings, 'futures_sl_pct') if settings else 3.0)
+        _tp_pct = float(get_param(settings, 'futures_tp_pct') if settings else 5.0)
+        for _pos in list(self._open_positions.values()):
+            if _pos.closed:
+                continue
+            _pos._smart_meta['current_regime_mode'] = _regime_mode
+            _pos._smart_meta['current_profile_label'] = _profile_label
+            _pos._smart_meta['last_transition_switch_id'] = switch_id
+            if transition_policy:
+                _pos._smart_meta['transition_policy'] = transition_policy
+
+            # Keep existing trailing/breakeven management untouched; otherwise refresh software SL/TP.
+            _managed = bool(_pos._smart_meta.get('breakeven_done') or _pos._smart_meta.get('trail_best_price'))
+            if not _managed:
+                if _pos.side == 'SHORT':
+                    _new_sl = round(_pos.entry_price * (1 + _sl_pct / 100), 6)
+                    _new_tp = round(_pos.entry_price * (1 - _tp_pct / 100), 6)
+                else:
+                    _new_sl = round(_pos.entry_price * (1 - _sl_pct / 100), 6)
+                    _new_tp = round(_pos.entry_price * (1 + _tp_pct / 100), 6)
+                self.update_sl_tp(_pos.symbol, _pos.side, new_sl=_new_sl, new_tp=_new_tp)
+            self._persist_smart_meta(_pos)
+            _updated += 1
+        return _updated
 
     def _audit(self, symbol: str, event: str, detail: dict, binance_confirmed: bool = False) -> None:
         """FIX-9: Write a traceability record to trades_audit for every critical event."""
@@ -1664,7 +1705,7 @@ class FuturesClient:
             # For SHORT: BUY STOP_MARKET triggers when price rises to triggerPrice
             # FIX-T2A: Binance trigger uses wider _binance_sl_pct as safety net
             sl_order_id = None
-            for _sl_attempt in range(2):
+            for _sl_attempt in range(3):
                 try:
                     _raw_trigger = self.get_price(symbol) * (1 + _binance_sl_pct / 100) if _sl_attempt > 0 else filled_price * (1 + _binance_sl_pct / 100)
                     _sl_trigger = self._align_price(_raw_trigger, tick)
@@ -1679,11 +1720,13 @@ class FuturesClient:
                     print(f"[Futures] SL algo order placed: triggerPrice={_sl_trigger} (safety), software SL={sl_price} (algoId={sl_order_id})")
                     break
                 except Exception as se:
-                    if _sl_attempt == 0:
-                        print(f"[Futures] SL order attempt 1 failed for {symbol}: {se} — retrying with refreshed price")
+                    if _sl_attempt < 2:
+                        print(f"[Futures] SL order attempt {_sl_attempt + 1} failed for {symbol}: {se} — retrying with refreshed price")
                         time.sleep(0.5)
                     else:
                         print(f"[Futures] SL order failed for {symbol}: {se} — position open WITHOUT SL, closing immediately")
+                        ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_CRITICAL,
+                                     f"Futures SHORT {symbol} SL placement failed after 3 attempts: {se}")
                         self._post("/fapi/v1/order", {
                             "symbol": symbol, "side": "BUY", "type": "MARKET",
                             "quantity": str(qty), "positionSide": "SHORT",
@@ -1723,6 +1766,8 @@ class FuturesClient:
             pos._smart_meta['entry_filled_qty'] = float(entry_order.get('executedQty', qty))
             pos._smart_meta['entry_avg_price'] = filled_price
             pos._smart_meta['binance_entry_confirmed'] = entry_order.get('status') in ('FILLED', 'NEW')
+            pos._smart_meta['regime_at_entry'] = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
+            pos._smart_meta['profile_at_entry'] = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
             if signal_id:
                 pos._smart_meta['signal_id'] = signal_id
             self._open_positions[self._pos_key(symbol, "SHORT")] = pos
@@ -1813,22 +1858,30 @@ class FuturesClient:
             # 2. Stop-loss: SELL STOP_MARKET with positionSide=LONG
             # FIX-T2A: Binance trigger uses wider safety SL
             sl_order_id = None
-            try:
-                sl_order = self._post("/fapi/v1/algoOrder", {
-                    "symbol": symbol, "side": "SELL",
-                    "algoType": "CONDITIONAL", "type": "STOP_MARKET",
-                    "quantity": str(qty), "triggerPrice": str(_binance_sl_trigger),
-                    "positionSide": "LONG", "timeInForce": "GTC",
-                })
-                sl_order_id = str(sl_order.get("algoId", sl_order.get("orderId", "")))
-                print(f"[Futures] LONG SL placed: triggerPrice={_binance_sl_trigger:.4f} (safety), software SL={sl_price:.4f} (algoId={sl_order_id})")
-            except Exception as se:
-                print(f"[Futures] LONG SL order failed {symbol}: {se} — closing immediately")
-                self._post("/fapi/v1/order", {
-                    "symbol": symbol, "side": "SELL", "type": "MARKET",
-                    "quantity": str(qty), "positionSide": "LONG",
-                })
-                return None
+            for _sl_attempt in range(3):
+                try:
+                    sl_order = self._post("/fapi/v1/algoOrder", {
+                        "symbol": symbol, "side": "SELL",
+                        "algoType": "CONDITIONAL", "type": "STOP_MARKET",
+                        "quantity": str(qty), "triggerPrice": str(_binance_sl_trigger),
+                        "positionSide": "LONG", "timeInForce": "GTC",
+                    })
+                    sl_order_id = str(sl_order.get("algoId", sl_order.get("orderId", "")))
+                    print(f"[Futures] LONG SL placed: triggerPrice={_binance_sl_trigger:.4f} (safety), software SL={sl_price:.4f} (algoId={sl_order_id})")
+                    break
+                except Exception as se:
+                    if _sl_attempt < 2:
+                        print(f"[Futures] LONG SL attempt {_sl_attempt + 1} failed {symbol}: {se} — retrying")
+                        time.sleep(0.5)
+                    else:
+                        print(f"[Futures] LONG SL order failed {symbol}: {se} — closing immediately")
+                        ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_CRITICAL,
+                                     f"Futures LONG {symbol} SL placement failed after 3 attempts: {se}")
+                        self._post("/fapi/v1/order", {
+                            "symbol": symbol, "side": "SELL", "type": "MARKET",
+                            "quantity": str(qty), "positionSide": "LONG",
+                        })
+                        return None
 
             # 3. Take-profit: SELL TAKE_PROFIT_MARKET with positionSide=LONG
             tp_order_id = None
@@ -1859,6 +1912,8 @@ class FuturesClient:
             pos._smart_meta['entry_filled_qty'] = float(entry_order.get('executedQty', qty))
             pos._smart_meta['entry_avg_price'] = filled_price
             pos._smart_meta['binance_entry_confirmed'] = entry_order.get('status') in ('FILLED', 'NEW')
+            pos._smart_meta['regime_at_entry'] = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
+            pos._smart_meta['profile_at_entry'] = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
             if signal_id:
                 pos._smart_meta['signal_id'] = signal_id
             self._open_positions[self._pos_key(symbol, "LONG")] = pos

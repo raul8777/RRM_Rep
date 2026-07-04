@@ -433,6 +433,10 @@ class PositionManager:
         for pos_list in self._open_positions.values():
             for pos in pos_list:
                 if str(pos.position_id) == str(position_id):
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    metadata['_meta_version'] = int(metadata.get('_meta_version', 0) or 0) + 1
+                    metadata['_meta_updated_at'] = datetime.now(timezone.utc).isoformat()
                     pos.metadata = metadata
                     if self.db_client and pos.db_id:
                         try:
@@ -534,7 +538,8 @@ class PositionManager:
         exit_price: float,
         close_reason: str = "manual",
         commission_rate: float = 0.001,
-        position_id: Optional[str] = None
+        position_id: Optional[str] = None,
+        exit_context: Optional[Dict[str, Any]] = None
     ) -> Optional[ClosedPosition]:
         """
         Close a specific open position for a symbol.
@@ -566,6 +571,15 @@ class PositionManager:
 
         _, entry_p, exit_p, pnl, pnl_pct, exit_comm, pred_acc = self._calc_close(target, exit_price, commission_rate)
 
+        _meta = dict(target.metadata or {}) if isinstance(target.metadata, dict) else {}
+        if exit_context:
+            if exit_context.get('regime_mode'):
+                _meta['regime_at_exit'] = exit_context.get('regime_mode')
+            if exit_context.get('profile_label'):
+                _meta['profile_at_exit'] = exit_context.get('profile_label')
+            if exit_context.get('switch_id'):
+                _meta['switch_id'] = exit_context.get('switch_id')
+
         closed_position = ClosedPosition(
             symbol=target.symbol,
             side=target.side,
@@ -578,7 +592,7 @@ class PositionManager:
             pnl_percentage=pnl_pct,
             close_reason=close_reason,
             strategy_id=target.strategy_id,
-            metadata=target.metadata,
+            metadata=_meta,
             entry_commission=float(target.entry_commission or 0),
             exit_commission=exit_comm,
             pnl_prediction=target.pnl_prediction,
@@ -616,7 +630,8 @@ class PositionManager:
         symbol: str,
         exit_price: float,
         close_reason: str = "manual",
-        commission_rate: float = 0.001
+        commission_rate: float = 0.001,
+        exit_context: Optional[Dict[str, Any]] = None
     ) -> List[ClosedPosition]:
         """
         Close ALL open positions for a symbol (used on full liquidation).
@@ -636,7 +651,7 @@ class PositionManager:
                 pos.metadata['close_group_id'] = _close_group
                 pos.metadata['escalonamiento_index'] = pos.metadata.get('escalonamiento_index', _i + 1)
                 pos.metadata['total_escalonamientos'] = len(positions)
-            closed = self.close_position(symbol, exit_price, close_reason, commission_rate, position_id=pos.position_id)
+            closed = self.close_position(symbol, exit_price, close_reason, commission_rate, position_id=pos.position_id, exit_context=exit_context)
             if closed:
                 results.append(closed)
         return results

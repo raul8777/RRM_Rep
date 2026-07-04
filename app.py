@@ -1349,6 +1349,13 @@ def _get_effective_runtime_selection(summary_mode: Optional[str] = None) -> Dict
         _profile = "A"
         _profile_source = "default"
 
+    try:
+        harmony_apply = getattr(run_trades, '_apply_mode_profile_harmony', None)
+        if callable(harmony_apply):
+            harmony_apply(settings, _mode or _fallback_mode, _profile)
+    except Exception:
+        pass
+
     return {
         "mode": _mode,
         "mode_source": _mode_source,
@@ -1377,6 +1384,10 @@ def _build_operator_focus(health: Dict[str, Any], health_results: Dict[str, Any]
     _hr_overall = str((health_results or {}).get("overall") or "unknown").lower()
     _mode = str((effective_runtime or {}).get("mode") or "SPOT_BULL").upper()
     _profile = str((effective_runtime or {}).get("profile_label") or "A").upper()
+    _harmony_drift = (health_results or {}).get("harmony_drift") or {}
+    _drift_count = int(_harmony_drift.get("drift_count") or 0)
+    _parity_validation = (health_results or {}).get("parity_validation") or {}
+    _parity_status = str(_parity_validation.get("status") or "unknown").lower()
 
     _cycle_fail = int((checks.get("cycle_failures") or {}).get("consecutive") or 0)
     if _cycle_fail >= 3:
@@ -1433,6 +1444,32 @@ def _build_operator_focus(health: Dict[str, Any], health_results: Dict[str, Any]
             "SMART Recheck en warning",
             "Se detectan señales de deriva o caída de calidad operativa.",
             "Monitorear métricas de SPOT/FUTURES y confirmar en próximo ciclo.",
+        )
+
+    if _drift_count > 0:
+        _push(
+            "harmony_drift",
+            "warning",
+            "Drift de armonía detectado",
+            f"Se detectaron {_drift_count} diferencias entre el snapshot persistido y el runtime efectivo.",
+            "Revisar la matriz aplicada antes de continuar con el rollout.",
+        )
+
+    if _parity_status == "critical":
+        _push(
+            "parity_critical",
+            "critical",
+            "Paridad backtest-live crítica",
+            "; ".join((_parity_validation.get("reasons") or [])[:2]) or "Gap crítico entre baseline y live.",
+            "No promover rollout; revisar baseline, ventana comparada y divergencia live.",
+        )
+    elif _parity_status in ("warning", "inconclusive"):
+        _push(
+            "parity_watch",
+            "warning",
+            "Paridad backtest-live pendiente",
+            "; ".join((_parity_validation.get("reasons") or [])[:2]) or "Paridad aún no concluyente.",
+            "Acumular muestra adicional y revalidar antes de promover cambios.",
         )
 
     _sel_rows = db_client.execute_query(
@@ -1641,6 +1678,30 @@ async def get_dashboard_summary() -> Dict:
         result["performance_changepoint"] = _get_performance_changepoint_metrics()
     except Exception as e:
         result["performance_changepoint"] = {"available": False, "error": str(e)}
+
+    # Mode/profile harmony — expose the effective Kelly/KPI/SSO overlay currently active
+    try:
+        result["mode_profile_harmony"] = _get_mode_profile_harmony_snapshot()
+    except Exception as e:
+        result["mode_profile_harmony"] = {"ok": False, "error": str(e)}
+
+    # Rollout readiness — consolidated operational verdict for current tuning state
+    try:
+        result["rollout_readiness"] = _get_rollout_readiness_snapshot()
+    except Exception as e:
+        result["rollout_readiness"] = {"ok": False, "status": "error", "error": str(e)}
+
+    # Parity validation — compare active rollout baseline vs live results
+    try:
+        result["parity_validation"] = _get_parity_validation_snapshot()
+    except Exception as e:
+        result["parity_validation"] = {"ok": False, "status": "error", "error": str(e)}
+
+    # Promotion criteria — decide whether the current tuning has enough evidence to promote
+    try:
+        result["promotion_criteria"] = _get_promotion_criteria_snapshot()
+    except Exception as e:
+        result["promotion_criteria"] = {"ok": False, "status": "error", "error": str(e)}
 
     # Portfolio config
     try:
@@ -3373,7 +3434,10 @@ def _build_spot_bull_candidate_snapshot() -> Dict[str, Any]:
 def _get_performance_changepoint_metrics() -> Dict[str, Any]:
     try:
         marker_rows = db_client.execute_query(
-            "SELECT value, updated_at FROM trading_runtime_state WHERE key='performance_changepoint_PERF_3Y60K_PRIORITY_2026-07-02'"
+            "SELECT key, value, updated_at FROM trading_runtime_state "
+            "WHERE key LIKE %s "
+            "ORDER BY updated_at DESC, key DESC LIMIT 1",
+            ('performance_changepoint_%',)
         )
         if not marker_rows:
             return {"ok": False, "error": "performance changepoint marker not found"}
@@ -3425,7 +3489,7 @@ def _get_performance_changepoint_metrics() -> Dict[str, Any]:
         return {
             "ok": True,
             "marker": {
-                "key": "performance_changepoint_PERF_3Y60K_PRIORITY_2026-07-02",
+                "key": marker_row.get("key"),
                 "changepoint_id": marker_value.get("changepoint_id"),
                 "base_run_id": marker_value.get("base_run_id"),
                 "root_session_id": marker_value.get("root_session_id"),
@@ -3444,6 +3508,322 @@ def _get_performance_changepoint_metrics() -> Dict[str, Any]:
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def _get_mode_profile_harmony_snapshot() -> Dict[str, Any]:
+    try:
+        rows = db_client.execute_query(
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key='mode_profile_harmony_snapshot'"
+        )
+        if not rows:
+            return {"ok": False, "error": "mode profile harmony snapshot not found"}
+        row = rows[0]
+        value = row.get("value") or {}
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                value = {}
+        return {
+            "ok": True,
+            "snapshot": value if isinstance(value, dict) else {},
+            "updated_at": (row.get("updated_at") or datetime.now(timezone.utc)).isoformat() if row.get("updated_at") else None,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _get_mode_profile_harmony_drift() -> Dict[str, Any]:
+    try:
+        harmony = _get_mode_profile_harmony_snapshot()
+        if not harmony.get("ok"):
+            return {"ok": False, "error": harmony.get("error") or "harmony snapshot unavailable"}
+
+        snapshot = harmony.get("snapshot") or {}
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        effective = _get_effective_runtime_selection(str(snapshot.get("selected_mode") or "SPOT_BULL"))
+
+        mismatches = []
+
+        def _compare_float(name: str, expected: Any, actual: Any, tolerance: float = 1e-6) -> None:
+            if expected is None or actual is None:
+                return
+            try:
+                if abs(float(expected) - float(actual)) > tolerance:
+                    mismatches.append({"field": name, "expected": float(expected), "actual": float(actual)})
+            except Exception:
+                if expected != actual:
+                    mismatches.append({"field": name, "expected": expected, "actual": actual})
+
+        if str(snapshot.get("selected_mode") or "").strip().upper() != str(effective.get("mode") or "").strip().upper():
+            mismatches.append({"field": "selected_mode", "expected": snapshot.get("selected_mode"), "actual": effective.get("mode")})
+        if str(snapshot.get("selected_profile") or "").strip().upper() != str(effective.get("profile_label") or "").strip().upper():
+            mismatches.append({"field": "selected_profile", "expected": snapshot.get("selected_profile"), "actual": effective.get("profile_label")})
+
+        _compare_float("trailing_stop_activation_pct", snapshot.get("harmony_result", {}).get("applied", {}).get("trailing_stop_activation_pct", {}).get("new"), getattr(settings, 'trailing_stop_activation_pct', None))
+        _compare_float("trailing_stop_distance_pct", snapshot.get("harmony_result", {}).get("applied", {}).get("trailing_stop_distance_pct", {}).get("new"), getattr(settings, 'trailing_stop_distance_pct', None))
+        _compare_float("sso_target_daily_usd", snapshot.get("sso_target_daily_usd"), getattr(settings, 'sso_target_daily_usd', None))
+        _compare_float("sso_stagnant_min_hours", snapshot.get("sso_stagnant_min_hours"), getattr(settings, 'sso_stagnant_min_hours', None))
+        _compare_float("sso_slow_velocity_threshold", snapshot.get("sso_slow_velocity_threshold"), getattr(settings, 'sso_slow_velocity_threshold', None))
+        _compare_float("sso_reentry_min_strength_diff", snapshot.get("sso_reentry_min_strength_diff"), getattr(settings, 'sso_reentry_min_strength_diff', None))
+        _compare_float("max_positions_spot_bull", snapshot.get("max_positions_spot_bull"), getattr(settings, 'max_positions_spot_bull', None))
+        _compare_float("max_positions_range_scalp", snapshot.get("max_positions_range_scalp"), getattr(settings, 'max_positions_range_scalp', None))
+        _compare_float("max_positions_preservation", snapshot.get("max_positions_preservation"), getattr(settings, 'max_positions_preservation', None))
+        _compare_float("max_positions_futures_short", snapshot.get("max_positions_futures_short"), getattr(settings, 'max_positions_futures_short', None))
+        _compare_float("futures_max_new_per_cycle", snapshot.get("futures_max_new_per_cycle"), getattr(settings, 'futures_max_new_per_cycle', None))
+        _compare_float("min_hold_minutes", snapshot.get("min_hold_minutes"), getattr(settings, 'min_hold_minutes', None))
+        _compare_float("min_hold_minutes_spot_bull", snapshot.get("min_hold_minutes_spot_bull"), getattr(settings, 'min_hold_minutes_spot_bull', None))
+        _compare_float("min_hold_minutes_range_scalp", snapshot.get("min_hold_minutes_range_scalp"), getattr(settings, 'min_hold_minutes_range_scalp', None))
+        _compare_float("futures_long_sl_pct", snapshot.get("futures_long_sl_pct"), getattr(settings, 'futures_long_sl_pct', None))
+        _compare_float("futures_long_tp_pct", snapshot.get("futures_long_tp_pct"), getattr(settings, 'futures_long_tp_pct', None))
+        _compare_float("max_rebalance_per_cycle", snapshot.get("max_rebalance_per_cycle"), getattr(settings, 'max_rebalance_per_cycle', None))
+
+        return {
+            "ok": True,
+            "drift_count": len(mismatches),
+            "mismatches": mismatches,
+            "snapshot_updated_at": harmony.get("updated_at"),
+            "effective_runtime": effective,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "drift_count": 0, "mismatches": []}
+
+
+def _get_rollout_readiness_snapshot() -> Dict[str, Any]:
+    try:
+        health_snapshot = _compute_health_results_snapshot(trigger="rollout_readiness")
+        drift_blockers = _get_top_drift_blockers(limit=10)
+        active_drift = _get_active_critical_drift_blockers()
+        parity_validation = _get_parity_validation_snapshot()
+
+        overall = str((health_snapshot or {}).get("overall") or "unknown").lower()
+        harmony_drift = (health_snapshot or {}).get("harmony_drift") or {}
+        drift_count = int(harmony_drift.get("drift_count") or 0)
+        active_drift_count = int(active_drift.get("count") or 0)
+        changepoint = (health_snapshot or {}).get("changepoint") or {}
+        delta = changepoint.get("delta") or {}
+        health_harmony = (health_snapshot or {}).get("harmony") or {}
+        spot = (health_snapshot or {}).get("spot") or {}
+        futures = (health_snapshot or {}).get("futures") or {}
+        spot_reasons = list(spot.get("reasons") or [])
+        futures_reasons = list(futures.get("reasons") or [])
+
+        reasons: List[str] = []
+        status = "ready"
+
+        if drift_count > 0:
+            status = "blocked"
+            reasons.append(f"harmony drift={drift_count}")
+
+        if active_drift_count > 0:
+            status = "blocked"
+            reasons.append(f"active critical drift={active_drift_count}")
+
+        if overall in ("critical", "error"):
+            status = "blocked"
+            reasons.append(f"health overall={overall}")
+        elif overall in ("warning", "inconclusive") and status != "blocked":
+            status = "caution"
+            reasons.append(f"health overall={overall}")
+
+        net_delta = float(delta.get("net_pnl") or 0.0)
+        trade_delta = int(delta.get("n_trades") or 0)
+        if net_delta < -20:
+            status = "blocked"
+            reasons.append(f"changepoint net_pnl delta {net_delta:.4f}")
+        elif net_delta < 0 and status == "ready":
+            status = "caution"
+            reasons.append(f"changepoint net_pnl delta {net_delta:.4f}")
+
+        if trade_delta <= 0 and status == "ready":
+            status = "caution"
+            reasons.append("no positive post-change trade delta yet")
+
+        parity_status = str(parity_validation.get('status') or 'unknown').lower()
+        if parity_status == 'critical':
+            status = 'blocked'
+            reasons.append('parity validation critical')
+        elif parity_status == 'warning' and status == 'ready':
+            status = 'caution'
+            reasons.append('parity validation warning')
+        elif parity_status == 'inconclusive' and status == 'ready':
+            status = 'caution'
+            reasons.append('parity validation inconclusive')
+
+        spot_status = str(spot.get("status") or "unknown").lower()
+        futures_status = str(futures.get("status") or "unknown").lower()
+        if spot_status in ("critical", "error") or futures_status in ("critical", "error"):
+            status = "blocked"
+            reasons.append(f"market health spot={spot_status} futures={futures_status}")
+            if spot_reasons:
+                reasons.append(f"spot: {spot_reasons[0]}")
+            if futures_reasons:
+                reasons.append(f"futures: {futures_reasons[0]}")
+
+        if not reasons:
+            reasons.append("health, drift, and changepoint checks are aligned")
+
+        return {
+            "ok": True,
+            "status": status,
+            "reasons": reasons,
+            "overall_health": overall,
+            "harmony_drift_count": drift_count,
+            "active_critical_drift_count": active_drift_count,
+            "changepoint_delta": delta,
+            "spot_status": spot_status,
+            "futures_status": futures_status,
+            "spot_reasons": spot_reasons,
+            "futures_reasons": futures_reasons,
+            "active_critical_drift_blockers": (active_drift.get("blockers") or []),
+            "critical_drift_blockers": (drift_blockers.get("blockers") or []),
+            "critical_drift_blocker_count": int(drift_blockers.get("count") or 0),
+            "parity_validation": parity_validation,
+            "harmony_snapshot_updated_at": health_harmony.get("updated_at"),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "status": "error", "error": str(e), "reasons": [str(e)]}
+
+
+def _get_parity_validation_snapshot() -> Dict[str, Any]:
+    try:
+        run_id = _resolve_rollout_baseline_run_id()
+        if run_id is None:
+            return {"ok": False, "status": "unavailable", "error": "no baseline run_id resolved"}
+
+        compare = _build_backtest_compare_vs_live(run_id)
+        parity = compare.get('parity') or {}
+        gap = parity.get('pnl_total_gap_pct')
+        trade_gap = int(parity.get('n_trades_gap') or 0)
+        win_gap = float(parity.get('win_rate_gap_pct') or 0.0)
+
+        status = 'ok'
+        reasons: List[str] = []
+        if gap is None:
+            status = 'inconclusive'
+            reasons.append('live pnl is zero or insufficient for parity gap')
+        else:
+            abs_gap = abs(float(gap))
+            if abs_gap >= 100.0:
+                status = 'critical'
+                reasons.append(f'pnl parity gap {gap:.2f}%')
+            elif abs_gap >= 25.0:
+                status = 'warning'
+                reasons.append(f'pnl parity gap {gap:.2f}%')
+
+        if abs(win_gap) >= 20.0:
+            status = 'critical' if status != 'critical' else status
+            reasons.append(f'win-rate gap {win_gap:.2f}pp')
+        elif abs(win_gap) >= 10.0 and status == 'ok':
+            status = 'warning'
+            reasons.append(f'win-rate gap {win_gap:.2f}pp')
+
+        if trade_gap > 20:
+            if status == 'ok':
+                status = 'warning'
+            reasons.append(f'trade count gap {trade_gap}')
+
+        if not reasons:
+            reasons.append('parity within current tolerance')
+
+        return {
+            'ok': True,
+            'status': status,
+            'run_id': run_id,
+            'reasons': reasons,
+            'parity': parity,
+            'compare': compare,
+        }
+    except HTTPException as e:
+        return {"ok": False, "status": "error", "error": str(e.detail)}
+    except Exception as e:
+        return {"ok": False, "status": "error", "error": str(e)}
+
+
+def _get_top_drift_blockers(limit: int = 10) -> Dict[str, Any]:
+    try:
+        _limit = max(1, min(int(limit), 50))
+        rows = db_client.execute_query(
+            "SELECT id, detected_at, severity, param, expected, actual, source "
+            "FROM config_drift_alerts WHERE acknowledged=FALSE AND severity='critical' "
+            "ORDER BY detected_at DESC LIMIT %s",
+            (_limit,),
+        )
+        blockers = []
+        for row in rows or []:
+            blockers.append({
+                "id": row.get("id"),
+                "detected_at": row.get("detected_at").isoformat() if row.get("detected_at") else None,
+                "severity": row.get("severity"),
+                "param": row.get("param"),
+                "expected": row.get("expected"),
+                "actual": row.get("actual"),
+                "source": row.get("source"),
+            })
+        return {"ok": True, "count": len(blockers), "blockers": blockers}
+    except Exception as e:
+        return {"ok": False, "count": 0, "blockers": [], "error": str(e)}
+
+
+def _get_promotion_criteria_snapshot() -> Dict[str, Any]:
+    try:
+        rollout = _get_rollout_readiness_snapshot()
+        changepoint = _get_performance_changepoint_metrics()
+        parity = _get_parity_validation_snapshot()
+
+        current_window = (changepoint.get('current_window') or {}) if changepoint.get('ok') else {}
+        current_summary = (current_window.get('summary') or {}) if isinstance(current_window, dict) else {}
+        current_trades = int(current_summary.get('n_trades') or 0)
+        current_net = float(current_summary.get('net_pnl') or 0.0)
+
+        sample_target = 8
+        sample_status = 'sufficient' if current_trades >= sample_target else ('limited' if current_trades >= 3 else 'insufficient')
+
+        status = 'hold'
+        reasons: List[str] = []
+
+        rollout_status = str(rollout.get('status') or 'error').lower()
+        parity_status = str(parity.get('status') or 'error').lower()
+        active_drift = int(rollout.get('active_critical_drift_count') or 0)
+
+        if active_drift > 0:
+            reasons.append(f'active critical drift={active_drift}')
+        if rollout_status in ('blocked', 'error'):
+            reasons.append(f'rollout status={rollout_status}')
+        if parity_status in ('critical', 'error'):
+            reasons.append(f'parity status={parity_status}')
+        if sample_status != 'sufficient':
+            reasons.append(f'sample {sample_status} ({current_trades}/{sample_target} trades)')
+        if current_net < 0:
+            reasons.append(f'current net pnl {current_net:.4f}')
+
+        if not reasons:
+            status = 'promote'
+            reasons.append('sample, parity, drift, and rollout checks passed')
+        elif rollout_status in ('caution',) and parity_status in ('warning', 'inconclusive', 'ok') and sample_status != 'insufficient' and active_drift == 0:
+            status = 'observe'
+        else:
+            status = 'hold'
+
+        return {
+            'ok': True,
+            'status': status,
+            'sample': {
+                'target_trades': sample_target,
+                'current_trades': current_trades,
+                'status': sample_status,
+                'current_net_pnl': round(current_net, 4),
+            },
+            'rollout_status': rollout_status,
+            'parity_status': parity_status,
+            'active_critical_drift_count': active_drift,
+            'reasons': reasons,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {'ok': False, 'status': 'error', 'reasons': [str(e)], 'error': str(e)}
 
 
 @app.get("/metrics/performance-changepoint")
@@ -3474,6 +3854,12 @@ async def get_trade_throughput_exposure(
         raise HTTPException(status_code=400, detail="cycle_minutes must be > 0")
     start_ts = datetime.now(timezone.utc) - timedelta(hours=hours)
     return _trade_throughput_exposure_range(start_ts, datetime.now(timezone.utc), cycle_minutes=cycle_minutes)
+
+
+@app.get("/metrics/rollout-readiness")
+async def get_rollout_readiness(_auth=Depends(_require_api_key)) -> Dict:
+    """Return a single operational verdict for rollout based on health, drift, and changepoint."""
+    return _get_rollout_readiness_snapshot()
 
 
 @app.get("/metrics/transition-health")
@@ -5782,19 +6168,45 @@ _KELLY_EDITABLE_FIELDS = {
     "fng_capitulation_threshold", "fng_extreme_fear_threshold",
     "fng_extreme_greed_threshold", "fng_capitulation_multiplier",
     "fng_extreme_fear_multiplier", "fng_extreme_greed_multiplier",
+    "fng_kelly_boost_enabled",
     "kelly_conviction_vol2x", "kelly_conviction_vol3x",
     "kelly_conviction_max_pct",
     "kelly_conviction_enabled",
     "stop_loss_pct", "take_profit_pct", "smart_tp_max_pnl_pct",
+    "smart_tp_enabled", "smart_tp_max_extensions", "smart_tp_extend_score_threshold",
+    "scale_out_enabled", "scale_out_first_close_pct",
     "futures_sl_pct", "futures_tp_pct",
+    "futures_smart_tp_enabled", "futures_smart_tp_extend_score_threshold",
+    "futures_max_new_per_cycle", "futures_confirm_red_candle",
+    "futures_no_short_btc_4h_threshold", "futures_no_short_btc_3h_threshold", "futures_no_short_btc_1h_threshold",
+    "futures_mass_sl_threshold", "futures_mass_sl_cooldown_hours",
     "min_signal_strength",
     "vol_spike_min",
     "futures_min_prob", "futures_vol_spike_min",
     "min_success_probability",
+    "max_positions_spot_bull", "max_positions_range_scalp", "max_positions_preservation", "max_positions_futures_short",
+    "max_total_exposure_pct", "max_total_exposure_spot_bull_fear",
+    "min_hold_minutes", "min_hold_minutes_range_scalp",
+    "max_rebalance_per_cycle",
     "min_hold_minutes_spot_bull", "min_hold_for_prediction_exit",
     "min_cycles_before_close_shorts",
     "futures_trailing_activation_pct", "futures_sl_cooldown_hours",
     "futures_smart_tp_max_pnl_pct", "futures_smart_tp_max_extensions",
+    "futures_bounce_rescue_enabled", "futures_bounce_rescue_max_peak_pct", "futures_bounce_rescue_min_hours", "futures_bounce_rescue_target_pnl",
+    "spot_bounce_rescue_enabled", "spot_bounce_rescue_max_peak_pct", "spot_bounce_rescue_min_hours", "spot_bounce_rescue_target_pnl",
+    "futures_momentum_reversal_enabled", "futures_momentum_reversal_min_peak", "futures_momentum_reversal_drawback",
+    "rescue_smart_gate_enabled", "rescue_stay_strength_min", "rescue_stay_ev_multiplier", "rescue_velocity_min_pct", "rescue_gate_min_concurrent",
+    "rescue_gate_g1_min_pct", "rescue_gate_g1_spot_min_pct", "rescue_gate_vol_min_spike", "rescue_gate_max_blocks", "rescue_gate_min_pnl_improvement",
+    "volspike_override_enabled", "volspike_override_min_spike", "volspike_override_max_rsi", "volspike_override_trend_required",
+    "volspike_override_narrative_only", "volspike_override_min_strength", "volspike_override_max_positions", "volspike_override_daily_limit",
+    "btc_dominance_filter_enabled", "btc_dominance_altcoin_threshold",
+    "liquidity_filter_enabled", "min_liquidity_vol_usdt",
+    "wr_screener_enabled", "wr_screener_consecutive_sl_block",
+    "sso_target_daily_usd",
+    "circuit_breaker_enabled", "circuit_breaker_consecutive_failures", "circuit_breaker_pause_minutes",
+    "screener_min_vol_usdt", "screener_futures_min_vol",
+    "screener_max_pairs", "screener_max_futures_pairs",
+    "screener_cache_minutes", "screener_snapshot_max_age_minutes",
     "sso_slow_velocity_threshold", "sso_slow_min_hours",
     "sso_stagnant_min_hours", "sso_decay_min_hours",
     "sso_decay_threshold_pct",
@@ -6233,21 +6645,56 @@ async def post_activate_regime_profile(body: Dict, _auth=Depends(_require_api_ke
 
         _snapshot_id = _create_full_config_snapshot(_s)
         _active_key = f"regime_profile_active_{_regime}"
+        _updated_at = datetime.now(timezone.utc).isoformat()
         _active_payload = {
             "regime": _regime,
             "profile": _profile,
             "reason": _reason,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": _updated_at,
             "updated_by": str(_auth) if _auth else None,
             "snapshot_id": _snapshot_id,
         }
         _active_json = json.dumps(_active_payload)
+
+        # Restart-safe runtime snapshots required by rollout closeout gates.
+        _runtime_selection_payload = {
+            "selected_mode": _regime,
+            "selected_profile": _profile,
+            "source": "regime_profile_activate",
+            "reason": _reason,
+            "snapshot_id": _snapshot_id,
+            "updated_at": _updated_at,
+        }
+        _runtime_selection_json = json.dumps(_runtime_selection_payload)
+
+        _transition_payload = {
+            "active": False,
+            "from_mode": None,
+            "to_mode": _regime,
+            "from_profile": None,
+            "to_profile": _profile,
+            "reason": _reason,
+            "source": "regime_profile_activate",
+            "snapshot_id": _snapshot_id,
+            "updated_at": _updated_at,
+        }
+        _transition_json = json.dumps(_transition_payload)
 
         db_client.execute_transaction([
             (
                 "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
                 "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
                 (_active_key, _active_json, _active_json),
+            ),
+            (
+                "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                ("effective_runtime_selection_snapshot", _runtime_selection_json, _runtime_selection_json),
+            ),
+            (
+                "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                ("regime_transition_state", _transition_json, _transition_json),
             ),
             (
                 "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
@@ -6278,6 +6725,13 @@ async def post_activate_regime_profile(body: Dict, _auth=Depends(_require_api_ke
                     }
             except Exception as _ae:
                 _applied = {"skipped": True, "reason": f"apply_failed: {_ae}"}
+
+        # Clear screener cache after any profile activation so next cycle uses fresh profile-scoped filters.
+        try:
+            from pair_screener import invalidate_cache as _invalidate_screener_cache
+            _invalidate_screener_cache()
+        except Exception:
+            pass
 
         _log_config_change(
             source="regime_profile_activate",
@@ -7127,6 +7581,19 @@ def _count_unacked_drift_alerts() -> Dict[str, int]:
         return {"critical": 0, "warning": 0, "info": 0, "total": 0}
 
 
+def _get_active_critical_drift_blockers() -> Dict[str, Any]:
+    try:
+        _drifts = _check_config_drift(settings)
+        _critical = [d for d in (_drifts or []) if str(d.get("severity") or "").lower() == "critical"]
+        return {
+            "ok": True,
+            "count": len(_critical),
+            "blockers": _critical,
+        }
+    except Exception as e:
+        return {"ok": False, "count": 0, "blockers": [], "error": str(e)}
+
+
 def _extract_scope_stats(window: Dict[str, Any], scope: str) -> Dict[str, Any]:
     try:
         by_scope = ((window or {}).get("by_scope") or {})
@@ -7152,6 +7619,7 @@ def _compute_market_health(
     audit_consistency: Dict[str, Any],
     err_summary: Dict[str, Any],
     drift_counts: Dict[str, int],
+    active_drift_count: int = 0,
 ) -> Dict[str, Any]:
     score = 100
     reasons: List[str] = []
@@ -7171,10 +7639,13 @@ def _compute_market_health(
     missing_audit = int((audit_consistency or {}).get("signals_missing_audit") or 0)
     coverage_pct = float((audit_consistency or {}).get("coverage_pct") or 100.0)
 
-    if drift_critical > 0:
+    if active_drift_count > 0:
         score -= 35
         critical_flags.append("config_drift_critical")
-        reasons.append(f"{drift_critical} drift(s) críticos sin ack")
+        reasons.append(f"{active_drift_count} drift(s) críticos activos")
+    elif drift_critical > 0:
+        score -= 10
+        reasons.append(f"{drift_critical} drift(s) críticos históricos sin ack")
     elif drift_warning > 0:
         score -= 10
         reasons.append(f"{drift_warning} drift(s) warning sin ack")
@@ -7249,8 +7720,13 @@ def _compute_health_results_snapshot(trigger: str = "manual") -> Dict[str, Any]:
     now_utc = datetime.now(timezone.utc)
     err_summary = ec.get_summary(minutes=5)
     drift_counts = _count_unacked_drift_alerts()
+    active_drift = _get_active_critical_drift_blockers()
+    active_drift_count = int(active_drift.get("count") or 0)
     audit_consistency = check_signal_audit_consistency(db_client, limit=150)
     changepoint = _get_performance_changepoint_metrics()
+    harmony = _get_mode_profile_harmony_snapshot()
+    harmony_drift = _get_mode_profile_harmony_drift()
+    parity_validation = _get_parity_validation_snapshot()
 
     current_window = (changepoint.get("current_window") or {}) if changepoint.get("ok") else {}
     previous_window = (changepoint.get("previous_window") or {}) if changepoint.get("ok") else {}
@@ -7267,6 +7743,7 @@ def _compute_health_results_snapshot(trigger: str = "manual") -> Dict[str, Any]:
         audit_consistency=audit_consistency,
         err_summary=err_summary,
         drift_counts=drift_counts,
+        active_drift_count=active_drift_count,
     )
     futures_health = _compute_market_health(
         market="futures",
@@ -7275,6 +7752,7 @@ def _compute_health_results_snapshot(trigger: str = "manual") -> Dict[str, Any]:
         audit_consistency=audit_consistency,
         err_summary=err_summary,
         drift_counts=drift_counts,
+        active_drift_count=active_drift_count,
     )
 
     overall_status = "ok"
@@ -7316,6 +7794,19 @@ def _compute_health_results_snapshot(trigger: str = "manual") -> Dict[str, Any]:
             "marker": (changepoint.get("marker") or {}),
             "delta": (changepoint.get("delta") or {}),
         },
+        "harmony": {
+            "ok": bool(harmony.get("ok")),
+            "snapshot": (harmony.get("snapshot") or {}),
+            "updated_at": harmony.get("updated_at"),
+        },
+        "harmony_drift": {
+            "ok": bool(harmony_drift.get("ok")),
+            "drift_count": int(harmony_drift.get("drift_count") or 0),
+            "mismatches": harmony_drift.get("mismatches") or [],
+            "effective_runtime": harmony_drift.get("effective_runtime") or {},
+            "snapshot_updated_at": harmony_drift.get("snapshot_updated_at"),
+        },
+        "parity_validation": parity_validation,
         "smart_recheck": {
             "trigger": trigger,
             "interval_seconds": interval_seconds,
@@ -7540,6 +8031,162 @@ def _parity_gap_pct(backtest_value: float, live_value: float) -> Optional[float]
     return round(((backtest_value - live_value) / abs(live_value)) * 100.0, 4)
 
 
+def _resolve_rollout_baseline_run_id() -> Optional[int]:
+    try:
+        rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key LIKE %s ORDER BY updated_at DESC, key DESC LIMIT 1",
+            ('performance_changepoint_%',),
+        )
+        if not rows:
+            return None
+        value = rows[0].get('value') or {}
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                value = {}
+        if isinstance(value, dict) and value.get('base_run_id') is not None:
+            return int(value.get('base_run_id'))
+        baseline_key = value.get('baseline_key') if isinstance(value, dict) else None
+        if baseline_key:
+            base_rows = db_client.execute_query(
+                "SELECT value FROM trading_runtime_state WHERE key=%s LIMIT 1",
+                (baseline_key,),
+            )
+            if base_rows:
+                base_value = base_rows[0].get('value') or {}
+                if isinstance(base_value, str):
+                    try:
+                        base_value = json.loads(base_value)
+                    except Exception:
+                        base_value = {}
+                if isinstance(base_value, dict) and base_value.get('base_run_id') is not None:
+                    return int(base_value.get('base_run_id'))
+    except Exception:
+        return None
+    return None
+
+
+def _build_backtest_compare_vs_live(run_id: int) -> Dict[str, Any]:
+    run_rows = db_client.execute_query(
+        "SELECT id, label, params, pnl_total, pnl_spot, pnl_futures, win_rate, n_trades, n_spot, n_futures, rank_pnl, window_start, window_end FROM backtest_run WHERE id = %s",
+        (run_id,)
+    )
+    if not run_rows:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    run = run_rows[0]
+    params = _normalize_backtest_params(run.get('params'))
+    run_meta = _normalize_backtest_params(params.get('__run_meta', {}))
+    window_start = run.get('window_start')
+    window_end = run.get('window_end')
+    regime = run_meta.get('regime') or params.get('regime') or 'unknown'
+    session_id = run_meta.get('session_id')
+
+    backtest_trades = db_client.execute_query(
+        """
+        SELECT symbol, trade_type, side, entry_ts, exit_ts, entry_price, exit_price,
+               usdt_size, pnl_usdt, pnl_pct, tier, regime, close_reason, kelly_mult
+        FROM backtest_trade
+        WHERE run_id = %s
+        ORDER BY entry_ts ASC
+        """,
+        (run_id,)
+    )
+    bt_symbols = sorted({r.get('symbol') for r in backtest_trades if r.get('symbol')})
+
+    live_rows = db_client.execute_query(
+        """
+        SELECT symbol, side, quantity, entry_time, exit_time, pnl, pnl_percentage,
+               close_reason, metadata, entry_commission, exit_commission
+        FROM trades_closed
+        WHERE entry_time >= %s AND entry_time < %s
+        ORDER BY entry_time ASC
+        """,
+        (window_start, window_end)
+    )
+    live_trades: List[Dict[str, Any]] = []
+    for row in live_rows:
+        meta = row.get('metadata') or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        if bt_symbols and row.get('symbol') not in bt_symbols:
+            continue
+
+        inferred_type = str(meta.get('trade_type') or '').strip().lower()
+        if inferred_type not in ('spot', 'futures'):
+            inferred_type = 'spot'
+
+        raw_reason = row.get('close_reason') or meta.get('close_reason') or 'unknown'
+        live_trades.append({
+            'symbol': row.get('symbol'),
+            'trade_type': inferred_type,
+            'side': row.get('side'),
+            'entry_time': row.get('entry_time'),
+            'exit_time': row.get('exit_time'),
+            'pnl': float(row.get('pnl') or 0.0),
+            'pnl_percentage': float(row.get('pnl_percentage') or 0.0),
+            'close_reason': raw_reason,
+            'close_reason_norm': _normalize_close_reason(raw_reason),
+            'metadata': meta,
+        })
+
+    bt_summary = _trade_summary(backtest_trades, pnl_key='pnl_usdt')
+    live_summary = _trade_summary(live_trades, pnl_key='pnl')
+    bt_by_type = {
+        trade_type: _trade_summary([r for r in backtest_trades if r.get('trade_type') == trade_type], pnl_key='pnl_usdt')
+        for trade_type in ('spot', 'futures')
+    }
+    live_by_type = {
+        trade_type: _trade_summary([r for r in live_trades if r.get('trade_type') == trade_type], pnl_key='pnl')
+        for trade_type in ('spot', 'futures')
+    }
+
+    parity = {
+        'pnl_total_gap_pct': _parity_gap_pct(bt_summary['pnl_total'], live_summary['pnl_total']),
+        'win_rate_gap_pct': round((bt_summary['win_rate'] - live_summary['win_rate']) * 100.0, 4),
+        'avg_pnl_gap_pct': _parity_gap_pct(bt_summary['avg_pnl'], live_summary['avg_pnl']),
+        'n_trades_gap': bt_summary['n_trades'] - live_summary['n_trades'],
+    }
+
+    return {
+        'ok': True,
+        'run_id': run_id,
+        'session_id': session_id,
+        'regime': regime,
+        'window_start': window_start.isoformat() if hasattr(window_start, 'isoformat') else str(window_start),
+        'window_end': window_end.isoformat() if hasattr(window_end, 'isoformat') else str(window_end),
+        'symbols': bt_symbols,
+        'backtest': {
+            'run': {
+                'id': run.get('id'),
+                'label': run.get('label'),
+                'pnl_total': float(run.get('pnl_total') or 0.0),
+                'pnl_spot': float(run.get('pnl_spot') or 0.0),
+                'pnl_futures': float(run.get('pnl_futures') or 0.0),
+                'win_rate': float(run.get('win_rate') or 0.0),
+                'n_trades': int(run.get('n_trades') or 0),
+                'n_spot': int(run.get('n_spot') or 0),
+                'n_futures': int(run.get('n_futures') or 0),
+                'rank_pnl': run.get('rank_pnl'),
+            },
+            'summary': bt_summary,
+            'by_trade_type': bt_by_type,
+        },
+        'live': {
+            'summary': live_summary,
+            'by_trade_type': live_by_type,
+        },
+        'parity': parity,
+        'ts': to_mexico_time(datetime.utcnow()).isoformat(),
+    }
+
+
 @app.get("/backtest/compare-vs-live")
 async def get_backtest_compare_vs_live(
     run_id: int,
@@ -7547,125 +8194,7 @@ async def get_backtest_compare_vs_live(
 ) -> Dict:
     """Compare one backtest run against live closed trades in the same window."""
     try:
-        run_rows = db_client.execute_query(
-            "SELECT id, label, params, pnl_total, pnl_spot, pnl_futures, win_rate, n_trades, n_spot, n_futures, rank_pnl, window_start, window_end FROM backtest_run WHERE id = %s",
-            (run_id,)
-        )
-        if not run_rows:
-            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-
-        run = run_rows[0]
-        params = _normalize_backtest_params(run.get('params'))
-        run_meta = _normalize_backtest_params(params.get('__run_meta', {}))
-        window_start = run.get('window_start')
-        window_end = run.get('window_end')
-        regime = run_meta.get('regime') or params.get('regime') or 'unknown'
-        session_id = run_meta.get('session_id')
-
-        backtest_trades = db_client.execute_query(
-            """
-            SELECT symbol, trade_type, side, entry_ts, exit_ts, entry_price, exit_price,
-                   usdt_size, pnl_usdt, pnl_pct, tier, regime, close_reason, kelly_mult
-            FROM backtest_trade
-            WHERE run_id = %s
-            ORDER BY entry_ts ASC
-            """,
-            (run_id,)
-        )
-        bt_symbols = sorted({r.get('symbol') for r in backtest_trades if r.get('symbol')})
-
-        live_rows = db_client.execute_query(
-            """
-            SELECT symbol, side, quantity, entry_time, exit_time, pnl, pnl_percentage,
-                   close_reason, metadata, entry_commission, exit_commission
-            FROM trades_closed
-            WHERE entry_time >= %s AND entry_time < %s
-            ORDER BY entry_time ASC
-            """,
-            (window_start, window_end)
-        )
-        live_trades: List[Dict[str, Any]] = []
-        for row in live_rows:
-            meta = row.get('metadata') or {}
-            if isinstance(meta, str):
-                try:
-                    meta = json.loads(meta)
-                except Exception:
-                    meta = {}
-            if not isinstance(meta, dict):
-                meta = {}
-            if bt_symbols and row.get('symbol') not in bt_symbols:
-                continue
-
-            inferred_type = str(meta.get('trade_type') or '').strip().lower()
-            if inferred_type not in ('spot', 'futures'):
-                # Most legacy rows without explicit type are SPOT; futures rows are expected
-                # to carry metadata.trade_type='futures' from futures_client persistence.
-                inferred_type = 'spot'
-
-            raw_reason = row.get('close_reason') or meta.get('close_reason') or 'unknown'
-            live_trades.append({
-                'symbol': row.get('symbol'),
-                'trade_type': inferred_type,
-                'side': row.get('side'),
-                'entry_time': row.get('entry_time'),
-                'exit_time': row.get('exit_time'),
-                'pnl': float(row.get('pnl') or 0.0),
-                'pnl_percentage': float(row.get('pnl_percentage') or 0.0),
-                'close_reason': raw_reason,
-                'close_reason_norm': _normalize_close_reason(raw_reason),
-                'metadata': meta,
-            })
-
-        bt_summary = _trade_summary(backtest_trades, pnl_key='pnl_usdt')
-        live_summary = _trade_summary(live_trades, pnl_key='pnl')
-        bt_by_type = {
-            trade_type: _trade_summary([r for r in backtest_trades if r.get('trade_type') == trade_type], pnl_key='pnl_usdt')
-            for trade_type in ('spot', 'futures')
-        }
-        live_by_type = {
-            trade_type: _trade_summary([r for r in live_trades if r.get('trade_type') == trade_type], pnl_key='pnl')
-            for trade_type in ('spot', 'futures')
-        }
-
-        parity = {
-            'pnl_total_gap_pct': _parity_gap_pct(bt_summary['pnl_total'], live_summary['pnl_total']),
-            'win_rate_gap_pct': round((bt_summary['win_rate'] - live_summary['win_rate']) * 100.0, 4),
-            'avg_pnl_gap_pct': _parity_gap_pct(bt_summary['avg_pnl'], live_summary['avg_pnl']),
-            'n_trades_gap': bt_summary['n_trades'] - live_summary['n_trades'],
-        }
-
-        return {
-            'ok': True,
-            'run_id': run_id,
-            'session_id': session_id,
-            'regime': regime,
-            'window_start': window_start.isoformat() if hasattr(window_start, 'isoformat') else str(window_start),
-            'window_end': window_end.isoformat() if hasattr(window_end, 'isoformat') else str(window_end),
-            'symbols': bt_symbols,
-            'backtest': {
-                'run': {
-                    'id': run.get('id'),
-                    'label': run.get('label'),
-                    'pnl_total': float(run.get('pnl_total') or 0.0),
-                    'pnl_spot': float(run.get('pnl_spot') or 0.0),
-                    'pnl_futures': float(run.get('pnl_futures') or 0.0),
-                    'win_rate': float(run.get('win_rate') or 0.0),
-                    'n_trades': int(run.get('n_trades') or 0),
-                    'n_spot': int(run.get('n_spot') or 0),
-                    'n_futures': int(run.get('n_futures') or 0),
-                    'rank_pnl': run.get('rank_pnl'),
-                },
-                'summary': bt_summary,
-                'by_trade_type': bt_by_type,
-            },
-            'live': {
-                'summary': live_summary,
-                'by_trade_type': live_by_type,
-            },
-            'parity': parity,
-            'ts': to_mexico_time(datetime.utcnow()).isoformat(),
-        }
+        return _build_backtest_compare_vs_live(run_id)
     except HTTPException:
         raise
     except Exception as e:
