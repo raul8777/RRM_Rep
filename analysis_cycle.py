@@ -18,6 +18,7 @@ from config import TRADE_CYCLE_MINUTES
 from analysis_cache import analysis_cache
 from signal_store import get_signals
 from strategy import normalize_symbol
+from binance_truth_guard import is_truth_critical
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,14 @@ def execute_once() -> None:
     """
     try:
         logger.info("[AnalysisCycle] Starting technical analysis cycle")
+        try:
+            from init_components import get_components as _gc
+            _db = _gc().db_client
+            if is_truth_critical(_db, max_age_seconds=900):
+                logger.warning("[AnalysisCycle] skipped: binance truth status is critical")
+                return
+        except Exception:
+            pass
         symbols = get_top_symbols_from_signals(limit=5)
 
         if not symbols:

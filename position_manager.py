@@ -85,6 +85,7 @@ class PositionManager:
         # Performance metrics cache: (result, monotonic_ts)
         self._perf_cache: Optional[tuple] = None
         self._perf_cache_ttl = 60.0  # seconds
+        self._missing_balance_streak: Dict[str, int] = {}
         logger.info("Position Manager initialized")
         
         # Load positions from database if available
@@ -116,7 +117,7 @@ class PositionManager:
                        strategy_id, entry_time, stop_loss, take_profit, metadata,
                        entry_commission, pnl_prediction, indicators_at_entry
                 FROM trades_open
-                WHERE COALESCE(metadata->>'trade_type', 'spot') != 'futures'
+                WHERE metadata->>'trade_type' = 'spot'
                 ORDER BY symbol, entry_time ASC
             """
             results = self.db_client.execute_query(query)
@@ -142,6 +143,20 @@ class PositionManager:
                 self._open_positions[position.symbol].append(position)
             total = sum(len(v) for v in self._open_positions.values())
             logger.info(f"Loaded {total} open positions ({len(self._open_positions)} symbols) from database")
+            try:
+                _unknown_rows = self.db_client.execute_query(
+                    "SELECT COUNT(*) AS c FROM trades_open WHERE metadata->>'trade_type' IS NULL"
+                )
+                _unknown = int((_unknown_rows or [{}])[0].get('c') or 0)
+                if _unknown > 0:
+                    logger.warning("Loaded positions with strict trade_type='spot'; found %s open rows with missing trade_type", _unknown)
+                    ec.add_error(
+                        ec.SOURCE_DB,
+                        ec.LEVEL_WARNING,
+                        f"trades_open rows with missing trade_type: {_unknown}",
+                    )
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"Failed to load positions from database: {e}")
             ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"Failed to load open positions: {e}")
@@ -295,7 +310,7 @@ class PositionManager:
                            strategy_id, entry_time, stop_loss, take_profit, metadata,
                            entry_commission, pnl_prediction, indicators_at_entry
                     FROM trades_open
-                    WHERE COALESCE(metadata->>'trade_type', 'spot') != 'futures'
+                    WHERE metadata->>'trade_type' = 'spot'
                     ORDER BY symbol, entry_time ASC
                 """
                 results = self.db_client.execute_query(query)
@@ -395,6 +410,9 @@ class PositionManager:
                 logger.info(f"Balance sync imported: {symbol} qty={amount} price={price}")
 
             # Reconcile DB positions that no longer have an on-exchange balance.
+            _validation_ts = datetime.now(timezone.utc).isoformat()
+            _min_missing_confirm = int(getattr(settings, 'spot_reconcile_missing_confirm_cycles', 2) or 2)
+
             for symbol, pos_list in existing_positions.items():
                 if not pos_list:
                     continue
@@ -403,8 +421,30 @@ class PositionManager:
                 db_qty = sum(float(p.quantity or 0) for p in pos_list)
                 if db_qty <= 0:
                     continue
+                if balance_qty > 0:
+                    self._missing_balance_streak[symbol] = 0
+                    for _pos in pos_list:
+                        try:
+                            _meta = dict(getattr(_pos, 'metadata', {}) or {})
+                            _meta['binance_validated_at'] = _validation_ts
+                            _meta['binance_validated_qty'] = round(balance_qty, 8)
+                            self.update_position_metadata(_pos.position_id, _meta)
+                        except Exception:
+                            pass
+                    continue
                 # If Binance no longer shows the asset, treat the position as externally closed.
                 if balance_qty <= 0:
+                    _streak = int(self._missing_balance_streak.get(symbol, 0) or 0) + 1
+                    self._missing_balance_streak[symbol] = _streak
+                    if _streak < _min_missing_confirm:
+                        self._audit(symbol, 'reconcile_missing_balance_deferred', {
+                            'db_qty': db_qty,
+                            'exchange_qty': balance_qty,
+                            'streak': _streak,
+                            'required': _min_missing_confirm,
+                            'reason': 'waiting_confirmation_cycles',
+                        }, binance_confirmed=True)
+                        continue
                     try:
                         exit_price = binance_client.get_symbol_price(symbol)
                     except Exception:
@@ -422,6 +462,7 @@ class PositionManager:
                         get_param(settings, 'binance_commission_rate') if settings else 0.001,
                     )
                     if closed:
+                        self._missing_balance_streak[symbol] = 0
                         logger.info(f"Balance sync reconciled missing balance: {symbol} closed {len(closed)} DB position(s)")
         except Exception as e:
             logger.error(f"Balance sync failed: {e}")

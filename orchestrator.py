@@ -11,6 +11,7 @@ import json
 from typing import Dict, Optional, Callable
 from datetime import datetime
 from enum import Enum
+from binance_truth_guard import is_truth_critical
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ class Orchestrator:
         self.consecutive_cycle_failures: int = 0
         self.last_cycle_error: Optional[str] = None
         self.last_cycle_error_at: Optional[datetime] = None
+        self.binance_truth_drift_cycles: int = 0
         
         # Callbacks
         self.on_state_change: Optional[Callable] = None
@@ -355,6 +357,11 @@ class Orchestrator:
     def _learning_execute_once() -> None:
         """Run one LearningEngine cycle and invalidate the predictor cache."""
         try:
+            from init_components import get_components as _gc_lrn
+            _db = _gc_lrn().db_client if _gc_lrn() else None
+            if is_truth_critical(_db, max_age_seconds=1800):
+                logger.warning("[LearningCycle] skipped: binance truth status is critical")
+                return
             from learning_engine import get_learning_engine
             from pnl_service import get_predictor
             result = get_learning_engine().run(min_trades=5, lookback_days=30)
@@ -461,6 +468,20 @@ class Orchestrator:
                     self.consecutive_cycle_failures = 0
                     self.last_cycle_error = None
                     self.last_cycle_error_at = None
+                    if cycle_func == getattr(self, '_trade_cycle_func', None):
+                        if is_truth_critical(self.db_client, max_age_seconds=900):
+                            self.binance_truth_drift_cycles += 1
+                            logger.warning(
+                                "[BinanceTruth] critical drift cycle %s/2",
+                                self.binance_truth_drift_cycles,
+                            )
+                            if self.binance_truth_drift_cycles >= 2:
+                                self.pause(
+                                    changed_by="system",
+                                    reason="binance_truth_drift_critical",
+                                )
+                        else:
+                            self.binance_truth_drift_cycles = 0
                 elif _cycle_error is not None:
                     self.consecutive_cycle_failures += 1
                     self.last_cycle_error = _cycle_error

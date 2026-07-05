@@ -27,6 +27,7 @@ from orchestrator import SystemState
 from init_components import get_components
 from audit_tools import check_signal_audit_consistency
 import error_collector as ec
+from binance_truth_guard import get_truth_status
 
 settings = get_settings()
 app = FastAPI(title="Binance Trading Agent")
@@ -1637,6 +1638,7 @@ async def get_dashboard_config(request: Request) -> Dict:
 @app.get("/dashboard/summary")
 async def get_dashboard_summary() -> Dict:
     """Single endpoint that returns all dashboard data to minimize API calls."""
+    _snapshot_started_at = datetime.now(timezone.utc)
     result = {}
     price_cache: Dict[str, float] = {}
 
@@ -1660,6 +1662,32 @@ async def get_dashboard_summary() -> Dict:
         result["health"] = orchestrator.get_health_status()
     except Exception as e:
         result["health"] = {"error": str(e)}
+
+    # Binance truth parity status (runtime vs exchange)
+    try:
+        result["binance_truth"] = get_truth_status(comp.db_client)
+    except Exception as e:
+        result["binance_truth"] = {"ok": False, "severity": "error", "error": str(e)}
+
+    # Basket reset recommendation (runtime decision persisted by trade cycle)
+    try:
+        _br_rows = comp.db_client.execute_query(
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key=%s LIMIT 1",
+            ('basket_reset_decision',),
+        ) if comp.db_client else []
+        if _br_rows:
+            _br_raw = _br_rows[0].get('value')
+            _br_val = _decode_runtime_state_value(_br_raw)
+            if isinstance(_br_val, dict):
+                _br_ts = _br_rows[0].get('updated_at')
+                _br_val['updated_at'] = _br_ts.isoformat() if _br_ts and hasattr(_br_ts, 'isoformat') else None
+                result["basket_reset_decision"] = _br_val
+            else:
+                result["basket_reset_decision"] = {"raw": _br_val}
+        else:
+            result["basket_reset_decision"] = {"trigger": False, "reason": "no_decision"}
+    except Exception as e:
+        result["basket_reset_decision"] = {"trigger": False, "error": str(e)}
 
     # Result-based SMART health (SPOT/FUTURES split + adaptive cadence)
     try:
@@ -1990,6 +2018,7 @@ async def get_dashboard_summary() -> Dict:
             _sp_total_pnl  = 0.0
             _sp_max_age_h  = 0.0
             _sp_first_entry_time = ""
+            _sp_age_parse_errors = 0
             _sp_pred = None
             _sp_meta_last = {}
             now_dt = to_mexico_time(datetime.utcnow())
@@ -2019,6 +2048,7 @@ async def get_dashboard_summary() -> Dict:
                 except Exception:
                     _et_str = ""
                     _age_h  = 0.0
+                    _sp_age_parse_errors += 1
                 if _age_h > _sp_max_age_h:
                     _sp_max_age_h = _age_h
                     _sp_first_entry_time = _et_str
@@ -2033,6 +2063,7 @@ async def get_dashboard_summary() -> Dict:
                     "entry_price": _ep,
                     "qty": _qty,
                     "age_h": round(_age_h, 2),
+                    "age_parse_error": _age_h <= 0 and bool(_et_str == ""),
                     "escalonamiento_index": _sp_meta_i.get('escalonamiento_index', _pos_i + 1),
                     "es_escalonamiento": _sp_meta_i.get('es_escalonamiento', _pos_i > 0),
                     "trade_type": "spot",
@@ -2090,7 +2121,9 @@ async def get_dashboard_summary() -> Dict:
                 "unrealized_pnl": _sp_total_pnl,
                 "unrealized_pnl_mxn": round(_sp_total_pnl * _usd_mxn, 2),
                 "entry_time": _sp_first_entry_time,
+                "first_entry_time": _sp_first_entry_time,
                 "hours_held": round(_sp_max_age_h, 1),
+                "age_parse_errors": _sp_age_parse_errors,
                 "entry_commission": float(_sp_first.entry_commission) if _sp_first.entry_commission else 0.0,
                 "stop_loss": _sl_f,
                 "take_profit": _tp_f,
@@ -2129,6 +2162,7 @@ async def get_dashboard_summary() -> Dict:
                 _esc_rows = db_client.execute_query(
                     "SELECT symbol, quantity, price, entry_time, metadata "
                     "FROM trades_open "
+                    "WHERE metadata->>'trade_type' = 'futures' "
                     "ORDER BY symbol, entry_time ASC", ()
                 ) if db_client else []
                 from datetime import timezone as _tz_esc
@@ -2151,7 +2185,7 @@ async def get_dashboard_summary() -> Dict:
                         "age_h": _age2,
                         "escalonamiento_index": _em.get('escalonamiento_index', 1),
                         "es_escalonamiento": _em.get('es_escalonamiento', False),
-                        "trade_type": _em.get('trade_type', 'spot'),
+                        "trade_type": 'futures',
                         "opened_at": _esc_opened_str,
                         "pnl_usdt": 0.0,
                         "pnl_pct": 0.0,
@@ -2163,6 +2197,7 @@ async def get_dashboard_summary() -> Dict:
                 # FIX-D1: calculate real hours_held and inject pnl_prediction from summary
                 _fp_opened = fp.get("opened_at", "")
                 _fp_hours = 0.0
+                _fp_age_parse_error = False
                 try:
                     if _fp_opened:
                         from datetime import datetime as _dt2
@@ -2171,8 +2206,17 @@ async def get_dashboard_summary() -> Dict:
                         _fp_hours = round((datetime.now(timezone.utc) - _fp_dt_utc).total_seconds() / 3600, 1)
                 except Exception:
                     _fp_hours = 0.0
+                    _fp_age_parse_error = True
+
+                _fp_symbol_entries = _dash_esc_map.get(fp["symbol"], [])
+                if _fp_hours <= 0 and _fp_symbol_entries:
+                    _fp_hours = round(max((float(e.get('age_h', 0.0) or 0.0) for e in _fp_symbol_entries), default=0.0), 1)
+                    _fp_age_parse_error = _fp_age_parse_error and (_fp_hours <= 0)
                 # FIX-D1: use entry_time in Mexico timezone for display
                 _fp_entry_time_str = to_mexico_time_str(_fp_opened) if _fp_opened else ""
+                if not _fp_entry_time_str and _fp_symbol_entries:
+                    _fp_oldest = max(_fp_symbol_entries, key=lambda _x: float(_x.get('age_h', 0.0) or 0.0))
+                    _fp_entry_time_str = _fp_oldest.get('opened_at', '')
 
                 # FIX-PR2: backfill pnl_prediction for futures huérfanos (no prediction in DB)
                 _fp_pred = fp.get("pnl_prediction")
@@ -2247,7 +2291,9 @@ async def get_dashboard_summary() -> Dict:
                     "unrealized_pnl": _fp_upnl,
                     "unrealized_pnl_mxn": round(_fp_upnl * _usd_mxn, 2),
                     "entry_time": _fp_entry_time_str,
+                    "first_entry_time": _fp_entry_time_str,
                     "hours_held": _fp_hours,
+                    "age_parse_error": _fp_age_parse_error,
                     "entry_commission": 0.0,
                     "stop_loss": _fp_sl,
                     "take_profit": _fp_tp,
@@ -2286,11 +2332,13 @@ async def get_dashboard_summary() -> Dict:
 
         _spot_count = sum(1 for p in open_list if p.get('trade_type') != 'futures')
         _fut_count  = sum(1 for p in open_list if p.get('trade_type') == 'futures')
+        _open_unrealized_total = round(sum(float(p.get('unrealized_pnl', 0.0) or 0.0) for p in open_list), 4)
         result["open_positions"] = {
             "positions": open_list,
             "count": len(open_list),
             "spot_count": _spot_count,
             "futures_count": _fut_count,
+            "total_unrealized_pnl": _open_unrealized_total,
         }
     except Exception as e:
         result["open_positions"] = {"positions": [], "count": 0, "error": str(e)}
@@ -2746,6 +2794,17 @@ async def get_dashboard_summary() -> Dict:
     except Exception as _evre:
         result["expectativa_vs_realidad"] = {"details": [], "count": 0}
 
+    _snapshot_finished_at = datetime.now(timezone.utc)
+    _snapshot_generation_ms = int((_snapshot_finished_at - _snapshot_started_at).total_seconds() * 1000)
+    _truth_sev = str((result.get("binance_truth") or {}).get("severity") or "unknown").lower()
+    result["snapshot_meta"] = {
+        "snapshot_timestamp": _snapshot_started_at.isoformat(),
+        "snapshot_finished_at": _snapshot_finished_at.isoformat(),
+        "snapshot_generation_ms": _snapshot_generation_ms,
+        "data_freshness_seconds": round((datetime.now(timezone.utc) - _snapshot_started_at).total_seconds(), 3),
+        "binance_truth_severity": _truth_sev,
+        "tactical_decision_blocked": _truth_sev in ("critical",),
+    }
     result["timestamp"] = to_mexico_time(datetime.utcnow()).isoformat()
     return result
 
@@ -4109,6 +4168,19 @@ async def get_transition_health(_auth=Depends(_require_api_key)) -> Dict:
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+@app.get("/metrics/binance-truth")
+async def get_binance_truth_metrics(_auth=Depends(_require_api_key)) -> Dict:
+    """Return Binance parity state used by runtime gates."""
+    try:
+        status = get_truth_status(db_client)
+        status = status if isinstance(status, dict) else {"raw": status}
+        status["ok"] = bool(status.get("ok", str(status.get("severity", "")).lower() in ("ok", "unknown")))
+        status["timestamp"] = datetime.now(timezone.utc).isoformat()
+        return status
+    except Exception as e:
+        return {"ok": False, "severity": "error", "error": str(e)}
 
 
 @app.get("/metrics/transition-kpis")

@@ -24,6 +24,8 @@ const CACHE_TTL_MS = 5000;    // 5 s frontend cache for fresher mode/profile
 const POLL_INTERVAL_MS = 15000; // 15 s poll for near-real-time status
 const BACKTEST_PROGRESS_POLL_MS = 5000;
 let _fetchInProgress = false;
+let _lastSuccessfulFetch = 0;
+let _lastFetchErrorAt = 0;
 
 async function fetchDashboardData() {
     const now = Date.now();
@@ -35,9 +37,12 @@ async function fetchDashboardData() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         _cachedData = await res.json();
         _lastFetch = Date.now();
+        _lastSuccessfulFetch = _lastFetch;
+        _lastFetchErrorAt = 0;
         return _cachedData;
     } catch (err) {
         console.error('Dashboard fetch error:', err);
+        _lastFetchErrorAt = Date.now();
         return _cachedData;
     } finally {
         _fetchInProgress = false;
@@ -265,6 +270,9 @@ function renderExecutiveSummary(data) {
     const signals  = data.signals       || {};
     const cycle    = data.next_cycle    || {};
     const pnlH     = data.pnl_history   || {};
+    const btruth   = data.binance_truth || {};
+    const sMeta    = data.snapshot_meta || {};
+    const breset   = data.basket_reset_decision || {};
 
     const totalUsdt   = parseFloat(balance.total_usdt || 0);
     const liquidUsdt  = parseFloat(balance.usdt_available || balance.total_usdt || 0);
@@ -310,6 +318,23 @@ function renderExecutiveSummary(data) {
     });
     if (closeSL.length > 0) alerts.push(`🔴 ${closeSL.length} posición(es) con <1% al SL: ${closeSL.map(p => p.symbol).join(', ')}`);
     if (fng < 20) alerts.push(`😰 Fear &amp; Greed: ${fng} — Miedo Extremo (señales más difíciles de aprobar)`);
+    const btSeverity = String(btruth.severity || 'unknown').toLowerCase();
+    if (btSeverity === 'critical') {
+        alerts.push(`🧭 Binance Truth CRITICAL: ${btruth.mismatch_count || 0} mismatch(es) runtime↔exchange`);
+    } else if (btSeverity === 'warning') {
+        alerts.push(`⚠️ Binance Truth warning: ${btruth.mismatch_count || 0} mismatch(es) detectados`);
+    }
+    const snapTs = sMeta.snapshot_timestamp ? Date.parse(sMeta.snapshot_timestamp) : NaN;
+    const snapAgeSec = Number.isFinite(snapTs) ? Math.max(0, (Date.now() - snapTs) / 1000) : null;
+    if (snapAgeSec != null && snapAgeSec > 20) {
+        alerts.push(`⏱️ Dashboard stale: ${snapAgeSec.toFixed(1)}s desde snapshot — valida en Binance antes de ejecutar`);
+    }
+    if (_lastSuccessfulFetch > 0 && (Date.now() - _lastSuccessfulFetch) > 60000) {
+        alerts.push('📡 Sin actualización backend >60s — datos pueden estar vencidos');
+    }
+    if (breset.trigger === true) {
+        alerts.push(`🧹 Basket reset sugerido: pnl=${(breset.combined_pnl_usd || 0).toFixed ? breset.combined_pnl_usd.toFixed(2) : breset.combined_pnl_usd} usd`);
+    }
     const alertHtml = alerts.length
         ? `<div class="exec-alerts">${alerts.map(a => `<div class="exec-alert">${a}</div>`).join('')}</div>`
         : '';
@@ -337,6 +362,7 @@ function renderExecutiveSummary(data) {
                     &nbsp; BTC 4h <span class="${btc4h === 'UP' ? 'positive' : btc4h === 'DOWN' ? 'negative' : ''}">${btc4h === 'UP' ? '⬆ UP' : btc4h === 'DOWN' ? '⬇ DOWN' : '→ FLAT'}</span>
                     &nbsp; ${btc7dHtml}
                     &nbsp; F&amp;G <span style="color:${fng < 25 ? '#e74c3c' : fng < 45 ? '#ff7c4d' : fng < 56 ? '#aaa' : '#4ecca3'}">${fng} ${fngLabel}</span>
+                    &nbsp; Binance <span class="${btSeverity === 'critical' ? 'negative' : btSeverity === 'warning' ? 'exec-warn' : 'positive'}">${(btruth.severity || 'unknown').toUpperCase()}</span>
                 </div>
             </div>
             <div class="exec-section exec-portfolio">
@@ -1021,8 +1047,18 @@ function renderOpenPositions(d) {
 
     // Ordenar por Edad descendente (más antigua primero — edad real desde primera apertura)
     visiblePositions = [...visiblePositions].sort((a, b) => {
-        const aHrs = a.entries?.length > 0 ? Math.max(...a.entries.map(e => e.age_h || 0)) : parseFloat(a.hours_held || 0);
-        const bHrs = b.entries?.length > 0 ? Math.max(...b.entries.map(e => e.age_h || 0)) : parseFloat(b.hours_held || 0);
+        const aEntries = a.entries?.length > 0 ? Math.max(...a.entries.map(e => e.age_h || 0)) : 0;
+        const bEntries = b.entries?.length > 0 ? Math.max(...b.entries.map(e => e.age_h || 0)) : 0;
+        const aField = parseFloat(a.hours_held || 0);
+        const bField = parseFloat(b.hours_held || 0);
+        const aFirst = a.first_entry_time && Number.isFinite(Date.parse(a.first_entry_time))
+            ? Math.max(0, (Date.now() - Date.parse(a.first_entry_time)) / 3600000)
+            : 0;
+        const bFirst = b.first_entry_time && Number.isFinite(Date.parse(b.first_entry_time))
+            ? Math.max(0, (Date.now() - Date.parse(b.first_entry_time)) / 3600000)
+            : 0;
+        const aHrs = Math.max(aEntries, aField, aFirst);
+        const bHrs = Math.max(bEntries, bField, bFirst);
         return bHrs - aHrs;
     });
 
@@ -1057,10 +1093,17 @@ function renderOpenPositions(d) {
         const curP   = parseFloat(p.current_price || 0);
         const entryP = parseFloat(p.entry_price || 0);
         const _escEntries = p.entries || [];
-        // B1: edad real = mayor age_h entre escalamientos, o hours_held del campo
-        const realHrs = _escEntries.length > 0
+        // Edad real: max entre first_entry_time, entries.age_h y hours_held de backend.
+        let _firstHrs = 0;
+        if (p.first_entry_time) {
+            const _dt = Date.parse(p.first_entry_time);
+            if (Number.isFinite(_dt)) _firstHrs = Math.max(0, (Date.now() - _dt) / 3600000);
+        }
+        const _entriesMaxHrs = _escEntries.length > 0
             ? Math.max(..._escEntries.map(e => e.age_h || 0))
-            : parseFloat(p.hours_held || 0);
+            : 0;
+        const _fieldHrs = parseFloat(p.hours_held || 0);
+        const realHrs = Math.max(_firstHrs, _entriesMaxHrs, _fieldHrs);
         const ageCls = realHrs < 2 ? 'age-fresh' : realHrs < 8 ? 'age-mid' : 'age-old';
         const ageStr = realHrs < 1 ? '<1h' : realHrs < 24 ? realHrs.toFixed(0) + 'h' : (realHrs/24).toFixed(1) + 'd';
 

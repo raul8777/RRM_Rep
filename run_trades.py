@@ -29,6 +29,12 @@ from unified_governance_supervisor import (
     UnifiedGovernanceContext,
     evaluate as _evaluate_unified_governance,
 )
+from binance_truth_guard import (
+    evaluate_futures_parity,
+    persist_truth_status,
+    audit_truth_mismatches,
+    compute_basket_reset_decision,
+)
 
 
 # Symbols confirmed invalid on Binance (delisted) — skip without API call
@@ -3220,7 +3226,20 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         print(f"[SSO/SPOT] {symbol} evaluation error: {_sso_s_exc}")
 
                 # ── Profit Realization Supervisor ─────────────────────────────
-                if close_reason is None and pnl_pct > 0:
+                _spot_binance_validated = False
+                try:
+                    _vts = metadata.get('binance_validated_at')
+                    _vqty = float(metadata.get('binance_validated_qty', 0.0) or 0.0)
+                    if _vts:
+                        _vdt = datetime.fromisoformat(str(_vts).replace('Z', '+00:00'))
+                        if _vdt.tzinfo is None:
+                            _vdt = _vdt.replace(tzinfo=timezone.utc)
+                        _vage = (datetime.now(timezone.utc) - _vdt).total_seconds()
+                        _spot_binance_validated = (_vage <= 20 * 60 and _vqty > 0)
+                except Exception:
+                    _spot_binance_validated = False
+
+                if close_reason is None and pnl_pct > 0 and _spot_binance_validated:
                     _profit_started_at = _parse_profit_dt(metadata.get('profit_realization_started_at'))
                     _trail_peak = float(metadata.get('trailing_peak', entry_price) or entry_price)
                     _peak_pnl_pct = (_trail_peak - entry_price) / entry_price if entry_price > 0 else pnl_pct
@@ -3264,7 +3283,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
 
                 # ── Unified Governance Supervisor (profit + loss arbitration) ─
                 _soft_reason_pre_ug = close_reason
-                if close_reason is None or not str(close_reason).startswith(("stop_loss", "take_profit", "trailing_stop")):
+                if (close_reason is None or not str(close_reason).startswith(("stop_loss", "take_profit", "trailing_stop"))) and _spot_binance_validated:
                     try:
                         _sl_floor_pre = entry_price * (1.0 - sl_pct)
                         _sl_saved_pre = float(pos.stop_loss) if pos.stop_loss and float(pos.stop_loss) > 0 else _sl_floor_pre
@@ -3341,6 +3360,15 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 pass
                     except Exception as _ug_err:
                         print(f"[UnifiedGov/SPOT] {symbol}: evaluation error: {_ug_err}")
+                elif not _spot_binance_validated:
+                    try:
+                        position_manager._audit(symbol, 'soft_supervisor_skipped_binance_unconfirmed', {
+                            'side': 'BUY',
+                            'reason': 'spot_not_recently_validated_against_binance',
+                            'has_validation_ts': bool(metadata.get('binance_validated_at')),
+                        }, binance_confirmed=False)
+                    except Exception:
+                        pass
 
                 # ── Stop-Loss ──────────────────────────────────────────────
                 # Fix 1: use effective SL = max(category floor, saved pos.stop_loss)
@@ -5399,6 +5427,27 @@ def execute_once(monitor_only: bool = False):
         print("[execute_once] health_results_latest=critical — switching to monitor_only")
         monitor_only = True
 
+    # Binance-first gate: runtime-vs-exchange parity for futures must be healthy
+    # before allowing new entries. Hard protections (SL/TP) stay enabled.
+    _binance_truth_status = {"ok": True, "severity": "unknown", "mismatch_count": 0}
+    try:
+        if getattr(settings, 'futures_enabled', True):
+            _fc_truth = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None))
+            _wire_futures_client(_fc_truth, client, settings)
+            _binance_truth_status = evaluate_futures_parity(_fc_truth)
+            persist_truth_status(_db_client_ref, _binance_truth_status, source='execute_once_pretrade')
+            if (_binance_truth_status.get('mismatch_count') or 0) > 0:
+                audit_truth_mismatches(_db_client_ref, _binance_truth_status, source='execute_once_pretrade')
+                print(
+                    f"[BinanceTruth] severity={_binance_truth_status.get('severity')} "
+                    f"mismatches={_binance_truth_status.get('mismatch_count')}"
+                )
+            if (not monitor_only) and str(_binance_truth_status.get('severity', '')).lower() == 'critical':
+                print("[execute_once] binance_truth_status=critical — switching to monitor_only")
+                monitor_only = True
+    except Exception as _truth_gate_err:
+        print(f"[BinanceTruth] pretrade gate failed: {_truth_gate_err}")
+
     # ── PAUSED / monitor_only: solo ejecutar SL/TP y retornar ───────────────────
     if monitor_only:
         print("[execute_once] monitor_only=True (system PAUSED) — running SL/TP monitor only")
@@ -5790,6 +5839,7 @@ def execute_once(monitor_only: bool = False):
 
     # ── Step 0.5: Futures positions check + auto-fund on FUTURES_SHORT ──────────
     futures_closes = []
+    _fc = None
     if getattr(settings, 'futures_enabled', True):
         try:
             _fc = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None))
@@ -6002,6 +6052,99 @@ def execute_once(monitor_only: bool = False):
                           f'GLOBAL COOLDOWN {_mass_cd_hours}h — no new shorts until {_FUTURES_MASS_SL_COOLDOWN_UNTIL.strftime("%H:%M UTC")}')
         except Exception as _fce:
             print(f"[Futures] check_positions error: {_fce}")
+
+    # Tactical reset policy: if combined open basket is weak (<= +$10), stale and with
+    # low momentum, mark reset recommendation and optionally execute full close.
+    try:
+        _reset_positions = []
+        _fut_hours_default = float(getattr(settings, 'basket_reset_futures_hours_default', 4.0) or 4.0)
+        if _fc is not None:
+            for _f in _fc.get_open_positions_summary() or []:
+                _reset_positions.append({
+                    'symbol': _f.get('symbol'),
+                    'unrealized_pnl': float(_f.get('pnl', 0.0) or 0.0),
+                    'hours_held': float(_f.get('hours_held', _fut_hours_default) or _fut_hours_default),
+                    'pnl_pct': float(_f.get('pnl_pct', 0.0) or 0.0) / 100.0,
+                    'momentum_score': float(_f.get('signal_strength', 0.0) or 0.0),
+                })
+
+        _spot_positions = position_manager.get_all_positions() if position_manager else {}
+        for _sym, _plist in (_spot_positions or {}).items():
+            if not _plist:
+                continue
+            _sp_price = _get_cycle_price(client, _sym)
+            for _p in _plist:
+                _entry = float(getattr(_p, 'entry_price', 0) or 0)
+                _qty = float(getattr(_p, 'quantity', 0) or 0)
+                if _entry <= 0 or _qty <= 0:
+                    continue
+                _pnl = (_sp_price - _entry) * _qty
+                _opened = getattr(_p, 'entry_time', None)
+                _hours = _fut_hours_default
+                if isinstance(_opened, str) and _opened:
+                    try:
+                        _dt = datetime.fromisoformat(_opened.replace('Z', '+00:00'))
+                        if _dt.tzinfo is None:
+                            _dt = _dt.replace(tzinfo=timezone.utc)
+                        _hours = max(0.0, (datetime.now(timezone.utc) - _dt).total_seconds() / 3600.0)
+                    except Exception:
+                        pass
+                _reset_positions.append({
+                    'symbol': _sym,
+                    'unrealized_pnl': _pnl,
+                    'hours_held': _hours,
+                    'pnl_pct': ((_sp_price - _entry) / _entry) if _entry > 0 else 0.0,
+                    'momentum_score': 0.0,
+                })
+
+        _reset_decision = compute_basket_reset_decision(
+            _reset_positions,
+            pnl_threshold_usd=float(getattr(settings, 'basket_reset_pnl_threshold_usd', 10.0) or 10.0),
+            min_avg_age_hours=float(getattr(settings, 'basket_reset_min_avg_age_hours', 4.0) or 4.0),
+            momentum_positive_count_limit=int(getattr(settings, 'basket_reset_max_positive_momentum_positions', 1) or 1),
+        )
+
+        if _db_client_ref:
+            _db_client_ref.execute_update(
+                "INSERT INTO trading_runtime_state (key, value, updated_at) "
+                "VALUES (%s, %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                ('basket_reset_decision', json.dumps(_reset_decision), json.dumps(_reset_decision)),
+            )
+
+        if _reset_decision.get('trigger'):
+            _auto_reset = bool(getattr(settings, 'basket_reset_auto_execute', False))
+            print(
+                f"[BasketReset] trigger=True pnl=${_reset_decision.get('combined_pnl_usd')} "
+                f"avg_age_h={_reset_decision.get('avg_age_hours')} auto_execute={_auto_reset}"
+            )
+            if _db_client_ref:
+                _db_client_ref.execute_update(
+                    "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+                    ('SYSTEM', 'system', 'basket_reset_triggered', json.dumps(_reset_decision), False),
+                )
+            if _auto_reset and not monitor_only:
+                for _sym, _plist in (_spot_positions or {}).items():
+                    if not _plist:
+                        continue
+                    try:
+                        _exit = _get_cycle_price(client, _sym)
+                        position_manager.close_all_positions_for_symbol(_sym, _exit, 'basket_reset_auto')
+                    except Exception as _sp_reset_err:
+                        print(f"[BasketReset] spot close failed {_sym}: {_sp_reset_err}")
+                if _fc is not None:
+                    for _k, _p in list(_fc._open_positions.items()):
+                        if getattr(_p, 'closed', False):
+                            continue
+                        try:
+                            if str(getattr(_p, 'side', '')).upper() == 'SHORT':
+                                _fc.close_short(_p.symbol, _p.qty, reason='basket_reset_auto')
+                            else:
+                                _fc.close_long(_p.symbol, _p.qty, reason='basket_reset_auto')
+                        except Exception as _fu_reset_err:
+                            print(f"[BasketReset] futures close failed {_p.symbol}: {_fu_reset_err}")
+    except Exception as _reset_err:
+        print(f"[BasketReset] decision error: {_reset_err}")
 
     # ── Step 1: Determine top symbols ─────────────────────────────────────────
     top_signals = _select_symbols(settings, news_client, client, portfolio_manager, regime=_regime_mode, db_client=comp.db_client)

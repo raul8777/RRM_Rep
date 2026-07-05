@@ -1,7 +1,67 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 05 2026 | Sesión 41: hardening final multimodo/perfiles, memorias consolidadas y validación PASS.
+> Última actualización: jul 05 2026 | Sesión 44: cierre final del pendiente E2E (auth+rutas en vivo), hardening de snapshot y restauración de startup tras drift de defaults.
+
+---
+
+### ✅ Sesión 44 — Cierre final del pendiente E2E + estabilización startup post-restart — jul 05 2026
+
+**Objetivo operativo (cumplido):**
+1. Cerrar el último pendiente de paridad con evidencia en vivo autenticada (`dashboard`, `runtime-state`, `futures`, `binance-truth`).
+2. Endurecer la captura de evidencia para no fallar ante `401/404` o drift de rutas.
+3. Restaurar estabilidad de arranque del contenedor ante validación estricta de defaults canónicos.
+
+**Implementación aplicada:**
+1. `Dev/dashboard_parity_snapshot.py`:
+  - manejo resiliente de errores HTTP/URL (`_http_status`, `_error`, `_body`);
+  - resolución automática de API key (`DASHBOARD_API_KEY` desde env/.env o runtime-config);
+  - fallback de rutas para runtime/truth (`/system/runtime-state|/runtime-state` y `/metrics/binance-truth|alternas`);
+  - salida enriquecida con `api_key_resolved`, `resolved_endpoints`, `endpoint_status`.
+2. `config_helpers.py`:
+  - alineación de defaults críticos para pasar validación de paridad con `config.Settings`;
+  - sincronización dinámica de defaults complejos (`token_categories`, `category_thresholds`, `narrative_tokens`, `analysis_symbols`, `trading_excluded_symbols`) desde `Settings` para evitar drift futuro.
+
+**Evidencia de cierre (snapshot final):**
+1. `Dev/dashboard_parity_snapshot.json` generado con `api_key_resolved=true`.
+2. `endpoint_status` final: `dashboard_summary=200`, `runtime_state=200`, `futures_positions=200`, `binance_truth=200`.
+3. `binance_truth.mismatch_count=0` y `mismatch_count=0` en comparación de posiciones abiertas.
+4. `snapshot_meta` presente en dashboard (`snapshot_timestamp`, `snapshot_generation_ms`, `data_freshness_seconds`).
+
+**Estado final:**
+1. Pendiente operativo E2E: cerrado.
+2. Runtime recuperado post-restart con validación de defaults controlada.
+
+---
+
+### ✅ Sesión 43 — Implementación Dashboard-Binance Parity E2E (SPOT+FUTURES) — jul 05 2026
+
+**Objetivo operativo (cumplido):**
+1. Convertir la verificación de dashboard en fase bloqueante con correlación 1:1 contra Binance.
+2. Reducir falsos positivos de tipo/edad (`SPOT`, `<1h`) por fallbacks ambiguos.
+3. Exponer estado de frescura/snapshot para decisiones tácticas rápidas con menor riesgo de actuar sobre datos vencidos.
+
+**Implementación aplicada:**
+1. `app.py` (`/dashboard/summary`):
+  - agrega `snapshot_meta` (`snapshot_timestamp`, `snapshot_finished_at`, `snapshot_generation_ms`, `tactical_decision_blocked` por severidad de `binance_truth`);
+  - expone `basket_reset_decision` desde `trading_runtime_state`;
+  - fortalece `open_positions` con `first_entry_time`, flags de parse de edad y `total_unrealized_pnl` consolidado.
+2. `futures_client.py`:
+  - consolidación preserva antigüedad real (usa `entry_time` más antiguo al consolidar);
+  - incluye `first_opened_at` en `get_open_positions_summary()` para edad consistente post-restart.
+3. `position_manager.py`:
+  - elimina fallback ambiguo `COALESCE(...,'spot')` en carga de abiertas SPOT;
+  - audita filas con `trade_type` faltante para trazabilidad de drift legacy.
+4. `frontend/dashboard.js`:
+  - añade alertas de staleness (`snapshot_age`, falta de fetch >60s);
+  - integra alerta operativa de `basket_reset_decision.trigger`;
+  - cálculo y orden de edad usa máximo entre `first_entry_time`, `entries.age_h` y `hours_held` para evitar sub-reporte.
+5. `Dev/dashboard_parity_snapshot.py` (nuevo):
+  - herramienta de captura 3x snapshots y comparación `dashboard ↔ futures endpoint ↔ runtime state ↔ binance_truth`.
+
+**Estado de fase:**
+1. Implementación completada en código para fases de snapshot, paridad por campo, staleness visible y preservación de edad real.
+2. Validación enfocada requerida al cierre de esta sesión para confirmar PASS final tras cambios.
 
 ---
 

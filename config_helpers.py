@@ -43,7 +43,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'futures_leverage': 10,
     'futures_max_shorts': 12,
     'futures_max_largecap_shorts': 5,
-    'futures_max_new_per_cycle': 5,
+    'futures_max_new_per_cycle': 3,
     'futures_usdt_per_trade': 100.0,
     'futures_sl_pct': 1.42,
     'futures_tp_pct': 2.81,
@@ -72,7 +72,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'vol_spike_min': 0.91,
 
     # Exposure / regime
-    'max_total_exposure_pct': 0.75,
+    'max_total_exposure_pct': 0.65,
     'max_positions_spot_bull': 20,
     'max_positions_range_scalp': 10,
     'max_positions_preservation': 5,
@@ -164,19 +164,19 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     },
     'token_categories': {},
     'category_thresholds': {},
-    'max_positions_per_symbol': 1,
+    'max_positions_per_symbol': 3,
     'overflow_min_strength': 0.80,
     'overflow_min_prob': 0.65,
-    'overflow_max_extra': 5,
+    'overflow_max_extra': 3,
 
     # Min hold
-    'min_hold_minutes': 240,
+    'min_hold_minutes': 120,
     'min_hold_minutes_range_scalp': 30,
     'min_hold_minutes_spot_bull': 120,
     'min_hold_for_prediction_exit': 90,
 
     # Rebalance
-    'max_rebalance_per_cycle': 1,
+    'max_rebalance_per_cycle': 2,
     'rebalance_rsi_overbought': 60.0,
     'rebalance_skip_if_bullish_signal': True,
     'replace_ev_min_ratio': 1.1,
@@ -185,7 +185,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
 
     # BTC dominance / regime filters
     'btc_dominance_filter_enabled': True,
-    'btc_dominance_altcoin_threshold': 64.0,
+    'btc_dominance_altcoin_threshold': 56.0,
     'market_regime_enabled': True,
     'preservation_narrative_only': True,
     'preservation_max_rsi': 65.0,
@@ -253,10 +253,10 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'futures_max_escalamientos': 2,
     'futures_protect_profit_usdt': -5.0,
     'min_cycles_before_close_shorts': 5,
-    'use_unified_portfolio_manager': True,
+    'use_unified_portfolio_manager': False,
 
     # Futures overflow
-    'futures_overflow_min_strength': 0.55,
+    'futures_overflow_min_strength': 0.65,
     'futures_overflow_min_drop_24h': -3.0,
     'futures_overflow_max_extra': 3,
     'futures_overflow_min_vol_spike': 2.0,
@@ -346,10 +346,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'bnb_buffer_days': 7,
 
     # Trading symbol lists
-    'analysis_symbols': [
-        'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
-        'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT',
-    ],
+    'analysis_symbols': [],
     'trading_excluded_symbols': [],
     'auto_close_excluded_on_startup': True,
 
@@ -383,6 +380,31 @@ _TRADE_TYPE_PARAM_MAP: Dict[str, Dict[str, str]] = {
         'kelly_max_pct_liquid': 'futures_kelly_max_pct_liquid',
     },
 }
+
+
+def _sync_canonical_defaults_from_settings() -> None:
+    """Keep hardcoded helper defaults aligned with config.Settings defaults."""
+    try:
+        from config import Settings as _Settings  # Local import to avoid startup cycles.
+
+        fields = getattr(_Settings, "model_fields", {}) or {}
+        names = [
+            "token_categories",
+            "category_thresholds",
+            "narrative_tokens",
+            "analysis_symbols",
+            "trading_excluded_symbols",
+        ]
+        for name in names:
+            f = fields.get(name)
+            if f is not None:
+                _PARAM_DEFAULTS[name] = deepcopy(f.default)
+    except Exception:
+        # Validation step will surface any remaining mismatch explicitly.
+        return
+
+
+_sync_canonical_defaults_from_settings()
 
 
 def get_param(settings, name: str, default: Optional[Any] = None, *,

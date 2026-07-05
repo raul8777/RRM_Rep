@@ -39,6 +39,11 @@ from unified_governance_supervisor import (
     UnifiedGovernanceContext,
     evaluate as _evaluate_unified_governance,
 )
+from binance_truth_guard import (
+    evaluate_futures_parity,
+    persist_truth_status,
+    audit_truth_mismatches,
+)
 
 
 def _parse_utc_datetime(value):
@@ -902,8 +907,9 @@ class FuturesClient:
             # Use Binance-reported entry price as the source of truth for the consolidated row
             _avg_price = _pos.entry_price
 
-            # Preserve the newest metadata / pnl_prediction / indicators
+            # Preserve newest metadata/prediction but keep oldest entry_time for real age tracking.
             _last = _db_rows[-1]
+            _first = _db_rows[0]
             _meta = _last.get('metadata') or {}
             if isinstance(_meta, str):
                 try:
@@ -913,6 +919,16 @@ class FuturesClient:
             _meta['consolidated_at'] = datetime.now(timezone.utc).isoformat()
             _meta['consolidated_from'] = len(_db_rows)
             _meta['trade_type'] = 'futures'
+            _first_entry_raw = _first.get('entry_time')
+            _first_entry_iso = None
+            try:
+                _first_dt = _parse_utc_datetime(_first_entry_raw)
+                if _first_dt:
+                    _first_entry_iso = _first_dt.isoformat()
+            except Exception:
+                _first_entry_iso = None
+            if _first_entry_iso:
+                _meta['first_entry_time'] = _first_entry_iso
 
             # Insert consolidated row
             _pnl_pred = _last.get('pnl_prediction')
@@ -936,7 +952,7 @@ class FuturesClient:
                     json.dumps(_meta),
                     _pnl_pred,
                     _indicators,
-                    _last.get('entry_time'),
+                    _first_entry_raw or _last.get('entry_time'),
                 )
             )
             # Delete old rows
@@ -2263,6 +2279,30 @@ class FuturesClient:
 
         _signal_cache: Dict[str, Dict[str, Optional[float]]] = {}
         _signal_generator = None
+        _truth_status = {
+            "ok": True,
+            "severity": "unknown",
+            "mismatch_count": 0,
+            "binance_keys": [],
+        }
+        _binance_live_keys = set()
+        _enforce_live_gate = not bool(self.dry_run)
+
+        try:
+            if self.dry_run:
+                _binance_live_keys = set(self._open_positions.keys())
+            else:
+                _truth_status = evaluate_futures_parity(self)
+                _binance_live_keys = set(_truth_status.get("binance_keys") or [])
+                persist_truth_status(self.db_client, _truth_status, source="futures_check_positions")
+                if (_truth_status.get("mismatch_count") or 0) > 0:
+                    audit_truth_mismatches(self.db_client, _truth_status, source="futures_check_positions")
+                    print(
+                        f"[BinanceTruth/Futures] severity={_truth_status.get('severity')} "
+                        f"mismatches={_truth_status.get('mismatch_count')}"
+                    )
+        except Exception as _truth_err:
+            print(f"[BinanceTruth/Futures] parity check failed: {_truth_err}")
 
         def _get_signal_snapshot(_symbol: str) -> Dict[str, Optional[float]]:
             nonlocal _signal_generator
@@ -2853,7 +2893,8 @@ class FuturesClient:
                     continue  # position closed, move to next
 
                 # ── Profit Realization Supervisor ───────────────────────────
-                if pnl_pct > 0:
+                _pos_live_in_binance = (not _enforce_live_gate) or (self._pos_key(symbol, pos.side) in _binance_live_keys)
+                if pnl_pct > 0 and _pos_live_in_binance:
                     _pr_meta = pos._smart_meta
                     _pr_started_at = _parse_profit_dt(_pr_meta.get('profit_realization_started_at'))
                     _pr_ctx = ProfitRealizationContext(
@@ -2963,6 +3004,14 @@ class FuturesClient:
 
                 # ── Unified Governance Supervisor (profit + loss arbitration) ─
                 try:
+                    if not _pos_live_in_binance:
+                        self._audit(symbol, 'unified_governance_skipped_binance_unconfirmed', {
+                            'side': pos.side,
+                            'reason': 'binance_not_confirmed',
+                            'truth_severity': _truth_status.get('severity'),
+                            'truth_mismatches': _truth_status.get('mismatch_count'),
+                        })
+                        continue
                     _ug_meta = pos._smart_meta or {}
                     _ug_distance_to_sl = None
                     if price > 0 and pos.sl_price:
@@ -3318,15 +3367,22 @@ class FuturesClient:
         """
         # FIX-L1: build a DB lookup map {(symbol, 'SELL'|'BUY'): row} for enrichment
         _db_map: dict = {}
+        _db_first_entry_map: dict = {}
         if self.db_client:
             try:
                 rows = self.db_client.execute_query(
-                    """SELECT symbol, side, pnl_prediction, indicators_at_entry, entry_time
+                    """SELECT symbol, side, pnl_prediction, indicators_at_entry, entry_time, metadata
                        FROM trades_open
-                       WHERE metadata->>'trade_type' = 'futures'"""
+                       WHERE metadata->>'trade_type' = 'futures'
+                       ORDER BY entry_time ASC"""
                 )
                 for r in rows:
-                    _db_map[(r['symbol'], r['side'])] = r
+                    _k = (r['symbol'], r['side'])
+                    _db_map[_k] = r
+                    if _k not in _db_first_entry_map:
+                        _meta = _normalize_metadata(r.get('metadata'), default_trade_type='futures')
+                        _first = _parse_utc_datetime(_meta.get('first_entry_time')) or _parse_utc_datetime(r.get('entry_time'))
+                        _db_first_entry_map[_k] = _first
             except Exception as _dbe:
                 print(f'[Futures/DB] get_open_positions_summary enrichment failed: {_dbe}')
 
@@ -3346,6 +3402,7 @@ class FuturesClient:
             _opened_at = pos.opened_at.isoformat()
             _db_side = 'SELL' if pos.side == 'SHORT' else 'BUY'
             _db_row = _db_map.get((pos.symbol, _db_side))
+            _first_dt = _db_first_entry_map.get((pos.symbol, _db_side))
             if _db_row:
                 if _pnl_pred is None and _db_row.get('pnl_prediction'):
                     _pnl_pred = _db_row['pnl_prediction']
@@ -3364,6 +3421,8 @@ class FuturesClient:
                             _opened_at = str(_et).replace(' ', 'T', 1)  # string fallback
                     except Exception:
                         pass
+
+            _first_opened_at = _first_dt.isoformat() if _first_dt and hasattr(_first_dt, 'isoformat') else _opened_at
 
             # VIS-1: SL/TP lifecycle fields from _smart_meta
             _pnl_pct = unr / (pos.entry_price * pos.qty) if pos.entry_price > 0 and pos.qty > 0 else 0.0
@@ -3397,6 +3456,7 @@ class FuturesClient:
                 "tp_price":         pos.tp_price,
                 "unrealized_pnl":   round(unr, 4),
                 "opened_at":        _opened_at,
+                "first_opened_at":  _first_opened_at,
                 "pnl_prediction":   _pnl_pred,
                 "breakeven_done":   _vis_be,
                 "trail_best_price": _vis_trail_best,
