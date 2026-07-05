@@ -67,6 +67,17 @@ def test_runtime_config_matches_baseline():
     )
 
 
+def test_validate_config_reports_no_errors_on_canonical_defaults():
+    """F3b: validate_config should accept canonical defaults without errors."""
+    from config import Settings
+    from config_helpers import validate_config
+
+    validation = validate_config(Settings())
+    assert validation["ok"] is True
+    errors = [issue for issue in validation["issues"] if issue["severity"] == "error"]
+    assert errors == []
+
+
 def _api_headers():
     """Build headers for protected endpoints."""
     _headers = {"Content-Type": "application/json"}

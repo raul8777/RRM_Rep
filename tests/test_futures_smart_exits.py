@@ -670,6 +670,44 @@ class TestConfigParams:
         assert isinstance(val, list)
         assert len(val) >= 2
 
+    def test_config_helpers_critical_defaults_match_settings(self):
+        from config import Settings
+        from config_helpers import _PARAM_DEFAULTS
+
+        critical_keys = [
+            'kelly_dynamic_base_pct',
+            'max_per_trade_usdt',
+            'max_positions',
+            'trailing_stop_activation_pct',
+            'trailing_stop_distance_pct',
+        ]
+        for key in critical_keys:
+            assert _PARAM_DEFAULTS[key] == Settings.model_fields[key].default, f"Default mismatch for {key}"
+
+
+class TestUnifiedGovernanceMonitorOnlyPropagation:
+    def test_monitor_only_flag_reaches_futures_unified_governance(self, monkeypatch):
+        from unified_governance_supervisor import UnifiedGovernanceDecision
+
+        pos = make_short(entry=100.0, sl_pct=3.0, tp_pct=7.0, qty=1.0)
+        fc = make_fc([pos])
+        inject_price(fc, pos.symbol, 100.2)  # tiny loss, avoids PRS branch
+        s = make_settings(
+            sso_enabled=False,
+            futures_adverse_exit_enabled=False,
+            futures_smart_tp_enabled=False,
+        )
+
+        captured = {}
+
+        def _fake_ug(ctx, _settings):
+            captured['monitor_only'] = ctx.monitor_only
+            return UnifiedGovernanceDecision()
+
+        monkeypatch.setattr('futures_client._evaluate_unified_governance', _fake_ug)
+        fc.check_positions(settings=s, monitor_only=True)
+        assert captured.get('monitor_only') is True
+
 
 # ─── 11. update_sl_tp + check_positions interaction (race condition) ──────────
 

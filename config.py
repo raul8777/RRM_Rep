@@ -131,6 +131,11 @@ class Settings(BaseSettings):
     futures_momentum_reversal_enabled: bool = Field(default=True, env="FUTURES_MOMENTUM_REVERSAL_ENABLED")
     futures_momentum_reversal_min_peak: float = Field(default=2.0, env="FUTURES_MOMENTUM_REVERSAL_MIN_PEAK")  # peak must reach 2%+
     futures_momentum_reversal_drawback: float = Field(default=0.8, env="FUTURES_MOMENTUM_REVERSAL_DRAWBACK")  # close if given back 0.8% from peak
+    # Early adverse exit: if signal flips against open futures position while already in loss, cut earlier than hard SL
+    futures_adverse_exit_enabled: bool = Field(default=True, env="FUTURES_ADVERSE_EXIT_ENABLED")
+    futures_adverse_exit_loss_pct: float = Field(default=0.8, env="FUTURES_ADVERSE_EXIT_LOSS_PCT")
+    futures_adverse_exit_min_hours: float = Field(default=1.5, env="FUTURES_ADVERSE_EXIT_MIN_HOURS")
+    futures_adverse_exit_min_strength: float = Field(default=0.55, env="FUTURES_ADVERSE_EXIT_MIN_STRENGTH")
     # SSO (Smart Scale-Out) — adaptive multi-signal exit system
     sso_enabled: bool = Field(default=True, env="SSO_ENABLED")
     sso_stagnant_min_profit_factor: float = Field(default=0.02, env="SSO_STAGNANT_MIN_PROFIT_FACTOR")
@@ -188,6 +193,43 @@ class Settings(BaseSettings):
     rescue_gate_min_pnl_improvement: float = Field(default=0.005, env="RESCUE_GATE_MIN_PNL_IMPROVEMENT")  # expiry: min pnl_pct improvement between blocks to reset counter
     # FIX-7: Throttle Binance algo order verification every N check_positions cycles
     futures_binance_verify_interval_cycles: int = Field(default=3, env="FUTURES_BINANCE_VERIFY_INTERVAL_CYCLES")
+    # Profit realization supervisor — shared exit authority across SPOT and FUTURES
+    profit_realization_enabled: bool = Field(default=True, env="PROFIT_REALIZATION_ENABLED")
+    profit_realization_spot_enabled: bool = Field(default=True, env="PROFIT_REALIZATION_SPOT_ENABLED")
+    profit_realization_spot_min_profit_pct: float = Field(default=0.0025, env="PROFIT_REALIZATION_SPOT_MIN_PROFIT_PCT")
+    profit_realization_spot_partial_minutes: float = Field(default=35.0, env="PROFIT_REALIZATION_SPOT_PARTIAL_MINUTES")
+    profit_realization_spot_full_minutes: float = Field(default=70.0, env="PROFIT_REALIZATION_SPOT_FULL_MINUTES")
+    profit_realization_spot_drawback_pct: float = Field(default=0.0040, env="PROFIT_REALIZATION_SPOT_DRAWDOWN_PCT")
+    profit_realization_spot_partial_close_pct: float = Field(default=0.60, env="PROFIT_REALIZATION_SPOT_PARTIAL_CLOSE_PCT")
+    profit_realization_spot_max_extensions: int = Field(default=2, env="PROFIT_REALIZATION_SPOT_MAX_EXTENSIONS")
+    profit_realization_futures_enabled: bool = Field(default=True, env="PROFIT_REALIZATION_FUTURES_ENABLED")
+    profit_realization_futures_min_profit_pct: float = Field(default=0.0030, env="PROFIT_REALIZATION_FUTURES_MIN_PROFIT_PCT")
+    profit_realization_futures_partial_minutes: float = Field(default=20.0, env="PROFIT_REALIZATION_FUTURES_PARTIAL_MINUTES")
+    profit_realization_futures_full_minutes: float = Field(default=45.0, env="PROFIT_REALIZATION_FUTURES_FULL_MINUTES")
+    profit_realization_futures_drawback_pct: float = Field(default=0.0035, env="PROFIT_REALIZATION_FUTURES_DRAWDOWN_PCT")
+    profit_realization_futures_partial_close_pct: float = Field(default=0.60, env="PROFIT_REALIZATION_FUTURES_PARTIAL_CLOSE_PCT")
+    profit_realization_futures_max_extensions: int = Field(default=1, env="PROFIT_REALIZATION_FUTURES_MAX_EXTENSIONS")
+    # Unified governance supervisor (profit + loss)
+    unified_governance_enabled: bool = Field(default=True, env="UNIFIED_GOVERNANCE_ENABLED")
+    unified_governance_profit_enabled: bool = Field(default=True, env="UNIFIED_GOVERNANCE_PROFIT_ENABLED")
+    unified_governance_loss_enabled: bool = Field(default=True, env="UNIFIED_GOVERNANCE_LOSS_ENABLED")
+    unified_governance_loss_min_age_profile_a: float = Field(default=30.0, env="UNIFIED_GOVERNANCE_LOSS_MIN_AGE_PROFILE_A")
+    unified_governance_loss_min_age_profile_b: float = Field(default=60.0, env="UNIFIED_GOVERNANCE_LOSS_MIN_AGE_PROFILE_B")
+    unified_governance_loss_min_age_profile_c: float = Field(default=45.0, env="UNIFIED_GOVERNANCE_LOSS_MIN_AGE_PROFILE_C")
+    unified_governance_futures_loss_min_age_profile_a: float = Field(default=20.0, env="UNIFIED_GOVERNANCE_FUTURES_LOSS_MIN_AGE_PROFILE_A")
+    unified_governance_futures_loss_min_age_profile_b: float = Field(default=45.0, env="UNIFIED_GOVERNANCE_FUTURES_LOSS_MIN_AGE_PROFILE_B")
+    unified_governance_futures_loss_min_age_profile_c: float = Field(default=30.0, env="UNIFIED_GOVERNANCE_FUTURES_LOSS_MIN_AGE_PROFILE_C")
+    unified_governance_loss_escalation_age_profile_a: float = Field(default=120.0, env="UNIFIED_GOVERNANCE_LOSS_ESCALATION_AGE_PROFILE_A")
+    unified_governance_loss_escalation_age_profile_b: float = Field(default=90.0, env="UNIFIED_GOVERNANCE_LOSS_ESCALATION_AGE_PROFILE_B")
+    unified_governance_loss_escalation_age_profile_c: float = Field(default=60.0, env="UNIFIED_GOVERNANCE_LOSS_ESCALATION_AGE_PROFILE_C")
+    unified_governance_futures_loss_escalation_age_profile_a: float = Field(default=90.0, env="UNIFIED_GOVERNANCE_FUTURES_LOSS_ESCALATION_AGE_PROFILE_A")
+    unified_governance_futures_loss_escalation_age_profile_b: float = Field(default=70.0, env="UNIFIED_GOVERNANCE_FUTURES_LOSS_ESCALATION_AGE_PROFILE_B")
+    unified_governance_futures_loss_escalation_age_profile_c: float = Field(default=45.0, env="UNIFIED_GOVERNANCE_FUTURES_LOSS_ESCALATION_AGE_PROFILE_C")
+    unified_governance_loss_distance_to_sl_min_pct: float = Field(default=0.50, env="UNIFIED_GOVERNANCE_LOSS_DISTANCE_TO_SL_MIN_PCT")
+    unified_governance_loss_trajectory_acceleration_pct: float = Field(default=0.50, env="UNIFIED_GOVERNANCE_LOSS_TRAJECTORY_ACCELERATION_PCT")
+    unified_governance_loss_signal_reversal_strength: float = Field(default=0.65, env="UNIFIED_GOVERNANCE_LOSS_SIGNAL_REVERSAL_STRENGTH")
+    unified_governance_monitor_only_force_loss_pct: float = Field(default=2.0, env="UNIFIED_GOVERNANCE_MONITOR_ONLY_FORCE_LOSS_PCT")
+    unified_governance_monitor_only_force_age_minutes: float = Field(default=90.0, env="UNIFIED_GOVERNANCE_MONITOR_ONLY_FORCE_AGE_MINUTES")
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True, env="WR_SCREENER_ENABLED")
     wr_screener_consecutive_sl_block: int = Field(default=3, env="WR_SCREENER_CONSECUTIVE_SL_BLOCK")  # block after N consecutive SL

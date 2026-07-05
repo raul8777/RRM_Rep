@@ -29,8 +29,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'kelly_max_usdt': 747.0,
     'kelly_max_pct_liquid': 0.704,
     'kelly_max_pct_cap': 0.25,
-    'kelly_dynamic_base_pct': 0.12,
-    'max_per_trade_usdt': 500.0,
+    'kelly_dynamic_base_pct': 0.15,
+    'max_per_trade_usdt': 10.0,
 
     # FUTURES Kelly
     'futures_kelly_base_usdt': 73.0,
@@ -61,8 +61,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'stop_loss_pct': 3.36,
     'take_profit_pct': 4.14,
     'trailing_stop_enabled': True,
-    'trailing_stop_activation_pct': 2.5,
-    'trailing_stop_distance_pct': 1.2,
+    'trailing_stop_activation_pct': 2.0,
+    'trailing_stop_distance_pct': 1.0,
 
     # Signal filters
     'min_signal_strength': 0.389,
@@ -77,7 +77,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'max_positions_range_scalp': 10,
     'max_positions_preservation': 5,
     'max_positions_futures_short': 12,
-    'max_positions': 12,
+    'max_positions': 5,
 
     # Commissions / BNB — rates are controlled by Binance, not backtest.
     # Defaults are the documented standard rates; live rates are refreshed from API.
@@ -112,8 +112,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
 
     # Trailing stop (SPOT)
     'trailing_stop_enabled': True,
-    'trailing_stop_activation_pct': 2.5,
-    'trailing_stop_distance_pct': 1.2,
+    'trailing_stop_activation_pct': 2.0,
+    'trailing_stop_distance_pct': 1.0,
 
     # Smart TP / scale out (SPOT)
     'smart_tp_enabled': True,
@@ -286,6 +286,45 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'futures_momentum_reversal_enabled': True,
     'futures_momentum_reversal_min_peak': 2.0,
     'futures_momentum_reversal_drawback': 0.8,
+    'futures_adverse_exit_enabled': True,
+    'futures_adverse_exit_loss_pct': 0.8,
+    'futures_adverse_exit_min_hours': 1.5,
+    'futures_adverse_exit_min_strength': 0.55,
+    'profit_realization_enabled': True,
+    'profit_realization_spot_enabled': True,
+    'profit_realization_spot_min_profit_pct': 0.0025,
+    'profit_realization_spot_partial_minutes': 35.0,
+    'profit_realization_spot_full_minutes': 70.0,
+    'profit_realization_spot_drawback_pct': 0.0040,
+    'profit_realization_spot_partial_close_pct': 0.60,
+    'profit_realization_spot_max_extensions': 2,
+    'profit_realization_futures_enabled': True,
+    'profit_realization_futures_min_profit_pct': 0.0030,
+    'profit_realization_futures_partial_minutes': 20.0,
+    'profit_realization_futures_full_minutes': 45.0,
+    'profit_realization_futures_drawback_pct': 0.0035,
+    'profit_realization_futures_partial_close_pct': 0.60,
+    'profit_realization_futures_max_extensions': 1,
+    'unified_governance_enabled': True,
+    'unified_governance_profit_enabled': True,
+    'unified_governance_loss_enabled': True,
+    'unified_governance_loss_min_age_profile_a': 30.0,
+    'unified_governance_loss_min_age_profile_b': 60.0,
+    'unified_governance_loss_min_age_profile_c': 45.0,
+    'unified_governance_futures_loss_min_age_profile_a': 20.0,
+    'unified_governance_futures_loss_min_age_profile_b': 45.0,
+    'unified_governance_futures_loss_min_age_profile_c': 30.0,
+    'unified_governance_loss_escalation_age_profile_a': 120.0,
+    'unified_governance_loss_escalation_age_profile_b': 90.0,
+    'unified_governance_loss_escalation_age_profile_c': 60.0,
+    'unified_governance_futures_loss_escalation_age_profile_a': 90.0,
+    'unified_governance_futures_loss_escalation_age_profile_b': 70.0,
+    'unified_governance_futures_loss_escalation_age_profile_c': 45.0,
+    'unified_governance_loss_distance_to_sl_min_pct': 0.50,
+    'unified_governance_loss_trajectory_acceleration_pct': 0.50,
+    'unified_governance_loss_signal_reversal_strength': 0.65,
+    'unified_governance_monitor_only_force_loss_pct': 2.0,
+    'unified_governance_monitor_only_force_age_minutes': 90.0,
     'futures_binance_verify_interval_cycles': 3,
 
     # Futures capital bridge
@@ -402,6 +441,23 @@ def validate_config(settings) -> Dict[str, Any]:
     if f_cap < s_cap * 0.5:
         issues.append({'severity': 'warning', 'param': 'futures_kelly_max_pct_liquid',
                        'message': f'futures_kelly_max_pct_liquid ({f_cap}) much lower than spot ({s_cap})'})
+
+    # Canonical default parity: config.py must not drift from _PARAM_DEFAULTS.
+    try:
+        from config import Settings
+        for name, default in _PARAM_DEFAULTS.items():
+            model_field = Settings.model_fields.get(name)
+            if model_field is None:
+                issues.append({'severity': 'error', 'param': name,
+                               'message': f'{name} missing from config.Settings'})
+                continue
+            model_default = model_field.default
+            if model_default != default:
+                issues.append({'severity': 'error', 'param': name,
+                               'message': f'config_helpers default {default!r} != config.Settings default {model_default!r}'})
+    except Exception as e:
+        issues.append({'severity': 'error', 'param': '_PARAM_DEFAULTS',
+                       'message': f'Unable to validate config default parity: {e}'})
 
     # Check for known drift against hardcodes (legacy safety)
     if hasattr(settings, 'futures_leverage') and settings.futures_leverage != lev:

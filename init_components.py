@@ -38,7 +38,12 @@ class Components:
 def _build() -> Components:
     """Construct every component exactly once."""
     from config import get_settings
+    from config_helpers import validate_config
     settings = get_settings()
+
+    validation = validate_config(settings)
+    if not validation.get("ok", False):
+        raise RuntimeError(f"Config validation failed: {validation['issues']}")
 
     c = Components(settings=settings)
 

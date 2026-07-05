@@ -19,6 +19,16 @@ import pnl_service
 import json
 import state_persistence
 from config_helpers import get_param as _get_param
+from profit_realization_supervisor import (
+    ProfitRealizationContext,
+    evaluate as _evaluate_profit_realization,
+    mark_profit_started as _mark_profit_started,
+    parse_dt as _parse_profit_dt,
+)
+from unified_governance_supervisor import (
+    UnifiedGovernanceContext,
+    evaluate as _evaluate_unified_governance,
+)
 
 
 # Symbols confirmed invalid on Binance (delisted) — skip without API call
@@ -561,6 +571,7 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'min_hold_minutes_spot_bull': 'min_hold_minutes_spot_bull',
             'min_hold_for_prediction_exit': 'min_hold_for_prediction_exit',
             'min_cycles_before_close_shorts': 'min_cycles_before_close_shorts',
+            'futures_breakeven_activation_pct': 'futures_breakeven_activation_pct',
             'futures_trailing_activation_pct': 'futures_trailing_activation_pct',
             'futures_sl_cooldown_hours': 'futures_sl_cooldown_hours',
             'futures_smart_tp_max_pnl_pct': 'futures_smart_tp_max_pnl_pct',
@@ -814,8 +825,15 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
         'SPOT_BULL': {
             'trailing_stop_activation_pct': 1.08,
             'trailing_stop_distance_pct': 1.10,
-            'futures_trailing_activation_pct': 1.05,
-            'futures_trailing_distance_pct': 1.08,
+            'futures_breakeven_activation_pct': 0.95,
+            'futures_trailing_activation_pct': 1.00,
+            'futures_trailing_distance_pct': 1.00,
+            'futures_trail_floor_pct': 0.98,
+            'futures_trail_ceiling_pct': 0.98,
+            'futures_trail_atr_multiplier_low': 0.98,
+            'futures_trail_atr_multiplier_mid': 0.98,
+            'futures_trail_atr_multiplier_high': 0.98,
+            'futures_trail_atr_multiplier_deep': 0.98,
             'max_positions_spot_bull': 1.08,
             'min_hold_minutes_spot_bull': 1.08,
             'max_rebalance_per_cycle': 0.95,
@@ -831,8 +849,15 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
         'RANGE_SCALP': {
             'trailing_stop_activation_pct': 0.95,
             'trailing_stop_distance_pct': 0.90,
-            'futures_trailing_activation_pct': 0.95,
-            'futures_trailing_distance_pct': 0.92,
+            'futures_breakeven_activation_pct': 0.90,
+            'futures_trailing_activation_pct': 0.92,
+            'futures_trailing_distance_pct': 0.90,
+            'futures_trail_floor_pct': 0.95,
+            'futures_trail_ceiling_pct': 0.92,
+            'futures_trail_atr_multiplier_low': 0.94,
+            'futures_trail_atr_multiplier_mid': 0.94,
+            'futures_trail_atr_multiplier_high': 0.95,
+            'futures_trail_atr_multiplier_deep': 0.96,
             'max_positions_range_scalp': 0.92,
             'min_hold_minutes_range_scalp': 0.88,
             'max_rebalance_per_cycle': 1.10,
@@ -848,8 +873,15 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
         'PRESERVATION': {
             'trailing_stop_activation_pct': 0.92,
             'trailing_stop_distance_pct': 0.88,
-            'futures_trailing_activation_pct': 0.90,
-            'futures_trailing_distance_pct': 0.88,
+            'futures_breakeven_activation_pct': 0.88,
+            'futures_trailing_activation_pct': 0.88,
+            'futures_trailing_distance_pct': 0.86,
+            'futures_trail_floor_pct': 0.92,
+            'futures_trail_ceiling_pct': 0.88,
+            'futures_trail_atr_multiplier_low': 0.90,
+            'futures_trail_atr_multiplier_mid': 0.90,
+            'futures_trail_atr_multiplier_high': 0.92,
+            'futures_trail_atr_multiplier_deep': 0.94,
             'max_positions_preservation': 0.88,
             'min_hold_minutes': 1.12,
             'max_rebalance_per_cycle': 0.85,
@@ -865,8 +897,15 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
         'FUTURES_SHORT': {
             'trailing_stop_activation_pct': 1.00,
             'trailing_stop_distance_pct': 1.00,
-            'futures_trailing_activation_pct': 1.05,
-            'futures_trailing_distance_pct': 1.06,
+            'futures_breakeven_activation_pct': 0.85,
+            'futures_trailing_activation_pct': 0.88,
+            'futures_trailing_distance_pct': 0.92,
+            'futures_trail_floor_pct': 0.92,
+            'futures_trail_ceiling_pct': 0.88,
+            'futures_trail_atr_multiplier_low': 0.88,
+            'futures_trail_atr_multiplier_mid': 0.90,
+            'futures_trail_atr_multiplier_high': 0.92,
+            'futures_trail_atr_multiplier_deep': 0.94,
             'max_positions_futures_short': 1.05,
             'futures_max_new_per_cycle': 1.00,
             'futures_long_sl_pct': 0.98,
@@ -882,8 +921,15 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
         'A': {
             'trailing_stop_activation_pct': 1.06,
             'trailing_stop_distance_pct': 1.08,
-            'futures_trailing_activation_pct': 1.04,
-            'futures_trailing_distance_pct': 1.05,
+            'futures_breakeven_activation_pct': 0.94,
+            'futures_trailing_activation_pct': 0.95,
+            'futures_trailing_distance_pct': 0.97,
+            'futures_trail_floor_pct': 0.98,
+            'futures_trail_ceiling_pct': 0.96,
+            'futures_trail_atr_multiplier_low': 0.96,
+            'futures_trail_atr_multiplier_mid': 0.96,
+            'futures_trail_atr_multiplier_high': 0.97,
+            'futures_trail_atr_multiplier_deep': 0.98,
             'max_positions_spot_bull': 1.12,
             'max_positions_range_scalp': 1.10,
             'max_positions_preservation': 1.00,
@@ -905,8 +951,15 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
         'C': {
             'trailing_stop_activation_pct': 0.94,
             'trailing_stop_distance_pct': 0.90,
-            'futures_trailing_activation_pct': 0.92,
-            'futures_trailing_distance_pct': 0.92,
+            'futures_breakeven_activation_pct': 0.90,
+            'futures_trailing_activation_pct': 0.88,
+            'futures_trailing_distance_pct': 0.90,
+            'futures_trail_floor_pct': 0.94,
+            'futures_trail_ceiling_pct': 0.90,
+            'futures_trail_atr_multiplier_low': 0.92,
+            'futures_trail_atr_multiplier_mid': 0.92,
+            'futures_trail_atr_multiplier_high': 0.94,
+            'futures_trail_atr_multiplier_deep': 0.95,
             'max_positions_spot_bull': 0.88,
             'max_positions_range_scalp': 0.90,
             'max_positions_preservation': 0.82,
@@ -952,8 +1005,15 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
     for _f, _bounds in (
         ('trailing_stop_activation_pct', (0.5, 6.0)),
         ('trailing_stop_distance_pct', (0.4, 4.0)),
+        ('futures_breakeven_activation_pct', (0.2, 4.0)),
         ('futures_trailing_activation_pct', (0.5, 6.0)),
         ('futures_trailing_distance_pct', (0.4, 4.0)),
+        ('futures_trail_floor_pct', (0.2, 1.2)),
+        ('futures_trail_ceiling_pct', (0.6, 2.0)),
+        ('futures_trail_atr_multiplier_low', (0.4, 2.5)),
+        ('futures_trail_atr_multiplier_mid', (0.4, 2.5)),
+        ('futures_trail_atr_multiplier_high', (0.4, 2.5)),
+        ('futures_trail_atr_multiplier_deep', (0.4, 2.5)),
         ('sso_target_daily_usd', (10.0, 250.0)),
         ('sso_stagnant_min_hours', (0.5, 12.0)),
         ('sso_slow_velocity_threshold', (0.0003, 0.01)),
@@ -977,6 +1037,21 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
         ('max_rebalance_per_cycle', (1, 5)),
     ):
         _apply_field(_f, minimum=_bounds[0], maximum=_bounds[1])
+
+    # Guarantee breakeven always activates before futures trailing.
+    try:
+        _be = float(getattr(settings, 'futures_breakeven_activation_pct', 1.0) or 1.0)
+        _tr = float(getattr(settings, 'futures_trailing_activation_pct', 2.0) or 2.0)
+        if _be >= _tr:
+            _safe_be = _clamp_value(_tr - 0.1, 0.2, max(0.2, _tr - 0.01))
+            setattr(settings, 'futures_breakeven_activation_pct', type(getattr(settings, 'futures_breakeven_activation_pct', 1.0))(_safe_be))
+            _applied['futures_breakeven_activation_pct_guardrail'] = {
+                "old": _be,
+                "new": float(getattr(settings, 'futures_breakeven_activation_pct', _safe_be)),
+                "reason": "enforce_be_before_trailing",
+            }
+    except Exception:
+        pass
 
     for _ct_attr in ('category_thresholds', 'futures_category_thresholds'):
         _ct = getattr(settings, _ct_attr, None)
@@ -1732,7 +1807,7 @@ def _apply_fng_kelly_boost(trade_allocation: float, fng_value: int, settings) ->
 
 def _get_funding_rate(symbol: str, settings) -> float:
     """R6: On-chain — fetch & cache funding rate for a symbol.
-    Returns 0.0 on error (fail-open: don't block trade on API failure).
+    Returns None on error so callers can fail safe.
     Cache TTL = funding_rate_cache_minutes (default 10 min).
     """
     global _funding_rate_cache
@@ -1749,8 +1824,9 @@ def _get_funding_rate(symbol: str, settings) -> float:
         rate = float(data[0].get('fundingRate', 0)) if data else 0.0
         _funding_rate_cache[symbol] = (rate, now)
         return rate
-    except Exception:
-        return 0.0
+    except Exception as exc:
+        logger.warning("Funding rate fetch failed for %s: %s", symbol, exc)
+        return None
 
 
 def _check_liquidity_and_slippage(symbol: str, vol_24h_usdt: float,
@@ -2700,7 +2776,7 @@ def _compute_spot_trail_distance(client: BinanceClient, symbol: str, pnl_pct: fl
     return trail_dist
 
 
-def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, news_client=None, regime: str = None) -> List[Dict]:
+def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, news_client=None, regime: str = None, monitor_only: bool = False) -> List[Dict]:
     """
     Check all open positions against Stop-Loss, Take-Profit, and Trailing Stop rules.
     Also performs prediction-based exit when EV deteriorates (C1).
@@ -2726,6 +2802,28 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
         print(f"SL/TP check: cannot get positions: {e}")
         return closed
 
+    _spot_signal_cache: Dict[str, Dict[str, Any]] = {}
+    _spot_signal_generator = None
+
+    def _get_spot_signal_snapshot(_symbol: str) -> Dict[str, Any]:
+        nonlocal _spot_signal_generator
+        if _symbol in _spot_signal_cache:
+            return _spot_signal_cache[_symbol]
+        _ctx = {"strength": None, "direction": None, "timestamp": None}
+        try:
+            from autonomous_signals import AutonomousSignalGenerator
+            if _spot_signal_generator is None:
+                _spot_signal_generator = AutonomousSignalGenerator(client)
+            _sig = _spot_signal_generator.analyze_symbol(_symbol, interval='1h', use_multi_timeframe=True)
+            if isinstance(_sig, dict):
+                _ctx["strength"] = float(_sig.get("strength", 0.0) or 0.0)
+                _ctx["direction"] = str(_sig.get("signal") or "").strip().upper() or None
+                _ctx["timestamp"] = datetime.now(timezone.utc).isoformat()
+        except Exception:
+            pass
+        _spot_signal_cache[_symbol] = _ctx
+        return _ctx
+
     for symbol, pos_list in all_positions.items():
         # ── Per-category SL/TP/trailing thresholds ────────────────────────
         _cat_beh = _token_categories.get(symbol, {}).get('market_behavior', 'MIDCAP_ALT')
@@ -2746,6 +2844,40 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
 
                 pnl_pct = (current_price - entry_price) / entry_price
                 close_reason = None
+                supervisor_decision = None
+                supervisor_close_pct = 1.0
+                supervisor_force_close = False
+                metadata = getattr(pos, 'metadata', {}) or {}
+                _ctx_signal_strength = None
+                _ctx_signal_direction = None
+                _ctx_signal_timestamp = None
+                _ctx_pnl_velocity = None
+
+                # Base signal/velocity context for supervisors (can be refined by SSO path below).
+                try:
+                    from smart_scale_out import compute_pnl_velocity as _compute_pnl_velocity
+                    _v_snap = metadata.get('sso_pnl_snapshot')
+                    _v_val, _v_new = _compute_pnl_velocity(pnl_pct, _v_snap)
+                    _ctx_pnl_velocity = _v_val
+                    if _v_new != _v_snap:
+                        metadata['sso_pnl_snapshot'] = _v_new
+                        try:
+                            position_manager.update_position_metadata(pos.position_id, metadata)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                _sig_ctx = _get_spot_signal_snapshot(symbol)
+                _ctx_signal_strength = _sig_ctx.get("strength")
+                _ctx_signal_direction = _sig_ctx.get("direction")
+                _ctx_signal_timestamp = _sig_ctx.get("timestamp")
+                if pnl_pct > 0:
+                    _profit_started_dirty = _mark_profit_started(metadata, pnl_pct)
+                    if _profit_started_dirty:
+                        try:
+                            position_manager.update_position_metadata(pos.position_id, metadata)
+                        except Exception:
+                            pass
 
                 # ── C1: Re-evaluación predictiva — predicción tiene prioridad absoluta ──
                 if getattr(settings, 'prediction_exit_enabled', True) and pnl_pct < 0:
@@ -2863,6 +2995,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         # Velocity tracking
                         _sso_s_snap = metadata.get('sso_pnl_snapshot')
                         _sso_s_vel, _sso_s_new_snap = compute_pnl_velocity(pnl_pct, _sso_s_snap)
+                        _ctx_pnl_velocity = _sso_s_vel
                         if _sso_s_new_snap != _sso_s_snap:
                             metadata['sso_pnl_snapshot'] = _sso_s_new_snap
                             try:
@@ -2895,6 +3028,10 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             _sso_s_ind = _sso_s_sig.get("indicators", {}) if _sso_s_sig else {}
                             _sso_s_rsi = float(_sso_s_ind.get("rsi", 50))
                             _sso_s_vol = float(_sso_s_ind.get("vol_spike") or _sso_s_ind.get("volume_ratio") or 1.0)
+                            if _sso_s_sig:
+                                _ctx_signal_strength = float(_sso_s_sig.get('strength', 0.0) or 0.0)
+                                _ctx_signal_direction = str(_sso_s_sig.get('signal') or '').strip().upper() or None
+                                _ctx_signal_timestamp = datetime.now(timezone.utc).isoformat()
                         except Exception:
                             pass
                         # SSO-6 Smart Gate SPOT: compute rescue_prediction_ev + signal
@@ -2947,8 +3084,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             today_realized_pnl=_get_spot_daily_pnl(),  # P1.1: real from BD, thread-safe
                             daily_target=getattr(settings, 'sso_target_daily_usd', 40.0),
                             trade_type="spot",
-                            regime_mode=_regime_mode,
-                            profile_label=_active_profile_label,
+                            regime_mode=regime,
+                            profile_label=str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
                             bounce_entry=_spot_bounce_entry_flag,
                             rescue_prediction_ev=_sp_rescue_pred_ev,
                             rescue_signal=_sp_rescue_signal,
@@ -3082,6 +3219,129 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                     except Exception as _sso_s_exc:
                         print(f"[SSO/SPOT] {symbol} evaluation error: {_sso_s_exc}")
 
+                # ── Profit Realization Supervisor ─────────────────────────────
+                if close_reason is None and pnl_pct > 0:
+                    _profit_started_at = _parse_profit_dt(metadata.get('profit_realization_started_at'))
+                    _trail_peak = float(metadata.get('trailing_peak', entry_price) or entry_price)
+                    _peak_pnl_pct = (_trail_peak - entry_price) / entry_price if entry_price > 0 else pnl_pct
+                    _tp_ext_count = int(metadata.get('tp_extensions_count', 0) or 0)
+                    _supervisor_ctx = ProfitRealizationContext(
+                        symbol=symbol,
+                        trade_type='spot',
+                        side='LONG',
+                        pnl_pct=pnl_pct,
+                        pnl_usdt=(current_price - entry_price) * float(pos.quantity),
+                        entry_price=entry_price,
+                        current_price=current_price,
+                        opened_at=getattr(pos, 'entry_time', None) or getattr(pos, 'created_at', None),
+                        profit_started_at=_profit_started_at,
+                        peak_pnl_pct=max(_peak_pnl_pct, pnl_pct),
+                        pnl_velocity_1h=_ctx_pnl_velocity,
+                        current_signal_strength=_ctx_signal_strength,
+                        regime_mode=regime,
+                        profile_label=str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                        breakeven_done=bool(trailing_enabled and pnl_pct >= 0.015 and float(pos.stop_loss or 0) >= entry_price),
+                        trailing_active=bool(trailing_enabled and pnl_pct >= trail_activate and float(pos.stop_loss or 0) > 0),
+                        tp_extensions=_tp_ext_count,
+                        take_profit_price=float(getattr(pos, 'take_profit', 0) or 0) if getattr(pos, 'take_profit', 0) else None,
+                        metadata=metadata,
+                    )
+                    supervisor_decision = _evaluate_profit_realization(_supervisor_ctx, settings)
+                    if supervisor_decision.should_close:
+                        close_reason = f"{supervisor_decision.reason} ({pnl_pct*100:.2f}%)"
+                        supervisor_close_pct = float(supervisor_decision.close_pct or 1.0)
+                        supervisor_force_close = supervisor_close_pct >= 1.0
+                        metadata.update(supervisor_decision.state_patch or {})
+                        metadata['profit_realization_last_reason'] = supervisor_decision.reason
+                        metadata['profit_realization_last_detail'] = supervisor_decision.detail
+                        metadata['profit_realization_override_target'] = supervisor_decision.override_target
+                        try:
+                            position_manager.update_position_metadata(pos.position_id, metadata)
+                        except Exception:
+                            pass
+                        print(f"[ProfitRealization/SPOT] {symbol}: {supervisor_decision.reason} close={supervisor_close_pct*100:.0f}% "
+                              f"held={supervisor_decision.diagnostics}")
+
+                # ── Unified Governance Supervisor (profit + loss arbitration) ─
+                _soft_reason_pre_ug = close_reason
+                if close_reason is None or not str(close_reason).startswith(("stop_loss", "take_profit", "trailing_stop")):
+                    try:
+                        _sl_floor_pre = entry_price * (1.0 - sl_pct)
+                        _sl_saved_pre = float(pos.stop_loss) if pos.stop_loss and float(pos.stop_loss) > 0 else _sl_floor_pre
+                        _effective_sl_pre = max(_sl_floor_pre, _sl_saved_pre)
+                        _ug_distance_to_sl = None
+                        if current_price > 0 and _effective_sl_pre > 0:
+                            _ug_distance_to_sl = ((current_price - _effective_sl_pre) / current_price) * 100.0
+
+                        _ug_ctx = UnifiedGovernanceContext(
+                            symbol=symbol,
+                            trade_type='spot',
+                            side='LONG',
+                            pnl_pct=pnl_pct,
+                            pnl_usdt=(current_price - entry_price) * float(pos.quantity),
+                            entry_price=entry_price,
+                            current_price=current_price,
+                            opened_at=getattr(pos, 'entry_time', None) or getattr(pos, 'created_at', None),
+                            metadata=metadata,
+                            regime_mode=regime,
+                            profile_label=str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                            distance_to_sl_pct=_ug_distance_to_sl,
+                            pnl_velocity_1h=_ctx_pnl_velocity,
+                            current_signal_strength=_ctx_signal_strength,
+                            current_signal_direction=_ctx_signal_direction,
+                            tp_extensions=int(metadata.get('tp_extensions_count', 0) or 0),
+                            peak_pnl_pct=float(metadata.get('trailing_peak', entry_price) - entry_price) / entry_price if entry_price > 0 else pnl_pct,
+                            profit_started_at=_parse_profit_dt(metadata.get('profit_realization_started_at')),
+                            breakeven_done=bool(trailing_enabled and pnl_pct >= 0.015 and float(pos.stop_loss or 0) >= entry_price),
+                            trailing_active=bool(trailing_enabled and pnl_pct >= trail_activate and float(pos.stop_loss or 0) > 0),
+                            take_profit_price=float(getattr(pos, 'take_profit', 0) or 0) if getattr(pos, 'take_profit', 0) else None,
+                            monitor_only=bool(monitor_only),
+                            tier1_soft_reason=_soft_reason_pre_ug,
+                        )
+                        _ug_decision = _evaluate_unified_governance(_ug_ctx, settings)
+                        if _ug_decision.state_patch:
+                            metadata.update(_ug_decision.state_patch)
+                            try:
+                                position_manager.update_position_metadata(pos.position_id, metadata)
+                            except Exception:
+                                pass
+                        try:
+                            position_manager._audit(symbol, 'unified_governance_decision', {
+                                'side': 'BUY',
+                                'action': _ug_decision.action,
+                                'reason': _ug_decision.reason,
+                                'detail': _ug_decision.detail,
+                                'priority': _ug_decision.priority,
+                                'diagnostics': _ug_decision.diagnostics,
+                                'close_pct': float(_ug_decision.close_pct or 0.0),
+                            })
+                        except Exception:
+                            pass
+
+                        # Unified authority among soft engines: can veto local soft closes.
+                        if _soft_reason_pre_ug and (not _ug_decision.should_close) and _ug_decision.action in ("hold", "watchdog"):
+                            close_reason = None
+
+                        if _ug_decision.should_close:
+                            close_reason = f"{_ug_decision.reason} ({pnl_pct*100:.2f}%)"
+                            supervisor_decision = _ug_decision
+                            supervisor_close_pct = float(_ug_decision.close_pct or 1.0)
+                            supervisor_force_close = supervisor_close_pct >= 1.0
+                            try:
+                                position_manager._audit(symbol, 'unified_governance_close_triggered', {
+                                    'side': 'BUY',
+                                    'action': _ug_decision.action,
+                                    'reason': _ug_decision.reason,
+                                    'detail': _ug_decision.detail,
+                                    'priority': _ug_decision.priority,
+                                    'diagnostics': _ug_decision.diagnostics,
+                                    'close_pct': supervisor_close_pct,
+                                })
+                            except Exception:
+                                pass
+                    except Exception as _ug_err:
+                        print(f"[UnifiedGov/SPOT] {symbol}: evaluation error: {_ug_err}")
+
                 # ── Stop-Loss ──────────────────────────────────────────────
                 # Fix 1: use effective SL = max(category floor, saved pos.stop_loss)
                 # Prevents SL from retreating when SmartTP EXTEND or Scale-Out moved it forward
@@ -3094,6 +3354,51 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 # ── Take-Profit ────────────────────────────────────────────
                 if close_reason is None and pnl_pct >= tp_pct:
                     close_reason = f"take_profit ({pnl_pct*100:.2f}%)"
+
+                if close_reason and close_reason.startswith("profit_realization_supervisor") and supervisor_close_pct < 1.0:
+                    try:
+                        filters = get_symbol_filters(client, symbol)
+                        full_qty = float(pos.quantity)
+                        sell_qty = align_quantity_to_step(full_qty * supervisor_close_pct, filters["step"])
+                        valid, reason = is_quantity_valid(sell_qty, current_price, filters)
+                        if not valid or sell_qty <= 0:
+                            print(f"[ProfitRealization/SPOT] {symbol}: invalid partial qty {sell_qty} — {reason}")
+                            close_reason = None
+                        else:
+                            order = client.create_market_order(symbol=symbol, side="SELL", quantity=sell_qty)
+                            if not client.verify_order_filled(order, f"ProfitRealization SELL {symbol}"):
+                                print(f"[WARN] ProfitRealization SELL {symbol}: order NOT confirmed filled — skipping")
+                                continue
+                            remaining_qty = align_quantity_to_step(full_qty - sell_qty, filters["step"])
+                            metadata['profit_realization_last_triggered_at'] = datetime.now(timezone.utc).isoformat()
+                            metadata['profit_realization_partial_qty'] = sell_qty
+                            metadata['profit_realization_partial_reason'] = supervisor_decision.reason if supervisor_decision else 'profit_realization_supervisor_partial'
+                            try:
+                                position_manager.update_position_metadata(pos.position_id, metadata)
+                                position_manager.update_position_quantity(pos.position_id, remaining_qty)
+                                position_manager._audit(symbol, 'profit_realization_supervisor_partial', {
+                                    'side': 'BUY',
+                                    'qty_closed': sell_qty,
+                                    'qty_remaining': remaining_qty,
+                                    'reason': metadata['profit_realization_partial_reason'],
+                                    'detail': supervisor_decision.detail if supervisor_decision else '',
+                                    'diagnostics': supervisor_decision.diagnostics if supervisor_decision else '',
+                                })
+                            except Exception:
+                                pass
+                            print(f"[ProfitRealization/SPOT] {symbol}: partial close {supervisor_close_pct*100:.0f}% qty={sell_qty} reason={close_reason}")
+                            add_signal({
+                                "symbol": symbol,
+                                "action": "SELL",
+                                "price": current_price,
+                                "reason": metadata['profit_realization_partial_reason'],
+                                "pnl_pct": round(pnl_pct * 100, 4),
+                                "source": "profit_realization_supervisor",
+                            })
+                            closed.append({"symbol": symbol, "reason": metadata['profit_realization_partial_reason'], "price": current_price, "order": order, "partial": True})
+                            continue
+                    except Exception as _pr_err:
+                        print(f"[ProfitRealization/SPOT] partial close failed for {symbol}: {_pr_err}")
 
                 # ── Breakeven SL (SPOT) ───────────────────────────────────
                 # Move SL to entry price once position reaches 1.5% profit
@@ -3148,7 +3453,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                     # ── Anti-wick: confirm SL/TS with last closed candle ───────
                     _is_sl_trigger = close_reason.startswith("stop_loss")
                     _is_ts_trigger = close_reason.startswith("trailing_stop")
-                    if _is_sl_trigger or _is_ts_trigger:
+                    if (_is_sl_trigger or _is_ts_trigger) and not close_reason.startswith("profit_realization_supervisor"):
                         _confirm_n = getattr(settings, 'sl_confirmation_candles', 1)
                         if _confirm_n > 0:
                             try:
@@ -3906,7 +4211,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                             print(f"[Futures/Corr] {symbol}: avg_|r|={_avg_r:.2f} → kelly_mult={_corr_kelly:.2f} "
                                   f"${_f_usdt_pre:.1f}→${_f_usdt:.1f}")
                 except Exception as _corr_err:
-                    pass  # fail-open — correlation guard is advisory only
+                    logger.warning("[Futures/Corr] correlation guard failed for %s: %s", symbol, _corr_err)
+                    _f_usdt = round(_f_usdt * 0.65, 2)
 
                 try:
                     if news_client:
@@ -3947,7 +4253,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         update_signal_decision(symbol, 'rejected', 'BTC_1H_BOUNCE')
                         continue
                 except Exception:
-                    pass
+                    print(f'[Futures] SHORT {symbol} SKIPPED: BTC 1h bounce check unavailable')
+                    update_signal_decision(symbol, 'rejected', 'BTC_1H_BOUNCE_CHECK')
+                    continue
                 # PB5: BTC 3h rolling momentum filter — catches gradual rallies
                 _no_short_btc_3h_threshold = getattr(settings, 'futures_no_short_btc_3h_threshold', 1.0)
                 try:
@@ -3961,7 +4269,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                             update_signal_decision(symbol, 'rejected', 'BTC_3H_RALLY')
                             continue
                 except Exception:
-                    pass
+                    print(f'[Futures/PB5] SHORT {symbol} SKIPPED: BTC 3h momentum check unavailable')
+                    update_signal_decision(symbol, 'rejected', 'BTC_3H_RALLY_CHECK')
+                    continue
                 # PB3: Confirm entry with red 5m candle — don't short into active green momentum
                 _confirm_red = getattr(settings, 'futures_confirm_red_candle', True)
                 if _confirm_red:
@@ -3981,7 +4291,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                     update_signal_decision(symbol, 'rejected', 'NO_RED_CANDLE')
                                     continue
                     except Exception:
-                        pass  # on error, allow entry (don't block)
+                        print(f'[Futures/PB3] SHORT {symbol} SKIPPED: red candle confirmation unavailable')
+                        update_signal_decision(symbol, 'rejected', 'NO_RED_CANDLE_CHECK')
+                        continue
                 # PB1: Stagger check — max N new shorts per cycle
                 if _pb_new_shorts_this_cycle >= _pb_max_new_per_cycle:
                     print(f'[Futures/PB1] SHORT {symbol} SKIPPED: max {_pb_max_new_per_cycle} new shorts/cycle reached — queued for next cycle')
@@ -4132,6 +4444,10 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 and _regime_mode in ('SPOT_BULL', 'RANGE_SCALP')):
             _fr = _get_funding_rate(symbol, settings)
             _fr_max = getattr(settings, 'funding_rate_spot_max', 0.0008)
+            if _fr is None:
+                print(f"Skipping buy {symbol}: funding_rate unavailable — fail-safe block")
+                update_signal_decision(symbol, "rejected", "FUNDING_RATE_UNAVAILABLE")
+                continue
             if _fr > _fr_max:
                 print(f"Skipping buy {symbol}: funding_rate={_fr:.4%} > {_fr_max:.4%} — longs sobreapalancados")
                 update_signal_decision(symbol, "rejected", "FUNDING_RATE")
@@ -4404,8 +4720,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                     print(f"VolSpike OVERRIDE {symbol}: funding rate={_fr_val:.4%} > 0.05% — skip (overleveraged longs)")
                                 else:
                                     print(f"VolSpike OVERRIDE {symbol}: funding rate={_fr_val:.4%} ✓")
-                        except Exception:
-                            pass  # no futures pair or API error → allow entry
+                        except Exception as _fr_err:
+                            _funding_ok = False
+                            print(f"VolSpike OVERRIDE {symbol}: funding check unavailable ({_fr_err}) — block entry")
                         _meta_rsi_override = float(signal_meta.get(symbol, {}).get('rsi', 50.0))
                         if _meta_rsi_override >= _max_rsi and _spike >= _min_spike:
                             print(f"VolSpike OVERRIDE {symbol}: RSI_1h={_meta_rsi_override:.1f} >= {_max_rsi} — bloqueado (sobrecomprado en 1h)")
@@ -5096,8 +5413,17 @@ def execute_once(monitor_only: bool = False):
                     pass
             _mon_closes = _check_sl_tp_positions(
                 client, settings, position_manager,
-                news_client=news_client, regime=_regime_mode_mon
+                news_client=news_client, regime=_regime_mode_mon, monitor_only=True
             )
+            try:
+                _fc_mon = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None))
+                _wire_futures_client(_fc_mon, client, settings)
+                _fut_mon_closes = _fc_mon.check_positions(settings=settings, monitor_only=True)
+                if _fut_mon_closes:
+                    _mon_closes.extend(_fut_mon_closes)
+                    print(f"[Monitor] Futures closed {len(_fut_mon_closes)} position(s) while PAUSED")
+            except Exception as _fut_mon_err:
+                print(f"[Monitor] Futures monitor error while PAUSED: {_fut_mon_err}")
             if _mon_closes:
                 print(f"[Monitor] Closed {len(_mon_closes)} position(s) while PAUSED: "
                       f"{[c['symbol'] for c in _mon_closes]}")
@@ -5309,6 +5635,15 @@ def execute_once(monitor_only: bool = False):
                             "sso_stagnant_min_hours": float(getattr(settings, 'sso_stagnant_min_hours', 2.0) or 2.0),
                             "sso_slow_velocity_threshold": float(getattr(settings, 'sso_slow_velocity_threshold', 0.001) or 0.001),
                             "sso_reentry_min_strength_diff": float(getattr(settings, 'sso_reentry_min_strength_diff', 0.3) or 0.3),
+                            "futures_breakeven_activation_pct": float(getattr(settings, 'futures_breakeven_activation_pct', 1.0) or 1.0),
+                            "futures_trailing_activation_pct": float(getattr(settings, 'futures_trailing_activation_pct', 2.0) or 2.0),
+                            "futures_trailing_distance_pct": float(getattr(settings, 'futures_trailing_distance_pct', 1.5) or 1.5),
+                            "futures_trail_floor_pct": float(getattr(settings, 'futures_trail_floor_pct', 0.4) or 0.4),
+                            "futures_trail_ceiling_pct": float(getattr(settings, 'futures_trail_ceiling_pct', 1.2) or 1.2),
+                            "futures_trail_atr_multiplier_low": float(getattr(settings, 'futures_trail_atr_multiplier_low', 1.5) or 1.5),
+                            "futures_trail_atr_multiplier_mid": float(getattr(settings, 'futures_trail_atr_multiplier_mid', 1.2) or 1.2),
+                            "futures_trail_atr_multiplier_high": float(getattr(settings, 'futures_trail_atr_multiplier_high', 1.0) or 1.0),
+                            "futures_trail_atr_multiplier_deep": float(getattr(settings, 'futures_trail_atr_multiplier_deep', 0.8) or 0.8),
                             "max_positions_spot_bull": int(getattr(settings, 'max_positions_spot_bull', 20) or 20),
                             "max_positions_range_scalp": int(getattr(settings, 'max_positions_range_scalp', 10) or 10),
                             "max_positions_preservation": int(getattr(settings, 'max_positions_preservation', 5) or 5),
@@ -5442,7 +5777,14 @@ def execute_once(monitor_only: bool = False):
         _AUDIT_STARTUP_DONE = True
 
     # ── Step 0: SL/TP monitor — runs every cycle before any new trades ─────────
-    sl_tp_closes = _check_sl_tp_positions(client, settings, position_manager, news_client=news_client, regime=_regime_mode)
+    sl_tp_closes = _check_sl_tp_positions(
+        client,
+        settings,
+        position_manager,
+        news_client=news_client,
+        regime=_regime_mode,
+        monitor_only=False,
+    )
     if sl_tp_closes:
         print(f"SL/TP closed {len(sl_tp_closes)} position(s): {[c['symbol'] for c in sl_tp_closes]}")
 
@@ -5634,7 +5976,7 @@ def execute_once(monitor_only: bool = False):
 
             # Normal SL/TP cycle check (passes settings for trailing/SmartTP and client ref for momentum)
             _wire_futures_client(_fc, client, settings)
-            _cycle_closes = _fc.check_positions(settings=settings)
+            _cycle_closes = _fc.check_positions(settings=settings, monitor_only=False)
             if _cycle_closes:
                 futures_closes.extend(_cycle_closes)
                 print(f"[Futures] Closed {len(_cycle_closes)} position(s) via SL/TP: {_cycle_closes}")
@@ -5814,4 +6156,8 @@ def execute_once(monitor_only: bool = False):
 
 if __name__ == '__main__':
     settings = get_settings()
+    from config_helpers import validate_config
+    _validation = validate_config(settings)
+    if not _validation.get('ok', False):
+        raise SystemExit(f"Config validation failed: {_validation['issues']}")
     execute_once()

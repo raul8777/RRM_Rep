@@ -29,6 +29,50 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 from config_helpers import get_param
 import error_collector as ec
+from profit_realization_supervisor import (
+    ProfitRealizationContext,
+    evaluate as _evaluate_profit_realization,
+    mark_profit_started as _mark_profit_started,
+    parse_dt as _parse_profit_dt,
+)
+from unified_governance_supervisor import (
+    UnifiedGovernanceContext,
+    evaluate as _evaluate_unified_governance,
+)
+
+
+def _parse_utc_datetime(value):
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except Exception:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _normalize_metadata(raw, default_trade_type: str = "futures"):
+    if raw is None:
+        return {"trade_type": default_trade_type}
+    if isinstance(raw, dict):
+        meta = dict(raw)
+    elif isinstance(raw, str):
+        try:
+            meta = json.loads(raw)
+        except Exception:
+            return {"trade_type": default_trade_type, "_metadata_corrupt_raw": raw}
+    else:
+        return {"trade_type": default_trade_type, "_metadata_corrupt_raw": repr(raw)}
+    if not isinstance(meta, dict):
+        return {"trade_type": default_trade_type, "_metadata_corrupt_raw": repr(raw)}
+    trade_type = str(meta.get("trade_type") or default_trade_type).strip().lower()
+    meta["trade_type"] = trade_type if trade_type in ("spot", "futures") else default_trade_type
+    return meta
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -1013,12 +1057,7 @@ class FuturesClient:
                         _dbr = _db_map.get(_k)
                         if _dbr:
                             # Restore _smart_meta from DB metadata
-                            _meta_raw = _dbr.get('metadata') or {}
-                            if isinstance(_meta_raw, str):
-                                try:
-                                    _meta_raw = json.loads(_meta_raw)
-                                except Exception:
-                                    _meta_raw = {}
+                            _meta_raw = _normalize_metadata(_dbr.get('metadata'), default_trade_type='futures')
                             _saved_sm = _meta_raw.get('smart_meta')
                             if _saved_sm and isinstance(_saved_sm, dict):
                                 _p._smart_meta = _saved_sm
@@ -1038,15 +1077,11 @@ class FuturesClient:
                                     except Exception: _ie = None
                                 _p.indicators_at_entry = _ie
                             # Restore opened_at
-                            if _dbr.get('entry_time'):
-                                try:
-                                    from datetime import datetime as _dt
-                                    _et = _dbr['entry_time']
-                                    if isinstance(_et, str):
-                                        _et = _dt.fromisoformat(_et.replace('Z', '+00:00'))
-                                    _p.opened_at = _et
-                                except Exception:
-                                    pass
+                            _restored_opened_at = _parse_utc_datetime(_dbr.get('entry_time')) or _parse_utc_datetime(_meta_raw.get('opened_at'))
+                            if _restored_opened_at is not None:
+                                _p.opened_at = _restored_opened_at
+                            elif _p.opened_at is None:
+                                logger.warning("[Futures/Sync] %s %s: opened_at missing after DB restore", _p.symbol, _p.side)
                             # FIX-SL-RESTORE: Prefer software SL/TP from DB over Binance safety trigger
                             # Binance algo order triggerPrice is wider (safety margin), not software SL
                             _db_sl = _dbr.get('stop_loss')
@@ -2204,7 +2239,7 @@ class FuturesClient:
 
         return success
 
-    def check_positions(self, settings=None) -> List[dict]:
+    def check_positions(self, settings=None, monitor_only: bool = False) -> List[dict]:
         """
         Check all tracked positions (LONG and SHORT) for SL/TP hits.
 
@@ -2225,6 +2260,33 @@ class FuturesClient:
         closed = []
         if settings is not None:
             self._cached_settings = settings  # FIX-5: persist for retro-tag on next startup
+
+        _signal_cache: Dict[str, Dict[str, Optional[float]]] = {}
+        _signal_generator = None
+
+        def _get_signal_snapshot(_symbol: str) -> Dict[str, Optional[float]]:
+            nonlocal _signal_generator
+            if _symbol in _signal_cache:
+                return _signal_cache[_symbol]
+            _ctx: Dict[str, Optional[float]] = {
+                "strength": None,
+                "direction": None,
+                "timestamp": None,
+            }
+            try:
+                if self._binance_client_ref is not None:
+                    from autonomous_signals import AutonomousSignalGenerator
+                    if _signal_generator is None:
+                        _signal_generator = AutonomousSignalGenerator(self._binance_client_ref)
+                    _sig = _signal_generator.analyze_symbol(_symbol, interval='1h', use_multi_timeframe=True)
+                    if isinstance(_sig, dict):
+                        _ctx["strength"] = float(_sig.get("strength", 0.0) or 0.0)
+                        _ctx["direction"] = str(_sig.get("signal") or "").strip().upper() or None
+                        _ctx["timestamp"] = datetime.now(timezone.utc).isoformat()
+            except Exception:
+                pass
+            _signal_cache[_symbol] = _ctx
+            return _ctx
 
         # ── FIX-T4: Ghost detection — find positions closed by Binance SL/TP ──
         if not self.dry_run:
@@ -2416,10 +2478,83 @@ class FuturesClient:
                 unr     = pos.unrealized_pnl(price)
                 entry   = pos.entry_price
                 pnl_pct = unr / (entry * pos.qty) if entry > 0 and pos.qty > 0 else 0.0
+                _ctx_signal_strength = None
+                _ctx_signal_direction = None
+                _ctx_signal_timestamp = None
+                _ctx_pnl_velocity = None
+
+                # Base velocity context for supervisors (can be refined by SSO path below).
+                try:
+                    from smart_scale_out import compute_pnl_velocity as _compute_pnl_velocity
+                    _v_snap = pos._smart_meta.get('sso_pnl_snapshot')
+                    _v_val, _v_new = _compute_pnl_velocity(pnl_pct, _v_snap)
+                    _ctx_pnl_velocity = _v_val
+                    if _v_new != _v_snap:
+                        pos._smart_meta['sso_pnl_snapshot'] = _v_new
+                        self._persist_smart_meta(pos)
+                except Exception:
+                    pass
+
+                _base_sig = _get_signal_snapshot(symbol)
+                _ctx_signal_strength = _base_sig.get("strength")
+                _ctx_signal_direction = _base_sig.get("direction")
+                _ctx_signal_timestamp = _base_sig.get("timestamp")
 
                 print(f"[Futures] {symbol} {pos.side} check: price={price:.4f}, "
                       f"entry={entry:.4f}, unr_pnl=${unr:.2f} ({pnl_pct*100:.2f}%), "
                       f"SL={pos.sl_price:.4f}, TP={pos.tp_price:.4f}")
+
+                # ── 0a. Adverse signal early-exit (loss containment before hard SL) ──
+                _adv_enabled = bool(get_param(settings, 'futures_adverse_exit_enabled')) if settings else True
+                _adv_loss_pct = float(get_param(settings, 'futures_adverse_exit_loss_pct')) / 100.0 if settings else 0.008
+                _adv_min_hours = float(get_param(settings, 'futures_adverse_exit_min_hours')) if settings else 1.5
+                _adv_min_strength = float(get_param(settings, 'futures_adverse_exit_min_strength')) if settings else 0.55
+                if _adv_enabled and pnl_pct <= -abs(_adv_loss_pct):
+                    _age_h = 0.0
+                    try:
+                        if pos.opened_at:
+                            _age_h = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600.0
+                    except Exception:
+                        _age_h = 0.0
+                    if _age_h >= _adv_min_hours:
+                        try:
+                            _bc_ref = getattr(self, '_binance_client_ref', None)
+                            if _bc_ref:
+                                from autonomous_signals import AutonomousSignalGenerator
+                                _adv_sg = AutonomousSignalGenerator(_bc_ref)
+                                _adv_sig = _adv_sg.analyze_symbol(symbol, interval='1h', use_multi_timeframe=True)
+                                _adv_dir = str((_adv_sig or {}).get('signal') or '').strip().upper()
+                                _adv_strength = float((_adv_sig or {}).get('strength', 0.0) or 0.0)
+                                _ctx_signal_direction = _adv_dir or _ctx_signal_direction
+                                _ctx_signal_strength = _adv_strength
+                                _ctx_signal_timestamp = datetime.now(timezone.utc).isoformat()
+                                _against_short = pos.side == "SHORT" and _adv_dir == "BUY" and _adv_strength >= _adv_min_strength
+                                _against_long = pos.side == "LONG" and _adv_dir == "SELL" and _adv_strength >= _adv_min_strength
+                                if _against_short or _against_long:
+                                    _close_fn = self.close_long if pos.side == "LONG" else self.close_short
+                                    _adv_result = _close_fn(symbol, reason="adverse_signal_exit")
+                                    if _adv_result:
+                                        self._audit(symbol, 'adverse_signal_exit', {
+                                            'side': pos.side,
+                                            'pnl_pct': round(pnl_pct * 100.0, 4),
+                                            'pnl_usdt': round(unr, 4),
+                                            'signal': _adv_dir,
+                                            'signal_strength': round(_adv_strength, 4),
+                                            'min_strength': round(_adv_min_strength, 4),
+                                            'age_hours': round(_age_h, 3),
+                                            'loss_threshold_pct': round(_adv_loss_pct * 100.0, 4),
+                                        })
+                                        print(f"[Futures/AdverseExit] {symbol} {pos.side}: close on {_adv_dir} "
+                                              f"(strength={_adv_strength:.2f}, loss={pnl_pct*100:.2f}%, age={_age_h:.2f}h)")
+                                        closed.append({
+                                            "symbol": symbol,
+                                            "side": pos.side,
+                                            "reason": "adverse_signal_exit",
+                                            "pnl": pos.pnl or unr,
+                                        })
+                                        continue
+                        except Exception as _adv_err:
+                            print(f"[Futures/AdverseExit] {symbol}: evaluation error: {_adv_err}")
 
                 # ── 0a. Track peak PnL for momentum reversal ───────────────────
                 _prev_peak = pos._smart_meta.get('peak_pnl_pct', 0.0)
@@ -2463,6 +2598,7 @@ class FuturesClient:
                         # Compute velocity
                         _sso_snap = pos._smart_meta.get('sso_pnl_snapshot')
                         _sso_vel, _sso_new_snap = compute_pnl_velocity(pnl_pct, _sso_snap)
+                        _ctx_pnl_velocity = _sso_vel
                         if _sso_new_snap != _sso_snap:
                             pos._smart_meta['sso_pnl_snapshot'] = _sso_new_snap
                             self._persist_smart_meta(pos)  # FIX: persist velocity snapshot to DB
@@ -2484,6 +2620,10 @@ class FuturesClient:
                                 _sso_ind = _sso_sig.get("indicators", {}) if _sso_sig else {}
                                 _sso_rsi = float(_sso_ind.get("rsi", 50))
                                 _sso_vol = float(_sso_ind.get("vol_spike") or _sso_ind.get("volume_ratio") or 1.0)
+                                if _sso_sig:
+                                    _ctx_signal_strength = float(_sso_sig.get('strength', 0.0) or 0.0)
+                                    _ctx_signal_direction = str(_sso_sig.get('signal') or '').strip().upper() or None
+                                    _ctx_signal_timestamp = datetime.now(timezone.utc).isoformat()
                         except Exception:
                             pass
                         # P1.1: Get today's realized PnL from BD (thread-safe, restart-safe)
@@ -2711,6 +2851,223 @@ class FuturesClient:
                         closed.append({"symbol": symbol, "side": pos.side,
                                        "reason": "momentum_reversal", "pnl": pos.pnl or unr})
                     continue  # position closed, move to next
+
+                # ── Profit Realization Supervisor ───────────────────────────
+                if pnl_pct > 0:
+                    _pr_meta = pos._smart_meta
+                    _pr_started_at = _parse_profit_dt(_pr_meta.get('profit_realization_started_at'))
+                    _pr_ctx = ProfitRealizationContext(
+                        symbol=symbol,
+                        trade_type='futures',
+                        side=pos.side,
+                        pnl_pct=pnl_pct,
+                        pnl_usdt=unr,
+                        entry_price=entry,
+                        current_price=price,
+                        opened_at=pos.opened_at,
+                        profit_started_at=_pr_started_at,
+                        peak_pnl_pct=float(_pr_meta.get('peak_pnl_pct', 0.0) or 0.0),
+                        pnl_velocity_1h=_ctx_pnl_velocity,
+                        current_signal_strength=_ctx_signal_strength,
+                        regime_mode=getattr(settings, 'current_regime_mode', None) if settings else None,
+                        profile_label=getattr(settings, 'current_regime_profile_label', None) if settings else None,
+                        breakeven_done=bool(_pr_meta.get('breakeven_done', False)),
+                        trailing_active=bool(_pr_meta.get('trail_best_price')),
+                        tp_extensions=int(_pr_meta.get('tp_extensions_count', 0) or 0),
+                        take_profit_price=pos.tp_price,
+                        metadata=_pr_meta,
+                    )
+                    if _mark_profit_started(_pr_meta, pnl_pct):
+                        self._persist_smart_meta(pos)
+                    _pr_decision = _evaluate_profit_realization(_pr_ctx, settings)
+                    if _pr_decision.should_close:
+                        _pr_meta.update(_pr_decision.state_patch or {})
+                        _pr_meta['profit_realization_last_reason'] = _pr_decision.reason
+                        _pr_meta['profit_realization_last_detail'] = _pr_decision.detail
+                        _pr_meta['profit_realization_override_target'] = _pr_decision.override_target
+                        self._persist_smart_meta(pos)
+                        if _pr_decision.close_pct < 1.0:
+                            try:
+                                _step = self._get_step_size(symbol)
+                                _pr_qty = self._align_qty(pos.qty * _pr_decision.close_pct, _step)
+                                if _pr_qty <= 0:
+                                    print(f"[ProfitRealization/Futures] {symbol}: invalid partial qty {_pr_qty} — skipping")
+                                else:
+                                    _side = "BUY" if pos.side == "SHORT" else "SELL"
+                                    _pr_ok = False
+                                    if self.dry_run:
+                                        _pr_ok = True
+                                    else:
+                                        try:
+                                            self._post("/fapi/v1/order", {
+                                                "symbol": symbol, "side": _side, "type": "MARKET",
+                                                "quantity": str(_pr_qty),
+                                                "positionSide": pos.side,
+                                            })
+                                            _pr_ok = True
+                                        except Exception as _pr_err:
+                                            print(f"[ProfitRealization/Futures] {symbol} partial FAILED: {_pr_err}")
+                                    if _pr_ok:
+                                        _pr_pnl = (entry - price) * _pr_qty if pos.side == "SHORT" else (price - entry) * _pr_qty
+                                        pos.qty -= _pr_qty
+                                        _pr_meta['scale_out_done'] = True
+                                        _pr_meta['profit_realization_partial_qty'] = _pr_qty
+                                        _pr_meta['profit_realization_partial_reason'] = _pr_decision.reason
+                                        self._persist_smart_meta(pos)
+                                        if pos.qty > 0:
+                                            self.update_sl_tp(symbol, pos.side, new_sl=pos.sl_price, new_tp=pos.tp_price)
+                                        if self.db_client:
+                                            try:
+                                                self.db_client.execute_update(
+                                                    "UPDATE trades_open SET quantity=%s, metadata=%s, updated_at=NOW() "
+                                                    "WHERE symbol=%s AND side=%s AND closed_at IS NULL",
+                                                    (str(pos.qty), json.dumps({"smart_meta": pos._smart_meta}), symbol, pos.side)
+                                                )
+                                            except Exception:
+                                                pass
+                                        try:
+                                            self._audit(symbol, 'profit_realization_supervisor_partial', {
+                                                'side': pos.side,
+                                                'qty_closed': _pr_qty,
+                                                'qty_remaining': pos.qty,
+                                                'reason': _pr_decision.reason,
+                                                'detail': _pr_decision.detail,
+                                                'diagnostics': _pr_decision.diagnostics,
+                                            })
+                                        except Exception:
+                                            pass
+                                        print(f"[ProfitRealization/Futures] {symbol} {pos.side}: partial close {_pr_decision.close_pct*100:.0f}% qty={_pr_qty:.6f} PnL=${_pr_pnl:.2f}")
+                                        closed.append({"symbol": symbol, "side": pos.side,
+                                                       "reason": _pr_decision.reason, "pnl": _pr_pnl,
+                                                       "partial": True})
+                                        continue
+                            except Exception as _pr_partial_exc:
+                                print(f"[ProfitRealization/Futures] {symbol} partial error: {_pr_partial_exc}")
+                        else:
+                            _close_fn = self.close_long if pos.side == "LONG" else self.close_short
+                            _pr_result = _close_fn(symbol, reason=_pr_decision.reason)
+                            if _pr_result:
+                                try:
+                                    self._audit(symbol, 'profit_realization_supervisor_full', {
+                                        'side': pos.side,
+                                        'reason': _pr_decision.reason,
+                                        'detail': _pr_decision.detail,
+                                        'diagnostics': _pr_decision.diagnostics,
+                                    })
+                                except Exception:
+                                    pass
+                                print(f"[ProfitRealization/Futures] {symbol} {pos.side}: full close reason={_pr_decision.reason}")
+                                closed.append({"symbol": symbol, "side": pos.side,
+                                               "reason": _pr_decision.reason, "pnl": pos.pnl or unr})
+                            continue
+
+                # ── Unified Governance Supervisor (profit + loss arbitration) ─
+                try:
+                    _ug_meta = pos._smart_meta or {}
+                    _ug_distance_to_sl = None
+                    if price > 0 and pos.sl_price:
+                        if pos.side == "SHORT":
+                            _ug_distance_to_sl = ((pos.sl_price - price) / price) * 100.0
+                        else:
+                            _ug_distance_to_sl = ((price - pos.sl_price) / price) * 100.0
+
+                    _ug_ctx = UnifiedGovernanceContext(
+                        symbol=symbol,
+                        trade_type='futures',
+                        side=pos.side,
+                        pnl_pct=pnl_pct,
+                        pnl_usdt=unr,
+                        entry_price=entry,
+                        current_price=price,
+                        opened_at=pos.opened_at,
+                        metadata=_ug_meta,
+                        regime_mode=getattr(settings, 'current_regime_mode', None) if settings else None,
+                        profile_label=getattr(settings, 'current_regime_profile_label', None) if settings else None,
+                        distance_to_sl_pct=_ug_distance_to_sl,
+                        pnl_velocity_1h=_ctx_pnl_velocity,
+                        current_signal_strength=_ctx_signal_strength,
+                        current_signal_direction=_ctx_signal_direction,
+                        tp_extensions=int(_ug_meta.get('tp_extensions_count', 0) or 0),
+                        peak_pnl_pct=float(_ug_meta.get('peak_pnl_pct', 0.0) or 0.0),
+                        profit_started_at=_parse_profit_dt(_ug_meta.get('profit_realization_started_at')),
+                        breakeven_done=bool(_ug_meta.get('breakeven_done', False)),
+                        trailing_active=bool(_ug_meta.get('trail_best_price')),
+                        take_profit_price=pos.tp_price,
+                        monitor_only=bool(monitor_only),
+                        tier1_soft_reason=None,
+                    )
+                    _ug_decision = _evaluate_unified_governance(_ug_ctx, settings)
+                    if _ug_decision.state_patch:
+                        pos._smart_meta.update(_ug_decision.state_patch)
+                        self._persist_smart_meta(pos)
+
+                    self._audit(symbol, 'unified_governance_decision', {
+                        'side': pos.side,
+                        'action': _ug_decision.action,
+                        'reason': _ug_decision.reason,
+                        'detail': _ug_decision.detail,
+                        'priority': _ug_decision.priority,
+                        'diagnostics': _ug_decision.diagnostics,
+                        'close_pct': float(_ug_decision.close_pct or 0.0),
+                    })
+
+                    if _ug_decision.should_close:
+                        self._audit(symbol, 'unified_governance_close_triggered', {
+                            'side': pos.side,
+                            'action': _ug_decision.action,
+                            'reason': _ug_decision.reason,
+                            'detail': _ug_decision.detail,
+                            'priority': _ug_decision.priority,
+                            'diagnostics': _ug_decision.diagnostics,
+                            'close_pct': float(_ug_decision.close_pct or 1.0),
+                        })
+                        if (_ug_decision.close_pct or 1.0) < 1.0:
+                            _step = self._get_step_size(symbol)
+                            _ug_qty = self._align_qty(pos.qty * float(_ug_decision.close_pct), _step)
+                            if _ug_qty > 0:
+                                _side = "BUY" if pos.side == "SHORT" else "SELL"
+                                _ug_ok = False
+                                if self.dry_run:
+                                    _ug_ok = True
+                                else:
+                                    try:
+                                        self._post("/fapi/v1/order", {
+                                            "symbol": symbol,
+                                            "side": _side,
+                                            "type": "MARKET",
+                                            "quantity": str(_ug_qty),
+                                            "positionSide": pos.side,
+                                        })
+                                        _ug_ok = True
+                                    except Exception as _uge:
+                                        print(f"[UnifiedGov/Futures] {symbol} partial FAILED: {_uge}")
+                                if _ug_ok:
+                                    _ug_pnl = (entry - price) * _ug_qty if pos.side == "SHORT" else (price - entry) * _ug_qty
+                                    pos.qty -= _ug_qty
+                                    self._persist_smart_meta(pos)
+                                    if pos.qty > 0:
+                                        self.update_sl_tp(symbol, pos.side, new_sl=pos.sl_price, new_tp=pos.tp_price)
+                                    closed.append({
+                                        "symbol": symbol,
+                                        "side": pos.side,
+                                        "reason": _ug_decision.reason,
+                                        "pnl": _ug_pnl,
+                                        "partial": True,
+                                    })
+                                    continue
+                        else:
+                            _close_fn = self.close_long if pos.side == "LONG" else self.close_short
+                            _ug_result = _close_fn(symbol, reason=_ug_decision.reason)
+                            if _ug_result:
+                                closed.append({
+                                    "symbol": symbol,
+                                    "side": pos.side,
+                                    "reason": _ug_decision.reason,
+                                    "pnl": pos.pnl or unr,
+                                })
+                                continue
+                except Exception as _ug_err:
+                    print(f"[UnifiedGov/Futures] {symbol}: evaluation error: {_ug_err}")
 
                 # ── 1. Breakeven SL ─────────────────────────────────────────────
                 if _trailing_enabled and pnl_pct >= _breakeven_act_pct / 100.0:

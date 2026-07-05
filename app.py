@@ -638,8 +638,11 @@ async def get_commission_summary(hours: int = 24) -> Dict:
         for r in rows:
             meta = r.get('metadata') or {}
             if isinstance(meta, str):
-                try: meta = _json.loads(meta)
-                except: meta = {}
+                try:
+                    meta = _json.loads(meta)
+                except Exception as _meta_err:
+                    logger.warning("[PnL breakdown] metadata parse failed for %s: %s", r.get('symbol'), _meta_err)
+                    meta = {'_metadata_corrupt_raw': True}
             ttype = meta.get('trade_type', 'spot')
             pnl  = float(r.get('pnl') or 0)
             qty  = float(r.get('quantity') or 0)
@@ -1990,6 +1993,7 @@ async def get_dashboard_summary() -> Dict:
             _sp_pred = None
             _sp_meta_last = {}
             now_dt = to_mexico_time(datetime.utcnow())
+            now_utc = datetime.now(timezone.utc)
             for _pos_i, position in enumerate(pos_list):
                 try:
                     _ep = float(position.entry_price)
@@ -2006,8 +2010,12 @@ async def get_dashboard_summary() -> Dict:
                 # Age
                 try:
                     _et_str = to_mexico_time_str(position.entry_time) if position.entry_time else ""
-                    _et_dt  = datetime.fromisoformat(_et_str) if _et_str else now_dt
-                    _age_h  = (now_dt - _et_dt).total_seconds() / 3600
+                    _et_dt = position.entry_time
+                    if isinstance(_et_dt, str):
+                        _et_dt = datetime.fromisoformat(_et_dt.replace('Z', '+00:00'))
+                    if _et_dt and _et_dt.tzinfo is None:
+                        _et_dt = _et_dt.replace(tzinfo=timezone.utc)
+                    _age_h = (now_utc - _et_dt).total_seconds() / 3600 if _et_dt else 0.0
                 except Exception:
                     _et_str = ""
                     _age_h  = 0.0
@@ -2159,8 +2167,8 @@ async def get_dashboard_summary() -> Dict:
                     if _fp_opened:
                         from datetime import datetime as _dt2
                         _fp_dt = _dt2.fromisoformat(str(_fp_opened).replace(' ', 'T', 1).replace('Z', '+00:00'))
-                        _fp_dt_naive = _fp_dt.replace(tzinfo=None) if _fp_dt.tzinfo else _fp_dt
-                        _fp_hours = round((_dt2.utcnow() - _fp_dt_naive).total_seconds() / 3600, 1)
+                        _fp_dt_utc = _fp_dt if _fp_dt.tzinfo else _fp_dt.replace(tzinfo=timezone.utc)
+                        _fp_hours = round((datetime.now(timezone.utc) - _fp_dt_utc).total_seconds() / 3600, 1)
                 except Exception:
                     _fp_hours = 0.0
                 # FIX-D1: use entry_time in Mexico timezone for display
@@ -2539,6 +2547,11 @@ async def get_dashboard_summary() -> Dict:
         )
     except Exception as e:
         result["operator_focus"] = {"items": [], "error": str(e)}
+
+    try:
+        result["profit_realization"] = await get_profit_realization_metrics()
+    except Exception as e:
+        result["profit_realization"] = {"ok": False, "error": str(e)}
 
     # Market context: Fear & Greed + CoinGecko Trending
     try:
@@ -3563,6 +3576,15 @@ def _get_mode_profile_harmony_drift() -> Dict[str, Any]:
 
         _compare_float("trailing_stop_activation_pct", snapshot.get("harmony_result", {}).get("applied", {}).get("trailing_stop_activation_pct", {}).get("new"), getattr(settings, 'trailing_stop_activation_pct', None))
         _compare_float("trailing_stop_distance_pct", snapshot.get("harmony_result", {}).get("applied", {}).get("trailing_stop_distance_pct", {}).get("new"), getattr(settings, 'trailing_stop_distance_pct', None))
+        _compare_float("futures_breakeven_activation_pct", snapshot.get("futures_breakeven_activation_pct"), getattr(settings, 'futures_breakeven_activation_pct', None))
+        _compare_float("futures_trailing_activation_pct", snapshot.get("futures_trailing_activation_pct"), getattr(settings, 'futures_trailing_activation_pct', None))
+        _compare_float("futures_trailing_distance_pct", snapshot.get("futures_trailing_distance_pct"), getattr(settings, 'futures_trailing_distance_pct', None))
+        _compare_float("futures_trail_floor_pct", snapshot.get("futures_trail_floor_pct"), getattr(settings, 'futures_trail_floor_pct', None))
+        _compare_float("futures_trail_ceiling_pct", snapshot.get("futures_trail_ceiling_pct"), getattr(settings, 'futures_trail_ceiling_pct', None))
+        _compare_float("futures_trail_atr_multiplier_low", snapshot.get("futures_trail_atr_multiplier_low"), getattr(settings, 'futures_trail_atr_multiplier_low', None))
+        _compare_float("futures_trail_atr_multiplier_mid", snapshot.get("futures_trail_atr_multiplier_mid"), getattr(settings, 'futures_trail_atr_multiplier_mid', None))
+        _compare_float("futures_trail_atr_multiplier_high", snapshot.get("futures_trail_atr_multiplier_high"), getattr(settings, 'futures_trail_atr_multiplier_high', None))
+        _compare_float("futures_trail_atr_multiplier_deep", snapshot.get("futures_trail_atr_multiplier_deep"), getattr(settings, 'futures_trail_atr_multiplier_deep', None))
         _compare_float("sso_target_daily_usd", snapshot.get("sso_target_daily_usd"), getattr(settings, 'sso_target_daily_usd', None))
         _compare_float("sso_stagnant_min_hours", snapshot.get("sso_stagnant_min_hours"), getattr(settings, 'sso_stagnant_min_hours', None))
         _compare_float("sso_slow_velocity_threshold", snapshot.get("sso_slow_velocity_threshold"), getattr(settings, 'sso_slow_velocity_threshold', None))
@@ -3854,6 +3876,199 @@ async def get_trade_throughput_exposure(
         raise HTTPException(status_code=400, detail="cycle_minutes must be > 0")
     start_ts = datetime.now(timezone.utc) - timedelta(hours=hours)
     return _trade_throughput_exposure_range(start_ts, datetime.now(timezone.utc), cycle_minutes=cycle_minutes)
+
+
+@app.get("/metrics/profit-realization")
+async def get_profit_realization_metrics(_auth=Depends(_require_api_key)) -> Dict:
+    """Return live profit-realization health across SPOT and FUTURES."""
+    try:
+        from init_components import get_components
+        from profit_realization_supervisor import PROFIT_START_KEY, parse_dt as _parse_profit_dt
+        comp = get_components()
+        _spot_pm = getattr(comp, 'position_manager', None)
+        _spot_client = getattr(comp, 'binance_client', None)
+
+        _now = datetime.now(timezone.utc)
+        _spot_locked = 0
+        _spot_unlocked = 0
+        _spot_hold_minutes: List[int] = []
+        _spot_giveback = 0.0
+        _spot_peak = 0.0
+        _spot_positive = 0
+
+        if _spot_pm and _spot_client:
+            for _symbol, _pos_list in (_spot_pm.get_all_positions() or {}).items():
+                if not _pos_list:
+                    continue
+                try:
+                    _price = float(_spot_client.get_symbol_price(_symbol))
+                except Exception:
+                    continue
+                for _pos in _pos_list:
+                    _entry = float(getattr(_pos, 'entry_price', 0) or 0)
+                    if _entry <= 0:
+                        continue
+                    _pnl_pct = (_price - _entry) / _entry
+                    if _pnl_pct <= 0:
+                        continue
+                    _spot_positive += 1
+                    _spot_meta = dict(getattr(_pos, 'metadata', {}) or {})
+                    _locked = float(getattr(_pos, 'stop_loss', 0) or 0) >= _entry or float(_spot_meta.get('trailing_peak', 0) or 0) > _entry
+                    if _locked:
+                        _spot_locked += 1
+                    else:
+                        _spot_unlocked += 1
+                        _spot_ref = _parse_profit_dt(_spot_meta.get(PROFIT_START_KEY)) or getattr(_pos, 'entry_time', None) or getattr(_pos, 'created_at', None)
+                        if _spot_ref:
+                            _spot_hold_minutes.append(max(0, int((_now - _spot_ref).total_seconds() // 60)))
+                    _spot_peak_pct = max(0.0, (float(_spot_meta.get('trailing_peak', _entry) or _entry) - _entry) / _entry)
+                    _spot_peak += _spot_peak_pct
+                    _spot_giveback += max(0.0, _spot_peak_pct - _pnl_pct)
+
+        _futures_open = []
+        try:
+            from run_trades import _futures_client as _fc_ref
+            if _fc_ref:
+                _futures_open = [p for p in _fc_ref._open_positions.values() if not p.closed]
+        except Exception:
+            _futures_open = []
+
+        _fut_locked = 0
+        _fut_unlocked = 0
+        _fut_hold_minutes: List[int] = []
+        _fut_giveback = 0.0
+        _fut_peak = 0.0
+        _fut_positive = 0
+        for _pos in _futures_open:
+            try:
+                _fc_price = float(_fc_ref.get_price(_pos.symbol)) if _fc_ref else 0.0
+            except Exception:
+                continue
+            _entry = float(getattr(_pos, 'entry_price', 0) or 0)
+            _qty = float(getattr(_pos, 'qty', 0) or 0)
+            if _entry <= 0 or _qty <= 0:
+                continue
+            _pnl_pct = _pos.unrealized_pnl(_fc_price) / (_entry * _qty)
+            if _pnl_pct <= 0:
+                continue
+            _fut_positive += 1
+            _meta = dict(getattr(_pos, '_smart_meta', {}) or {})
+            _locked = bool(_meta.get('breakeven_done')) or bool(_meta.get('trail_best_price'))
+            if _locked:
+                _fut_locked += 1
+            else:
+                _fut_unlocked += 1
+                _fut_ref = _parse_profit_dt(_meta.get(PROFIT_START_KEY)) or getattr(_pos, 'opened_at', None)
+                if _fut_ref:
+                    _fut_hold_minutes.append(max(0, int((_now - _fut_ref).total_seconds() // 60)))
+            _fut_peak_pct = max(0.0, float(_meta.get('peak_pnl_pct', 0.0) or 0.0))
+            _fut_peak += _fut_peak_pct
+            _fut_giveback += max(0.0, _fut_peak_pct - _pnl_pct)
+
+        _total_positive = _spot_positive + _fut_positive
+        _total_unlocked = _spot_unlocked + _fut_unlocked
+        _total_locked = _spot_locked + _fut_locked
+        _avg_minutes = 0.0
+        _minutes_pool = _spot_hold_minutes + _fut_hold_minutes
+        if _minutes_pool:
+            _avg_minutes = round(sum(_minutes_pool) / len(_minutes_pool), 1)
+        _giveback_ratio = round((_spot_giveback + _fut_giveback) / (_spot_peak + _fut_peak), 4) if (_spot_peak + _fut_peak) > 0 else 0.0
+
+        _audit_rows = db_client.execute_query(
+            "SELECT COUNT(*) AS n FROM trades_audit WHERE event LIKE 'profit_realization_supervisor%' AND created_at >= NOW() - INTERVAL '24 hours'"
+        )
+        _supervisor_24h = int((_audit_rows[0].get('n') if _audit_rows else 0) or 0)
+
+        return {
+            "ok": True,
+            "spot": {
+                "positive_positions": _spot_positive,
+                "positive_unlocked_positions": _spot_unlocked,
+                "positive_locked_positions": _spot_locked,
+                "avg_minutes_in_profit_without_realization": round(sum(_spot_hold_minutes) / len(_spot_hold_minutes), 1) if _spot_hold_minutes else 0.0,
+            },
+            "futures": {
+                "positive_positions": _fut_positive,
+                "positive_unlocked_positions": _fut_unlocked,
+                "positive_locked_positions": _fut_locked,
+                "avg_minutes_in_profit_without_realization": round(sum(_fut_hold_minutes) / len(_fut_hold_minutes), 1) if _fut_hold_minutes else 0.0,
+            },
+            "totals": {
+                "positive_positions": _total_positive,
+                "positive_unlocked_positions": _total_unlocked,
+                "positive_locked_positions": _total_locked,
+                "avg_minutes_in_profit_without_realization": _avg_minutes,
+                "giveback_ratio_live": _giveback_ratio,
+                "supervisor_audit_events_24h": _supervisor_24h,
+            },
+            "timestamp": _now.isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/metrics/unified-governance")
+async def get_unified_governance_metrics(_auth=Depends(_require_api_key)) -> Dict:
+    """Return live governance state across SPOT/FUTURES from metadata and audit trail."""
+    try:
+        from init_components import get_components
+        from unified_governance_supervisor import LOSS_STATE_KEY, LAST_DECISION_KEY
+
+        comp = get_components()
+        _spot_pm = getattr(comp, 'position_manager', None)
+
+        _now = datetime.now(timezone.utc)
+        _actions = {"hold": 0, "watchdog": 0, "escalate": 0, "close": 0}
+        _loss_positions = 0
+        _watchdog_levels: List[int] = []
+
+        if _spot_pm:
+            for _symbol, _positions in (_spot_pm.get_all_positions() or {}).items():
+                for _pos in (_positions or []):
+                    _meta = dict(getattr(_pos, 'metadata', {}) or {})
+                    _last = _meta.get(LAST_DECISION_KEY) or {}
+                    _loss = _meta.get(LOSS_STATE_KEY) or {}
+                    _action = str(_last.get('action') or '').strip().lower()
+                    if _action in _actions:
+                        _actions[_action] += 1
+                    if _loss:
+                        _loss_positions += 1
+                        _watchdog_levels.append(int(_loss.get('watchdog_level', 0) or 0))
+
+        _futures_positions = []
+        try:
+            from run_trades import _futures_client as _fc_ref
+            if _fc_ref:
+                _futures_positions = [p for p in _fc_ref._open_positions.values() if not p.closed]
+        except Exception:
+            _futures_positions = []
+
+        for _pos in _futures_positions:
+            _meta = dict(getattr(_pos, '_smart_meta', {}) or {})
+            _last = _meta.get(LAST_DECISION_KEY) or {}
+            _loss = _meta.get(LOSS_STATE_KEY) or {}
+            _action = str(_last.get('action') or '').strip().lower()
+            if _action in _actions:
+                _actions[_action] += 1
+            if _loss:
+                _loss_positions += 1
+                _watchdog_levels.append(int(_loss.get('watchdog_level', 0) or 0))
+
+        _audit_24h = db_client.execute_query(
+            "SELECT COUNT(*) AS n FROM trades_audit WHERE event='unified_governance_decision' AND created_at >= NOW() - INTERVAL '24 hours'"
+        )
+        _audit_n = int((_audit_24h[0].get('n') if _audit_24h else 0) or 0)
+
+        return {
+            "ok": True,
+            "actions_open_positions": _actions,
+            "loss_state_positions": _loss_positions,
+            "avg_watchdog_level": round(sum(_watchdog_levels) / len(_watchdog_levels), 3) if _watchdog_levels else 0.0,
+            "audit_events_24h": _audit_n,
+            "timestamp": _now.isoformat(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.get("/metrics/rollout-readiness")
@@ -6142,6 +6357,27 @@ async def get_kelly_config(_auth=Depends(_require_api_key)) -> Dict:
                     "current_mult":  round(_corr_mult, 3),
                 },
             },
+            "profit_realization": {
+                "enabled": getattr(_s, 'profit_realization_enabled', True),
+                "spot": {
+                    "enabled": getattr(_s, 'profit_realization_spot_enabled', True),
+                    "min_profit_pct": getattr(_s, 'profit_realization_spot_min_profit_pct', 0.0030),
+                    "partial_minutes": getattr(_s, 'profit_realization_spot_partial_minutes', 60.0),
+                    "full_minutes": getattr(_s, 'profit_realization_spot_full_minutes', 120.0),
+                    "drawback_pct": getattr(_s, 'profit_realization_spot_drawback_pct', 0.0060),
+                    "partial_close_pct": getattr(_s, 'profit_realization_spot_partial_close_pct', 0.50),
+                    "max_extensions": getattr(_s, 'profit_realization_spot_max_extensions', 3),
+                },
+                "futures": {
+                    "enabled": getattr(_s, 'profit_realization_futures_enabled', True),
+                    "min_profit_pct": getattr(_s, 'profit_realization_futures_min_profit_pct', 0.0040),
+                    "partial_minutes": getattr(_s, 'profit_realization_futures_partial_minutes', 45.0),
+                    "full_minutes": getattr(_s, 'profit_realization_futures_full_minutes', 90.0),
+                    "drawback_pct": getattr(_s, 'profit_realization_futures_drawback_pct', 0.0050),
+                    "partial_close_pct": getattr(_s, 'profit_realization_futures_partial_close_pct', 0.50),
+                    "max_extensions": getattr(_s, 'profit_realization_futures_max_extensions', 2),
+                },
+            },
             "regime": {
                 "mode":           _regime_mode,
                 "confirmed":      _confirmed,
@@ -6195,6 +6431,13 @@ _KELLY_EDITABLE_FIELDS = {
     "futures_bounce_rescue_enabled", "futures_bounce_rescue_max_peak_pct", "futures_bounce_rescue_min_hours", "futures_bounce_rescue_target_pnl",
     "spot_bounce_rescue_enabled", "spot_bounce_rescue_max_peak_pct", "spot_bounce_rescue_min_hours", "spot_bounce_rescue_target_pnl",
     "futures_momentum_reversal_enabled", "futures_momentum_reversal_min_peak", "futures_momentum_reversal_drawback",
+    "futures_adverse_exit_enabled", "futures_adverse_exit_loss_pct", "futures_adverse_exit_min_hours", "futures_adverse_exit_min_strength",
+    "profit_realization_enabled", "profit_realization_spot_enabled", "profit_realization_spot_min_profit_pct",
+    "profit_realization_spot_partial_minutes", "profit_realization_spot_full_minutes", "profit_realization_spot_drawback_pct",
+    "profit_realization_spot_partial_close_pct", "profit_realization_spot_max_extensions",
+    "profit_realization_futures_enabled", "profit_realization_futures_min_profit_pct",
+    "profit_realization_futures_partial_minutes", "profit_realization_futures_full_minutes", "profit_realization_futures_drawback_pct",
+    "profit_realization_futures_partial_close_pct", "profit_realization_futures_max_extensions",
     "rescue_smart_gate_enabled", "rescue_stay_strength_min", "rescue_stay_ev_multiplier", "rescue_velocity_min_pct", "rescue_gate_min_concurrent",
     "rescue_gate_g1_min_pct", "rescue_gate_g1_spot_min_pct", "rescue_gate_vol_min_spike", "rescue_gate_max_blocks", "rescue_gate_min_pnl_improvement",
     "volspike_override_enabled", "volspike_override_min_spike", "volspike_override_max_rsi", "volspike_override_trend_required",

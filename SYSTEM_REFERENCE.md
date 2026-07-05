@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 04 2026 18:10 UTC-6 | Sesión 36: mode/profile harmony + KPI gates de rollout/parity/promotion documentados como modelo operativo.
+> Última actualización: jul 05 2026 | Sesión 41: hardening final multimodo/perfiles, memorias consolidadas y validación PASS.
 
 ---
 
@@ -30,6 +30,215 @@
 3. Drift activo crítico de armonía se redujo a 0 en validaciones de runtime; deuda histórica puede seguir visible como contexto de auditoría.
 
 ---
+
+### ✅ Sesión 37 — Caso SUIUSDT/XRPUSDT (negativos en FUTURES) — jul 04 2026
+
+**Hallazgo forense (producción):**
+1. SUIUSDT y XRPUSDT en SHORT estuvieron en pérdida prolongada con SL aún no tocado.
+2. SSO no intervenía en pérdida para esos casos (`NO ACTION`), porque la lógica de salida principal estaba orientada a profit/bounce gates.
+3. En SPOT se detectó error en evaluación SSO por variable de régimen inválida (`_regime_mode` fuera de scope), lo que podía desactivar protección en ciertos símbolos.
+
+**Corrección aplicada:**
+1. `run_trades.py`: fix de scope en SSO SPOT (`regime_mode=regime`) para evitar fallos de evaluación.
+2. `futures_client.py`: nueva protección `adverse_signal_exit`:
+  - si una posición FUTURES ya está en pérdida por encima de umbral,
+  - supera tiempo mínimo,
+  - y la señal técnica 1h se voltea en contra con fuerza mínima,
+  - se cierra antes del hard SL.
+3. Configuración persistente y editable añadida:
+  - `futures_adverse_exit_enabled`
+  - `futures_adverse_exit_loss_pct`
+  - `futures_adverse_exit_min_hours`
+  - `futures_adverse_exit_min_strength`
+  (persistida en `Settings` + defaults canónicos + patch whitelist API).
+
+**Impacto SPOT/FUTURES y perfiles:**
+1. SPOT: se recupera estabilidad del path SSO (sin excepción por régimen).
+2. FUTURES: se agrega salida temprana anti-deterioro para evitar deriva hasta SL completo cuando el mercado cambia de dirección.
+3. Perfiles A/B/C: la corrección aplica por igual; los umbrales siguen gobernados por configuración runtime y modo activo.
+
+**Trazabilidad y restart-safe:**
+1. Cada cierre temprano registra auditoría `trades_audit.event='adverse_signal_exit'`.
+2. Estado de decisión y metadata de posición permanecen en BD y sobreviven reinicios.
+3. Validación enfocada posterior al fix: PASS.
+
+---
+
+### ✅ Sesión 38 — Implementación inicial de emergencia (triage SPOT/FUTURES) — jul 04 2026
+
+**Objetivo operativo inmediato:**
+1. Ejecutar fase 0/1 de emergencia sin cierres impulsivos: clasificar posiciones por probabilidad de recuperación antes de decidir rescate o cierre defensivo.
+2. Aplicar la misma lógica para SPOT y FUTURES con sensibilidad por perfil A/B/C.
+3. Mantener trazabilidad 100% y estado restart-safe en BD.
+
+**Implementación aplicada:**
+1. `app.py` agrega `GET /positions/emergency-triage`:
+  - construye snapshot de riesgo por posición (SPOT/FUTURES),
+  - clasifica en `recuperable`, `vigilancia_activa`, `cierre_defensivo`,
+  - incluye cobertura activa (`adverse_exit_applicable`, `profit_supervisor_applicable`, `sso_waiting`, `monitor_only`).
+2. `app.py` agrega `POST /positions/emergency-triage/snapshot` (auth):
+  - persiste snapshot en `trading_runtime_state.key='emergency_triage_latest'`,
+  - audita captura en `trades_audit.event='emergency_triage_snapshot'`.
+3. El endpoint de triage no ejecuta cierres; solo habilita decisiones operativas basadas en datos.
+
+**Contrato de emergencia (activo):**
+1. No cerrar por pánico: toda salida defensiva debe estar sustentada por riesgo alto + baja probabilidad de recuperación.
+2. Priorizar cierres individuales sobre batch durante contingencia para minimizar huecos de trazabilidad.
+3. Validar por split SPOT/FUTURES y perfil A/B/C antes de aplicar acciones de ejecución.
+
+**Trazabilidad y restart-safe:**
+1. Snapshot operativo persistido en BD (`trading_runtime_state`) para reconstrucción post-reinicio.
+2. Evento auditable en `trades_audit` por cada captura oficial del triage.
+3. Compatible con `monitor_only/pause_new_entries`: el diagnóstico refleja el modo real de operación.
+
+---
+
+### ✅ Sesión 39 — Supervisor unificado de gobernanza (profit+loss) y rollback de triage — jul 05 2026
+
+**Objetivo operativo:**
+1. Consolidar autoridad de salida en un supervisor único para SPOT/FUTURES sin romper protecciones hard SL/safety SL.
+2. Eliminar la capa táctica de triage de emergencia (endpoint/snapshot) para volver al plan estratégico estable.
+3. Mantener trazabilidad 100% y restart-safe con metadata persistida y auditoría por decisión.
+
+**Implementación aplicada:**
+1. `app.py`:
+  - rollback completo de `EmergencyTriageSnapshotRequest`, helpers de triage y endpoints `GET/POST /positions/emergency-triage*`.
+  - nuevo endpoint `GET /metrics/unified-governance` para visibilidad live de decisiones abiertas y eventos 24h.
+2. `unified_governance_supervisor.py` (nuevo):
+  - `UnifiedGovernanceContext` y `UnifiedGovernanceDecision`;
+  - rama de profit delega en `profit_realization_supervisor`;
+  - rama de pérdida gestiona min-age/escalado, guard de distancia a SL, aceleración y reversión de señal, con modo `monitor_only`.
+3. `run_trades.py` y `futures_client.py`:
+  - integración del supervisor en flujo de decisión antes de cierre suave final;
+  - persistencia de `state_patch` en metadata (`metadata` SPOT / `_smart_meta` FUTURES);
+  - auditoría explícita `unified_governance_decision` y `unified_governance_close_triggered`.
+4. `config.py` + `config_helpers.py`:
+  - nuevas llaves runtime para activar/desactivar y parametrizar profit/loss governance por perfil y tipo de mercado.
+
+**Validación y estado de fase:**
+1. Escaneo de errores en archivos tocados: sin errores.
+2. Runner enfocado: `focused_validation_runner.py` => `{"overall": "PASS"}`.
+3. Estado: implementación cerrada en código para fases de rollback, supervisor, integración, persistencia/auditoría y validación base.
+
+---
+
+### ✅ Sesión 40 — Cierre operativo: cambios, notas y memorias consolidadas — jul 05 2026
+
+**Cierre ejecutado:**
+1. Cambios de código guardados en árbol de trabajo y verificados sin errores en archivos modificados.
+2. Notas de sesión y memoria de repositorio consolidadas con foco en supervisor unificado y trazabilidad.
+3. SYSTEM_REFERENCE actualizado como fuente de verdad de fase y estado.
+
+**Evidencia de cierre:**
+1. Validación enfocada más reciente: `focused_validation_runner.py` => `{"overall": "PASS"}`.
+2. Observabilidad activa de gobernanza: endpoint `GET /metrics/unified-governance`.
+3. Auditoría activa de decisiones: `unified_governance_decision` + `unified_governance_close_triggered`.
+
+**Estado final de implementación (plan original):**
+1. Fases B/C/D/E/G: completadas.
+2. Fase H: lista para ejecución en ventana de rollout controlado.
+
+---
+
+### ✅ Sesión 41 — Implementación por fases ejecutada (UG/PRS/SPOT+FUTURES) — jul 05 2026
+
+**Objetivo operativo (cumplido):**
+1. Ejecutar en una sola pasada los fixes críticos detectados en auditoría integral, sin desviarse del plan por fases.
+2. Asegurar paridad de comportamiento SPOT/FUTURES en `monitor_only` y en evaluación de supervisores.
+3. Cerrar con validación enfocada en verde y trazabilidad persistida en referencias/memorias.
+
+**Fase 1 — Safety/monitor-only (completada):**
+1. `run_trades.py` corrige signo de `distance_to_sl_pct` en SPOT para UG (distancia positiva cuando el precio está por encima del SL efectivo).
+2. `run_trades.execute_once(monitor_only=True)` ahora ejecuta también monitoreo/cierres de FUTURES antes de retornar.
+3. `_check_sl_tp_positions(..., monitor_only=...)` recibe bandera explícita y la propaga al contexto de UG en SPOT.
+4. `futures_client.check_positions(..., monitor_only=...)` incorpora parámetro y lo propaga a `UnifiedGovernanceContext`.
+
+**Fase 2 — Contexto de señal/velocidad en supervisores (completada):**
+1. SPOT y FUTURES ahora inyectan `current_signal_strength`, `current_signal_direction` y `pnl_velocity_1h` en PRS/UG con fallback seguro.
+2. Se reutiliza snapshot de velocidad (`sso_pnl_snapshot`) para continuidad restart-safe y menor deriva de contexto entre ciclos.
+3. `profit_realization_supervisor.py` ajusta criterio: señal ausente (`None`) se trata como neutral, no como señal degradada.
+
+**Fase 3 — Canonical defaults + regresión (completada):**
+1. `config_helpers.py` alinea defaults críticos con `config.py`:
+  - `kelly_dynamic_base_pct`
+  - `max_per_trade_usdt`
+  - `max_positions`
+  - `trailing_stop_activation_pct`
+  - `trailing_stop_distance_pct`
+2. `tests/test_futures_smart_exits.py` agrega:
+  - prueba de paridad de defaults críticos;
+  - prueba de propagación de `monitor_only` hacia UG en FUTURES.
+
+---
+
+### ✅ Sesión 42 — Implementación final del plan silencioso E2E — jul 05 2026
+
+**Objetivo operativo (cumplido):**
+1. Ejecutar la última revisión del plan y convertir los fallbacks silenciosos críticos en comportamiento fail-safe.
+2. Reforzar la verdad canónica de configuración, metadata y dashboard sin desviarse del flujo original del sistema.
+3. Mantener el foco en maximizar ganancias evitando entradas dañinas, cierres falsos y drift de restart.
+
+**Implementación aplicada:**
+1. `run_trades.py`:
+  - funding rate SPOT ahora falla de forma segura y bloquea la entrada si la API no responde;
+  - la confirmación de vela roja y la guardia de correlación/short momentum ya no permiten entrar en silencio cuando fallan;
+  - la correlación de shorts degrada la exposición de forma conservadora ante errores.
+2. `futures_client.py`:
+  - restauración de metadata normalizada con preservación de corrupción y reconstrucción UTC de `opened_at`;
+  - `monitor_only` y contexto UG permanecen intactos.
+3. `position_manager.py`:
+  - metadata no dict ahora conserva evidencia de corrupción en vez de reescribirse como `{}`;
+  - se evita perder el rastro de por qué faltaba un campo.
+4. `config_helpers.py` + `init_components.py`:
+  - `validate_config()` ahora verifica paridad de defaults canónicos con `config.py`;
+  - el bootstrap de componentes bloquea el arranque si existe drift crítico.
+5. `app.py`:
+  - parsing de metadata con warning explícito en caso de corrupción;
+  - cálculo de `hours_held` unificado a UTC para SPOT y FUTURES.
+6. `futures_correlation.py`:
+  - fallas de correlación pasan a sizing conservador en vez de fail-open.
+7. Tests:
+  - agregado chequeo de validación de config canónica en `tests/test_config_governance.py`.
+
+**Validación y estado final:**
+1. Escaneo de errores en archivos tocados: sin errores.
+2. Runner enfocado: `focused_validation_runner.py` => `{"overall": "PASS"}`.
+3. Estado: el plan quedó implementado, validado y documentado; no quedan pasos pendientes dentro del alcance definido.
+
+**Validación y estado final:**
+1. Primera corrida del runner enfocada: FAIL controlado por prueba nueva (comparaba contra valores runtime con override de entorno).
+2. Ajuste aplicado a prueba de paridad para comparar contra defaults declarados del modelo.
+3. Segunda corrida: `focused_validation_runner.py` => `{"overall": "PASS"}`.
+4. Estado de cierre: implementación por fases completada, validada y documentada.
+
+**Memoria/Notas persistidas en repo memory:**
+1. `unified_governance_supervisor_2026_07_05.md` actualizado con cierre de implementación (sign fix + monitor_only parity + contexto PRS/UG).
+2. `profit_realization_supervisor_2026_07_05.md` actualizado con criterio de señal neutral cuando falta contexto.
+3. `production-hardening-2026-06-29.md` actualizado con hardening adicional del 2026-07-05.
+
+---
+
+### Profit Realization Supervisor (autoridad central de salida)
+
+El sistema usa un supervisor central de realización de ganancias para evitar que SmartTP, anti-wick, protección de reemplazo y SSO bloqueen rebotes ya maduros.
+
+**Reglas operativas:**
+1. Aplica a SPOT y FUTURES con umbrales separados por tipo y por perfil A/B/C.
+2. Tiene prioridad sobre extensiones de TP y sobre confirmaciones anti-wick cuando la salida ya está justificada por tiempo en profit, giveback o pérdida de momentum.
+3. No desactiva SL ni backstops de seguridad: solo acelera la monetización cuando la posición ya entregó suficiente recorrido.
+4. Cada decisión debe persistirse en `trading_runtime_state` o metadata de posición y dejar evento auditable en `trades_audit`.
+5. Si falta el estado de arranque, el supervisor reconstruye el tiempo en profit desde metadata persistida y sigue siendo restart-safe.
+
+**Contrato mínimo esperado:**
+1. `profit_realization_started_at` se guarda la primera vez que una posición entra en verde.
+2. `profit_realization_last_reason` y `profit_realization_last_detail` dejan la razón operativa de la última intervención.
+3. El dashboard/metrics debe mostrar posiciones positivas sin lock, minutos medios en profit sin realización y conteo de decisiones del supervisor.
+4. Si el supervisor realiza un parcial, el resto de la posición sigue bajo SL/TP/trailing normal, pero con nueva traza persistida.
+
+**Criterio de uso:**
+1. Si una posición está en profit, pero no avanza o devuelve parte importante del peak, el supervisor puede cerrar parcial o totalmente antes de que SmartTP decida extender.
+2. Si la señal sigue fuerte y el movimiento está limpio, el supervisor debe dejar correr la posición.
+3. En reinicio, la misma decisión debe poder reconstruirse con la metadata ya persistida.
 
 ## MODELO OPERATIVO DE REFERENCIA (BASE DE FUNCIONAMIENTO)
 
@@ -444,7 +653,7 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 
 | Campo | Valor |
 |-------|-------|
-| Fecha última actualización | jun 24 2026 09:18 UTC-6 |
+| Fecha última actualización | jul 05 2026 |
 | Capital total | ~$2,810 USDT |
 | Capital spot líquido | ~$1,771 USDT |
 | Capital invertido spot | $0 (sin posiciones spot) |

@@ -11,7 +11,7 @@ Design:
   - Cache TTL = 15 min (3–4 futures cycles) — avoids excessive API calls
   - Thread-safe: single Lock guards the cache
   - Returns kelly_mult ∈ [0.65, 1.0] — never blocks entries, only sizes down  (K1: floor 0.5→0.65)
-  - Fail-open: any error returns 1.0 (no size reduction)
+    - Fail-safe: any error returns the conservative minimum multiplier (0.65)
 
 Kelly reduction formula (applied in run_trades.py):
     avg_r = mean of all pairwise |r| for open shorts
@@ -108,7 +108,7 @@ def get_portfolio_correlation(
         avg_r      — average |Pearson r| across all pairs (0.0–1.0)
         kelly_mult — Kelly size multiplier to apply (0.5–1.0)
 
-    Cached for _CACHE_TTL seconds. Fail-open: returns (0.0, 1.0) on any error.
+    Cached for _CACHE_TTL seconds. Fail-safe: returns (0.0, 0.65) on any error.
     """
     if len(open_short_symbols) < 2:
         return 0.0, 1.0  # single or no position — no correlation to compute
@@ -123,7 +123,7 @@ def get_portfolio_correlation(
                 _refresh_cache(binance_client, open_short_symbols)
             except Exception as e:
                 logger.warning(f"[Correlation] Refresh failed: {e}")
-                return 0.0, 1.0
+                return 0.0, _KELLY_MIN
 
         matrix = _cache["matrix"]
 

@@ -434,7 +434,10 @@ class PositionManager:
             for pos in pos_list:
                 if str(pos.position_id) == str(position_id):
                     if not isinstance(metadata, dict):
-                        metadata = {}
+                        metadata = {
+                            '_metadata_corrupt_raw': repr(metadata),
+                            '_meta_recovered': True,
+                        }
                     metadata['_meta_version'] = int(metadata.get('_meta_version', 0) or 0) + 1
                     metadata['_meta_updated_at'] = datetime.now(timezone.utc).isoformat()
                     pos.metadata = metadata
@@ -647,7 +650,10 @@ class PositionManager:
             # Inject close_group_id + escalonamiento metadata into the position before closing
             if _close_group:
                 if not isinstance(pos.metadata, dict):
-                    pos.metadata = {}
+                    pos.metadata = {
+                        '_metadata_corrupt_raw': repr(pos.metadata),
+                        '_meta_recovered': True,
+                    }
                 pos.metadata['close_group_id'] = _close_group
                 pos.metadata['escalonamiento_index'] = pos.metadata.get('escalonamiento_index', _i + 1)
                 pos.metadata['total_escalonamientos'] = len(positions)
