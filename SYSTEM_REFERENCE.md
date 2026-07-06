@@ -1,7 +1,52 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 06 2026 | Sesión 55: Documentación de cierre (Fase 2.8). Plan exhaustivo trazabilidad Fases 2.0–2.8 **COMPLETADAS**.
+> Última actualización: jul 06 2026 | Sesión 56: Herramientas operativas de cierre manual SPOT (incluye dust force-close).
+
+---
+
+### ✅ Sesión 56 — Herramientas operativas de cierre manual SPOT — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Dejar herramientas reutilizables para cierres manuales de posiciones SPOT en tres modos: conservador (solo no-perdida), forzado directo y forzado con top-up para dust por debajo de `min_notional`.
+
+**Implementación aplicada:**
+
+1. **`tmp_close_selected_spot.py` (modo conservador):**
+  - Solo cierra si el PnL neto estimado (incluyendo comisiones) es >= 0.
+  - Ahora acepta CLI:
+    - `--symbols ENAUSDT,ADAUSDT,BTCUSDT`
+    - `--close-reason manual_close_small_runner`
+    - `--commission-rate 0.001`
+
+2. **`tmp_close_selected_spot_force.py` (modo forzado):**
+  - Intenta cierre inmediato por market sell del balance disponible.
+  - Ahora acepta CLI:
+    - `--symbols ENAUSDT,ADAUSDT,BTCUSDT`
+    - `--close-reason manual_force_close_small_runner`
+    - `--commission-rate 0.001`
+
+3. **`tmp_force_dust_close_ena_ada.py` (modo dust force-close):**
+  - Resuelve bloqueos por `min_notional` comprando top-up y vendiendo todo inmediatamente.
+  - Regla clave: el top-up debe cumplir por si mismo `min_notional` (no solo completar el faltante).
+  - Ahora acepta CLI:
+    - `--symbols ENAUSDT,ADAUSDT`
+    - `--buffer-usdt 0.30`
+    - `--close-reason manual_force_close_dust_runner`
+    - `--commission-rate 0.001`
+
+4. **Resultado operativo validado en esta sesión:**
+  - `BTCUSDT` cerrado por modo forzado.
+  - `ENAUSDT` y `ADAUSDT` cerrados por modo dust force-close.
+  - Verificado en DB: `trades_open` sin ENA/ADA/BTC y registros en `trades_closed` con `close_reason` manual.
+
+**Comandos de uso sugeridos (contenedor app):**
+- `docker exec crypto-agent-app python /app/tmp_close_selected_spot.py --symbols ENAUSDT,ADAUSDT`
+- `docker exec crypto-agent-app python /app/tmp_close_selected_spot_force.py --symbols ENAUSDT,ADAUSDT,BTCUSDT`
+- `docker exec crypto-agent-app python /app/tmp_force_dust_close_ena_ada.py --symbols ENAUSDT,ADAUSDT --buffer-usdt 0.30`
+
+**Principio operativo:**
+Para posiciones pequenas en spot, el cierre forzado puede requerir una compra previa de top-up si el exchange exige `min_notional` tanto en BUY como en SELL.
 
 ---
 
