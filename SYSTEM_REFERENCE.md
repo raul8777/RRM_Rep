@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 06 2026 | Sesión 56: Herramientas operativas de cierre manual SPOT (incluye dust force-close).
+> Última actualización: jul 06 2026 | Sesión 57: Estandarización de herramientas de cierre SPOT (rutas Dev/tools).
 
 ---
 
@@ -47,6 +47,36 @@ Dejar herramientas reutilizables para cierres manuales de posiciones SPOT en tre
 
 **Principio operativo:**
 Para posiciones pequenas en spot, el cierre forzado puede requerir una compra previa de top-up si el exchange exige `min_notional` tanto en BUY como en SELL.
+
+---
+
+### ✅ Sesión 57 — Estandarización de herramientas de cierre SPOT (rutas Dev/tools) — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Dejar las utilidades de cierre manual en una ruta estable de operaciones y exponer lanzadores PowerShell para uso rápido sin editar scripts.
+
+**Implementación aplicada:**
+
+1. **Reorganización de scripts Python:**
+  - `tmp_close_selected_spot.py` -> `Dev/tools/spot_close/close_if_non_negative.py`
+  - `tmp_close_selected_spot_force.py` -> `Dev/tools/spot_close/force_close.py`
+  - `tmp_force_dust_close_ena_ada.py` -> `Dev/tools/spot_close/force_close_dust.py`
+
+2. **Wrappers PowerShell añadidos:**
+  - `Dev/tools/spot_close/run_close_if_non_negative.ps1`
+  - `Dev/tools/spot_close/run_force_close.ps1`
+  - `Dev/tools/spot_close/run_force_dust_close.ps1`
+
+3. **Guía de uso local:**
+  - `Dev/tools/spot_close/README.md`
+
+**Comandos operativos recomendados:**
+- `.\Dev\tools\spot_close\run_close_if_non_negative.ps1 -Symbols "ENAUSDT,ADAUSDT"`
+- `.\Dev\tools\spot_close\run_force_close.ps1 -Symbols "ENAUSDT,ADAUSDT,BTCUSDT"`
+- `.\Dev\tools\spot_close\run_force_dust_close.ps1 -Symbols "ENAUSDT,ADAUSDT" -BufferUsdt 0.30`
+
+**Principio operativo:**
+Las herramientas temporales para trading manual deben terminar en `Dev/tools` con nombre funcional y wrapper de ejecucion para reducir errores operativos en sesiones futuras.
 
 ---
 
