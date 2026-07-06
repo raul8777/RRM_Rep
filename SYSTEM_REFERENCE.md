@@ -1,7 +1,102 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 06 2026 | Sesión 46: fix de paridad active-only con validación de baseline y comparabilidad (no-critical para no homologables).
+> Última actualización: jul 06 2026 | Sesión 48: Pydantic V2 Migration — 370 deprecation warnings eliminadas.
+
+---
+
+### ✅ Sesión 48 — Pydantic V2 Migration — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Eliminar las 370 `PydanticDeprecatedSince20` warnings que contaminaban cada ciclo de test y arranque del contenedor, migrando `config.py` a la API nativa de pydantic-settings v2.
+
+**Cambios aplicados (commit `a2e7fd7`):**
+
+1. **`model_config`** — reemplazó `class Config:` inner class con `model_config = SettingsConfigDict(env_file=..., env_file_encoding="utf-8", extra="ignore")` al inicio de `Settings`.
+
+2. **`env=` eliminado de los 183 `Field()`** — pydantic-settings v2 mapea `campo_nombre` → `CAMPO_NOMBRE` automáticamente; el parámetro `env=` en `Field()` es sintaxis V1 obsoleta.
+
+3. **Tipos genéricos explícitos** — 8 campos `list` → `List[str]` y 4 campos `dict` → `Dict[str, Any]`:
+   - `List[str]`: `futures_largecap_symbols`, `smart_tp_extend_disabled_regimes`, `analysis_symbols`, `rebalance_excluded_symbols`, `narrative_tokens`, `trading_excluded_symbols`, `futures_symbols`, `futures_largecap_symbols` (2ª def)
+   - `Dict[str, Any]`: `category_max_positions`, `token_categories`, `category_thresholds`, `futures_category_thresholds`
+
+**Resultado:**
+- **0 `PydanticDeprecatedSince20` warnings** en toda la suite de tests.
+- `309 passed` — sin regresiones nuevas.
+- 7 fallas pre-existentes inalteradas (config governance baseline, webhook auth, screener DB, reconciliation).
+- `docker-compose.yml` y variables de entorno sin cambios — comportamiento en producción idéntico.
+
+**Archivo modificado:** `config.py`
+
+---
+
+### ✅ Sesión 47 — Binance Connection Hardening (Plan Maestro A1–A5 + B1–B4) — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+1. Eliminar bloqueos del event loop de FastAPI causados por llamadas síncronas a Binance dentro de handlers `async`.
+2. Añadir timeouts explícitos y reintentos en todas las llamadas HTTP externas del sistema de trading.
+3. Verificar que toda entrada a Binance Futures quede confirmada antes de persistir la posición.
+4. Detectar y exponer paridad SPOT (DB vs balance Binance) al mismo nivel que la paridad FUTURES existente.
+
+**Serie A — Timeout Stabilization:**
+
+1. **A1** — `futures_client.py` *(sesión anterior)*:
+   - `_request_with_retry()` helper con backoff en errores de red y HTTP 5xx;
+   - `_get`, `_post`, `_delete` refactorizados para usar el helper.
+
+2. **A2** — `app.py` (5 call sites):
+   - `get_account_balance()` en `/account/balance`, `/dashboard/summary`, `/health/status` (×2) → `asyncio.to_thread()`;
+   - `get_total_wallet_usdt()` en `/dashboard/summary` → `asyncio.to_thread()`;
+   - fapi ping en `/health/status` → `asyncio.to_thread()`;
+   - daily ticker (6 símbolos) en `/dashboard/summary` → `asyncio.gather()` con tareas `to_thread` concurrentes.
+
+3. **A3** — `app.py`: `aiohttp.ClientTimeout(total=10)` aplicado a la sesión klines en `/price-history/{symbol}`.
+
+4. **A4** — `run_trades.py`:
+   - CoinGecko BTC dominance: timeout 3→6s, captura explícita de `socket.timeout`;
+   - VolSpike override inline funding-rate reemplazado por `_get_funding_rate()` cacheado (evita duplicación y respeta TTL).
+   - `pair_screener.py`: ticker/24hr timeout 8→12s; path de timeout cae al fallback de snapshot DB (igual que `Exception`).
+
+5. **A5** — `autonomous_signals.py`: `request_params={"timeout": 10}` en `get_klines()`; timeouts de red logueados como `warning`, no `error`.
+   - `tests/test_system_health.py`: `_api_available()` 2→5s con 3 reintentos antes de marcar API ausente.
+
+**Serie B — Transaction Verification:**
+
+6. **B1** — `futures_client.py` *(sesión anterior)*:
+   - `_verify_entry_filled()`: consulta `/fapi/v2/positionRisk` post-market-order;
+   - si `positionAmt == 0`, aborta: cierra la posición de mercado y no persiste nada;
+   - integrado en `open_short()` y `open_long()`.
+
+7. **B2** — `binance_truth_guard.py`:
+   - `RUNTIME_KEY_SPOT = "binance_truth_status_spot"`;
+   - `evaluate_spot_parity(position_manager, binance_client)`: compara posiciones SPOT en DB vs balances de Binance;
+     detecta `SPOT_GHOST_IN_DB` (severity=high), `SPOT_QTY_DRIFT` (warning), `SPOT_ORPHAN_IN_BINANCE` (warning);
+   - `persist_truth_status_spot()` y `get_truth_status_spot()` espejados de las funciones de futures.
+
+8. **B3** — `run_trades.py`:
+   - import de `evaluate_spot_parity` y `persist_truth_status_spot`;
+   - bloque pre-trade `[SpotTruth]` que evalúa, persiste y audita paridad SPOT cada ciclo;
+   - TTL de `binance_validated_at` extendido de 20→60 min (menos restricciones en ciclos cortos).
+
+9. **B4** — `app.py`:
+   - `binance_truth_spot` expuesto en `/dashboard/summary` (desde `get_truth_status_spot`);
+   - `_build_operator_focus()` recibe `binance_truth` y `binance_truth_spot` como parámetros;
+     - alerta `binance_truth_critical` (FUTURES severity=critical);
+     - alerta `binance_truth_spot_high` (SPOT severity=high);
+   - `snapshot_meta` incluye `binance_truth_spot_severity` y `tactical_decision_blocked` actualizado (bloquea si futures=critical OR spot=high);
+   - `/metrics/binance-truth` ahora retorna futures + `spot` anidado en un solo payload.
+
+**Validación:**
+- Sin errores de sintaxis en todos los archivos modificados.
+- Flujo de datos de paridad SPOT/FUTURES visible en `/dashboard/summary` → `operator_focus` → `snapshot_meta`.
+
+**Archivos modificados:**
+- `app.py` (A2, A3, B4)
+- `run_trades.py` (A4, B3)
+- `pair_screener.py` (A4)
+- `autonomous_signals.py` (A5)
+- `tests/test_system_health.py` (A5)
+- `binance_truth_guard.py` (B2)
 
 ---
 

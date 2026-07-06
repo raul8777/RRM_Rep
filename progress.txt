@@ -1,3 +1,44 @@
+2026-07-06 - Pydantic V2 Migration — Sesión 48
+==============================================
+Problema: 370 PydanticDeprecatedSince20 warnings en cada ciclo de tests/arranque (config.py con sintaxis V1).
+Archivos: config.py (único archivo modificado)
+Commit: a2e7fd7
+
+Cambios:
+- model_config = SettingsConfigDict(...) reemplaza inner class Config: en Settings
+- env= eliminado de los 183 Field() calls (pydantic-settings v2 mapea automáticamente)
+- 8 campos list → List[str]; 4 campos dict → Dict[str, Any] (tipos genéricos explícitos)
+
+Resultado: 0 PydanticDeprecatedSince20 warnings | 309 tests passed | sin regresiones
+Fallas pre-existentes inalteradas: config governance baseline, webhook auth, screener DB, reconciliation
+
+---
+
+2026-07-06 - Binance Connection Hardening (Plan Maestro A1-A5 + B1-B4) — Sesión 47
+==================================================================================
+Serie A — Timeout Stabilization:
+- A1 (sesión anterior): futures_client.py — _request_with_retry helper; _get/_post/_delete con reintentos.
+- A2: app.py — asyncio.to_thread() en get_account_balance (x3), get_total_wallet_usdt, fapi ping;
+       daily ticker (6 símbolos) con asyncio.gather() concurrente.
+- A3: app.py — aiohttp.ClientTimeout(total=10) en /price-history/{symbol} klines session.
+- A4: run_trades.py — CoinGecko timeout 3→6s + socket.timeout explícito;
+       VolSpike override inline funding-rate → _get_funding_rate() cacheado.
+     pair_screener.py — ticker/24hr timeout 8→12s; path de timeout cae a DB snapshot fallback.
+- A5: autonomous_signals.py — request_params={"timeout": 10} en get_klines(); timeouts como warning.
+     tests/test_system_health.py — _api_available() 2→5s con 3 reintentos.
+
+Serie B — Transaction Verification:
+- B1 (sesión anterior): futures_client.py — _verify_entry_filled() post-market-order; abort si positionAmt==0.
+- B2: binance_truth_guard.py — evaluate_spot_parity(), persist_truth_status_spot(), get_truth_status_spot();
+     detecta SPOT_GHOST_IN_DB (high), SPOT_QTY_DRIFT (warning), SPOT_ORPHAN_IN_BINANCE (warning).
+- B3: run_trades.py — bloque pre-trade [SpotTruth]; TTL binance_validated_at 20→60 min.
+- B4: app.py — binance_truth_spot en /dashboard/summary; operator_focus alerts (FUTURES critical + SPOT high);
+     snapshot_meta.binance_truth_spot_severity; tactical_decision_blocked incluye spot=high;
+     /metrics/binance-truth retorna futures + spot anidado.
+
+Archivos modificados: app.py, run_trades.py, pair_screener.py, autonomous_signals.py,
+                      tests/test_system_health.py, binance_truth_guard.py.
+
 2026-06-28 - Config Audit & Migration (run_0812 baseline)
 ==========================================================
 - Paused new trade entries via trading_runtime_state.pause_new_entries.
