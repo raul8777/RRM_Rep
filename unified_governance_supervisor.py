@@ -40,6 +40,18 @@ class UnifiedGovernanceContext:
     take_profit_price: Optional[float] = None
     monitor_only: bool = False
     tier1_soft_reason: Optional[str] = None
+    # SSO advisory — structured result passed from SmartScaleOut evaluation
+    sso_advisory_should_close: bool = False
+    sso_advisory_close_pct: float = 0.0
+    sso_advisory_reason: str = ""
+    sso_advisory_trigger: str = ""
+    # PRS advisory — structured result passed from ProfitRealizationSupervisor evaluation
+    prs_advisory_should_close: bool = False
+    prs_advisory_close_pct: float = 0.0
+    prs_advisory_reason: str = ""
+    prs_advisory_detail: str = ""
+    # Fear & Greed index value (0-100) for exit modifier
+    fear_greed_value: Optional[float] = None
 
 
 @dataclass
@@ -103,6 +115,23 @@ def _distance_guard(distance_to_sl_pct: Optional[float], threshold_pct: float) -
     return distance_to_sl_pct <= threshold_pct
 
 
+def _loss_regime_scale(regime_mode: Optional[str], trade_type: Optional[str]) -> tuple:
+    """Return (min_age_multiplier, escalation_age_multiplier) for loss branch.
+    FUTURES_SHORT and fast regimes get tighter patience; PRESERVATION gets more.
+    W3: regime-aware loss branch."""
+    regime = str(regime_mode or "").strip().upper()
+    tt = str(trade_type or "").strip().lower()
+    if tt == "futures" or regime == "FUTURES_SHORT":
+        return 0.40, 0.50   # e.g. B defaults: min_age 60→24m, esc_age 90→45m
+    if regime == "RANGE_SCALP":
+        return 0.65, 0.75   # min_age 60→39m, esc_age 90→68m
+    if regime == "PRESERVATION":
+        return 1.40, 1.80   # min_age 60→84m, esc_age 90→162m
+    if regime == "SPOT_BULL":
+        return 1.10, 1.30   # more patience in bull — may recover
+    return 1.0, 1.0         # neutral
+
+
 def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime] = None) -> UnifiedGovernanceDecision:
     now = now or datetime.now(timezone.utc)
     meta = dict(context.metadata or {})
@@ -111,8 +140,31 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
     if not enabled:
         return UnifiedGovernanceDecision()
 
-    # Profit branch: delegate to PRS under unified contract.
+    # Profit branch: UG as single arbiter, using PRS + SSO as advisories.
     if context.pnl_pct > 0 and bool(get_param(settings, "unified_governance_profit_enabled", True)):
+        if not context.regime_mode:
+            print(f"[UG] {context.symbol}: regime_mode=None — profit branch using neutral regime scale (trade_type={context.trade_type}, profile={context.profile_label})")
+
+        # ── F8: Fear & Greed exit modifier ───────────────────────────────────
+        # F&G < 30 (Fear): reduce patience 15% — market can reverse quickly
+        # F&G > 70 (Greed): extend patience 10% — momentum is helping us
+        _fng = context.fear_greed_value
+        if _fng is None:
+            _fng = float(meta.get("fear_greed_value", 50))
+        _fng_exit_modifier = 1.0
+        if _fng < 30:
+            _fng_exit_modifier = 0.85
+        elif _fng > 70:
+            _fng_exit_modifier = 1.10
+
+        # ── F7: SSO advisory — if SSO fired a full close, give it high weight ─
+        _sso_confirms_close = context.sso_advisory_should_close and context.sso_advisory_close_pct >= 1.0
+        _sso_confirms_partial = context.sso_advisory_should_close and context.sso_advisory_close_pct < 1.0
+
+        # ── PRS evaluation with F&G-modified metadata ────────────────────────
+        _prs_meta = dict(meta)
+        _prs_meta["ug_fng_exit_modifier"] = round(_fng_exit_modifier, 4)
+        _prs_meta["ug_fng_value"] = round(float(_fng), 2)  # W8: persist real F&G value
         pr_ctx = ProfitRealizationContext(
             symbol=context.symbol,
             trade_type=context.trade_type,
@@ -132,28 +184,121 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
             trailing_active=context.trailing_active,
             tp_extensions=context.tp_extensions,
             take_profit_price=context.take_profit_price,
-            metadata=meta,
+            metadata=_prs_meta,
         )
         pr_decision = evaluate_profit_realization(pr_ctx, settings)
-        if pr_decision.should_close:
+
+        # ── UG arbitration logic ──────────────────────────────────────────────
+        # Priority matrix:
+        #   SSO full close + PRS agrees       → close 100%, priority 92
+        #   SSO full close alone              → close 100%, priority 82
+        #   SSO partial + PRS close           → escalate to full close, priority 88  (W1)
+        #   SSO partial alone                 → respect partial %, priority 75       (W1)
+        #   PRS close + F&G fear (<30)        → close with urgency, priority 80
+        #   PRS close (normal)                → close, priority 70-90 (from PRS)
+        #   PRS advisory_should_close         → advisory was pre-computed externally (F6)
+        #   All hold                          → hold
+        _prs_close = pr_decision.should_close or context.prs_advisory_should_close
+        _prs_reason = pr_decision.reason or context.prs_advisory_reason
+        _prs_detail = pr_decision.detail or context.prs_advisory_detail
+        _prs_close_pct = float(pr_decision.close_pct or context.prs_advisory_close_pct or 1.0)
+        _prs_priority = int(pr_decision.priority or 70)
+
+        _should_close = False
+        _close_pct = 0.0
+        _reason = ""
+        _detail = ""
+        _priority = 0
+
+        if _sso_confirms_close and _prs_close:
+            _should_close = True
+            _close_pct = 1.0
+            _reason = context.sso_advisory_reason or _prs_reason
+            _detail = f"SSO {context.sso_advisory_trigger} + PRS agree | F&G={_fng:.0f} modifier={_fng_exit_modifier:.2f}"
+            _priority = 92
+        elif _sso_confirms_close:
+            _should_close = True
+            _close_pct = 1.0
+            _reason = context.sso_advisory_reason
+            _detail = f"SSO {context.sso_advisory_trigger} full close (PRS hold) | F&G={_fng:.0f}"
+            _priority = 82
+        elif _sso_confirms_partial and _prs_close:
+            # W1: SSO partial + PRS also wants to close
+            _allow_escalation = bool(getattr(settings, 'ug_allow_partial_to_full_escalation', False))
+            if _allow_escalation:
+                # escalate to full exit
+                _should_close = True
+                _close_pct = 1.0
+                _reason = context.sso_advisory_reason or _prs_reason
+                _detail = (
+                    f"SSO {context.sso_advisory_trigger} partial({context.sso_advisory_close_pct*100:.0f}%) "
+                    f"escalated by PRS | F&G={_fng:.0f} modifier={_fng_exit_modifier:.2f}"
+                )
+                _priority = 88
+            else:
+                # keep the largest requested partial close, never kill a winner
+                _max_partial_pct = max(float(context.sso_advisory_close_pct), float(_prs_close_pct))
+                _should_close = True
+                _close_pct = _max_partial_pct
+                _reason = context.sso_advisory_reason or _prs_reason
+                _detail = (
+                    f"SSO {context.sso_advisory_trigger} partial({context.sso_advisory_close_pct*100:.0f}%) "
+                    f"+ PRS capped at {_max_partial_pct*100:.0f}% (no escalation) | F&G={_fng:.0f}"
+                )
+                _priority = 80
+        elif _sso_confirms_partial:
+            # W1: SSO partial alone → execute the partial close as-is
+            _should_close = True
+            _close_pct = float(context.sso_advisory_close_pct)
+            _reason = context.sso_advisory_reason
+            _detail = (
+                f"SSO {context.sso_advisory_trigger} partial {context.sso_advisory_close_pct*100:.0f}% "
+                f"(PRS hold) | F&G={_fng:.0f}"
+            )
+            _priority = 75
+        elif _prs_close and _fng < 30:
+            _should_close = True
+            _close_pct = _prs_close_pct
+            _reason = _prs_reason
+            _detail = f"{_prs_detail} | F&G={_fng:.0f} fear-urgency modifier={_fng_exit_modifier:.2f}"
+            _priority = 80
+        elif _prs_close:
+            _should_close = True
+            _close_pct = _prs_close_pct
+            _reason = _prs_reason
+            _detail = f"{_prs_detail} | F&G={_fng:.0f} modifier={_fng_exit_modifier:.2f}"
+            _priority = _prs_priority
+
+        _ug_diagnostics = (
+            f"sso_advisory={context.sso_advisory_trigger or 'none'}(close={context.sso_advisory_should_close},"
+            f"pct={context.sso_advisory_close_pct:.2f}); "
+            f"prs_advisory(close={context.prs_advisory_should_close}); "
+            f"prs_eval(close={pr_decision.should_close},pct={pr_decision.close_pct:.2f}); "
+            f"fng={_fng:.0f}(mod={_fng_exit_modifier:.2f}); "
+            f"{pr_decision.diagnostics}"
+        )
+
+        if _should_close:
             state_patch = dict(pr_decision.state_patch or {})
             state_patch[LAST_DECISION_KEY] = {
                 "action": "close",
-                "reason": pr_decision.reason,
+                "reason": _reason,
                 "trade_state": "profit",
                 "profile": str(context.profile_label or "B").upper(),
                 "regime": str(context.regime_mode or ""),
+                "fng_modifier": _fng_exit_modifier,
+                "sso_trigger": context.sso_advisory_trigger or "",
                 "updated_at": now.isoformat(),
             }
             return UnifiedGovernanceDecision(
                 action="close",
                 should_close=True,
-                close_pct=float(pr_decision.close_pct or 1.0),
-                reason=pr_decision.reason,
-                detail=pr_decision.detail,
-                priority=max(70, int(pr_decision.priority or 70)),
+                close_pct=_close_pct,
+                reason=_reason,
+                detail=_detail,
+                priority=_priority,
                 override_target=pr_decision.override_target or "smarttp_extend",
-                diagnostics=pr_decision.diagnostics,
+                diagnostics=_ug_diagnostics,
                 state_patch=state_patch,
             )
 
@@ -162,7 +307,7 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
             should_close=False,
             priority=30,
             reason="unified_governance_profit_hold",
-            diagnostics="profit_state_no_realization",
+            diagnostics=_ug_diagnostics,
             state_patch={
                 LAST_DECISION_KEY: {
                     "action": "hold",
@@ -170,6 +315,7 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
                     "trade_state": "profit",
                     "profile": str(context.profile_label or "B").upper(),
                     "regime": str(context.regime_mode or ""),
+                    "fng_modifier": _fng_exit_modifier,
                     "updated_at": now.isoformat(),
                 }
             },
@@ -182,23 +328,38 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
     if context.pnl_pct >= 0:
         return UnifiedGovernanceDecision()
 
+    _loss_min_usdt = float(get_param(settings, "unified_governance_loss_min_usdt", 1.50))
+    if abs(context.pnl_usdt) < _loss_min_usdt:
+        return UnifiedGovernanceDecision(
+            action="hold",
+            should_close=False,
+            priority=20,
+            reason="unified_governance_loss_below_min_usdt",
+            diagnostics=f"pnl_usdt={context.pnl_usdt:.4f} < min={_loss_min_usdt:.2f}",
+        )
+
+    if not context.regime_mode:
+        print(f"[UG] {context.symbol}: regime_mode=None — loss branch using neutral thresholds (trade_type={context.trade_type}, profile={context.profile_label})")
+
     opened_at = context.opened_at or _to_dt(meta.get("opened_at"))
     held_min = _held_minutes(now, opened_at)
 
+    # W3: regime-aware min_age and escalation_age
+    _regime_min_mult, _regime_esc_mult = _loss_regime_scale(context.regime_mode, context.trade_type)
     min_age = _get_profile_minutes(
         settings,
         context.trade_type,
         context.profile_label,
         "loss_min_age",
         {"A": 30.0, "B": 60.0, "C": 45.0},
-    )
+    ) * _regime_min_mult
     escalation_age = _get_profile_minutes(
         settings,
         context.trade_type,
         context.profile_label,
         "loss_escalation_age",
         {"A": 120.0, "B": 90.0, "C": 60.0},
-    )
+    ) * _regime_esc_mult
 
     distance_min = float(get_param(settings, "unified_governance_loss_distance_to_sl_min_pct", 0.5))
     accel_cfg = float(get_param(settings, "unified_governance_loss_trajectory_acceleration_pct", 0.5))
@@ -239,15 +400,31 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
     peak_loss_pct = min(peak_loss_pct, context.pnl_pct)
     watchdog_level = int(loss_state.get("watchdog_level", 0) or 0)
 
-    deterioration = False
-    if context.pnl_velocity_1h is not None:
-        deterioration = float(context.pnl_velocity_1h) <= -abs(accel_threshold)
+    # W3: velocity-based deterioration (unchanged) + 2-cycle adverse signal timer
+    _adverse_signal_cycles = int(loss_state.get("adverse_signal_cycles", 0) or 0)
+    _required_adverse_cycles = int(get_param(settings, "unified_governance_loss_adverse_signal_cycles", 2))
+    # FUTURES_SHORT: 1 cycle is enough (fast market, no recovery window)
+    if str(context.trade_type or "").strip().lower() == "futures" or str(context.regime_mode or "").upper() == "FUTURES_SHORT":
+        _required_adverse_cycles = 1
+
+    _signal_against = False
     if context.current_signal_direction:
         sig = str(context.current_signal_direction).strip().upper()
         against_short = context.side.upper() == "SHORT" and sig == "BUY"
         against_long = context.side.upper() in ("LONG", "BUY") and sig == "SELL"
-        if (against_short or against_long) and (context.current_signal_strength or 0.0) >= min_signal_strength:
-            deterioration = True
+        _signal_against = (against_short or against_long) and (context.current_signal_strength or 0.0) >= min_signal_strength
+
+    if _signal_against:
+        _adverse_signal_cycles += 1
+    else:
+        _adverse_signal_cycles = 0  # reset when signal clears
+
+    deterioration = False
+    if context.pnl_velocity_1h is not None:
+        deterioration = float(context.pnl_velocity_1h) <= -abs(accel_threshold)
+    # Adverse signal requires N consecutive cycles to trigger deterioration (W3 timer)
+    if _signal_against and _adverse_signal_cycles >= _required_adverse_cycles:
+        deterioration = True
 
     near_sl = _distance_guard(context.distance_to_sl_pct, distance_min)
 
@@ -284,10 +461,13 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
         "entered_loss_at": entered_loss_at.isoformat(),
         "peak_loss_pct": round(float(peak_loss_pct), 6),
         "watchdog_level": watchdog_level,
+        "adverse_signal_cycles": _adverse_signal_cycles,
         "last_eval_at": now.isoformat(),
         "last_eval_reason": reason,
         "profile_applied": str(context.profile_label or "B").upper(),
         "regime_applied": str(context.regime_mode or ""),
+        "regime_min_mult": round(_regime_min_mult, 2),
+        "regime_esc_mult": round(_regime_esc_mult, 2),
     }
 
     state_patch = {
@@ -309,14 +489,17 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
         close_pct=close_pct,
         reason=reason,
         detail=(
-            f"held_min={held_min}; min_age={min_age}; esc_age={escalation_age}; "
-            f"pnl_pct={context.pnl_pct*100:.2f}; near_sl={near_sl}; det={deterioration}"
+            f"held_min={held_min:.0f}; min_age={min_age:.0f}; esc_age={escalation_age:.0f}; "
+            f"pnl_pct={context.pnl_pct*100:.2f}; near_sl={near_sl}; det={deterioration}; "
+            f"adverse_cycles={_adverse_signal_cycles}/{_required_adverse_cycles}; "
+            f"regime_scale=({_regime_min_mult:.2f},{_regime_esc_mult:.2f})"
         ),
         priority=priority,
         override_target="risk_containment" if should_close else "watchdog",
         diagnostics=(
             f"distance_to_sl_pct={context.distance_to_sl_pct}; "
-            f"pnl_velocity_1h={context.pnl_velocity_1h}; signal_strength={context.current_signal_strength}"
+            f"pnl_velocity_1h={context.pnl_velocity_1h}; signal_strength={context.current_signal_strength}; "
+            f"adverse_signal_cycles={_adverse_signal_cycles}; required={_required_adverse_cycles}"
         ),
         state_patch=state_patch,
     )

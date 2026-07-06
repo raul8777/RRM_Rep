@@ -174,6 +174,12 @@
                         <label class="toggle-label">
                             <input type="checkbox" id="toggleMxn"> MXN
                         </label>
+                        <select id="openSortSelector" class="sort-selector" title="Ordenar posiciones abiertas">
+                            <option value="entry_desc">Más reciente arriba</option>
+                            <option value="entry_asc">Más antigua arriba</option>
+                            <option value="pnl_desc">Mayor PnL</option>
+                            <option value="pnl_asc">Menor PnL</option>
+                        </select>
                         <button class="btn btn-primary btn-xs" id="syncBalanceBtn" title="Sincronizar con Binance">⇄ Sync</button>
                     </div>
                 </div>
@@ -593,6 +599,13 @@
                 <span class="card-sub">cola accionable en tiempo real</span>
             </div>
             <div id="operatorFocusData"><p class="loading">Construyendo prioridades...</p></div>
+        </div>
+        <div class="card" id="reconciliationCard">
+            <div class="card-header">
+                <h2>⚖️ Reconciliación Binance</h2>
+                <span class="card-sub">SPOT/FUTURES vs Binance</span>
+            </div>
+            <div id="reconciliationPanel"><p class="loading">Cargando reconciliación...</p></div>
         </div>
         <div class="card" id="fullHealthCard" style="display:none">
             <div class="card-header">

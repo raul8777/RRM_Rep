@@ -115,10 +115,11 @@ class TestGetScreenedPairs:
                 regime_mode="SPOT_BULL",
                 db_client=db,
             )
-        db.execute_update.assert_called_once()
-        args = db.execute_update.call_args[0][1]
-        assert args[0] == "SPOT_BULL"
-        assert json.loads(args[1])  # spot_symbols
+        assert db.execute_update.call_count >= 1, "execute_update should be called at least once"
+        # First call is the screener_decisions INSERT
+        first_call_args = db.execute_update.call_args_list[0][0][1]
+        assert first_call_args[0] == "SPOT_BULL"
+        assert json.loads(first_call_args[1])  # spot_symbols
 
     def test_cache_invalidated_on_regime_change(self):
         call_count = {"n": 0}

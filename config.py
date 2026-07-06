@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     # Futures: max large-cap SHORTs (BTC/ETH/BNB/SOL) â€” slots above this must be MIDs/NARRATIVE for diversification
     futures_max_largecap_shorts: int = Field(default=5)
     futures_largecap_symbols: List[str] = Field(default=['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT'])
+    # Unified Governance: if False, SSO partial + PRS close will NOT be escalated to a full close.
+    # Instead UG keeps the largest requested partial close pct. This protects from killing a winner
+    # when a profit-taking partial aligns with a temporary PRS close signal.
+    ug_allow_partial_to_full_escalation: bool = Field(default=False)
+    # Peak protection in SPOT_BULL: fraction of peak PnL that must be preserved.
+    # Higher = more patient, lets winners run in bull markets (0.70 is more permissive than 0.60).
+    peak_protection_spot_bull_pct: float = Field(default=0.70)
+    peak_protection_spot_bull_profile_a_pct: float = Field(default=0.75)  # even more patient for profile A
     # Scale-out on take-profit
     scale_out_enabled: bool = Field(default=True)
     scale_out_first_close_pct: float = Field(default=0.5)  # close 50% at TP
@@ -236,6 +244,7 @@ class Settings(BaseSettings):
     unified_governance_loss_signal_reversal_strength: float = Field(default=0.65)
     unified_governance_monitor_only_force_loss_pct: float = Field(default=2.0)
     unified_governance_monitor_only_force_age_minutes: float = Field(default=90.0)
+    unified_governance_loss_min_usdt: float = Field(default=1.50)
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True)
     wr_screener_consecutive_sl_block: int = Field(default=3)  # block after N consecutive SL

@@ -42,7 +42,13 @@ INITIAL_CAPITAL    = 2910.0   # Capital real jun 2026
 DAYS               = 120      # 90d sim + 30d warmup indicadores
 WARMUP_BARS        = 50       # barras de calentamiento antes de tradear
 INTERVAL           = "4h"
-COMMISSION_RATE    = 0.001    # 0.1% por lado (Binance spot BNB fee)
+# C0: use centralized Binance commission module (defaults: spot 0.001, futures 0.0004)
+from binance_commission import (
+    entry_commission as _bt_entry_commission,
+    exit_commission as _bt_exit_commission,
+    get_config as _bt_comm_config,
+)
+COMMISSION_RATE    = _bt_comm_config().rate_for('spot')  # kept for backward compat, do not use directly
 MAX_POSITIONS      = 12       # max posiciones spot simultáneas (producción usa hasta 20 en SPOT_BULL)
 MAX_FUTURES_SHORTS = 7        # FUTURES_MAX_SHORTS producción
 MAX_EXPOSURE_PCT   = 0.75     # MAX_TOTAL_EXPOSURE_PCT
@@ -54,6 +60,11 @@ FNG_VALUE          = 15       # Fear & Greed actual (Capitulación)
 LEVERAGE           = 2        # apalancamiento futuros
 KELLY_BASE         = 40.0     # KELLY_BASE_USDT (producción: $40)
 KELLY_MAX          = 350.0    # KELLY_MAX_USDT (producción)
+
+# C0: futures commission helper (entry + exit on notional position)
+def _bt_fut_comm_total(sh, exit_price):
+    qty = sh.notional / sh.entry_price if sh.entry_price > 0 else 0.0
+    return _bt_entry_commission(qty, sh.entry_price, 'futures', None) + _bt_exit_commission(qty, exit_price, 'futures', None)
 
 # ── Símbolos reales del sistema (32 tokens — analysis_symbols en config.py) ──
 SPOT_SYMBOLS = [
@@ -779,7 +790,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]],
             sk = klines_by_symbol.get(pos.symbol, [])
             price = sk[bar_idx]["close"] if bar_idx < len(sk) else pos.entry_price
             pnl  = (price - pos.entry_price) * pos.qty
-            comm = pos.qty * price * COMMISSION_RATE   # solo comisión de salida
+            comm = _bt_exit_commission(pos.qty, price, 'spot', None)  # C0: solo salida
             capital += pos.size_usdt + pnl - comm     # devolver principal + PnL
             t = {"symbol": pos.symbol, "reason": "regime_close", "cat": pos.category,
                  "pnl": round(pnl - comm, 4), "pnl_pct": round((price/pos.entry_price-1)*100, 2)}
@@ -792,7 +803,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]],
                 sk    = klines_by_symbol.get(sh.symbol, [])
                 price = sk[bar_idx]["close"] if bar_idx < len(sk) else sh.entry_price
                 pnl_f = (sh.entry_price - price) / sh.entry_price
-                pnl   = sh.notional * pnl_f - sh.notional * COMMISSION_RATE * 2
+                pnl   = sh.notional * pnl_f - _bt_fut_comm_total(sh, price)
                 capital += pnl + sh.margin_usdt   # devolver margen
                 t = {"symbol": sh.symbol, "reason": "short_regime_close", "cat": "FUTURES",
                      "pnl": round(pnl, 4), "pnl_pct": round(pnl_f*100, 2), "is_short": True}
@@ -833,7 +844,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]],
                 elif smart_dec == "scale_out" and not pos.scale_done:
                     sell_qty = pos.qty * 0.50
                     pnl  = (tp_price - pos.entry_price) * sell_qty
-                    comm = sell_qty * tp_price * COMMISSION_RATE   # solo salida
+                    comm = _bt_exit_commission(sell_qty, tp_price, 'spot', None)  # C0: salida parcial
                     capital += pos.size_usdt * 0.50 + pnl - comm  # devolver 50% principal
                     pos.qty       -= sell_qty
                     pos.scale_done = True
@@ -872,7 +883,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]],
 
             if exit_price:
                 pnl  = (exit_price - pos.entry_price) * pos.qty
-                comm = pos.qty * exit_price * COMMISSION_RATE   # solo salida
+                comm = _bt_exit_commission(pos.qty, exit_price, 'spot', None)  # C0: salida
                 capital += pos.size_usdt + pnl - comm  # devolver principal + PnL
                 t = {"symbol": pos.symbol, "reason": exit_reason, "cat": pos.category,
                      "pnl": round(pnl-comm, 4), "pnl_pct": round((exit_price/pos.entry_price-1)*100, 2)}
@@ -923,7 +934,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]],
 
             if exit_price:
                 pnl_f = (sh.entry_price - exit_price) / sh.entry_price
-                pnl   = sh.notional * pnl_f - sh.notional * COMMISSION_RATE * 2
+                pnl   = sh.notional * pnl_f - _bt_fut_comm_total(sh, exit_price)
                 capital += pnl + sh.margin_usdt   # devolver margen
                 t = {"symbol": sh.symbol, "reason": exit_reason, "cat": "FUTURES",
                      "pnl": round(pnl, 4), "pnl_pct": round(pnl_f*100, 2), "is_short": True}
@@ -956,7 +967,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]],
                 margin = min(margin, capital * 0.06, 250.0)
                 margin = max(margin, KELLY_BASE)
                 if margin > capital * 0.9: continue
-                comm = margin * LEVERAGE * COMMISSION_RATE
+                comm = _bt_entry_commission(margin * LEVERAGE / sk[bar_idx]["close"], sk[bar_idx]["close"], 'futures', None)
                 capital -= margin + comm
                 shorts.append(SimShort(sym, sk[bar_idx]["close"], margin))
 
@@ -1005,7 +1016,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]],
                 stats["predictor_approved"] += 1
 
                 qty  = size / sk[bar_idx]["close"]
-                comm = qty * sk[bar_idx]["close"] * COMMISSION_RATE
+                comm = _bt_entry_commission(qty, sk[bar_idx]["close"], 'spot', None)
                 capital -= size + comm
                 entries_bar += 1
                 exposure_pct = (invested_usdt + size) / (total_eq) if total_eq > 0 else 0
@@ -1031,7 +1042,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]],
         if sk:
             lp   = sk[-1]["close"]
             pnl  = (lp - pos.entry_price) * pos.qty
-            comm = pos.qty * lp * COMMISSION_RATE   # solo salida
+            comm = _bt_exit_commission(pos.qty, lp, 'spot', None)  # C0: salida
             capital += pos.size_usdt + pnl - comm   # devolver principal + PnL
             trades.append({"symbol": pos.symbol, "reason": "end_of_period",
                            "cat": pos.category, "pnl": round(pnl-comm, 4),
@@ -1041,7 +1052,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]],
         if sk:
             lp    = sk[-1]["close"]
             pnl_f = (sh.entry_price - lp) / sh.entry_price
-            pnl   = sh.notional * pnl_f - sh.notional * COMMISSION_RATE * 2
+            pnl   = sh.notional * pnl_f - _bt_fut_comm_total(sh, lp)
             capital += pnl + sh.margin_usdt
             trades.append({"symbol": sh.symbol, "reason": "short_end_of_period",
                            "cat": "FUTURES", "pnl": round(pnl, 4),

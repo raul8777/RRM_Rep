@@ -66,8 +66,10 @@ def test_spot_sync_closes_missing_exchange_balance():
         take_profit=52000.0,
     ))
 
+    import types
+    _settings = types.SimpleNamespace(spot_reconcile_missing_confirm_cycles=1)
     binance = FakeBinanceClient(balances={'USDT': 1000.0}, prices={'BTCUSDT': 51000.0})
-    imported = pm.sync_with_exchange_balance(binance, settings=None, min_value_usdt=5.0)
+    imported = pm.sync_with_exchange_balance(binance, settings=_settings, min_value_usdt=5.0)
 
     assert imported == []
     assert pm.get_position('BTCUSDT') is None

@@ -587,18 +587,16 @@ class TestClosedPositionsSkipped:
 
 class TestPnLCalculation:
     def test_pnl_percentage_computation(self):
-        """pnl_pct = unr / (entry * qty). Verify the math in check_positions."""
-        # entry=100, qty=2.0, price=98.0 (SHORT 2% gain)
-        # unr = (100 - 98) * 2 = 4.0
-        # pnl_pct = 4.0 / (100 * 2) = 0.02 = 2.0%
+        """pnl_pct = unr / (entry * qty). Verify the math in check_positions uses net PnL."""
+        # entry=100, qty=2.0, price=98.0 (SHORT 2% gross gain)
+        # gross = (100 - 98) * 2 = 4.0
+        # net after Binance futures fees = 4.0 - comm ~= 3.92 => ~1.96%
         pos = make_short(entry=100.0, sl_pct=3.0, tp_pct=7.0, qty=2.0)
         fc = make_fc([pos])
         inject_price(fc, pos.symbol, 98.0)
-        # At 2.0% PnL, breakeven fires (1.0%), trail activates (2.0%) with 0.75% distance
-        # Trail: best=98.0, new_sl = 98*(1+0.0075)=98.735 which is < 100.0 (entry)
         fc.check_positions(settings=make_settings())
-        # Trail supersedes breakeven: SL = 98.735
-        assert pos.sl_price == pytest.approx(98.0 * 1.0075, abs=0.1)
+        # Breakeven fires at 1.0% net, but trailing activation is 2.0% net -> not yet
+        assert pos.sl_price == pytest.approx(100.0, abs=0.1)
         assert pos.sl_price <= 100.0
 
 

@@ -4,6 +4,11 @@ Integration tests for Position Manager
 
 import pytest
 from position_manager import PositionManager, Position, ClosedPosition
+from binance_commission import get_config as _pm_test_cfg
+
+
+def _spot_rate():
+    return _pm_test_cfg().rate_for('spot')
 
 
 class TestPositionManager:
@@ -47,9 +52,12 @@ class TestPositionManager:
         
         assert closed is not None
         assert closed.symbol == "BTCUSDT"
-        # PnL neto de comisiones: 1000 - 0.5*52000*0.001 = 974
-        assert closed.pnl == 974.0
-        assert closed.pnl_percentage == pytest.approx(3.896, abs=0.001)
+        # PnL neto de comisiones usando tasas activas del sistema
+        _r = _spot_rate()
+        _expected_pnl = 1000.0 - (0.5 * 50000.0 * _r) - (0.5 * 52000.0 * _r)
+        _expected_pct = (_expected_pnl / (0.5 * 50000.0)) * 100
+        assert closed.pnl == pytest.approx(_expected_pnl, abs=0.001)
+        assert closed.pnl_percentage == pytest.approx(_expected_pct, abs=0.001)
         assert closed.close_reason == "manual"
         assert pm.get_position("BTCUSDT") is None
     
@@ -68,8 +76,10 @@ class TestPositionManager:
         closed = pm.close_position("BTCUSDT", 48000.0, "manual")
         
         assert closed is not None
-        # PnL neto de comisiones: 1000 - 0.5*48000*0.001 = 976
-        assert closed.pnl == 976.0
+        # PnL neto de comisiones usando tasas activas del sistema
+        _r = _spot_rate()
+        _expected_pnl = 1000.0 - (0.5 * 50000.0 * _r) - (0.5 * 48000.0 * _r)
+        assert closed.pnl == pytest.approx(_expected_pnl, abs=0.001)
         assert closed.close_reason == "manual"
         assert pm.get_position("BTCUSDT") is None
     
@@ -129,6 +139,54 @@ class TestPositionManager:
         closed = pm.check_stop_loss_take_profit({"BTCUSDT": 53000.0})
         assert len(closed) == 1
         assert closed[0].close_reason == "take_profit"
+
+    def test_partial_close_clamps_quantity_and_preserves_residual(self):
+        """Partial close must record real sold quantity and keep residual open."""
+        pm = PositionManager()
+        position = Position(
+            symbol="XRPUSDT",
+            side="BUY",
+            quantity=1000.0,
+            entry_price=0.50,
+            entry_time="2024-01-01T00:00:00Z",
+            entry_commission=0.5,
+            metadata={'trade_type': 'spot'},
+        )
+        pm.add_position(position)
+        closed = pm.close_position("XRPUSDT", 0.55, "profit_realization_supervisor_partial", qty_closed=400.0)
+
+        assert closed is not None
+        assert closed.quantity == 400.0
+        assert closed.metadata.get('partial_close') is True
+        assert closed.metadata.get('partial_qty_closed') == 400.0
+        assert closed.metadata.get('partial_qty_remaining') == 600.0
+
+        residual = pm.get_position("XRPUSDT")
+        assert residual is not None
+        assert residual[0].quantity == 600.0
+        assert residual[0].metadata.get('partial_close') is True
+        assert residual[0].metadata.get('partial_qty_remaining') == 600.0
+
+    def test_partial_close_commission_proportional(self):
+        """Partial close should allocate entry commission proportionally."""
+        pm = PositionManager()
+        position = Position(
+            symbol="ENAUSDT",
+            side="BUY",
+            quantity=500.0,
+            entry_price=1.0,
+            entry_time="2024-01-01T00:00:00Z",
+            entry_commission=1.0,
+            metadata={'trade_type': 'spot'},
+        )
+        pm.add_position(position)
+        closed = pm.close_position("ENAUSDT", 1.10, "partial_close", qty_closed=200.0)
+
+        # 40% of position closed -> 40% of entry commission assigned to closed part
+        assert closed is not None
+        assert closed.entry_commission == pytest.approx(0.4, abs=0.001)
+        residual = pm.get_position("ENAUSDT")
+        assert residual[0].entry_commission == pytest.approx(0.6, abs=0.001)
 
 
 if __name__ == "__main__":

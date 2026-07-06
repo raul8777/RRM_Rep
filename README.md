@@ -112,5 +112,33 @@ Ejemplo con mensaje libre:
 }
 ```
 
+## Reconciliación y fuente de verdad
+
+El sistema usa **Binance como fuente de verdad** para cantidades y comisiones. En cada ciclo de trades se verifican los fills reales antes de persistir posiciones:
+
+- **SPOT:** `binance_client.verify_and_fetch_fills()` confirma el fill y devuelve `qty`, `avg_price`, `commission`.
+  - Entrada: `entry_filled_qty`, `entry_avg_price`, `entry_commission`, `binance_entry_confirmed`.
+  - Cierre: `exit_filled_qty`, `exit_avg_price`, `exit_commission`, `binance_exit_confirmed`.
+  - Si `qty_closed` difiere de la cantidad de posición, se cierra solo lo vendido y se reparte `entry_commission` proporcionalmente.
+- **FUTURES:** `futures_client._verify_entry_filled()` aborta si el `positionAmt` es cero. Cierres usan `realizedPnl` neto de `userTrades` o del evento de cierre (`ORDER TRADE UPDATE`).
+
+### Endpoints de reconciliación
+
+- `GET /reconciliation/spot` — discrepancias SPOT (DB vs balances Binance).
+- `POST /reconciliation/spot/run` — ejecuta reconciliación SPOT (dry-run por defecto).
+- `GET /reconciliation/futures` — discrepancias FUTURES.
+- `POST /reconciliation/futures/run` — ejecuta reconciliación FUTURES.
+- `GET /system/position-reconciliation` — health check consolidado SPOT+FUTURES para dashboard/alertas.
+
+### Modelo de fallo en cierres parciales SL/TP
+
+Si una orden de salida no se confirma (`verify_and_fetch_fills` devuelve `None`), el cierre **no se persiste** como exitoso. Si la orden se ejecuta parcialmente, `position_manager` cierra solo `qty_closed` y conserva el residuo de la posición, ajustando comisiones proporcionalmente. Esto evita fantasmas de posiciones cerradas cuando Binance no llenó toda la orden.
+
+### Persistencia ante reinicios
+
+- `trading_runtime_state` guarda safepoint, modo de régimen/perfil y estado de reconciliación.
+- FUTURES: `_open_positions` se serializa con metadatos `_smart_meta` (breakeven, trailing, SmartTP) para reconstrucción tras reinicio.
+- SPOT: posiciones se leen de la base de datos al arrancar; las comisiones faltantes se estiman con la tasa activa como fallback.
+
 ## Nota
 El sistema está diseñado para un entorno privado y local. No publiques las claves API en GitHub.

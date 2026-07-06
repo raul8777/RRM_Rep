@@ -134,9 +134,10 @@ class SmartScaleOut:
         self._dyn_slow_min_profit = _dyn_slow
 
     def _cfg(self, key: str, default):
-        """Read config from settings or return default."""
+        """Read config from settings via get_param so runtime governance applies."""
         if self._s:
-            return getattr(self._s, key, default)
+            from config_helpers import get_param
+            return get_param(self._s, key, default)
         return default
 
     def _profile_scale(self, pos: SSOPositionData, aggressive: float = 1.0, balanced: float = 1.0, defensive: float = 1.0) -> float:
@@ -378,7 +379,13 @@ class SmartScaleOut:
         _slow_t2 = self._cfg('sso_slow_tier2_hours', 4.0)
         _slow_t3 = self._cfg('sso_slow_tier3_hours', 6.0)
         _slow_t4 = self._cfg('sso_slow_tier4_hours', 8.0)
-        if _regime == 'SPOT_BULL':
+        # W4: FUTURES_SHORT / futures trade_type needs tighter patience on slow crawl
+        _is_futures = str(pos.trade_type or '').strip().lower() == 'futures'
+        if _is_futures or _regime == 'FUTURES_SHORT':
+            _slow_vel_base *= 1.40    # require higher velocity to stay (40% stricter)
+            _slow_min_hours *= 0.70   # only wait 70% of normal min hours
+            _slow_min_profit *= 0.85  # lower profit floor (leveraged = smaller absolute gains)
+        elif _regime == 'SPOT_BULL':
             _slow_vel_base *= 0.6
             _slow_min_hours *= 1.4
         elif _regime == 'RANGE_SCALP':
@@ -475,29 +482,38 @@ class SmartScaleOut:
         if pos.pnl_pct < min_pnl:
             return None
 
+        # W5: Return diagnostic instead of silent None when indicators missing
         if pos.rsi_1h is None or pos.vol_spike is None:
-            return None
+            _missing = []
+            if pos.rsi_1h is None: _missing.append("rsi_1h=None")
+            if pos.vol_spike is None: _missing.append("vol_spike=None")
+            return SSOAction(diagnosis=f"SSO-2:skip({','.join(_missing)})")
 
         # RSI exhaustion check (direction-aware)
+        # W5: SHORT uses separate configurable oversold threshold (default same as momentum_rsi_oversold)
         _is_long = pos.side.upper() in ("LONG", "BUY")
+        _rsi_ob_short = self._cfg('sso_momentum_rsi_oversold_short', self.momentum_rsi_oversold)
         rsi_exhausted = False
+        rsi_diag = f"RSI={pos.rsi_1h:.0f}"
         if _is_long and pos.rsi_1h >= self.momentum_rsi_overbought:
             rsi_exhausted = True
-        elif not _is_long and pos.rsi_1h <= self.momentum_rsi_oversold:
+            rsi_diag += f">={self.momentum_rsi_overbought:.0f}(ob)"
+        elif not _is_long and pos.rsi_1h <= _rsi_ob_short:
             rsi_exhausted = True
+            rsi_diag += f"<={_rsi_ob_short:.0f}(os)"
 
         if not rsi_exhausted:
-            return None
+            return SSOAction(diagnosis=f"SSO-2:no({rsi_diag} not exhausted, vol={pos.vol_spike:.2f}x)")
 
         # Volume dying
         if pos.vol_spike > self.momentum_vol_dying:
-            return None  # volume still healthy, momentum may continue
+            return SSOAction(diagnosis=f"SSO-2:no({rsi_diag} exhausted but vol={pos.vol_spike:.2f}x>{self.momentum_vol_dying:.2f}x still active)")
 
         return SSOAction(
             should_close=True,
             close_pct=0.75,
             reason="sso_momentum_exhausted",
-            detail=f"RSI={pos.rsi_1h:.0f} vol={pos.vol_spike:.2f}x (exhausted at +{pos.pnl_pct*100:.1f}%)",
+            detail=f"{rsi_diag} vol={pos.vol_spike:.2f}x (exhausted at +{pos.pnl_pct*100:.1f}%)",
             trigger="SSO-2",
             priority=2,
         )
@@ -576,9 +592,32 @@ class SmartScaleOut:
             if age_hours < _target_min_hours:
                 return None
 
-        # If already close to target, be more patient (let winners run)
+        # W6: Capital rotation logic — differentiate "close to target" from "far exceeded"
         if pos.today_realized_pnl >= target * 0.85:
-            return None  # already 85%+ of target, let remaining positions run
+            # Excellent day: only keep position if it still has active momentum
+            if pos.today_realized_pnl >= target * 1.5:
+                # Day far exceeded target → rotate capital: close if position is stagnant
+                _age_h = 0.0
+                if pos.opened_at:
+                    _age_h = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
+                _snap_vel = pos.pnl_velocity_1h
+                _life_vel = (pos.pnl_pct / _age_h) if _age_h > 0 else 0.0
+                _worst_vel = min(_snap_vel if _snap_vel is not None else _life_vel, _life_vel)
+                _rotation_vel_threshold = self._cfg('sso_target_rotation_vel_threshold', 0.001)
+                if _worst_vel <= _rotation_vel_threshold:
+                    return SSOAction(
+                        should_close=True,
+                        close_pct=1.0,
+                        reason="sso_capital_rotation",
+                        detail=(
+                            f"Day exceeded {pos.today_realized_pnl:.2f}/${target:.0f} (>{target*1.5:.0f}) "
+                            f"— stagnant pos vel={_worst_vel*100:.3f}%/h <= {_rotation_vel_threshold*100:.2f}%/h"
+                        ),
+                        trigger="SSO-4",
+                        priority=4,
+                    )
+            # 85-150% of target: more patience, let momentum continue
+            return None
 
         # Urgency: if late in the day and far from target, be aggressive
         now_utc = datetime.now(timezone.utc)

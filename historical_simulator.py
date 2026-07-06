@@ -178,9 +178,11 @@ class HistoricalSimulator:
                     forward, entry_price, sl_price, tp_price
                 )
 
-                # Calcular PnL
-                pnl_pct = (exit_price - entry_price) / entry_price
-                pnl = pnl_pct * entry_price  # Simplified - assumes 1 unit position
+                # Calcular PnL neto después de comisiones Binance (C0)
+                from binance_commission import net_pnl
+                _gross_pnl = (exit_price - entry_price) * 1.0
+                pnl = net_pnl(_gross_pnl, 1.0, entry_price, exit_price, 'spot', self.settings)
+                pnl_pct = pnl / entry_price if entry_price > 0 else 0.0
 
                 trade = SyntheticTrade(
                     symbol=symbol,

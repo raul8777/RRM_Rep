@@ -352,10 +352,24 @@ def get_screened_pairs(
 
     # ── Fetch Binance 24h ticker (public endpoint, no auth) ───────────────────
     try:
+        import socket as _sock
         url = "https://api.binance.com/api/v3/ticker/24hr"
         req = urllib.request.Request(url, headers={"User-Agent": "crypto-agent/1.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        with urllib.request.urlopen(req, timeout=12) as resp:
             tickers = json.loads(resp.read())
+    except (_sock.timeout, TimeoutError) as e:
+        print(f"[Screener] ticker/24hr timeout ({e}) — trying DB snapshot fallback")
+        snapshot = _load_screener_snapshot(db_client)
+        _fb_params = {
+            "spot_min_vol": spot_min_vol, "futures_min_vol": futures_min_vol,
+            "max_spot": max_spot, "max_futures": max_futures,
+            "cache_seconds": cache_seconds,
+            "profile_label": (str(profile_label).strip().upper() if profile_label else None),
+            "snapshot_max_age_seconds": _snapshot_max_age_seconds,
+        }
+        if snapshot and _snapshot_is_usable(snapshot, regime_mode, profile_label, _snapshot_max_age_seconds):
+            return _screener_from_snapshot(snapshot, regime_mode, **_fb_params)
+        return _empty_screener_result(regime_mode, **_fb_params)
     except Exception as e:
         print(f"[Screener] ticker/24hr fetch failed: {e} — trying DB snapshot fallback")
         snapshot = _load_screener_snapshot(db_client)

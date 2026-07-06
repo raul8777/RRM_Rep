@@ -1302,4 +1302,4 @@ config.py:40
     class Settings(BaseSettings):
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-====================== 98 passed, 335 warnings in 59.68s ======================
+====================== 98 passed, 335 warnings in 45.08s ======================

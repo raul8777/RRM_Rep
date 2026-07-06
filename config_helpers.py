@@ -325,6 +325,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'unified_governance_loss_signal_reversal_strength': 0.65,
     'unified_governance_monitor_only_force_loss_pct': 2.0,
     'unified_governance_monitor_only_force_age_minutes': 90.0,
+    'unified_governance_loss_min_usdt': 1.50,
     'futures_binance_verify_interval_cycles': 3,
 
     # Futures capital bridge

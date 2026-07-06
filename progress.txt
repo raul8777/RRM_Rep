@@ -1,3 +1,25 @@
+2026-07-06 - Robustness, Commissions, Reconciliation Tests & Docs (Fases 2.5-2.8)
+==================================================================================
+Archivos: config.py, unified_governance_supervisor.py, profit_realization_supervisor.py,
+          app.py, binance_truth_guard.py, frontend/dashboard.js, frontend/index.html,
+          frontend/styles.css, tests/test_position_reconciliation.py, README.md,
+          SYSTEM_REFERENCE.md.
+
+Cambios:
+- Fase 2.5: config flags `ug_allow_partial_to_full_escalation`, `peak_protection_spot_bull_pct`,
+  `peak_protection_spot_bull_profile_a_pct`; UG no escala SSO parcial a cierre total
+  cuando el flag es False; PRS usa nuevos umbrales para SPOT_BULL.
+- Fase 2.6: endpoint `/performance/commissions` usa `entry_avg_price`/`exit_avg_price`
+  de metadata en fallback y `quantity` real de `trades_closed`.
+- Fase 2.7: tests de regresión para SPOT/FUTURES reconciliation; endpoint
+  `/system/position-reconciliation`; panel de dashboard con discrepancias.
+- Fase 2.8: README.md documenta fuente de verdad Binance, modelo de fallo en cierres
+  parciales SL/TP, endpoints de reconciliación y persistencia ante reinicios.
+
+Resultado: 343 passed, 2 fallas preexistentes (config governance baseline).
+
+---
+
 2026-07-06 - Pydantic V2 Migration — Sesión 48
 ==============================================
 Problema: 370 PydanticDeprecatedSince20 warnings en cada ciclo de tests/arranque (config.py con sintaxis V1).

@@ -4,7 +4,9 @@ bc = comp.binance_client
 import statistics
 
 MXN_RATE = 19.5
-COMMISSION = 0.002
+# C0: use centralized Binance commission default (spot round trip)
+from binance_commission import get_config as _sc_comm_config
+COMMISSION = _sc_comm_config().rate_for('spot') * 2
 
 def calc_rsi(prices, n=14):
     if len(prices) < n+1: return 50.0

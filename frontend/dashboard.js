@@ -583,6 +583,7 @@ let _lastOpenData   = null;
 let _lastClosedData = null;
 let _opsMainTab = 'open';  // 'open' | 'closed'
 let _opsSubFilter = 'all'; // 'all' | 'spot' | 'fut'
+let _openSortMode = localStorage.getItem('ops_open_sort') || 'entry_desc'; // 'entry_desc' | 'entry_asc' | 'pnl_desc' | 'pnl_asc'
 
 function switchOpsMainTab(main) {
     _opsMainTab = main;
@@ -597,6 +598,8 @@ function switchOpsMainTab(main) {
     // Sync sub-tab filter to the active main tab
     if (main === 'open')   { _currentOpenFilter   = _opsSubFilter; if (_lastOpenData)   renderOpenPositions(_lastOpenData); }
     if (main === 'closed') { _currentClosedFilter = _opsSubFilter; if (_lastClosedData) renderClosedPositions(_lastClosedData); }
+    const openSortSelector = document.getElementById('openSortSelector');
+    if (openSortSelector) openSortSelector.style.display = main === 'open' ? '' : 'none';
 }
 
 function switchOpsSubTab(sub) {
@@ -1045,21 +1048,17 @@ function renderOpenPositions(d) {
     if (_filter === 'spot') visiblePositions = _allPos.filter(p => p.trade_type !== 'futures');
     else if (_filter === 'fut') visiblePositions = _allPos.filter(p => p.trade_type === 'futures');
 
-    // Ordenar por Edad descendente (más antigua primero — edad real desde primera apertura)
+    // Sort by selected mode (default: newest entry first)
+    function _entryTs(p) {
+        const ts = p.entry_time || p.first_entry_time || (p.entries?.[0]?.opened_at);
+        return ts && Number.isFinite(Date.parse(ts)) ? Date.parse(ts) : 0;
+    }
     visiblePositions = [...visiblePositions].sort((a, b) => {
-        const aEntries = a.entries?.length > 0 ? Math.max(...a.entries.map(e => e.age_h || 0)) : 0;
-        const bEntries = b.entries?.length > 0 ? Math.max(...b.entries.map(e => e.age_h || 0)) : 0;
-        const aField = parseFloat(a.hours_held || 0);
-        const bField = parseFloat(b.hours_held || 0);
-        const aFirst = a.first_entry_time && Number.isFinite(Date.parse(a.first_entry_time))
-            ? Math.max(0, (Date.now() - Date.parse(a.first_entry_time)) / 3600000)
-            : 0;
-        const bFirst = b.first_entry_time && Number.isFinite(Date.parse(b.first_entry_time))
-            ? Math.max(0, (Date.now() - Date.parse(b.first_entry_time)) / 3600000)
-            : 0;
-        const aHrs = Math.max(aEntries, aField, aFirst);
-        const bHrs = Math.max(bEntries, bField, bFirst);
-        return bHrs - aHrs;
+        if (_openSortMode === 'entry_desc') return _entryTs(b) - _entryTs(a);
+        if (_openSortMode === 'entry_asc')  return _entryTs(a) - _entryTs(b);
+        if (_openSortMode === 'pnl_desc')   return parseFloat(b.unrealized_pnl || 0) - parseFloat(a.unrealized_pnl || 0);
+        if (_openSortMode === 'pnl_asc')    return parseFloat(a.unrealized_pnl || 0) - parseFloat(b.unrealized_pnl || 0);
+        return _entryTs(b) - _entryTs(a);
     });
 
     if (visiblePositions.length === 0) {
@@ -1126,6 +1125,16 @@ function renderOpenPositions(d) {
         const escBadge = _showEscBadge
             ? ` <span class="badge-esc" style="cursor:pointer" onclick="event.stopPropagation();toggleEscRow('${p.symbol}')" title="Click para ver/ocultar entradas (${_escN} registradas, idx máx ${_maxEscIdx})">📊×${_maxEscIdx} ${isExpanded ? '▲' : '▼'}</span>`
             : '';
+        const _pMeta = p.metadata || {};
+        const isPartialOpen = _pMeta.partial_close || _pMeta.partial_qty_remaining || (_pMeta.entry_qty_original && p.quantity < _pMeta.entry_qty_original);
+        const _pQtyClosed = _pMeta.partial_qty_closed ?? _pMeta.profit_realization_partial_qty;
+        const _pQtyRemaining = _pMeta.partial_qty_remaining;
+        const _partialTooltip = (_pQtyClosed != null || _pQtyRemaining != null)
+            ? `Posición residual tras cierre parcial${(_pQtyClosed != null ? ' — cerrado: ' + fmt(_pQtyClosed, 4) : '')}${(_pQtyRemaining != null ? ' — restante: ' + fmt(_pQtyRemaining, 4) : '')}`
+            : 'Posición residual tras cierre parcial';
+        const partialBadge = isPartialOpen
+            ? ` <span class="badge-partial" title="${_partialTooltip}">✂️PARCIAL</span>`
+            : '';
 
         const tp = parseFloat(p.take_profit || 0);
         let progressHtml = '—';
@@ -1141,7 +1150,7 @@ function renderOpenPositions(d) {
 
         rows.push(`
         <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id}', 'open')" style="cursor:pointer" data-symbol="${p.symbol}">
-            <td>${typeBadge} <strong>${p.symbol}</strong>${overflowBadge}${escBadge}${bounceBadge}</td>
+            <td>${typeBadge} <strong>${p.symbol}</strong>${overflowBadge}${escBadge}${partialBadge}${bounceBadge}</td>
             <td>$${fmt(entryP)}<br><small class="entry-time">${entryTimeStr}</small></td>
             <td class="sl-tp-cell">${fmtSlTpCell(p)}</td>
             <td class="sl-tp-badges">${fmtSlTpBadges(p)}</td>
@@ -1263,9 +1272,9 @@ function renderClosedPositions(d) {
 
     // Ordenar por exit_time descendente (más reciente primero)
     const sortedPositions = [...filteredClosed].sort((a, b) => {
-        const dateA = new Date(b.exit_time || 0);
-        const dateB = new Date(a.exit_time || 0);
-        return dateA - dateB;
+        const dateA = new Date(a.exit_time || 0).getTime();
+        const dateB = new Date(b.exit_time || 0).getTime();
+        return dateB - dateA;
     });
 
     // Helper para formatear fechas en local (México)
@@ -1327,6 +1336,9 @@ function renderClosedPositions(d) {
                     }
                     if (p.peak_pnl_pct > 0) lifecycleBadges += `<span class="sl-badge peak" title="Peak PnL: ${fmt(p.peak_pnl_pct, 1)}%">📊${fmt(p.peak_pnl_pct, 1)}%</span>`;
                     if (p.close_reason === 'momentum_reversal') lifecycleBadges += '<span class="sl-badge mr" title="Cerrado por momentum reversal">⚡MR</span>';
+                    if (p.close_reason && (p.close_reason.includes('partial') || p.metadata?.partial_close || p.metadata?.profit_realization_partial_qty)) {
+                        lifecycleBadges += `<span class="sl-badge partial" title="Cierre parcial">✂️PARCIAL</span>`;
+                    }
                     // Escalamiento badge for closed positions
                     const _cMeta = p.metadata || {};
                     const _cEscIdx = _cMeta.escalonamiento_index;
@@ -2838,6 +2850,37 @@ async function updateHealthAndErrors() {
         }
     } catch (e) {
         console.error('Health fetch error:', e);
+    }
+}
+
+async function updateReconciliation() {
+    try {
+        const res = await fetch(`${API_BASE}/system/position-reconciliation`, { headers: _authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        const panel = document.getElementById('reconciliationPanel');
+        if (!panel) return;
+        const fmtDisc = (items) => {
+            if (!items || items.length === 0) return '<span class="rec-ok">Sin discrepancias</span>';
+            return items.map(i => {
+                const sev = i.severity || 'warning';
+                const cls = sev === 'high' || sev === 'critical' ? 'rec-high' : 'rec-warn';
+                return `<div class="rec-row ${cls}">[${sev.toUpperCase()}] ${i.code} — ${i.symbol || i.detail || ''}</div>`;
+            }).join('');
+        };
+        const spot = data.spot || {};
+        const futures = data.futures || {};
+        const healthy = data.healthy;
+        panel.innerHTML = `
+            <div class="rec-header ${healthy ? 'rec-ok' : 'rec-high'}">
+                ${healthy ? '✅ Reconciliación SPOT/FUTURES OK' : '⚠️ Discrepancias detectadas'}
+            </div>
+            <div class="rec-section"><strong>SPOT</strong> (${spot.severity || 'unknown'}): ${fmtDisc(spot.discrepancies)}</div>
+            <div class="rec-section"><strong>FUTURES</strong> (${futures.severity || 'unknown'}): ${fmtDisc(futures.discrepancies)}</div>
+            <div class="rec-ts">Último check: ${data.timestamp || '—'}</div>
+        `;
+    } catch (e) {
+        console.error('Reconciliation fetch error:', e);
     }
 }
 
@@ -5855,6 +5898,17 @@ document.addEventListener('DOMContentLoaded', () => {
     if (runSmartBacktestBtn) runSmartBacktestBtn.addEventListener('click', () => runSmartBacktest());
     renderControlAuditLog();
 
+    // ── Open positions sort selector ────────────────────────────────────────
+    const openSortSelector = document.getElementById('openSortSelector');
+    if (openSortSelector) {
+        openSortSelector.value = _openSortMode;
+        openSortSelector.addEventListener('change', () => {
+            _openSortMode = openSortSelector.value;
+            localStorage.setItem('ops_open_sort', _openSortMode);
+            if (_lastOpenData) renderOpenPositions(_lastOpenData);
+        });
+    }
+
     // ── Backtest run button ──────────────────────────────────────────────────
     const runBacktestBtn = document.getElementById('runBacktestBtn');
     if (runBacktestBtn) runBacktestBtn.addEventListener('click', async () => {
@@ -5969,13 +6023,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ── Refresh Health button ────────────────────────────────────
     const refreshHealthBtn = document.getElementById('refreshHealthBtn');
-    if (refreshHealthBtn) refreshHealthBtn.addEventListener('click', () => updateHealthAndErrors());
+    if (refreshHealthBtn) refreshHealthBtn.addEventListener('click', () => {
+        updateHealthAndErrors();
+        updateReconciliation();
+    });
 
     // ── Clear Errors button ──────────────────────────────────────
     const clearErrorsBtn = document.getElementById('clearErrorsBtn');
     if (clearErrorsBtn) clearErrorsBtn.addEventListener('click', async () => {
         await fetch(`${API_BASE}/errors/clear`, { method: 'POST' });
         await updateHealthAndErrors();
+        await updateReconciliation();
     });
 
     // ── Full Health Check button ──────────────────────────────────
@@ -6008,9 +6066,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     updateDashboard();
     updateHealthAndErrors();
+    updateReconciliation();
     pollBacktestResults();
     updateBacktestProgressWidget();
     setInterval(updateDashboard, POLL_INTERVAL_MS);
+    setInterval(updateReconciliation, 60000);
     setInterval(updateHealthAndErrors, 60000);  // Health & errors refresh every 60s
     setInterval(updateBacktestProgressWidget, BACKTEST_PROGRESS_POLL_MS);
     // Toggle MXN re-renders open positions

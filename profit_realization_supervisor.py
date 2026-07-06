@@ -73,10 +73,12 @@ def mark_profit_started(metadata: Dict[str, Any], pnl_pct: float, now: Optional[
 
 
 def _profile_scale(profile_label: Optional[str]) -> float:
-    # Option 2: keep a uniform policy across A/B/C profiles.
-    # Aggressiveness is still controlled by trade_type + regime scaling.
-    _ = str(profile_label or "").strip().upper()
-    return 1.0
+    p = str(profile_label or "").strip().upper()
+    if p == "A":
+        return 0.82   # Aggressive: shorter patience, exits profit sooner
+    if p == "C":
+        return 1.20   # Defensive: more patient, lets winners run longer
+    return 1.0        # B = neutral baseline
 
 
 def _regime_scale(regime_mode: Optional[str], trade_type: Optional[str]) -> float:
@@ -90,6 +92,61 @@ def _regime_scale(regime_mode: Optional[str], trade_type: Optional[str]) -> floa
     if regime == "SPOT_BULL":
         return 0.95 if trade_type == "spot" else 0.90
     return 1.0
+
+
+def _peak_protection_pct(regime_mode: Optional[str], trade_type: Optional[str]) -> float:
+    """Minimum fraction of peak_pnl_pct that must be preserved.
+    If pnl_pct < peak * this value, trigger full close regardless of held time.
+    F11: defends significant gains, prevents giving back peak to near-zero."""
+    regime = str(regime_mode or "").strip().upper()
+    if trade_type == "futures" or regime == "FUTURES_SHORT":
+        return 0.75  # futures: defend 75% of peak (fast market)
+    if regime == "PRESERVATION":
+        return 0.80  # preservation: defend 80% (capital protection priority)
+    if regime == "RANGE_SCALP":
+        return 0.70  # range scalp: defend 70% (mini-rebound killer)
+    if regime == "SPOT_BULL":
+        # Fase 2.5: configurable via settings; default is more patient than the old 0.60
+        _profile = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper()
+        if _profile == 'A':
+            return float(getattr(settings, 'peak_protection_spot_bull_profile_a_pct', 0.75))
+        return float(getattr(settings, 'peak_protection_spot_bull_pct', 0.70))
+    return 0.65      # neutral default
+
+
+def _compute_momentum_score(
+    pnl_velocity_1h: Optional[float],
+    signal_strength: Optional[float],
+    fng_value: Optional[float],
+    min_velocity: float,
+    hold_signal_strength: float,
+) -> float:
+    """F9: Unified momentum score 0-100 replacing binary signal_faded.
+    >= 70: hold — momentum is active
+    40-70: normal giveback evaluation
+    <  40: accelerate exit — momentum exhausted"""
+    score = 50.0  # neutral baseline
+
+    # Component 1: PnL velocity (40% weight)
+    # velocity > min_velocity → bullish momentum
+    if pnl_velocity_1h is not None:
+        vel_norm = max(-1.0, min(1.0, pnl_velocity_1h / max(min_velocity, 0.0001)))
+        score += 40.0 * (vel_norm * 0.5)  # [-20, +20] contribution
+
+    # Component 2: Signal strength (35% weight)
+    # strength >= hold_signal_strength → signal confirms position
+    if signal_strength is not None:
+        sig_norm = max(0.0, min(1.0, signal_strength / max(hold_signal_strength, 0.001)))
+        # Above hold threshold → positive; below → negative
+        score += 35.0 * (sig_norm - 0.5) * 2.0  # [-35, +35] contribution
+
+    # Component 3: Fear & Greed (25% weight)
+    # F&G > 50 → greed helps momentum; < 50 → fear hurts it
+    if fng_value is not None:
+        fng_norm = (float(fng_value) - 50.0) / 50.0  # [-1, +1]
+        score += 25.0 * fng_norm * 0.5  # [-12.5, +12.5] contribution
+
+    return max(0.0, min(100.0, score))
 
 
 def _trade_defaults(trade_type: str) -> Dict[str, float]:
@@ -153,15 +210,48 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
     if not enabled or context.pnl_pct <= 0 or context.pnl_pct < min_profit_pct:
         return ProfitRealizationDecision()
 
+    if not context.regime_mode:
+        print(f"[PRS] {context.symbol}: regime_mode=None — using neutral scale (trade_type={trade_type}, profile={context.profile_label})")
+
     profile_scale = _profile_scale(context.profile_label)
     regime_scale = _regime_scale(context.regime_mode, trade_type)
     scale = max(0.50, min(1.35, profile_scale * regime_scale))
 
-    partial_minutes = max(15.0, partial_minutes * scale)
-    full_minutes = max(partial_minutes + 15.0, full_minutes * scale)
-    drawback_pct = max(0.001, drawback_pct * (1.0 / max(0.75, scale)))
+    # F10: Apply Fear & Greed exit modifier injected by UG (if present)
+    _fng_meta_modifier = float(context.metadata.get("ug_fng_exit_modifier", 1.0) or 1.0)
+    _fng_meta_modifier = max(0.70, min(1.30, _fng_meta_modifier))  # guard: never more than 30% change
+    scale_with_fng = scale * _fng_meta_modifier
+
+    partial_minutes = max(15.0, partial_minutes * scale_with_fng)
+    full_minutes = max(partial_minutes + 15.0, full_minutes * scale_with_fng)
+    drawback_pct = max(0.001, drawback_pct * (1.0 / max(0.75, scale_with_fng)))
     min_velocity = float(defaults["min_velocity"])
     hold_signal_strength = float(defaults["hold_signal_strength"])
+
+    # F9: Unified momentum score replaces binary signal_faded
+    # W8: Use ug_fng_value (real F&G) when available; fallback to modifier-based approximation
+    _fng_real = context.metadata.get("ug_fng_value")
+    if _fng_real is not None:
+        _fng_for_score = max(0.0, min(100.0, float(_fng_real)))
+    else:
+        _fng_mod = float(context.metadata.get("ug_fng_exit_modifier", 1.0) or 1.0)
+        _fng_for_score = max(0.0, min(100.0, 50.0 + (_fng_mod - 1.0) * 250.0))
+    momentum_score = _compute_momentum_score(
+        pnl_velocity_1h=context.pnl_velocity_1h,
+        signal_strength=context.current_signal_strength,
+        fng_value=_fng_for_score,
+        min_velocity=min_velocity,
+        hold_signal_strength=hold_signal_strength,
+    )
+    momentum_low = momentum_score < 40.0   # exhausted — accelerate exit
+    momentum_high = momentum_score >= 70.0  # strong — extend patience
+
+    # When momentum is high, extend partial_minutes by up to 25%
+    if momentum_high:
+        partial_minutes = min(full_minutes - 10.0, partial_minutes * 1.25)
+    # When momentum is low, reduce partial_minutes by 25% (act faster)
+    elif momentum_low:
+        partial_minutes = max(10.0, partial_minutes * 0.75)
 
     held_min = _held_minutes(now, context.profit_started_at, context.opened_at)
     peak = max(float(context.peak_pnl_pct or 0.0), float(context.pnl_pct or 0.0))
@@ -171,9 +261,63 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
     signal_strength = context.current_signal_strength
     signal_known = signal_strength is not None
     strong_signal = signal_known and signal_strength >= hold_signal_strength
-    signal_faded = signal_known and (not strong_signal)
+    signal_faded = signal_known and (not strong_signal) and not momentum_high
     tp_extensions = max(0, int(context.tp_extensions or 0))
     extension_cap_hit = tp_extensions >= max_extensions
+
+    # F11: Peak protection — close immediately if significant gains are being given back
+    # W7: Minimum threshold is ATR-aware to avoid triggering on normal volatility noise
+    _peak_protect = _peak_protection_pct(context.regime_mode, trade_type)
+    _atr_4h_pct = float(context.metadata.get("atr_4h_pct", 0.0) or 0.0)
+    _atr_floor = _atr_4h_pct * 1.5 if _atr_4h_pct > 0 else 0.0
+    _peak_protect_min = max(min_profit_pct * 3.0, _atr_floor)
+    # FUTURES: needs higher threshold due to leverage amplifying noise
+    if trade_type == "futures":
+        _peak_protect_min = max(_peak_protect_min, 0.015)
+    _peak_protection_fired = (
+        peak >= _peak_protect_min
+        and float(context.pnl_pct or 0.0) < peak * _peak_protect
+        and float(context.pnl_pct or 0.0) > 0  # still in profit, but degrading fast
+    )
+    if _peak_protection_fired:
+        _pp_detail = (
+            f"{trade_type.upper()} peak={peak*100:.2f}% dropped to pnl={context.pnl_pct*100:.2f}% "
+            f"(< {_peak_protect*100:.0f}% of peak={peak*_peak_protect*100:.2f}%) "
+            f"regime={context.regime_mode or 'NEUTRAL'} score={momentum_score:.0f}"
+        )
+        _pp_diagnostics = (
+            f"peak_protection: peak={peak*100:.2f}% protect={_peak_protect:.2f} "
+            f"threshold={peak*_peak_protect*100:.2f}% current={context.pnl_pct*100:.2f}%; "
+            f"momentum_score={momentum_score:.1f}; fng_mod={_fng_meta_modifier:.2f}"
+        )
+        _pp_state_patch = {
+            LAST_DECISION_KEY: {
+                "action": "close",
+                "reason": "prs_peak_protection",
+                "close_pct": 1.0,
+                "detail": _pp_detail,
+                "diagnostics": _pp_diagnostics,
+                "peak_pnl_pct": round(float(peak), 6),
+                "pnl_pct": round(float(context.pnl_pct or 0.0), 6),
+                "peak_protect_pct": _peak_protect,
+                "momentum_score": round(momentum_score, 1),
+                "trade_type": trade_type,
+                "symbol": context.symbol,
+                "updated_at": now.isoformat(),
+            },
+            LAST_DECISION_AT_KEY: now.isoformat(),
+        }
+        return ProfitRealizationDecision(
+            should_close=True,
+            close_pct=1.0,
+            action="close",
+            reason="prs_peak_protection",
+            detail=_pp_detail,
+            override_target="peak_protection",
+            priority=95,
+            diagnostics=_pp_diagnostics,
+            state_patch=_pp_state_patch,
+        )
 
     if held_min < partial_minutes and giveback_pct < (drawback_pct * 0.5) and positive_velocity and signal_faded:
         return ProfitRealizationDecision()
@@ -185,20 +329,20 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
     override_target = "smarttp_extend"
     priority = 50
 
-    if held_min >= full_minutes and ((giveback_pct >= drawback_pct) or (not positive_velocity) or extension_cap_hit or signal_faded):
+    if held_min >= full_minutes and ((giveback_pct >= drawback_pct) or (not positive_velocity) or extension_cap_hit or signal_faded or momentum_low):
         should_full = True
         reason = "profit_realization_supervisor_full"
         detail = (
             f"{trade_type.upper()} held {held_min}m in profit; pnl={context.pnl_pct*100:.2f}% peak={peak*100:.2f}% "
-            f"giveback={giveback_pct*100:.2f}% >= {drawback_pct*100:.2f}% or signal faded"
+            f"giveback={giveback_pct*100:.2f}% >= {drawback_pct*100:.2f}% | score={momentum_score:.0f}"
         )
         priority = 90
-    elif held_min >= partial_minutes and ((giveback_pct >= (drawback_pct * 0.5)) or (not positive_velocity) or extension_cap_hit or signal_faded):
+    elif held_min >= partial_minutes and ((giveback_pct >= (drawback_pct * 0.5)) or (not positive_velocity) or extension_cap_hit or signal_faded or momentum_low):
         should_partial = True
         reason = "profit_realization_supervisor_partial"
         detail = (
             f"{trade_type.upper()} held {held_min}m in profit; pnl={context.pnl_pct*100:.2f}% peak={peak*100:.2f}% "
-            f"giveback={giveback_pct*100:.2f}% velocity={None if velocity is None else round(float(velocity)*100, 4)}"
+            f"giveback={giveback_pct*100:.2f}% velocity={None if velocity is None else round(float(velocity)*100, 4)} | score={momentum_score:.0f}"
         )
         priority = 70
 
@@ -210,7 +354,8 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
         f"held_min={held_min}; partial_min={partial_minutes:.1f}; full_min={full_minutes:.1f}; "
         f"drawback={drawback_pct*100:.2f}%; giveback={giveback_pct*100:.2f}%; "
         f"velocity={None if velocity is None else round(float(velocity), 6)}; "
-        f"strong_signal={strong_signal}; extensions={tp_extensions}; scale={scale:.2f}"
+        f"momentum_score={momentum_score:.1f}; momentum_high={momentum_high}; momentum_low={momentum_low}; "
+        f"strong_signal={strong_signal}; extensions={tp_extensions}; scale={scale:.2f}; fng_mod={_fng_meta_modifier:.2f}"
     )
     state_patch = {
         LAST_DECISION_KEY: {
@@ -223,6 +368,8 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
             "giveback_pct": round(giveback_pct, 6),
             "pnl_pct": round(float(context.pnl_pct or 0.0), 6),
             "peak_pnl_pct": round(float(peak or 0.0), 6),
+            "momentum_score": round(momentum_score, 1),
+            "fng_modifier": round(_fng_meta_modifier, 4),
             "trade_type": trade_type,
             "symbol": context.symbol,
             "updated_at": now.isoformat(),

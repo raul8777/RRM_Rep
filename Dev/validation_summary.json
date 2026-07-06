@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-06T14:15:54.450374+00:00",
+  "generated_at": "2026-07-06T14:32:43.840211+00:00",
   "python_executable": "C:\\Users\\raul8\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
   "overall": "PASS",
   "results": [
@@ -7,8 +7,8 @@
       "suite": "tests/test_system_health.py",
       "exit_code": 0,
       "status": "PASS",
-      "started_at": "2026-07-06T14:14:34.813905+00:00",
-      "ended_at": "2026-07-06T14:14:53.897673+00:00",
+      "started_at": "2026-07-06T14:31:38.864660+00:00",
+      "ended_at": "2026-07-06T14:31:57.876469+00:00",
       "output_file": "Dev/validation_system_health_utf8.txt",
       "tail": [
         "    db_port: int = Field(default=5432, env=\"DB_PORT\")",
@@ -30,15 +30,15 @@
         "    \"timestamp\": datetime.utcnow().isoformat()",
         "",
         "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
-        "============== 109 passed, 12 deselected, 370 warnings in 18.78s =============="
+        "============== 109 passed, 12 deselected, 370 warnings in 18.63s =============="
       ]
     },
     {
       "suite": "tests/test_futures_smart_exits.py",
       "exit_code": 0,
       "status": "PASS",
-      "started_at": "2026-07-06T14:14:53.898796+00:00",
-      "ended_at": "2026-07-06T14:15:53.884596+00:00",
+      "started_at": "2026-07-06T14:31:57.877976+00:00",
+      "ended_at": "2026-07-06T14:32:43.264726+00:00",
       "output_file": "Dev/validation_futures_smart_exits_utf8.txt",
       "tail": [
         "    db_password: str = Field(default=\"\", env=\"DB_PASSWORD\")",
@@ -60,15 +60,15 @@
         "    class Settings(BaseSettings):",
         "",
         "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
-        "====================== 98 passed, 335 warnings in 59.68s ======================"
+        "====================== 98 passed, 335 warnings in 45.08s ======================"
       ]
     },
     {
       "suite": "tests/test_portfolio_manager.py",
       "exit_code": 0,
       "status": "PASS",
-      "started_at": "2026-07-06T14:15:53.885577+00:00",
-      "ended_at": "2026-07-06T14:15:54.449305+00:00",
+      "started_at": "2026-07-06T14:32:43.265706+00:00",
+      "ended_at": "2026-07-06T14:32:43.839207+00:00",
       "output_file": "Dev/validation_portfolio_manager_utf8.txt",
       "tail": [
         "    db_host: str = Field(default=\"localhost\", env=\"DB_HOST\")",

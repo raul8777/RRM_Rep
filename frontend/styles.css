@@ -240,6 +240,18 @@ body {
 }
 .card-sub  { font-size:11px; color:var(--text-muted); font-weight:400; }
 .card-actions { display:flex; align-items:center; gap:6px; }
+.sort-selector {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px;
+    color: #ccc;
+    font-size: 11px;
+    padding: 3px 8px;
+    outline: none;
+    cursor: pointer;
+}
+.sort-selector:hover, .sort-selector:focus { border-color: rgba(78,204,163,0.4); }
+.sort-selector option { background: #16162a; color: #ccc; }
 
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    BUTTONS
@@ -1469,6 +1481,7 @@ body {
 .sl-badge.mr    { background:rgba(155,89,182,0.15); color:#9b59b6; border-color:rgba(155,89,182,0.3); }
 .sl-badge.sso   { background:rgba(241,196,15,0.15); color:#f1c40f; border-color:rgba(241,196,15,0.3); font-weight:600; }
 .sl-badge.esc   { background:rgba(230,126,34,0.15); color:#e67e22; border-color:rgba(230,126,34,0.3); font-weight:600; }
+.sl-badge.partial { background:rgba(231,76,60,0.15); color:#e74c3c; border:1px solid rgba(231,76,60,0.3); font-weight:600; }
 
 /* SSO-6: Bounce Rescue Mode — visual indicators */
 .row-bounce { background:rgba(230,126,34,0.10) !important; border-left:3px solid #e67e22; }
@@ -1494,6 +1507,9 @@ body {
              cursor:pointer; vertical-align:middle; font-weight:700;
              user-select:none; transition:background 0.15s; }
 .badge-esc:hover { background:rgba(230,126,34,0.32); }
+.badge-partial { display:inline-block; font-size:9px; padding:1px 4px; border-radius:5px; margin-left:3px;
+                 background:rgba(231,76,60,0.18); color:#e74c3c; border:1px solid rgba(231,76,60,0.35);
+                 vertical-align:middle; font-weight:700; cursor:help; }
 
 /* Escalamiento expandable sub-rows */
 .esc-sub-row td { font-size:12px; padding:4px 8px; border-bottom:1px solid rgba(255,255,255,0.04); }
@@ -1864,3 +1880,18 @@ body {
         width: auto;
     }
 }
+
+/* ── Reconciliation Panel (Fase 2.7) ─────────────────────────────────────── */
+#reconciliationPanel { font-size: 12px; }
+.rec-header {
+    padding: 6px 8px;
+    border-radius: 6px;
+    margin-bottom: 8px;
+    font-weight: 600;
+}
+.rec-ok { background: rgba(78,204,163,0.12); color: #4ecca3; }
+.rec-high { background: rgba(231,76,60,0.12); color: #e74c3c; }
+.rec-warn { background: rgba(243,156,18,0.12); color: #f39c12; }
+.rec-section { margin: 6px 0; }
+.rec-row { padding: 3px 0; border-bottom: 1px solid var(--border); }
+.rec-ts { color: var(--text-muted); margin-top: 6px; font-size: 11px; }

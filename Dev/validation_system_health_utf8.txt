@@ -1310,4 +1310,4 @@ tests/test_system_health.py::TestCat6_PositionManager::test_position_summary_val
     "timestamp": datetime.utcnow().isoformat()
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-============== 109 passed, 12 deselected, 370 warnings in 18.78s ==============
+============== 109 passed, 12 deselected, 370 warnings in 18.63s ==============

@@ -1,18 +1,22 @@
 === getattr(settings, ...) audit ===
-Total: 348 occurrences
+Total: 574 occurrences
 Critical mismatches: 0
 
 
 
 === Dev/backtest_optimizer.py ===
-  info     db_url                                   default=None                 line=660
-  info     database_url                             default=None                 line=660
-  info     db_user                                  default='crypto_agent'       line=662
-  info     db_password                              default=''                   line=663
-  info     db_host                                  default='postgres'           line=664
-  info     db_port                                  default=5432                 line=664
-  info     db_name                                  default='crypto_agent'       line=665
-  info     auto_apply                               default=False                line=912
+  info     db_url                                   default=None                 line=965
+  info     database_url                             default=None                 line=965
+  info     db_user                                  default='crypto_agent'       line=967
+  info     db_password                              default=''                   line=968
+  info     db_host                                  default='postgres'           line=969
+  info     db_port                                  default=5432                 line=969
+  info     db_name                                  default='crypto_agent'       line=970
+  info     auto_apply                               default=False                line=1569
+
+=== Dev/dashboard_parity_snapshot.py ===
+  info     status                                   default=200                  line=27
+  info     status                                   default=200                  line=29
 
 === Dev/scripts/_capture_baseline.py ===
   info     pnl                                      default=0                    line=28
@@ -24,6 +28,15 @@ Critical mismatches: 0
   info     pnl                                      default=0                    line=49
   info     pnl                                      default=0                    line=50
 
+=== Dev/smart_backtest_optimizer.py ===
+  info     db_url                                   default=None                 line=69
+  info     database_url                             default=None                 line=69
+  info     db_user                                  default='crypto_agent'       line=72
+  info     db_password                              default=''                   line=73
+  info     db_host                                  default='postgres'           line=74
+  info     db_port                                  default=5432                 line=74
+  info     db_name                                  default='crypto_agent'       line=75
+
 === Dev/validate_params.py ===
   info     category_thresholds                      default={}                   line=74
 
@@ -33,63 +46,147 @@ Critical mismatches: 0
   info     max_per_trade_usdt                       default=500.0                line=86
 
 === analysis_cycle.py ===
-  info     interval                                 default='1h'                 line=93
+  info     interval                                 default='1h'                 line=95
+  info     current_regime_mode                      default=''                   line=167
+  info     current_regime_profile_label             default=''                   line=168
+  info     db_client                                default=None                 line=174
 
 === app.py ===
-  info     trade_cycle_minutes                      default=5                    line=142
-  info     auto_bnb_for_commission                  default=True                 line=252
-  info     metadata                                 default={}                   line=793
-  info     metadata                                 default=None                 line=870
-  info     close_reason                             default=''                   line=1006
-  info     quantity                                 default=0                    line=1026
-  info     confidence                               default=0.5                  line=1217
-  info     close_reason                             default=''                   line=1346
-  info     is_corrupted                             default=False                line=1347
-  info     is_corrupted                             default=False                line=1351
-  info     token_categories                         default={}                   line=1543
-  info     metadata                                 default={}                   line=1591
-  info     metadata                                 default={}                   line=1593
-  info     token_categories                         default={}                   line=1864
-  info     category_thresholds                      default={}                   line=2100
-  info     volspike_override_daily_limit            default=3                    line=2348
-  info     volspike_override_max_positions          default=2                    line=2349
-  info     futures_enabled                          default=True                 line=2431
-  info     futures_enabled                          default=True                 line=2665
-  info     futures_enabled                          default=True                 line=3089
-  info     max_total_exposure_pct                   default=0.75                 line=3151
-  info     current_regime_mode                      default='SPOT_BULL'          line=3169
-  info     max_positions                            default=12                   line=3175
-  info     circuit_breaker_consecutive_failures     default=5                    line=3194
-  info     sso_target_daily_usd                     default=40.0                 line=3498
-  info     mode                                     default='unknown'            line=3598
-  info     confidence                               default=0.5                  line=3599
-  info     kelly_multiplier                         default=1.0                  line=3600
-  info     confirmed                                default=False                line=3601
-  info     fng_kelly_boost_enabled                  default=True                 line=3629
-  info     fng_capitulation_threshold               default=15                   line=3630
-  info     fng_extreme_fear_threshold               default=20                   line=3631
-  info     fng_extreme_greed_threshold              default=75                   line=3632
-  info     fng_capitulation_multiplier              default=1.50                 line=3633
-  info     fng_extreme_fear_multiplier              default=1.35                 line=3634
-  info     fng_extreme_greed_multiplier             default=0.65                 line=3635
-  info     kelly_conviction_enabled                 default=True                 line=3638
-  info     kelly_conviction_vol2x                   default=1.5                  line=3639
-  info     kelly_conviction_vol3x                   default=2.0                  line=3640
-  info     kelly_conviction_max_pct                 default=0.10                 line=3641
-  info     current_regime_mode                      default='SPOT_BULL'          line=3824
-  info     current_regime_mode                      default='SPOT_BULL'          line=3859
-  info     auto_bnb_for_commission                  default=True                 line=3893
-  info     current_regime_mode                      default='SPOT_BULL'          line=3914
-  info     category_thresholds                      default={}                   line=4210
-  info     futures_category_thresholds              default={}                   line=4215
-  info     futures_category_thresholds              default={}                   line=4216
-  info     category_thresholds                      default={}                   line=4250
-  info     futures_category_thresholds              default={}                   line=4251
-  info     backtest_safe_only                       default=True                 line=4595
-  info     category_thresholds                      default={}                   line=4624
-  info     futures_category_thresholds              default={}                   line=4639
-  info     current_regime_mode                      default="SPOT_BULL"          line=5111
-  info     orchestrator                             default=<no default>         line=5111
+  info     trade_cycle_minutes                      default=5                    line=177
+  info     auto_bnb_for_commission                  default=True                 line=297
+  info     metadata                                 default={}                   line=1135
+  info     metadata                                 default=None                 line=1213
+  info     close_reason                             default=''                   line=1349
+  info     quantity                                 default=0                    line=1369
+  info     current_regime_mode                      default=''                   line=1612
+  info     current_regime_profile_label             default=''                   line=1614
+  info     _apply_mode_profile_harmony              default=None                 line=1664
+  info     confidence                               default=0.5                  line=1920
+  info     close_reason                             default=''                   line=2170
+  info     is_corrupted                             default=False                line=2171
+  info     is_corrupted                             default=False                line=2175
+  info     token_categories                         default={}                   line=2367
+  info     metadata                                 default={}                   line=2422
+  info     metadata                                 default={}                   line=2424
+  info     token_categories                         default={}                   line=2717
+  info     category_thresholds                      default={}                   line=3009
+  info     volspike_override_daily_limit            default=3                    line=3273
+  info     volspike_override_max_positions          default=2                    line=3274
+  info     trailing_stop_activation_pct             default=None                 line=4005
+  info     trailing_stop_distance_pct               default=None                 line=4006
+  info     futures_breakeven_activation_pct         default=None                 line=4007
+  info     futures_trailing_activation_pct          default=None                 line=4008
+  info     futures_trailing_distance_pct            default=None                 line=4009
+  info     futures_trail_floor_pct                  default=None                 line=4010
+  info     futures_trail_ceiling_pct                default=None                 line=4011
+  info     futures_trail_atr_multiplier_low         default=None                 line=4012
+  info     futures_trail_atr_multiplier_mid         default=None                 line=4013
+  info     futures_trail_atr_multiplier_high        default=None                 line=4014
+  info     futures_trail_atr_multiplier_deep        default=None                 line=4015
+  info     sso_target_daily_usd                     default=None                 line=4016
+  info     sso_stagnant_min_hours                   default=None                 line=4017
+  info     sso_slow_velocity_threshold              default=None                 line=4018
+  info     sso_reentry_min_strength_diff            default=None                 line=4019
+  info     max_positions_spot_bull                  default=None                 line=4020
+  info     max_positions_range_scalp                default=None                 line=4021
+  info     max_positions_preservation               default=None                 line=4022
+  info     max_positions_futures_short              default=None                 line=4023
+  info     futures_max_new_per_cycle                default=None                 line=4024
+  info     min_hold_minutes                         default=None                 line=4025
+  info     min_hold_minutes_spot_bull               default=None                 line=4026
+  info     min_hold_minutes_range_scalp             default=None                 line=4027
+  info     futures_long_sl_pct                      default=None                 line=4028
+  info     futures_long_tp_pct                      default=None                 line=4029
+  info     max_rebalance_per_cycle                  default=None                 line=4030
+  info     position_manager                         default=None                 line=4348
+  info     binance_client                           default=None                 line=4349
+  info     entry_price                              default=0                    line=4368
+  info     metadata                                 default={}                   line=4375
+  info     stop_loss                                default=0                    line=4376
+  info     entry_time                               default=None                 line=4381
+  info     created_at                               default=None                 line=4381
+  info     entry_price                              default=0                    line=4407
+  info     qty                                      default=0                    line=4408
+  info     _smart_meta                              default={}                   line=4415
+  info     opened_at                                default=None                 line=4421
+  info     position_manager                         default=None                 line=4478
+  info     metadata                                 default={}                   line=4488
+  info     _smart_meta                              default={}                   line=4507
+  info     consecutive_cycle_failures               default=0                    line=4565
+  info     last_cycle_error                         default=None                 line=4566
+  info     tzinfo                                   default=None                 line=4655
+  info     tzinfo                                   default=None                 line=4657
+  info     futures_enabled                          default=True                 line=4847
+  info     dry_run                                  default=False                line=4849
+  info     futures_enabled                          default=True                 line=5089
+  info     dry_run                                  default=False                line=5091
+  info     current_regime_mode                      default='SPOT_BULL'          line=5105
+  info     dry_run                                  default=False                line=6073
+  info     consecutive_cycle_failures               default=0                    line=6120
+  info     last_cycle_error                         default=None                 line=6124
+  info     last_cycle_error_at                      default=None                 line=6125
+  info     last_cycle_error_at                      default=None                 line=6125
+  info     dry_run                                  default=False                line=6137
+  info     dry_run                                  default=False                line=6159
+  info     futures_enabled                          default=True                 line=6189
+  info     max_total_exposure_pct                   default=0.75                 line=6250
+  info     current_regime_mode                      default='SPOT_BULL'          line=6268
+  info     max_positions                            default=12                   line=6274
+  info     circuit_breaker_consecutive_failures     default=5                    line=6293
+  info     sso_target_daily_usd                     default=40.0                 line=6634
+  info     current_regime_mode                      default=''                   line=6711
+  info     current_regime_mode                      default=''                   line=6735
+  info     current_cycle_minutes                    default=None                 line=6740
+  info     mode                                     default='unknown'            line=6777
+  info     confidence                               default=0.5                  line=6778
+  info     kelly_multiplier                         default=1.0                  line=6779
+  info     confirmed                                default=False                line=6780
+  info     fng_kelly_boost_enabled                  default=True                 line=6808
+  info     fng_capitulation_threshold               default=15                   line=6809
+  info     fng_extreme_fear_threshold               default=20                   line=6810
+  info     fng_extreme_greed_threshold              default=75                   line=6811
+  info     fng_capitulation_multiplier              default=1.50                 line=6812
+  info     fng_extreme_fear_multiplier              default=1.35                 line=6813
+  info     fng_extreme_greed_multiplier             default=0.65                 line=6814
+  info     kelly_conviction_enabled                 default=True                 line=6817
+  info     kelly_conviction_vol2x                   default=1.5                  line=6818
+  info     kelly_conviction_vol3x                   default=2.0                  line=6819
+  info     kelly_conviction_max_pct                 default=0.10                 line=6820
+  info     profit_realization_enabled               default=True                 line=6843
+  info     profit_realization_spot_enabled          default=True                 line=6845
+  info     profit_realization_spot_min_profit_pct   default=0.0030               line=6846
+  info     profit_realization_spot_partial_minutes  default=60.0                 line=6847
+  info     profit_realization_spot_full_minutes     default=120.0                line=6848
+  info     profit_realization_spot_drawback_pct     default=0.0060               line=6849
+  info     profit_realization_spot_partial_close_pct default=0.50                 line=6850
+  info     profit_realization_spot_max_extensions   default=3                    line=6851
+  info     profit_realization_futures_enabled       default=True                 line=6854
+  info     profit_realization_futures_min_profit_pct default=0.0040               line=6855
+  info     profit_realization_futures_partial_minutes default=45.0                 line=6856
+  info     profit_realization_futures_full_minutes  default=90.0                 line=6857
+  info     profit_realization_futures_drawback_pct  default=0.0050               line=6858
+  info     profit_realization_futures_partial_close_pct default=0.50                 line=6859
+  info     profit_realization_futures_max_extensions default=2                    line=6860
+  info     confirmed                                default=False                line=7442
+  info     mode                                     default=None                 line=7442
+  info     mode                                     default=None                 line=7448
+  info     confirmed                                default=False                line=7449
+  info     current_regime_mode                      default='SPOT_BULL'          line=7601
+  info     current_regime_mode                      default='SPOT_BULL'          line=7636
+  info     auto_bnb_for_commission                  default=True                 line=7670
+  info     current_regime_mode                      default='SPOT_BULL'          line=7691
+  info     category_thresholds                      default={}                   line=8002
+  info     futures_category_thresholds              default={}                   line=8007
+  info     futures_category_thresholds              default={}                   line=8008
+  info     category_thresholds                      default={}                   line=8042
+  info     futures_category_thresholds              default={}                   line=8043
+  info     current_regime_mode                      default=''                   line=8904
+  info     current_regime_mode                      default=''                   line=8905
+  info     backtest_safe_only                       default=True                 line=9163
+  info     category_thresholds                      default={}                   line=9192
+  info     futures_category_thresholds              default={}                   line=9207
+  info     current_regime_mode                      default="SPOT_BULL"          line=9710
+  info     orchestrator                             default=<no default>         line=9710
 
 === autonomous_signals.py ===
   info     signal_cache_ttl_seconds                 default=SIGNAL_CACHE_TTL_SECONDS line=22
@@ -110,41 +207,70 @@ Critical mismatches: 0
   info     auto_bnb_for_commission                  default=True                 line=588
   info     bnb_extra_buffer_usd                     default=10.0                 line=597
 
+=== binance_truth_guard.py ===
+  info     _open_positions                          default={}                   line=61
+  info     closed                                   default=False                line=62
+  info     symbol                                   default=""                   line=64
+  info     side                                     default=""                   line=65
+  info     opened_at                                default=None                 line=70
+  info     qty                                      default=0.0                  line=78
+  info     entry_price                              default=0.0                  line=79
+  info     metadata                                 default=None                 line=179
+  info     quantity                                 default=0.0                  line=184
+  info     quantity                                 default=0.0                  line=334
+  info     quantity                                 default=0.0                  line=344
+  info     _open_positions                          default={}                   line=521
+  info     _open_positions                          default={}                   line=541
+  info     _open_positions                          default={}                   line=555
+
 === config_helpers.py ===
   info     param                                    default=hardcode             line=7
+  info     model_fields                             default={}                   line=391
 
 === futures_client.py ===
-  info     _cached_settings                         default=None                 line=239
-  info     futures_trail_atr_enabled                default=True                 line=565
-  info     futures_trail_floor_pct                  default=0.4                  line=566
-  info     futures_trail_ceiling_pct                default=1.2                  line=567
-  info     futures_trail_atr_fallback_distance_pct  default=1.5                  line=571
-  info     futures_trail_atr_multiplier_deep        default=0.8                  line=575
-  info     futures_trail_atr_multiplier_high        default=1.0                  line=577
-  info     futures_trail_atr_multiplier_mid         default=1.2                  line=579
-  info     futures_trail_atr_multiplier_low         default=1.5                  line=581
-  info     _cached_settings                         default=None                 line=1161
-  info     futures_bounce_rescue_max_peak_pct       default=0.5                  line=1162
-  info     futures_bounce_rescue_min_hours          default=4.0                  line=1163
-  info     futures_bounce_rescue_enabled            default=True                 line=1164
-  info     _check_cycle_count                       default=0                    line=2277
-  info     futures_binance_verify_interval_cycles   default=3                    line=2278
-  info     futures_bounce_rescue_max_peak_pct       default=0.5                  line=2364
-  info     futures_bounce_rescue_min_hours          default=4.0                  line=2365
-  info     sso_enabled                              default=True                 line=2380
-  info     _binance_client_ref                      default=None                 line=2408
-  info     futures_bounce_rescue_target_pnl         default=-0.50                line=2430
-  info     _binance_client_ref                      default=None                 line=2435
-  info     sso_target_daily_usd                     default=40.0                 line=2465
-  info     futures_momentum_reversal_enabled        default=True                 line=2623
-  info     futures_momentum_reversal_min_peak       default=2.0                  line=2624
-  info     futures_momentum_reversal_drawback       default=0.8                  line=2625
-  info     _binance_client_ref                      default=None                 line=2840
-  info     futures_usdt_per_trade                   default=100.0                line=2854
-  info     max_per_trade_usdt                       default=500.0                line=2855
+  info     _cached_settings                         default=None                 line=335
+  info     futures_trail_atr_enabled                default=True                 line=717
+  info     futures_trail_floor_pct                  default=0.4                  line=718
+  info     futures_trail_ceiling_pct                default=1.2                  line=719
+  info     futures_trail_atr_fallback_distance_pct  default=1.5                  line=723
+  info     futures_trail_atr_multiplier_deep        default=0.8                  line=727
+  info     futures_trail_atr_multiplier_high        default=1.0                  line=729
+  info     futures_trail_atr_multiplier_mid         default=1.2                  line=731
+  info     futures_trail_atr_multiplier_low         default=1.5                  line=733
+  info     _cached_settings                         default=None                 line=1318
+  info     futures_bounce_rescue_max_peak_pct       default=0.5                  line=1319
+  info     futures_bounce_rescue_min_hours          default=4.0                  line=1320
+  info     futures_bounce_rescue_enabled            default=True                 line=1321
+  info     current_regime_mode                      default=''                   line=1890
+  info     current_regime_profile_label             default=''                   line=1891
+  info     current_regime_mode                      default=''                   line=2051
+  info     current_regime_profile_label             default=''                   line=2052
+  info     _check_cycle_count                       default=0                    line=2535
+  info     futures_binance_verify_interval_cycles   default=3                    line=2536
+  info     _binance_client_ref                      default=None                 line=2649
+  info     futures_bounce_rescue_max_peak_pct       default=0.5                  line=2698
+  info     futures_bounce_rescue_min_hours          default=4.0                  line=2699
+  info     sso_enabled                              default=True                 line=2714
+  info     _binance_client_ref                      default=None                 line=2745
+  info     futures_bounce_rescue_target_pnl         default=-0.50                line=2771
+  info     _binance_client_ref                      default=None                 line=2776
+  info     sso_target_daily_usd                     default=40.0                 line=2806
+  info     current_regime_mode                      default=None                 line=2808
+  info     current_regime_profile_label             default=None                 line=2809
+  info     futures_momentum_reversal_enabled        default=True                 line=2971
+  info     futures_momentum_reversal_min_peak       default=2.0                  line=2972
+  info     futures_momentum_reversal_drawback       default=0.8                  line=2973
+  info     current_regime_mode                      default=None                 line=3008
+  info     current_regime_profile_label             default=None                 line=3009
+  info     _binance_client_ref                      default=None                 line=3078
+  info     current_regime_mode                      default=None                 line=3096
+  info     current_regime_profile_label             default=None                 line=3097
+  info     _binance_client_ref                      default=None                 line=3391
+  info     futures_usdt_per_trade                   default=100.0                line=3405
+  info     max_per_trade_usdt                       default=500.0                line=3406
 
 === init_components.py ===
-  info     db_url                                   default=None                 line=68
+  info     db_url                                   default=None                 line=73
 
 === learning_engine.py ===
   info     is_corrupted                             default=False                line=329
@@ -170,233 +296,345 @@ Critical mismatches: 0
   info     futures_enabled                          default=True                 line=370
 
 === orchestrator.py ===
-  info     _trade_cycle_func                        default=None                 line=389
-  info     _trade_cycle_func                        default=None                 line=397
-  info     _trade_cycle_func                        default=None                 line=412
+  info     _trade_cycle_func                        default=None                 line=425
+  info     _trade_cycle_func                        default=None                 line=434
+  info     _trade_cycle_func                        default=None                 line=455
+  info     _trade_cycle_func                        default=None                 line=471
 
 === pnl_service.py ===
-  info     trade_horizon_minutes                    default=240                  line=73
-  info     min_expected_pnl                         default=0.0                  line=105
-  info     max_risk_percentage                      default=10.0                 line=107
-  info     token_categories                         default={}                   line=111
-  info     category_thresholds                      default={}                   line=112
+  info     trade_horizon_minutes                    default=240                  line=76
+  info     min_expected_pnl                         default=0.0                  line=123
+  info     max_risk_percentage                      default=10.0                 line=125
+  info     token_categories                         default={}                   line=129
+  info     category_thresholds                      default={}                   line=130
 
 === portfolio_manager.py ===
-  info     min_pnl_improvement_threshold            default=0.5                  line=76
-  info     min_success_probability_improvement      default=0.2                  line=77
-  info     enable_prediction_based_closing          default=True                 line=78
-  info     trade_cycle_minutes                      default=5                    line=412
-  info     default_trade_size                       default=10.0                 line=578
+  info     min_pnl_improvement_threshold            default=0.5                  line=78
+  info     min_success_probability_improvement      default=0.2                  line=79
+  info     enable_prediction_based_closing          default=True                 line=80
+  info     default_trade_size                       default=10.0                 line=569
 
 === position_manager.py ===
-  info     db_id                                    default=None                 line=205
-  info     token_categories                         default={}                   line=352
-  info     category_thresholds                      default={}                   line=354
-  info     close_reason                             default=''                   line=911
+  info     db_id                                    default=None                 line=226
+  info     token_categories                         default={}                   line=378
+  info     category_thresholds                      default={}                   line=380
+  info     spot_reconcile_missing_confirm_cycles    default=2                    line=414
+  info     metadata                                 default={}                   line=428
+  info     close_reason                             default=''                   line=1109
+
+=== profit_realization_supervisor.py ===
+  info     current_regime_profile_label             default=''                   line=110
+  info     peak_protection_spot_bull_profile_a_pct  default=0.75                 line=112
+  info     peak_protection_spot_bull_pct            default=0.70                 line=113
 
 === run_trades.py ===
-  info     db_client                                default=None                 line=87
-  info     futures_max_shorts                       default=12                   line=95
-  info     futures_max_longs                        default=3                    line=96
-  info     futures_hedge_mode_enabled               default=True                 line=100
-  info     futures_leverage                         default=10                   line=109
-  info     futures_max_shorts                       default=12                   line=112
-  info     futures_max_largecap_shorts              default=5                    line=114
-  info     futures_largecap_symbols                 default=['BTCUSDT','ETHUSDT','BNBUSDT','XRPUSDT','SOLUSDT'] line=115
-  info     execute_update                           default=None                 line=190
-  info     funding_rate_cache_minutes               default=10                   line=303
-  info     liquidity_filter_enabled                 default=True                 line=328
-  info     min_liquidity_vol_usdt                   default=3_000_000.0          line=330
-  info     max_slippage_tp_ratio                    default=0.25                 line=333
-  info     symbol                                   default=''                   line=351
-  info     close_reason                             default=''                   line=353
-  info     close_reason                             default=''                   line=355
-  info     exit_time                                default=None                 line=358
-  info     close_reason                             default=''                   line=373
-  info     category_max_positions_enabled           default=True                 line=383
-  info     token_categories                         default={}                   line=388
-  info     token_categories                         default={}                   line=391
-  info     circuit_breaker_enabled                  default=True                 line=406
-  info     circuit_breaker_enabled                  default=True                 line=425
-  info     circuit_breaker_consecutive_failures     default=5                    line=428
-  info     circuit_breaker_pause_minutes            default=10                   line=430
-  info     futures_overflow_min_strength            default=0.55                 line=480
-  info     futures_overflow_min_drop_24h            default=-3.0                 line=481
-  info     futures_overflow_max_extra               default=3                    line=482
-  info     metadata                                 default={}                   line=553
-  info     replace_ev_min_ratio                     default=1.1                  line=559
-  info     replace_strength_min_delta               default=0.05                 line=574
-  info     min_hold_minutes_range_scalp             default=30                   line=581
-  info     entry_time                               default=None                 line=589
-  info     replace_only_losing                      default=True                 line=604
-  info     screener_quality_max_volatility          default=0.50                 line=672
-  info     screener_quality_min_price_usdt          default=0.0001               line=673
+  info     db_client                                default=None                 line=202
+  info     futures_max_shorts                       default=12                   line=210
+  info     futures_max_longs                        default=3                    line=211
+  info     futures_hedge_mode_enabled               default=True                 line=215
+  info     futures_leverage                         default=10                   line=224
+  info     futures_max_shorts                       default=12                   line=227
+  info     futures_max_largecap_shorts              default=5                    line=229
+  info     futures_largecap_symbols                 default=['BTCUSDT','ETHUSDT','BNBUSDT','XRPUSDT','SOLUSDT'] line=230
+  info     execute_update                           default=None                 line=361
+  info     category_thresholds                      default={}                   line=449
+  info     futures_category_thresholds              default={}                   line=450
+  info     current_regime_profile_label             default=''                   line=762
+  info     current_regime_mode                      default=''                   line=763
+  info     _mode_profile_harmony_signature          default=''                   line=829
+  info     futures_breakeven_activation_pct         default=1.0                  line=1052
+  info     futures_trailing_activation_pct          default=2.0                  line=1053
+  info     futures_breakeven_activation_pct         default=1.0                  line=1056
+  info     futures_breakeven_activation_pct         default=_safe_be             line=1059
+  info     min_cycles_before_close_shorts           default=3                    line=1227
+  info     token_categories                         default={}                   line=1245
+  info     category_thresholds                      default={}                   line=1246
+  info     confidence                               default=0.0                  line=1294
+  info     mode                                     default=''                   line=1381
+  info     confirmed                                default=False                line=1384
+  info     confidence                               default=0.0                  line=1385
+  info     confidence                               default=0.0                  line=1562
+  info     mode                                     default=''                   line=1583
+  info     confirmed                                default=False                line=1586
+  info     confirmed                                default=False                line=1709
+  info     confidence                               default=0.0                  line=1710
+  info     funding_rate_cache_minutes               default=10                   line=1823
+  info     liquidity_filter_enabled                 default=True                 line=1849
+  info     min_liquidity_vol_usdt                   default=3_000_000.0          line=1851
+  info     max_slippage_tp_ratio                    default=0.25                 line=1854
+  info     symbol                                   default=''                   line=1872
+  info     close_reason                             default=''                   line=1874
+  info     close_reason                             default=''                   line=1876
+  info     exit_time                                default=None                 line=1879
+  info     close_reason                             default=''                   line=1894
+  info     category_max_positions_enabled           default=True                 line=1904
+  info     token_categories                         default={}                   line=1909
+  info     token_categories                         default={}                   line=1912
+  info     circuit_breaker_enabled                  default=True                 line=1927
+  info     circuit_breaker_enabled                  default=True                 line=1946
+  info     circuit_breaker_consecutive_failures     default=5                    line=1949
+  info     circuit_breaker_pause_minutes            default=10                   line=1951
+  info     futures_overflow_min_strength            default=0.55                 line=2039
+  info     futures_overflow_min_drop_24h            default=-3.0                 line=2040
+  info     futures_overflow_max_extra               default=3                    line=2041
+  info     metadata                                 default={}                   line=2112
+  info     replace_ev_min_ratio                     default=1.1                  line=2118
+  info     replace_strength_min_delta               default=0.05                 line=2133
+  info     min_hold_minutes_range_scalp             default=30                   line=2140
+  info     entry_time                               default=None                 line=2148
+  info     replace_only_losing                      default=True                 line=2163
+  info     current_regime_profile_label             default=''                   line=2202
+  info     screener_quality_max_volatility          default=0.50                 line=2240
+  info     screener_quality_min_price_usdt          default=0.0001               line=2241
   info     analysis_symbols                         default=[
                 'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
                 'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT'
-            ] line=740
-  info     screener_enabled                         default=True                 line=770
-  info     screener_max_pairs                       default=50                   line=776
-  info     screener_enabled                         default=True                 line=780
-  info     screener_max_pairs                       default=50                   line=787
-  info     max_per_trade_usdt                       default=500.0                line=985
-  info     smart_tp_extend_score_threshold          default=2                    line=1035
-  info     atr_sl_enabled                           default=True                 line=1055
-  info     futures_trail_atr_enabled                default=True                 line=1095
-  info     token_categories                         default={}                   line=1161
-  info     category_thresholds                      default={}                   line=1162
-  info     prediction_exit_enabled                  default=True                 line=1192
-  info     min_hold_for_prediction_exit             default=90                   line=1194
-  info     entry_time                               default=None                 line=1195
-  info     metadata                                 default={}                   line=1223
-  info     spot_bounce_rescue_enabled               default=True                 line=1246
-  info     metadata                                 default={}                   line=1247
-  info     entry_time                               default=None                 line=1251
-  info     spot_bounce_rescue_max_peak_pct          default=0.8                  line=1258
-  info     spot_bounce_rescue_min_hours             default=8.0                  line=1259
-  info     sso_enabled                              default=True                 line=1277
-  info     metadata                                 default={}                   line=1281
-  info     spot_bounce_rescue_target_pnl            default=-0.30                line=1342
-  info     entry_time                               default=None                 line=1361
-  info     sso_target_daily_usd                     default=40.0                 line=1386
-  info     metadata                                 default={}                   line=1552
-  info     sl_confirmation_candles                  default=1                    line=1589
-  info     scale_out_enabled                        default=True                 line=1605
-  info     scale_out_first_close_pct                default=0.5                  line=1606
-  info     smart_tp_enabled                         default=True                 line=1608
-  info     smart_tp_extend_disabled_regimes         default=['RANGE_SCALP', 'PRESERVATION'] line=1610
-  info     metadata                                 default={}                   line=1617
-  info     smart_tp_max_extensions                  default=3                    line=1619
-  info     smart_tp_max_pnl_pct                     default=15.0                 line=1620
-  info     market_regime_enabled                    default=True                 line=2003
-  info     max_total_exposure_pct                   default=0.75                 line=2033
-  info     max_total_exposure_spot_bull_fear_fng_threshold default=40                   line=2041
-  info     max_total_exposure_spot_bull_fear        default=0.80                 line=2042
-  info     btc_dominance_filter_enabled             default=True                 line=2067
-  info     futures_max_new_per_cycle                default=5                    line=2118
-  info     futures_enabled                          default=True                 line=2124
-  info     screener_enabled                         default=True                 line=2134
-  info     futures_max_shorts                       default=12                   line=2164
-  info     futures_largecap_symbols                 default=['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT'] line=2167
-  info     futures_max_largecap_shorts              default=5                    line=2169
-  info     futures_max_escalamientos                default=2                    line=2178
-  info     futures_overflow_max_extra               default=3                    line=2207
-  info     futures_kelly_cap_pct                    default=0.20                 line=2269
-  info     futures_usdt_per_trade                   default=100.0                line=2272
-  info     futures_no_short_btc_4h_threshold        default=2.0                  line=2316
-  info     futures_no_short_btc_1h_threshold        default=0.8                  line=2322
-  info     futures_no_short_btc_3h_threshold        default=1.0                  line=2333
-  info     futures_confirm_red_candle               default=True                 line=2347
-  info     _last_error                              default=''                   line=2381
-  info     max_per_trade_usdt                       default=500.0                line=2404
-  info     allow_prediction_based_add               default=True                 line=2438
-  info     prediction_add_min_strength              default=0.70                 line=2442
-  info     metadata                                 default={}                   line=2450
-  info     prediction_add_min_ev_ratio              default=1.5                  line=2458
-  info     prediction_add_kelly_factor              default=0.6                  line=2467
-  info     wr_screener_enabled                      default=True                 line=2485
-  info     wr_screener_consecutive_sl_block         default=3                    line=2486
-  info     funding_rate_spot_filter_enabled         default=True                 line=2510
-  info     funding_rate_spot_max                    default=0.0008               line=2513
-  info     narrative_tokens                         default=[]                   line=2520
-  info     bear_market_volspike_min                 default=2.0                  line=2522
-  info     preservation_narrative_only              default=True                 line=2533
-  info     preservation_max_rsi                     default=65.0                 line=2538
-  info     range_scalp_max_rsi                      default=40.0                 line=2547
-  info     range_scalp_require_bb_lower             default=True                 line=2554
-  info     futures_enabled                          default=True                 line=2561
-  info     screener_enabled                         default=True                 line=2568
-  info     futures_usdt_per_trade                   default=100.0                line=2576
-  info     futures_long_sl_pct                      default=2.5                  line=2577
-  info     futures_long_tp_pct                      default=5.0                  line=2578
-  info     futures_leverage                         default=10                   line=2579
-  info     futures_enabled                          default=True                 line=2591
-  info     screener_enabled                         default=True                 line=2600
-  info     futures_long_sl_pct                      default=2.5                  line=2608
-  info     futures_long_tp_pct                      default=5.0                  line=2609
-  info     futures_leverage                         default=10                   line=2610
-  info     futures_usdt_per_trade                   default=100.0                line=2637
-  info     futures_kelly_cap_pct                    default=0.20                 line=2638
-  info     trading_excluded_symbols                 default=[]                   line=2651
-  info     spot_bull_pnl_boost_enabled              default=True                 line=2694
-  info     spot_bull_btc_4h_up_required             default=True                 line=2697
-  info     spot_bull_pnl_boost_large_cap            default=0.0                  line=2699
-  info     spot_bull_pnl_boost_midcap               default=-0.10                line=2701
-  info     category_thresholds                      default={}                   line=2702
-  info     token_categories                         default={}                   line=2703
-  info     volspike_override_enabled                default=True                 line=2720
-  info     narrative_tokens                         default=[]                   line=2721
-  info     volspike_override_narrative_only         default=True                 line=2722
-  info     volspike_override_min_spike              default=1.5                  line=2742
-  info     volspike_override_max_rsi                default=65.0                 line=2743
-  info     volspike_override_trend_required         default=True                 line=2744
-  info     volspike_override_min_strength           default=0.65                 line=2769
-  info     volspike_override_max_positions          default=2                    line=2775
-  info     volspike_override_daily_limit            default=3                    line=2782
-  info     token_categories                         default={}                   line=2845
-  info     category_thresholds                      default={}                   line=2846
-  info     range_scalp_sl_pct                       default=1.2                  line=2855
-  info     range_scalp_tp_pct                       default=1.5                  line=2856
-  info     prediction_add_kelly_factor              default=0.6                  line=2872
-  info     kelly_conviction_enabled                 default=True                 line=2883
-  info     kelly_conviction_vol3x                   default=2.0                  line=2885
-  info     kelly_conviction_vol2x                   default=1.5                  line=2886
-  info     kelly_conviction_max_pct                 default=0.10                 line=2887
-  info     token_categories                         default={}                   line=2979
-  info     category_thresholds                      default={}                   line=2981
-  info     min_hold_minutes_range_scalp             default=30                   line=3140
-  info     protect_profitable_positions             default=True                 line=3145
-  info     protect_profit_min_pct                   default=0.3                  line=3146
-  info     rebalance_excluded_symbols               default=[]                   line=3147
-  info     entry_time                               default=None                 line=3165
-  info     created_at                               default=None                 line=3165
-  info     token_categories                         default={}                   line=3183
-  info     category_thresholds                      default={}                   line=3184
-  info     rebalance_skip_if_bullish_signal         default=True                 line=3193
-  info     rebalance_rsi_overbought                 default=60.0                 line=3207
-  info     market_regime_enabled                    default=True                 line=3326
-  info     market_regime_enabled                    default=True                 line=3387
-  info     auto_close_excluded_on_startup           default=True                 line=3438
-  info     trading_excluded_symbols                 default=[]                   line=3441
-  info     futures_enabled                          default=True                 line=3483
-  info     db_client                                default=None                 line=3485
-  info     futures_capital_bridge_enabled           default=True                 line=3488
-  info     futures_max_shorts                       default=12                   line=3492
-  info     futures_usdt_per_trade                   default=100.0                line=3504
-  info     futures_kelly_cap_pct                    default=0.20                 line=3505
-  info     futures_capital_bridge_min_transfer      default=10.0                 line=3508
-  info     closed                                   default=False                line=3580
-  info     entry_price                              default=0                    line=3582
-  info     symbol                                   default=None                 line=3655
-  info     futures_sl_cooldown_hours                default=4.0                  line=3661
-  info     futures_mass_sl_threshold                default=3                    line=3666
-  info     futures_mass_sl_cooldown_hours           default=4.0                  line=3668
-  info     screener_enabled                         default=True                 line=3684
-  info     futures_enabled                          default=True                 line=3694
-  info     interval                                 default='1h'                 line=3709
-  info     futures_min_inject_strength              default=0.40                 line=3730
-  info     cycle_spot_bull                          default=10                   line=3779
-  info     cycle_range_scalp                        default=5                    line=3780
-  info     cycle_preservation                       default=45                   line=3781
-  info     trade_cycle_minutes                      default=5                    line=3784
+            ] line=2378
+  info     max_per_trade_usdt                       default=500.0                line=2590
+  info     smart_tp_extend_score_threshold          default=2                    line=2640
+  info     atr_sl_enabled                           default=True                 line=2660
+  info     futures_trail_atr_enabled                default=True                 line=2700
+  info     token_categories                         default={}                   line=2799
+  info     category_thresholds                      default={}                   line=2800
+  info     metadata                                 default={}                   line=2856
+  info     prediction_exit_enabled                  default=True                 line=2889
+  info     min_hold_for_prediction_exit             default=90                   line=2891
+  info     entry_time                               default=None                 line=2892
+  info     metadata                                 default={}                   line=2920
+  info     spot_bounce_rescue_enabled               default=True                 line=2943
+  info     metadata                                 default={}                   line=2944
+  info     entry_time                               default=None                 line=2948
+  info     spot_bounce_rescue_max_peak_pct          default=0.8                  line=2955
+  info     spot_bounce_rescue_min_hours             default=8.0                  line=2956
+  info     sso_enabled                              default=True                 line=2975
+  info     metadata                                 default={}                   line=2979
+  info     spot_bounce_rescue_target_pnl            default=-0.30                line=3047
+  info     entry_time                               default=None                 line=3066
+  info     sso_target_daily_usd                     default=40.0                 line=3094
+  info     current_regime_profile_label             default=''                   line=3097
+  info     current_regime_profile_label             default=''                   line=3129
+  info     entry_time                               default=None                 line=3291
+  info     created_at                               default=None                 line=3291
+  info     current_regime_profile_label             default=''                   line=3297
+  info     take_profit                              default=0                    line=3301
+  info     take_profit                              default=0                    line=3301
+  info     current_regime_profile_label             default=''                   line=3321
+  info     entry_time                               default=None                 line=3349
+  info     created_at                               default=None                 line=3349
+  info     current_regime_profile_label             default=''                   line=3352
+  info     take_profit                              default=0                    line=3362
+  info     take_profit                              default=0                    line=3362
+  info     current_regime_profile_label             default=''                   line=3398
+  info     current_regime_profile_label             default=''                   line=3432
+  info     current_regime_profile_label             default=''                   line=3514
+  info     metadata                                 default={}                   line=3559
+  info     sl_confirmation_candles                  default=1                    line=3596
+  info     scale_out_enabled                        default=True                 line=3612
+  info     scale_out_first_close_pct                default=0.5                  line=3613
+  info     smart_tp_enabled                         default=True                 line=3615
+  info     smart_tp_extend_disabled_regimes         default=['RANGE_SCALP', 'PRESERVATION'] line=3617
+  info     metadata                                 default={}                   line=3624
+  info     smart_tp_max_extensions                  default=3                    line=3626
+  info     smart_tp_max_pnl_pct                     default=15.0                 line=3627
+  info     current_regime_profile_label             default=''                   line=3781
+  info     current_regime_mode                      default=''                   line=3996
+  info     current_regime_profile_label             default=''                   line=3997
+  info     market_regime_enabled                    default=True                 line=4043
+  info     max_total_exposure_pct                   default=0.75                 line=4076
+  info     max_total_exposure_spot_bull_fear_fng_threshold default=40                   line=4084
+  info     max_total_exposure_spot_bull_fear        default=0.80                 line=4085
+  info     btc_dominance_filter_enabled             default=True                 line=4111
+  info     futures_max_new_per_cycle                default=5                    line=4164
+  info     futures_enabled                          default=True                 line=4174
+  info     screener_enabled                         default=True                 line=4190
+  info     futures_max_shorts                       default=12                   line=4227
+  info     futures_largecap_symbols                 default=['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT'] line=4230
+  info     futures_max_largecap_shorts              default=5                    line=4232
+  info     futures_max_escalamientos                default=2                    line=4241
+  info     futures_overflow_max_extra               default=3                    line=4270
+  info     futures_kelly_cap_pct                    default=0.20                 line=4343
+  info     futures_usdt_per_trade                   default=100.0                line=4346
+  info     futures_no_short_btc_4h_threshold        default=2.0                  line=4391
+  info     futures_no_short_btc_1h_threshold        default=0.8                  line=4397
+  info     futures_no_short_btc_3h_threshold        default=1.0                  line=4410
+  info     futures_confirm_red_candle               default=True                 line=4426
+  info     _last_error                              default=''                   line=4463
+  info     max_per_trade_usdt                       default=500.0                line=4487
+  info     allow_prediction_based_add               default=True                 line=4521
+  info     prediction_add_min_strength              default=0.70                 line=4525
+  info     metadata                                 default={}                   line=4533
+  info     prediction_add_min_ev_ratio              default=1.5                  line=4541
+  info     prediction_add_kelly_factor              default=0.6                  line=4550
+  info     wr_screener_enabled                      default=True                 line=4568
+  info     wr_screener_consecutive_sl_block         default=3                    line=4569
+  info     funding_rate_spot_filter_enabled         default=True                 line=4593
+  info     funding_rate_spot_max                    default=0.0008               line=4596
+  info     narrative_tokens                         default=[]                   line=4607
+  info     bear_market_volspike_min                 default=2.0                  line=4609
+  info     preservation_narrative_only              default=True                 line=4620
+  info     preservation_max_rsi                     default=65.0                 line=4625
+  info     range_scalp_max_rsi                      default=40.0                 line=4634
+  info     range_scalp_require_bb_lower             default=True                 line=4641
+  info     futures_enabled                          default=True                 line=4648
+  info     screener_enabled                         default=True                 line=4655
+  info     futures_usdt_per_trade                   default=100.0                line=4670
+  info     futures_long_sl_pct                      default=2.5                  line=4671
+  info     futures_long_tp_pct                      default=5.0                  line=4672
+  info     futures_leverage                         default=10                   line=4673
+  info     futures_enabled                          default=True                 line=4686
+  info     screener_enabled                         default=True                 line=4695
+  info     futures_long_sl_pct                      default=2.5                  line=4710
+  info     futures_long_tp_pct                      default=5.0                  line=4711
+  info     futures_leverage                         default=10                   line=4712
+  info     futures_usdt_per_trade                   default=100.0                line=4750
+  info     futures_kelly_cap_pct                    default=0.20                 line=4751
+  info     trading_excluded_symbols                 default=[]                   line=4765
+  info     spot_bull_pnl_boost_enabled              default=True                 line=4808
+  info     spot_bull_btc_4h_up_required             default=True                 line=4811
+  info     spot_bull_pnl_boost_large_cap            default=0.0                  line=4813
+  info     spot_bull_pnl_boost_midcap               default=-0.10                line=4815
+  info     category_thresholds                      default={}                   line=4816
+  info     token_categories                         default={}                   line=4817
+  info     volspike_override_enabled                default=True                 line=4834
+  info     narrative_tokens                         default=[]                   line=4835
+  info     volspike_override_narrative_only         default=True                 line=4836
+  info     volspike_override_min_spike              default=1.5                  line=4856
+  info     volspike_override_max_rsi                default=65.0                 line=4857
+  info     volspike_override_trend_required         default=True                 line=4858
+  info     volspike_override_min_strength           default=0.65                 line=4882
+  info     volspike_override_max_positions          default=2                    line=4888
+  info     volspike_override_daily_limit            default=3                    line=4895
+  info     token_categories                         default={}                   line=4958
+  info     category_thresholds                      default={}                   line=4959
+  info     range_scalp_sl_pct                       default=1.2                  line=4968
+  info     range_scalp_tp_pct                       default=1.5                  line=4969
+  info     prediction_add_kelly_factor              default=0.6                  line=4985
+  info     kelly_conviction_enabled                 default=True                 line=4996
+  info     kelly_conviction_vol3x                   default=2.0                  line=4998
+  info     kelly_conviction_vol2x                   default=1.5                  line=4999
+  info     kelly_conviction_max_pct                 default=0.10                 line=5000
+  info     token_categories                         default={}                   line=5094
+  info     category_thresholds                      default={}                   line=5096
+  info     min_hold_minutes_range_scalp             default=30                   line=5287
+  info     protect_profitable_positions             default=True                 line=5292
+  info     protect_profit_min_pct                   default=0.3                  line=5293
+  info     rebalance_max_abs_pnl_pct                default=0.5                  line=5294
+  info     rebalance_excluded_symbols               default=[]                   line=5295
+  info     entry_time                               default=None                 line=5313
+  info     created_at                               default=None                 line=5313
+  info     token_categories                         default={}                   line=5337
+  info     category_thresholds                      default={}                   line=5338
+  info     rebalance_skip_if_bullish_signal         default=True                 line=5347
+  info     rebalance_rsi_overbought                 default=60.0                 line=5361
+  info     current_regime_profile_label             default=''                   line=5418
+  info     current_regime_mode                      default=''                   line=5556
+  info     current_regime_profile_label             default=''                   line=5557
+  info     futures_enabled                          default=True                 line=5652
+  info     db_client                                default=None                 line=5653
+  info     market_regime_enabled                    default=True                 line=5687
+  info     db_client                                default=None                 line=5698
+  info     current_regime_mode                      default=''                   line=5761
+  info     current_regime_profile_label             default=''                   line=5762
+  info     market_regime_enabled                    default=True                 line=5772
+  info     mode                                     default=''                   line=5848
+  info     confirmed                                default=False                line=5851
+  info     confidence                               default=0.0                  line=5852
+  info     current_regime_profile_label             default=None                 line=5882
+  info     current_regime_profile_label             default=''                   line=5887
+  info     mode                                     default=''                   line=5888
+  info     current_regime_profile_label             default=''                   line=5907
+  info     mode                                     default=''                   line=5908
+  info     sso_target_daily_usd                     default=40.0                 line=5913
+  info     sso_stagnant_min_hours                   default=2.0                  line=5914
+  info     sso_slow_velocity_threshold              default=0.001                line=5915
+  info     sso_reentry_min_strength_diff            default=0.3                  line=5916
+  info     futures_breakeven_activation_pct         default=1.0                  line=5917
+  info     futures_trailing_activation_pct          default=2.0                  line=5918
+  info     futures_trailing_distance_pct            default=1.5                  line=5919
+  info     futures_trail_floor_pct                  default=0.4                  line=5920
+  info     futures_trail_ceiling_pct                default=1.2                  line=5921
+  info     futures_trail_atr_multiplier_low         default=1.5                  line=5922
+  info     futures_trail_atr_multiplier_mid         default=1.2                  line=5923
+  info     futures_trail_atr_multiplier_high        default=1.0                  line=5924
+  info     futures_trail_atr_multiplier_deep        default=0.8                  line=5925
+  info     max_positions_spot_bull                  default=20                   line=5926
+  info     max_positions_range_scalp                default=10                   line=5927
+  info     max_positions_preservation               default=5                    line=5928
+  info     max_positions_futures_short              default=12                   line=5929
+  info     futures_max_new_per_cycle                default=3                    line=5930
+  info     min_hold_minutes                         default=120                  line=5931
+  info     min_hold_minutes_spot_bull               default=120                  line=5932
+  info     min_hold_minutes_range_scalp             default=30                   line=5933
+  info     futures_long_sl_pct                      default=2.5                  line=5934
+  info     futures_long_tp_pct                      default=5.0                  line=5935
+  info     max_rebalance_per_cycle                  default=2                    line=5936
+  info     db_client                                default=None                 line=5957
+  info     auto_close_excluded_on_startup           default=True                 line=6012
+  info     trading_excluded_symbols                 default=[]                   line=6015
+  info     current_regime_profile_label             default=''                   line=6044
+  info     futures_enabled                          default=True                 line=6073
+  info     db_client                                default=None                 line=6075
+  info     futures_capital_bridge_enabled           default=True                 line=6078
+  info     futures_max_shorts                       default=12                   line=6082
+  info     futures_usdt_per_trade                   default=100.0                line=6094
+  info     futures_kelly_cap_pct                    default=0.20                 line=6095
+  info     futures_capital_bridge_min_transfer      default=10.0                 line=6098
+  info     closed                                   default=False                line=6170
+  info     entry_price                              default=0                    line=6172
+  info     current_regime_profile_label             default=''                   line=6202
+  info     symbol                                   default=None                 line=6265
+  info     futures_sl_cooldown_hours                default=4.0                  line=6271
+  info     futures_mass_sl_threshold                default=3                    line=6276
+  info     futures_mass_sl_cooldown_hours           default=4.0                  line=6278
+  info     basket_reset_futures_hours_default       default=4.0                  line=6290
+  info     entry_price                              default=0                    line=6307
+  info     quantity                                 default=0                    line=6308
+  info     entry_time                               default=None                 line=6312
+  info     basket_reset_pnl_threshold_usd           default=10.0                 line=6332
+  info     basket_reset_min_avg_age_hours           default=4.0                  line=6333
+  info     basket_reset_max_positive_momentum_positions default=1                    line=6334
+  info     basket_reset_auto_execute                default=False                line=6346
+  info     closed                                   default=False                line=6367
+  info     side                                     default=''                   line=6370
+  info     screener_enabled                         default=True                 line=6387
+  info     futures_enabled                          default=True                 line=6408
+  info     interval                                 default='1h'                 line=6423
+  info     futures_min_inject_strength              default=0.40                 line=6453
+  info     cycle_spot_bull                          default=10                   line=6503
+  info     cycle_range_scalp                        default=5                    line=6504
+  info     cycle_preservation                       default=45                   line=6505
+  info     trade_cycle_minutes                      default=5                    line=6508
 
 === smart_scale_out.py ===
-  info     _gate_block_count                        default=None                 line=282
-  info     _gate_last_pnl_pct                       default=None                 line=283
+  info     profile_label                            default=''                   line=144
+  info     regime_mode                              default=''                   line=152
+  info     _gate_block_count                        default=None                 line=304
+  info     _gate_last_pnl_pct                       default=None                 line=305
 
 === tests/test_futures_smart_exits.py ===
-  info     smart_tp_extend_disabled_regimes         default=['RANGE_SCALP', 'PRESERVATION'] line=616
+  info     smart_tp_extend_disabled_regimes         default=['RANGE_SCALP', 'PRESERVATION'] line=614
 
 === tests/test_system_health.py ===
   info     futures_leverage                         default=10                   line=157
   info     futures_enabled                          default=True                 line=245
-  info     kelly_max_usdt                           default=<no default>         line=631
-  info     kelly_max_pct_cap                        default=<no default>         line=631
-  info     kelly_max_pct_liquid                     default=<no default>         line=632
-  info     kelly_max_pct_liquid                     default=<no default>         line=639
-  info     kelly_max_pct_liquid                     default=<no default>         line=645
-  info     kelly_max_pct_liquid                     default=<no default>         line=673
-  info     futures_capital_bridge_min_transfer      default=10.0                 line=999
-  info     futures_capital_bridge_enabled           default=True                 line=1005
-  info     kelly_max_usdt                           default=<no default>         line=1074
-  info     max_per_trade_usdt                       default=<no default>         line=1075
+  info     kelly_max_usdt                           default=<no default>         line=633
+  info     kelly_max_pct_cap                        default=<no default>         line=633
+  info     kelly_max_pct_liquid                     default=<no default>         line=634
+  info     kelly_max_pct_liquid                     default=<no default>         line=641
+  info     kelly_max_pct_liquid                     default=<no default>         line=647
+  info     kelly_max_pct_liquid                     default=<no default>         line=675
+  info     futures_capital_bridge_min_transfer      default=10.0                 line=1101
+  info     futures_capital_bridge_enabled           default=True                 line=1107
+  info     kelly_max_usdt                           default=<no default>         line=1176
+  info     max_per_trade_usdt                       default=<no default>         line=1177
+
+=== unified_governance_supervisor.py ===
+  info     ug_allow_partial_to_full_escalation      default=False                line=227
+
+=== universe_selector.py ===
+  info     current_regime_profile_label             default=None                 line=56
+  info     current_regime_mode                      default=None                 line=70
+  info     current_regime_profile_label             default=None                 line=71
+  info     analysis_symbols                         default=[]                   line=74
+  info     futures_symbols                          default=[]                   line=75
+  info     narrative_tokens                         default=[]                   line=76

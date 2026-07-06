@@ -33,7 +33,14 @@ from typing import List, Dict, Optional, Tuple
 INITIAL_CAPITAL = 2910.0        # USDT — capital real jun 20 2026
 DAYS            = 90
 INTERVAL        = "4h"          # 6 velas/día → 90d ≈ 540 velas
-COMMISSION_RATE = 0.001         # 0.1% por lado (BNB holder discount ~0.075%)
+# C0: use centralized Binance commission module (defaults: spot 0.001, futures 0.0004)
+from binance_commission import (
+    entry_commission as _bt90_entry_commission,
+    exit_commission as _bt90_exit_commission,
+    total_commission as _bt90_total_commission,
+    get_config as _bt90_comm_config,
+)
+COMMISSION_RATE = _bt90_comm_config().rate_for('spot')  # kept for backward compat
 MAX_ENTRIES_PER_BAR = 2         # hasta 2 entradas nuevas por vela 4h
 
 # Régimen actual (jun 20 2026)
@@ -455,7 +462,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]], scenario: str) -> Di
                 if scenario in ("B", "C", "D") and not pos.scale_done:
                     sell_qty = pos.qty * 0.5
                     pnl  = (pos.tp_price - pos.entry_price) * sell_qty
-                    comm = sell_qty * pos.tp_price * COMMISSION_RATE * 2
+                    comm = _bt90_total_commission(sell_qty, pos.entry_price, pos.tp_price, 'spot', None)
                     capital     += pnl - comm
                     pos.qty     -= sell_qty
                     pos.scale_done  = True
@@ -484,7 +491,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]], scenario: str) -> Di
 
             if exit_price and exit_reason:
                 pnl  = (exit_price - pos.entry_price) * pos.qty
-                comm = pos.qty * exit_price * COMMISSION_RATE * 2
+                comm = _bt90_total_commission(pos.qty, pos.entry_price, exit_price, 'spot', None)
                 capital += pnl - comm
                 trades.append({"symbol": pos.symbol, "reason": exit_reason,
                                "pnl": pnl - comm,
@@ -537,7 +544,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]], scenario: str) -> Di
                         pnl_notional = (fpos.entry_price - exit_price) * fpos.qty * FUTURES_LEVERAGE
                     else:
                         pnl_notional = (exit_price - fpos.entry_price) * fpos.qty * FUTURES_LEVERAGE
-                    comm = fpos.margin * COMMISSION_RATE * 2
+                    comm = _bt90_total_commission(fpos.qty, fpos.entry_price, exit_price, 'futures', None)
                     net_pnl = pnl_notional - comm
                     capital += net_pnl
                     futures_trades.append({
@@ -596,7 +603,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]], scenario: str) -> Di
 
                 price = sig["price"]
                 qty   = size / price
-                comm  = qty * price * COMMISSION_RATE
+                comm  = _bt90_entry_commission(qty, price, 'spot', None)  # C0: entry-only at open
                 if capital < size + comm:
                     continue
                 capital -= size + comm
@@ -637,7 +644,8 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]], scenario: str) -> Di
 
                 price = sym_klines[bar_idx]["close"]
                 qty   = (margin * FUTURES_LEVERAGE) / price
-                capital -= margin
+                comm  = _bt90_entry_commission(qty, price, 'futures', None)  # C0: entry fee
+                capital -= margin + comm
                 futures_positions.append(SimFuturesPosition(symbol, price, qty, margin, "SHORT"))
                 if symbol in LARGE_CAP:
                     largecap_shorts += 1
@@ -655,7 +663,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]], scenario: str) -> Di
         if sym_klines:
             last_price = sym_klines[-1]["close"]
             pnl  = (last_price - pos.entry_price) * pos.qty
-            comm = pos.qty * last_price * COMMISSION_RATE * 2
+            comm = _bt90_total_commission(pos.qty, pos.entry_price, last_price, 'spot', None)
             capital += pnl - comm
             trades.append({"symbol": pos.symbol, "reason": "end_of_period",
                            "pnl": pnl - comm,
@@ -669,7 +677,7 @@ def run_simulation(klines_by_symbol: Dict[str, List[Dict]], scenario: str) -> Di
             if sym_klines:
                 last_price = sym_klines[-1]["close"]
                 pnl_notional = (fpos.entry_price - last_price) * fpos.qty * FUTURES_LEVERAGE
-                comm = fpos.margin * COMMISSION_RATE * 2
+                comm = _bt90_total_commission(fpos.qty, fpos.entry_price, last_price, 'futures', None)
                 net_pnl = pnl_notional - comm
                 capital += net_pnl
                 futures_trades.append({"symbol": fpos.symbol, "reason": "end_of_period",

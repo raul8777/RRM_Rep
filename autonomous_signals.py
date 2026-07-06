@@ -75,7 +75,8 @@ class AutonomousSignalGenerator:
             klines = self.binance_client.client.get_klines(
                 symbol=symbol,
                 interval=interval,
-                limit=limit
+                limit=limit,
+                request_params={"timeout": 10},
             )
             
             # Parse klines into structured data
@@ -98,7 +99,11 @@ class AutonomousSignalGenerator:
             return parsed_klines
             
         except Exception as e:
-            logger.error(f"Error fetching klines for {symbol}: {e}")
+            _err_cls = type(e).__name__
+            if _err_cls in ('ReadTimeout', 'ConnectTimeout', 'ConnectionError', 'ReadTimeoutError'):
+                logger.warning(f"Klines network timeout for {symbol} ({_err_cls}) — returning empty")
+            else:
+                logger.error(f"Error fetching klines for {symbol}: {e}")
             return []
     
     def _get_trend_from_higher_tf(self, symbol: str, higher_interval: str = '4h') -> str:

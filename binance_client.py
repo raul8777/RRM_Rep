@@ -12,7 +12,7 @@ except Exception:
     class BinanceRequestException(Exception):
         pass
 from decimal import Decimal
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class BinanceClient:
@@ -200,15 +200,74 @@ class BinanceClient:
             pass
         return self.get_symbol_price(symbol)
 
+    def get_my_trades(self, symbol: str, order_id: Optional[int] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """Fetch recent SPOT trades for a symbol from Binance.
+
+        If order_id is provided, filters trades to those matching the order.
+        Returns a list of raw trade dicts (qty, price, commission, etc.).
+        """
+        try:
+            params = {"symbol": symbol, "limit": limit}
+            if order_id is not None:
+                params["orderId"] = int(order_id)
+            trades = self.client.get_my_trades(**params)
+            return trades if isinstance(trades, list) else []
+        except (BinanceAPIException, BinanceRequestException) as exc:
+            print(f"[BinanceClient] get_my_trades error for {symbol}: {exc}")
+            return []
+        except Exception as exc:
+            print(f"[BinanceClient] get_my_trades unexpected error for {symbol}: {exc}")
+            return []
+
+    def verify_and_fetch_fills(self, order_result: dict, label: str = "") -> Optional[Dict[str, Any]]:
+        """Verify a SPOT market order and return aggregated fill data.
+
+        Returns None if not confirmed. When confirmed, returns dict with:
+          - qty (total executed base asset)
+          - quote_qty (total quote asset)
+          - commission (total commission in quote terms)
+          - avg_price (weighted average price)
+          - binance_confirmed: True
+        """
+        if not self.verify_order_filled(order_result, label=label):
+            return None
+        sym = order_result.get("symbol", "")
+        oid = order_result.get("orderId")
+        fills = order_result.get("fills") or []
+        if not fills and oid and sym:
+            fills = self.get_my_trades(sym, order_id=int(oid))
+        if not fills:
+            return None
+        total_qty = 0.0
+        total_quote = 0.0
+        total_commission = 0.0
+        for f in fills:
+            q = float(f.get("qty", 0.0)) or float(f.get("quantity", 0.0))
+            p = float(f.get("price", 0.0))
+            c = float(f.get("commission", 0.0))
+            total_qty += q
+            total_quote += q * p
+            total_commission += c
+        avg_price = total_quote / total_qty if total_qty > 0 else 0.0
+        return {
+            "symbol": sym,
+            "order_id": oid,
+            "qty": total_qty,
+            "quote_qty": total_quote,
+            "commission": total_commission,
+            "avg_price": avg_price,
+            "binance_confirmed": True,
+        }
+
     def calculate_commission(self, amount: float, price: float, commission_rate: float = 0.001) -> float:
         """
         Calculate commission for a trade.
-        
+
         Args:
             amount: Quantity of the asset
             price: Price per unit
             commission_rate: Commission rate (default 0.1% = 0.001)
-            
+
         Returns:
             Commission amount in quote currency (USDT)
         """

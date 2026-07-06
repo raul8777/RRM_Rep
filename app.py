@@ -28,7 +28,14 @@ from orchestrator import SystemState
 from init_components import get_components
 from audit_tools import check_signal_audit_consistency
 import error_collector as ec
-from binance_truth_guard import get_truth_status
+from binance_truth_guard import (
+    get_truth_status,
+    get_truth_status_spot,
+    get_truth_status_futures,
+    evaluate_spot_parity,
+    auto_reconcile_spot,
+    auto_reconcile_futures,
+)
 
 settings = get_settings()
 app = FastAPI(title="Binance Trading Agent")
@@ -126,7 +133,8 @@ def _get_request_price(price_cache: Dict[str, float], symbol: str) -> float:
 
 
 def _enrich_entries(entries: list, current_price: float, side: str) -> list:
-    """Enrich escalamiento entries with per-entry PnL given current price."""
+    """Enrich escalamiento entries with per-entry net PnL after Binance fees."""
+    from binance_commission import total_commission
     result = []
     is_short = str(side).upper() in ('SHORT', 'SELL')
     for e in entries:
@@ -134,9 +142,11 @@ def _enrich_entries(entries: list, current_price: float, side: str) -> list:
         qty = float(e.get('qty', 0) or 0)
         if ep > 0 and qty > 0:
             if is_short:
-                pnl = round((ep - current_price) * qty, 4)
+                gross = (ep - current_price) * qty
             else:
-                pnl = round((current_price - ep) * qty, 4)
+                gross = (current_price - ep) * qty
+            _comm = total_commission(qty, ep, current_price, 'spot', None)
+            pnl = round(gross - _comm, 4)
             pnl_pct = round((pnl / (ep * qty)) * 100, 2) if ep * qty > 0 else 0.0
         else:
             pnl = 0.0
@@ -459,6 +469,142 @@ async def sync_positions(_auth: None = Depends(_require_api_key)) -> Dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/reconciliation/spot")
+async def get_spot_reconciliation(_auth: None = Depends(_require_api_key)) -> Dict:
+    """Current SPOT parity status and persisted reconciliation report."""
+    try:
+        comp = get_components()
+        if not comp.position_manager or not comp.binance_client:
+            raise HTTPException(status_code=503, detail="Components not initialized")
+        parity = evaluate_spot_parity(comp.position_manager, comp.binance_client)
+        persisted = get_truth_status_spot(comp.db_client)
+        return {
+            "ok": parity.get("ok", True),
+            "severity": parity.get("severity", "unknown"),
+            "parity": parity,
+            "persisted": persisted,
+            "timestamp": to_mexico_time(datetime.utcnow()).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/reconciliation/spot/run")
+async def run_spot_reconciliation(dry_run: bool = True, _auth: None = Depends(_require_api_key)) -> Dict:
+    """Run SPOT auto-reconciliation; dry_run=True returns only recommendations."""
+    try:
+        comp = get_components()
+        if not comp.position_manager or not comp.binance_client:
+            raise HTTPException(status_code=503, detail="Components not initialized")
+        report = auto_reconcile_spot(
+            comp.position_manager, comp.binance_client, comp.db_client, dry_run=dry_run
+        )
+        return {
+            "status": "ok",
+            "dry_run": dry_run,
+            "report": report,
+            "timestamp": to_mexico_time(datetime.utcnow()).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/reconciliation/futures")
+async def get_futures_reconciliation(_auth: None = Depends(_require_api_key)) -> Dict:
+    """Current FUTURES parity status and persisted reconciliation report."""
+    try:
+        from run_trades import _get_futures_client
+        comp = get_components()
+        if not comp.binance_client:
+            raise HTTPException(status_code=503, detail="Components not initialized")
+        fc = _get_futures_client(settings, db_client=comp.db_client)
+        fc._binance_client_ref = comp.binance_client
+        parity = evaluate_futures_parity(fc)
+        persisted = get_truth_status(comp.db_client)
+        return {
+            "ok": parity.get("ok", True),
+            "severity": parity.get("severity", "unknown"),
+            "parity": parity,
+            "persisted": persisted,
+            "timestamp": to_mexico_time(datetime.utcnow()).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/reconciliation/futures/run")
+async def run_futures_reconciliation(dry_run: bool = True, _auth: None = Depends(_require_api_key)) -> Dict:
+    """Run FUTURES auto-reconciliation; dry_run=True returns only recommendations."""
+    try:
+        from run_trades import _get_futures_client
+        comp = get_components()
+        if not comp.binance_client:
+            raise HTTPException(status_code=503, detail="Components not initialized")
+        fc = _get_futures_client(settings, db_client=comp.db_client)
+        fc._binance_client_ref = comp.binance_client
+        report = auto_reconcile_futures(fc, comp.db_client, dry_run=dry_run)
+        return {
+            "status": "ok",
+            "dry_run": dry_run,
+            "report": report,
+            "timestamp": to_mexico_time(datetime.utcnow()).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/system/position-reconciliation")
+async def get_position_reconciliation_health(_auth: None = Depends(_require_api_key)) -> Dict:
+    """Health check: return current SPOT/FUTURES reconciliation discrepancies.
+
+    Useful for dashboard and alerting. Does not mutate state.
+    """
+    try:
+        comp = get_components()
+        if not comp.position_manager or not comp.binance_client:
+            raise HTTPException(status_code=503, detail="Components not initialized")
+        spot_parity = evaluate_spot_parity(comp.position_manager, comp.binance_client)
+        spot_status = get_truth_status_spot(comp.db_client)
+        futures_parity = {}
+        futures_status = {}
+        try:
+            fc = _get_futures_client(settings, db_client=comp.db_client)
+            fc._binance_client_ref = comp.binance_client
+            futures_parity = evaluate_futures_parity(fc)
+            futures_status = get_truth_status_futures(comp.db_client)
+        except Exception as _fe:
+            futures_parity = {"ok": False, "error": str(_fe)}
+        _healthy = bool(spot_parity.get("ok", True)) and bool(futures_parity.get("ok", True))
+        return {
+            "healthy": _healthy,
+            "spot": {
+                "ok": spot_parity.get("ok", True),
+                "severity": spot_parity.get("severity", "unknown"),
+                "discrepancies": spot_parity.get("discrepancies", []),
+                "last_status": spot_status,
+            },
+            "futures": {
+                "ok": futures_parity.get("ok", True),
+                "severity": futures_parity.get("severity", "unknown"),
+                "discrepancies": futures_parity.get("discrepancies", []),
+                "last_status": futures_status,
+            },
+            "timestamp": to_mexico_time(datetime.utcnow()).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class TradingViewPayload(BaseModel):
     symbol: Optional[str] = None
     action: Optional[str] = None
@@ -731,20 +877,23 @@ async def get_commission_summary(hours: int = 24) -> Dict:
             xp   = float(r.get('exit_price') or ep)
             ec   = r.get('entry_commission')
             xc   = r.get('exit_commission')
+            # Fase 2.6: prefer real average prices from fill metadata when available
+            _real_ep = float(meta.get('entry_avg_price', 0) or ep)
+            _real_xp = float(meta.get('exit_avg_price', 0) or xp)
             if ttype == 'futures':
                 fut_trades += 1
                 fut_gross  += pnl
                 if ec is not None and xc is not None:
                     fut_comm += float(ec) + float(xc)
                 else:
-                    fut_comm += (ep * qty + xp * qty) * _fut_rate
+                    fut_comm += (_real_ep * qty + _real_xp * qty) * _fut_rate
             else:
                 spot_trades += 1
                 spot_gross  += pnl
                 if ec is not None and xc is not None:
                     spot_comm += float(ec) + float(xc)
                 else:
-                    spot_comm += (ep * qty + xp * qty) * _spot_rate
+                    spot_comm += (_real_ep * qty + _real_xp * qty) * _spot_rate
         total_gross = spot_gross + fut_gross
         total_comm  = spot_comm + fut_comm
         net_pnl     = total_gross - total_comm
@@ -878,7 +1027,8 @@ async def update_portfolio_config(payload: PortfolioConfigRequest, _auth: None =
 async def get_account_balance() -> Dict:
     """Get current account balance with USDT and MXN conversion."""
     try:
-        balances = binance_client.get_account_balance()
+        import asyncio as _asyncio
+        balances = await _asyncio.to_thread(binance_client.get_account_balance)
         total_usdt = 0.0
         price_cache: Dict[str, float] = {}
         
@@ -965,16 +1115,20 @@ async def get_open_positions() -> Dict:
                 entry_price = float(position.entry_price)
                 quantity    = float(position.quantity)
                 if current_price is not None:
-                    if position.side.upper() == "BUY":
-                        unrealized_pnl = round((current_price - entry_price) * quantity, 4)
-                    else:
-                        unrealized_pnl = round((entry_price - current_price) * quantity, 4)
                     cp = current_price
+                    if position.side.upper() == "BUY":
+                        _gross_unrealized = (cp - entry_price) * quantity
+                    else:
+                        _gross_unrealized = (entry_price - cp) * quantity
+                    # C0: return net PnL after Binance fees
+                    from binance_commission import total_commission as _open_total_comm
+                    _comm_unrealized = _open_total_comm(quantity, entry_price, cp, 'spot', settings)
+                    unrealized_pnl = round(_gross_unrealized - _comm_unrealized, 4)
                 else:
                     cp = entry_price
                     unrealized_pnl = 0.0
 
-                unrealized_pnl_pct = round((cp - entry_price) / entry_price * 100, 4) if entry_price > 0 else 0.0
+                unrealized_pnl_pct = round((unrealized_pnl / (entry_price * quantity)) * 100, 4) if entry_price > 0 and quantity > 0 else 0.0
                 # Compute dynamic SL/TP/trailing prices from settings
                 sl_price = round(entry_price * (1 - settings.stop_loss_pct / 100), 6)
                 tp_price = round(entry_price * (1 + settings.take_profit_pct / 100), 6)
@@ -1528,6 +1682,8 @@ def _build_operator_focus(
     health_results: Dict[str, Any],
     effective_runtime: Dict[str, Any],
     pause_state: Optional[Dict[str, Any]] = None,
+    binance_truth: Optional[Dict[str, Any]] = None,
+    binance_truth_spot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create an actionable operator queue from health/runtime signals."""
     items: List[Dict[str, Any]] = []
@@ -1626,6 +1782,30 @@ def _build_operator_focus(
             "Drift de armonía detectado",
             f"Se detectaron {_drift_count} diferencias entre el snapshot persistido y el runtime efectivo.",
             "Revisar la matriz aplicada antes de continuar con el rollout.",
+        )
+
+    _bt_sev = str((binance_truth or {}).get("severity") or "unknown").lower()
+    if _bt_sev == "critical":
+        _bt_mm = (binance_truth or {}).get("mismatches") or []
+        _bt_syms = ", ".join({m.get("symbol", "") for m in _bt_mm[:3]})
+        _push(
+            "binance_truth_critical",
+            "critical",
+            "Paridad FUTURES crítica con Binance",
+            f"mismatch_count={(binance_truth or {}).get('mismatch_count', 0)}. Símbolos: {_bt_syms or 'N/A'}.",
+            "Revisar posiciones futures en Binance y reconciliar antes de nuevas entradas.",
+        )
+
+    _bts_sev = str((binance_truth_spot or {}).get("severity") or "unknown").lower()
+    if _bts_sev == "high":
+        _bts_mm = (binance_truth_spot or {}).get("mismatches") or []
+        _bts_syms = ", ".join({m.get("symbol", "") for m in _bts_mm[:3]})
+        _push(
+            "binance_truth_spot_high",
+            "critical",
+            "Paridad SPOT crítica con Binance",
+            f"mismatch_count={(binance_truth_spot or {}).get('mismatch_count', 0)}. Símbolos: {_bts_syms or 'N/A'}.",
+            "Revisar posiciones SPOT en DB y Binance — posibles fantasmas o inconsistencias de balance.",
         )
 
     if _parity_status == "critical":
@@ -1845,6 +2025,12 @@ async def get_dashboard_summary() -> Dict:
     except Exception as e:
         result["binance_truth"] = {"ok": False, "severity": "error", "error": str(e)}
 
+    # Binance SPOT truth parity status
+    try:
+        result["binance_truth_spot"] = get_truth_status_spot(comp.db_client)
+    except Exception as e:
+        result["binance_truth_spot"] = {"ok": False, "severity": "error", "error": str(e)}
+
     # Basket reset recommendation (runtime decision persisted by trade cycle)
     try:
         _br_rows = comp.db_client.execute_query(
@@ -1930,7 +2116,8 @@ async def get_dashboard_summary() -> Dict:
 
     # Balance
     try:
-        balances = binance_client.get_account_balance()
+        import asyncio as _asyncio
+        balances = await _asyncio.to_thread(binance_client.get_account_balance)
         total_usdt = 0.0
         # Reuse dashboard-local price cache when the same quote appears multiple times.
         balances_usdt = {}
@@ -1952,7 +2139,7 @@ async def get_dashboard_summary() -> Dict:
         try:
             from run_trades import _get_futures_client
             _fc_bal = _get_futures_client(settings)
-            _futures_usdt = _fc_bal.get_total_wallet_usdt()  # includes margin + available
+            _futures_usdt = await _asyncio.to_thread(_fc_bal.get_total_wallet_usdt)
         except Exception:
             pass
         _grand_total = total_usdt + _futures_usdt
@@ -2251,7 +2438,10 @@ async def get_dashboard_summary() -> Dict:
             if _sp_total_qty <= 0:
                 continue
             _sp_wap = _sp_total_cost / _sp_total_qty
-            _sp_total_pnl = round(_sp_total_pnl, 4)
+            # C0: dashboard shows net PnL after Binance fees (entry+exit on total notional)
+            from binance_commission import total_commission as _sp_total_commission
+            _sp_comm_total = _sp_total_commission(_sp_total_qty, _sp_wap, _sp_cp, 'spot', settings)
+            _sp_total_pnl = round(_sp_total_pnl - _sp_comm_total, 4)
             _sp_total_qty = round(_sp_total_qty, 8)
             _sp_wap       = round(_sp_wap, 8)
             _sp_total_cost = round(_sp_total_cost, 4)
@@ -2325,6 +2515,7 @@ async def get_dashboard_summary() -> Dict:
                 "bounce_gate_last_velocity": _sp_meta_last.get('bounce_gate_last_velocity'),
                 "bounce_gate_first_qualified_at": _sp_meta_last.get('bounce_gate_first_qualified_at'),
                 "btc_chg_since_entry_pct": None,
+                "metadata": _sp_meta_last,
             })
         # Add futures positions to the dashboard
         try:
@@ -2769,6 +2960,8 @@ async def get_dashboard_summary() -> Dict:
             result.get("health_results", {}),
             result.get("effective_runtime", {}),
             result.get("pause_new_entries", {}),
+            binance_truth=result.get("binance_truth"),
+            binance_truth_spot=result.get("binance_truth_spot"),
         )
     except Exception as e:
         result["operator_focus"] = {"items": [], "error": str(e)}
@@ -2827,22 +3020,19 @@ async def get_dashboard_summary() -> Dict:
 
     # Daily ticker bar (8AM Mexico open vs current price)
     try:
+        import asyncio as _asyncio
         ticker_symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
-        ticker_data = []
-        for sym in ticker_symbols:
+        async def _fetch_ticker(sym):
             try:
-                open_p = binance_client.get_daily_open_price(sym)
+                open_p = await _asyncio.to_thread(binance_client.get_daily_open_price, sym)
                 cur_p = _get_request_price(price_cache, sym)
                 change_pct = round((cur_p - open_p) / open_p * 100, 2) if open_p else 0.0
-                ticker_data.append({
-                    "symbol": sym,
-                    "open_price": round(open_p, 6),
-                    "current_price": round(cur_p, 6),
-                    "change_pct": change_pct,
-                })
+                return {"symbol": sym, "open_price": round(open_p, 6),
+                        "current_price": round(cur_p, 6), "change_pct": change_pct}
             except Exception:
-                pass
-        result["daily_ticker"] = ticker_data
+                return None
+        _ticker_results = await _asyncio.gather(*[_fetch_ticker(s) for s in ticker_symbols])
+        result["daily_ticker"] = [r for r in _ticker_results if r is not None]
     except Exception as e:
         result["daily_ticker"] = []
 
@@ -2974,13 +3164,15 @@ async def get_dashboard_summary() -> Dict:
     _snapshot_finished_at = datetime.now(timezone.utc)
     _snapshot_generation_ms = int((_snapshot_finished_at - _snapshot_started_at).total_seconds() * 1000)
     _truth_sev = str((result.get("binance_truth") or {}).get("severity") or "unknown").lower()
+    _truth_spot_sev = str((result.get("binance_truth_spot") or {}).get("severity") or "unknown").lower()
     result["snapshot_meta"] = {
         "snapshot_timestamp": _snapshot_started_at.isoformat(),
         "snapshot_finished_at": _snapshot_finished_at.isoformat(),
         "snapshot_generation_ms": _snapshot_generation_ms,
         "data_freshness_seconds": round((datetime.now(timezone.utc) - _snapshot_started_at).total_seconds(), 3),
         "binance_truth_severity": _truth_sev,
-        "tactical_decision_blocked": _truth_sev in ("critical",),
+        "binance_truth_spot_severity": _truth_spot_sev,
+        "tactical_decision_blocked": _truth_sev in ("critical",) or _truth_spot_sev in ("high",),
     }
     result["timestamp"] = to_mexico_time(datetime.utcnow()).isoformat()
     return result
@@ -4381,11 +4573,15 @@ async def get_transition_health(_auth=Depends(_require_api_key)) -> Dict:
 
 @app.get("/metrics/binance-truth")
 async def get_binance_truth_metrics(_auth=Depends(_require_api_key)) -> Dict:
-    """Return Binance parity state used by runtime gates."""
+    """Return Binance parity state (futures + spot) used by runtime gates."""
     try:
         status = get_truth_status(db_client)
         status = status if isinstance(status, dict) else {"raw": status}
         status["ok"] = bool(status.get("ok", str(status.get("severity", "")).lower() in ("ok", "unknown")))
+        status_spot = get_truth_status_spot(db_client)
+        status_spot = status_spot if isinstance(status_spot, dict) else {"raw": status_spot}
+        status_spot["ok"] = bool(status_spot.get("ok", str(status_spot.get("severity", "")).lower() in ("ok", "unknown")))
+        status["spot"] = status_spot
         status["timestamp"] = datetime.now(timezone.utc).isoformat()
         return status
     except Exception as e:
@@ -4847,7 +5043,8 @@ async def get_price_history(symbol: str, start_time: str, end_time: str):
         }
         
         # Fetch klines data
-        async with aiohttp.ClientSession() as session:
+        _klines_timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=_klines_timeout) as session:
             async with session.get(base_url, params=params) as response:
                 if response.status != 200:
                     return {"error": f"Binance API error: {response.status}", "symbol": symbol, "data": []}
@@ -5881,9 +6078,9 @@ async def get_health_status() -> Dict:
         }
     else:
         try:
-            import time as _time
+            import time as _time, asyncio as _asyncio
             t0 = _time.monotonic()
-            binance_client.get_account_balance()
+            await _asyncio.to_thread(binance_client.get_account_balance)
             latency_ms = round((_time.monotonic() - t0) * 1000, 1)
             checks["binance"] = {"status": "ok", "latency_ms": latency_ms,
                                   "testnet": settings.binance_use_testnet}
@@ -5936,7 +6133,8 @@ async def get_health_status() -> Dict:
     try:
         all_pos = position_manager.get_all_positions()
         db_count = sum(len(v) for v in all_pos.values())
-        balances = {} if bool(getattr(settings, 'dry_run', False)) else binance_client.get_account_balance()
+        import asyncio as _asyncio
+        balances = {} if bool(getattr(settings, 'dry_run', False)) else await _asyncio.to_thread(binance_client.get_account_balance)
         # Only check SPOT positions — futures positions (trade_type='futures') have no spot balance
         def _is_futures_pos(pos_list):
             return any(
@@ -5990,10 +6188,9 @@ async def get_health_status() -> Dict:
     try:
         _futures_enabled = getattr(settings, 'futures_enabled', True)
         if _futures_enabled:
-            import urllib.request as _ur, time as _time
+            import urllib.request as _ur, time as _time, asyncio as _asyncio
             t0 = _time.monotonic()
-            with _ur.urlopen('https://fapi.binance.com/fapi/v1/ping', timeout=5) as _r:
-                _r.read()
+            await _asyncio.to_thread(lambda: _ur.urlopen('https://fapi.binance.com/fapi/v1/ping', timeout=5).read())
             _fapi_lat = round((_time.monotonic() - t0) * 1000, 1)
             try:
                 from run_trades import _get_futures_client
@@ -8015,10 +8212,22 @@ def _check_config_drift(settings) -> List[Dict]:
     _actual = dump_active_config(settings)
     # These are intentionally environment-specific or operator-controlled and not drift.
     _EXCLUDED = {
-        'dry_run', 'allow_real_trading', 'analysis_symbols', 'futures_symbols',
-        'futures_largecap_symbols', 'trading_excluded_symbols', 'narrative_tokens',
+        # Env/safety overrides
+        'dry_run', 'allow_real_trading',
+        # Symbol/category lists (deployment-specific)
+        'analysis_symbols', 'futures_symbols', 'futures_largecap_symbols',
+        'trading_excluded_symbols', 'narrative_tokens',
         'token_categories', 'category_thresholds', 'futures_category_thresholds',
+        # Dynamic runtime state
         'current_regime_mode',
+        # Docker-compose operational overrides — intentionally tuned per deployment
+        'max_per_trade_usdt', 'max_positions', 'max_positions_per_symbol',
+        'max_total_exposure_pct', 'kelly_dynamic_base_pct',
+        'trailing_stop_activation_pct', 'trailing_stop_distance_pct',
+        'futures_max_new_per_cycle', 'overflow_max_extra',
+        'min_hold_minutes', 'max_rebalance_per_cycle',
+        'btc_dominance_altcoin_threshold', 'use_unified_portfolio_manager',
+        'futures_overflow_min_strength',
     }
     # Canonical default drift (SPOT+FUTURES parameters) — skip keys already covered by baseline
     for k, expected in _PARAM_DEFAULTS.items():
@@ -9244,9 +9453,20 @@ async def post_config_verify(body: Dict = None, _auth=Depends(_require_api_key))
         _comp = get_components()
         _actual = dump_active_config(_comp.settings)
         _exclude = {
-            'dry_run', 'allow_real_trading', 'analysis_symbols', 'futures_symbols',
-            'futures_largecap_symbols', 'trading_excluded_symbols', 'narrative_tokens',
+            # Env/safety overrides
+            'dry_run', 'allow_real_trading',
+            # Symbol/category lists (deployment-specific)
+            'analysis_symbols', 'futures_symbols', 'futures_largecap_symbols',
+            'trading_excluded_symbols', 'narrative_tokens',
             'token_categories', 'category_thresholds', 'current_regime_mode',
+            # Docker-compose operational overrides — intentionally tuned per deployment
+            'max_per_trade_usdt', 'max_positions', 'max_positions_per_symbol',
+            'max_total_exposure_pct', 'kelly_dynamic_base_pct',
+            'trailing_stop_activation_pct', 'trailing_stop_distance_pct',
+            'futures_max_new_per_cycle', 'overflow_max_extra',
+            'min_hold_minutes', 'max_rebalance_per_cycle',
+            'btc_dominance_altcoin_threshold', 'use_unified_portfolio_manager',
+            'futures_overflow_min_strength',
         }
         if body and isinstance(body, dict):
             _exclude.update(body.get('exclude', []))

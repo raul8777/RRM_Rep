@@ -1,7 +1,218 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 06 2026 | Sesión 48: Pydantic V2 Migration — 370 deprecation warnings eliminadas.
+> Última actualización: jul 06 2026 | Sesión 55: Documentación de cierre (Fase 2.8). Plan exhaustivo trazabilidad Fases 2.0–2.8 **COMPLETADAS**.
+
+---
+
+### ✅ Sesión 49 — SPOT/FUTURES Reconciliation & Persistence (Fases 2.1–2.2) — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Cerrar las fases de persistencia y reconciliación del plan de trazabilidad, asegurando que SPOT y FUTURES estén siempre alineados con Binance y que cualquier discrepancia sea visible y corregible manualmente.
+
+**Implementación aplicada:**
+
+1. **SPOT runtime (`run_trades.py`):**
+   - `execute_once()` ejecuta `sync_with_exchange_balance()` cada ciclo (importa huérfanos, cierra fantasmas, valida cantidades).
+
+2. **SPOT advisory reconciliation (`binance_truth_guard.py`):**
+   - Nuevo `auto_reconcile_spot()` genera recomendaciones para `SPOT_GHOST_IN_DB`, `SPOT_QTY_DRIFT` y `SPOT_ORPHAN_IN_BINANCE`.
+   - Modo `dry_run=True` por defecto; modo `dry_run=False` aplica cierres/ajustes/importaciones sintéticas con precio de mercado.
+   - Persiste reporte en `trading_runtime_state` con key `binance_truth_status_spot`.
+
+3. **FUTURES advisory reconciliation (`binance_truth_guard.py` + `futures_client.py`):**
+   - Nuevo `auto_reconcile_futures()` genera recomendaciones para `BINANCE_MISMATCH_RUNTIME_MISSING`, `BINANCE_MISMATCH_GHOST_RUNTIME`, `BINANCE_MISMATCH_QTY` y `BINANCE_MISMATCH_ENTRY_PRICE`.
+   - `check_positions()` ejecuta reporte advisory en cada ciclo.
+
+4. **API endpoints (`app.py`):**
+   - `GET /reconciliation/spot` — paridad SPOT y último reporte persistido.
+   - `POST /reconciliation/spot/run?dry_run=true` — ejecuta reconciliación SPOT.
+   - `GET /reconciliation/futures` — paridad FUTURES y último reporte persistido.
+   - `POST /reconciliation/futures/run?dry_run=true` — ejecuta reconciliación FUTURES.
+
+5. **Tests:**
+   - `position_manager.py`: default de `commission_rate` en `close_position()` ahora es `None` (usa config centralizada).
+   - `_calc_close()` y `close_position()` estiman `entry_commission` si falta, garantizando PnL neto histórico.
+   - `tests/test_position_manager.py` y `tests/test_commission_awareness.py` actualizados para usar tasas activas del sistema.
+   - `tests/test_futures_smart_exits.py` y `tests/test_system_health.py` ajustados a PnL neto en triggers de breakeven/trailing.
+
+**Validación:**
+- `pytest tests/ --ignore=tests/test_integration.py`: **334 passed, 2 failed preexistentes** (`test_config_governance.py` baseline drift).
+
+**Archivos modificados:**
+- `binance_truth_guard.py` (`auto_reconcile_spot`, `auto_reconcile_futures`)
+- `futures_client.py` (import + reporte advisory en `check_positions`)
+- `position_manager.py` (default `commission_rate=None`, fallback entry commission)
+- `app.py` (nuevos endpoints `/reconciliation/*`)
+- `tests/test_position_manager.py`, `tests/test_commission_awareness.py`, `tests/test_futures_smart_exits.py`, `tests/test_system_health.py`
+- `C:\Users\raul8\.windsurf\plans\plan_exhaustivo_trazabilidad_f41c05.md` (fases 2.1–2.2)
+
+---
+
+### ✅ Sesión 55 — Documentación de cierre (Fase 2.8) — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Documentar el modelo de fuente de verdad Binance, el manejo de fallos en cierres parciales SL/TP y la persistencia ante reinicios, para que operadores y mantenedores entiendan los invariantes del sistema.
+
+**Implementación aplicada:**
+
+1. **`README.md` nueva sección "Reconciliación y fuente de verdad":**
+   - SPOT: `verify_and_fetch_fills` devuelve cantidad real, precio promedio y comisión; se persisten en metadata.
+   - FUTURES: `_verify_entry_filled` aborta si `positionAmt == 0`; cierres usan PnL neto de `userTrades`/`ORDER TRADE UPDATE`.
+   - Endpoints de reconciliación: `/reconciliation/spot`, `/reconciliation/futures`, `/system/position-reconciliation`.
+   - Modelo de fallo: si el fill no se confirma, no se persiste el cierre; si es parcial, se cierra solo `qty_closed` y se reparten comisiones proporcionalmente.
+   - Persistencia: `trading_runtime_state` para safepoint/modos/reconciliación; `_open_positions` con `_smart_meta` para FUTURES; DB de SPOT al arranque.
+
+**Archivos modificados:**
+- `README.md` (nueva sección de reconciliación y fuente de verdad)
+
+**Validación:**
+- `pytest tests/ --ignore=tests/test_integration.py`: **343 passed, 2 failed preexistentes**.
+
+---
+
+### ✅ Sesión 54 — Tests, health check y dashboard (Fase 2.7) — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Añadir tests de regresión para la reconciliación SPOT/FUTURES, exponer un health check consolidado y un panel de dashboard para que el operador vea discrepancias en tiempo real.
+
+**Implementación aplicada:**
+
+1. **Tests `tests/test_position_reconciliation.py`:**
+   - `test_spot_parity_aligned` / `test_spot_ghost_detected` / `test_spot_orphan_detected` / `test_spot_qty_drift_detected`.
+   - `test_futures_parity_aligned` / `test_futures_parity_detects_runtime_missing` / `test_futures_parity_detects_ghost_runtime` / `test_futures_parity_detects_qty_drift` / `test_futures_parity_detects_entry_price_drift`.
+
+2. **`app.py` endpoint `/system/position-reconciliation`:**
+   - Devuelve `healthy`, `spot` y `futures` con severidad, discrepancias y último estado persistido.
+   - No muta estado; sirve para dashboard y alertas.
+
+3. **`binance_truth_guard.py`:**
+   - Nuevo `get_truth_status_futures()` alias de `get_truth_status()` para claridad.
+
+4. **`frontend/dashboard.js` + `index.html` + `styles.css`:**
+   - Nueva tarjeta "⚖️ Reconciliación Binance" con SPOT/FUTURES y lista de discrepancias.
+   - Se actualiza al inicio, cada 60s, y al refrescar/clear errores.
+
+**Validación:**
+- `pytest tests/ --ignore=tests/test_integration.py`: **343 passed, 2 failed preexistentes**.
+
+---
+
+### ✅ Sesión 53 — Comisiones y contabilidad (Fase 2.6) — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Garantizar que el endpoint de comisiones y los registros de cierre usen cantidades reales y precios promedio de Binance cuando estén disponibles, y que las comisiones estimadas en fallback se calculen sobre la cantidad real vendida.
+
+**Implementación aplicada:**
+
+1. **SPOT entradas (Fase 2.3 ya cubierto):**
+   - `verify_and_fetch_fills` devuelve comisión real y `entry_avg_price`.
+   - Metadata guarda `entry_commission`, `entry_avg_price`, `entry_filled_qty`, `binance_entry_confirmed`.
+
+2. **SPOT cierres (Fase 2.3 ya cubierto):**
+   - `exit_context` guarda `exit_commission`, `exit_avg_price`, `exit_filled_qty`, `binance_exit_confirmed`.
+   - `position_manager.close_position` reparte `entry_commission` proporcionalmente a `qty_closed` y calcula `exit_commission` sobre `qty_closed`.
+
+3. **`app.py` endpoint `/performance/commissions`:**
+   - Ahora usa `entry_avg_price` y `exit_avg_price` de metadata cuando existen para estimar comisiones en fallback.
+   - Usa `quantity` de `trades_closed`, que es la cantidad real cerrada (SPOT/FUTURES).
+
+**Principio Fase 2.6:** toda comisión estimada o reportada debe basarse en la cantidad real ejecutada en Binance; nunca en la cantidad teórica de posición.
+
+**Archivos modificados:**
+- `app.py` (`/performance/commissions` usa precios reales de metadata)
+
+**Validación:**
+- `pytest tests/ --ignore=tests/test_integration.py`: **334 passed, 2 failed preexistentes**.
+
+---
+
+### ✅ Sesión 52 — Robustez de modos y perfiles (Fase 2.5) — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Reducir cierres prematuros de posiciones ganadoras en SPOT_BULL y evitar que UG convierta scale-outs parciales en cierres totales automáticos, sin perder la defensa de ganancias significativas.
+
+**Implementación aplicada:**
+
+1. **`config.py`:**
+   - Nuevo `ug_allow_partial_to_full_escalation: bool = False` — si es `False`, UG no escala un SSO parcial a cierre total aunque PRS también quiera cerrar.
+   - Nuevos `peak_protection_spot_bull_pct: float = 0.70` y `peak_protection_spot_bull_profile_a_pct: float = 0.75` — más permisivos que el 0.60 anterior, permitiendo que ganadores corran en SPOT_BULL.
+
+2. **`unified_governance_supervisor.py`:**
+   - Cuando `ug_allow_partial_to_full_escalation=False`, el caso `SSO partial + PRS close` ejecuta un partial close igual al mayor porcentaje solicitado (no 100%), con prioridad 80 y mensaje de audit explícito.
+   - Cuando el flag está `True`, conserva el comportamiento legacy de escalación a cierre total.
+
+3. **`profit_realization_supervisor.py`:**
+   - `_peak_protection_pct()` lee los nuevos settings de SPOT_BULL y perfil A.
+
+**Principio Fase 2.5:** en SPOT_BULL el sistema debe ser más paciente con ganadores; los parciales de escalamiento no deben matar la posición completa a menos que el operador lo habilite explícitamente.
+
+**Archivos modificados:**
+- `config.py` (3 nuevos parámetros)
+- `unified_governance_supervisor.py` (respeto del flag de escalación)
+- `profit_realization_supervisor.py` (peak protection configurable SPOT_BULL)
+
+**Validación:**
+- `pytest tests/ --ignore=tests/test_integration.py`: **334 passed, 2 failed preexistentes**.
+
+---
+
+### ✅ Sesión 51 — Trazabilidad de decisiones UG/PRS/SSO + safepoint (Fase 2.4) — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Asegurar que cada decisión de los supervisores UG, PRS y SSO se persista en `trades_audit` con el contexto completo requerido para auditoría forense: PnL, peak, momentum, F&G, perfil, régimen y % de cierre.
+
+**Implementación aplicada:**
+
+1. **`run_trades.py`: SPOT supervisors**
+   - **PRS:** `profit_realization_supervisor_decision` ahora audita `pnl_pct`, `peak_pnl_pct`, `pnl_velocity_1h`, `current_signal_strength`, `fear_greed_value`, `regime_mode`, `profile_label`, `tp_extensions`, `close_pct`.
+   - **SSO:** `smart_scale_out_decision` audita `pnl_pct`, `pnl_usdt`, `peak_pnl_pct`, `velocity`, `signal_strength`, `fear_greed_value`, `regime_mode`, `profile_label`, `bounce_entry`, `sso_levels_done`, `close_pct`.
+   - **UG:** `unified_governance_decision` y `unified_governance_close_triggered` enriquecidos con `pnl_pct`, `pnl_usdt`, `peak_pnl_pct`, `velocity`, `signal_strength`, `fear_greed_value`, `regime_mode`, `profile_label`, y el estado de los advisories PRS/SSO.
+   - **F&G:** se obtiene una sola vez por posición y se comparte con PRS/SSO/UG.
+   - **Safepoint:** `_persist_safepoint()` guarda snapshot pre-decisión en `trading_runtime_state` (`safepoint_YYYYMMDD_HHMMSS`) con régimen, perfil, pausa, salud crítica y cantidades abiertas.
+
+2. **Persistencia de modo/perfil:**
+   - `_run_smart_total_mode_selector` y `_run_regime_profile_auto_selector` ya escriben estado en `trading_runtime_state` y audit decisiones en `trades_audit`.
+
+**Principio Fase 2.4:** toda decisión de riesgo que afecte una posición debe ser reconstruible desde `trades_audit` con el contexto de mercado y estado del sistema en el momento de la decisión.
+
+**Archivos modificados:**
+- `run_trades.py` (audits PRS/SSO/UG, F&G compartido, `_persist_safepoint`)
+
+**Validación:**
+- `pytest tests/ --ignore=tests/test_integration.py`: **334 passed, 2 failed preexistentes**.
+
+---
+
+### ✅ Sesión 50 — Verificación de órdenes Binance (Fase 2.3) — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Estandarizar que toda orden de mercado SPOT/FUTURES se verifique contra Binance antes de actualizar la base de datos, y que los registros reflejen la cantidad real ejecutada, precio promedio y comisión real cuando sea posible.
+
+**Implementación aplicada:**
+
+1. **`binance_client.py`:**
+   - Nuevo `get_my_trades(symbol, order_id=None)` — consulta `/api/v3/myTrades`.
+   - Nuevo `verify_and_fetch_fills(order_result, label)` — confirma fill y devuelve:
+     - `qty` (cantidad real ejecutada)
+     - `avg_price` (precio promedio ponderado)
+     - `commission` (comisión real en USDT)
+     - `binance_confirmed: True`
+
+2. **SPOT runtime (`run_trades.py`):**
+   - Compras (`_buy_top_symbols`): usan `verify_and_fetch_fills` para obtener `qty` real y comisión real; registran `entry_filled_qty`, `entry_avg_price`, `entry_commission`, `binance_entry_confirmed=True` en metadata.
+   - Cierres SL/TP (`_check_sl_tp_positions`): usan `verify_and_fetch_fills` para obtener `qty` real vendida; registran `exit_filled_qty`, `exit_avg_price`, `exit_commission`, `binance_exit_confirmed=True` en `exit_context`.
+
+3. **FUTURES runtime (`futures_client.py`):**
+   - Entradas: `_verify_entry_filled()` ya confirma `positionAmt > 0` y setea `binance_entry_confirmed`.
+   - Cierres: `_get_realized_pnl_from_trades()` ya usa `/fapi/v1/userTrades` para PnL real y cantidad real.
+
+**Principio Fase 2.3:** ninguna posición SPOT se registra o cierra en la base de datos sin confirmación previa de Binance. Si `verify_and_fetch_fills` devuelve `None`, el ciclo salta al siguiente símbolo sin mutar DB.
+
+**Archivos modificados:**
+- `binance_client.py` (`get_my_trades`, `verify_and_fetch_fills`)
+- `run_trades.py` (BUY y SL/TP SELL usan fills reales)
+- `C:\Users\raul8\.windsurf\plans\plan_exhaustivo_trazabilidad_f41c05.md` (fase 2.3)
 
 ---
 
@@ -27,6 +238,55 @@ Eliminar las 370 `PydanticDeprecatedSince20` warnings que contaminaban cada cicl
 - `docker-compose.yml` y variables de entorno sin cambios — comportamiento en producción idéntico.
 
 **Archivo modificado:** `config.py`
+
+---
+
+### ✅ Sesión 48 — Comisiones Binance en todos los cálculos (C0) — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Extender el requisito de comisiones a **todos** los cálculos del sistema que afectan PnL, EV, Kelly, toma de decisiones de cierre/partial, backtest y métricas del dashboard, usando `binance_commission.py` como fuente única de verdad.
+
+**Implementación aplicada:**
+
+1. **SPOT runtime (`run_trades.py`):**
+   - Nuevos helpers `_spot_net_pnl()` y `_spot_net_pnl_aggregate()` devuelven PnL bruto, neto y % neto después de comisiones de Binance.
+   - `ProfitRealizationContext` y `UnifiedGovernanceContext` reciben `pnl_pct` / `pnl_usdt` netos.
+   - Smart Scale-Out SPOT usa PnL neto agregado por símbolo (escalación).
+   - Bounce rescue gate evalúa `pnl_usdt_net`.
+   - Marca de inicio de profit (`_mark_profit_started`) usa PnL neto.
+   - Triggers de breakeven/trailing activación usan % neto.
+
+2. **FUTURES runtime (`futures_client.py`):**
+   - `check_positions()` convierte `unrealized_pnl` bruto a neto vía `binance_commission.net_pnl()` antes de PRS/UG/SSO/peaks.
+   - `get_open_positions_summary()` devuelve `unrealized_pnl` neto para el dashboard.
+   - Sync de `_smart_meta` desde DB usa PnL neto para inferir trailing/breakeven.
+
+3. **Dashboard / API (`app.py`):**
+   - `/positions/open` devuelve `unrealized_pnl` y `unrealized_pnl_pct` netos.
+   - Dashboard SPOT agregado (`/dashboard/summary`) reporta `unrealized_pnl` neto por símbolo.
+   - Entradas de escalamiento enriquecidas (`_enrich_entries`) muestran PnL neto por entrada.
+
+4. **Backtests / simuladores:**
+   - `historical_simulator.py`: `SyntheticTrade` ahora calcula PnL neto con `binance_commission.net_pnl`.
+   - `backtest_multimode.py`: reemplazado `COMMISSION_RATE` hardcodeado por `_bt_entry_commission` / `_bt_exit_commission` centralizados para SPOT y FUTURES.
+   - `backtest_90d_v2.py`: comisiones de entrada y salida centralizadas para SPOT y FUTURES.
+   - `sim_regimes.py` / `sim_compare.py`: tasas redonda de spot tomadas desde `binance_commission.get_config()`.
+
+5. **Tests:**
+   - Nuevo `tests/test_commission_awareness.py` con regresiones para `total_commission`, `net_pnl`, `expected_pnl_after_fees` y cierre SPOT neto.
+
+**Principio C0:** cualquier variable llamada `pnl`, `pnl_pct`, `expected_pnl`, `unrealized_pnl` o `peak_pnl_pct` que alimente una decisión de trading, supervisor o métrica debe representar valor **neto después de comisiones de Binance**. Los triggers basados estrictamente en precio (SL/TP) permanecen en precio, pero sus cálculos de % ganancia asociados usan neto.
+
+**Archivos modificados:**
+- `run_trades.py` (helpers + contextos netos)
+- `futures_client.py` (neto en check_positions, summary, sync)
+- `app.py` (API neto, dashboard neto, entries neto)
+- `historical_simulator.py` (PnL neto sintético)
+- `backtest_multimode.py` (comisiones centralizadas)
+- `backtest_90d_v2.py` (comisiones centralizadas)
+- `sim_regimes.py` / `sim_compare.py` (defaults centralizados)
+- `tests/test_commission_awareness.py` (nuevo)
+- `C:\Users\raul8\.windsurf\plans\plan_exhaustivo_trazabilidad_f41c05.md` (fase 2.0 comisiones)
 
 ---
 

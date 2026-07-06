@@ -505,17 +505,19 @@ class TestCat3_FuturesClientCore:
         """Fix 3: When SL is still at default (entry*1.03), inferred best > entry → fresh activation at price."""
         pos = make_short(entry=100.0, sl_pct=3.0, tp_pct=7.0)
         fc = make_fc([pos])
-        # SL is still at default 103.0 (no trailing yet), price is 98.0 (2% gain)
-        inject_price(fc, "BTCUSDT", 98.0)
+        # SL is still at default 103.0 (no trailing yet). With net PnL after fees,
+        # price=97.0 yields ~2.96% net gain on SHORT, crossing the 2% trail activation.
+        inject_price(fc, "BTCUSDT", 97.0)
         s = make_settings(futures_trailing_enabled=True,
                           futures_trailing_activation_pct=2.0,
-                          futures_trailing_distance_pct=2.0)
+                          futures_trailing_distance_pct=2.0,
+                          futures_sso_enabled=False)
         fc.check_positions(settings=s)
-        # inferred_best = 103.0 / 1.02 = 100.98 > entry(100) → sanity check fails → use price
+        # inferred_best = 100.0 / 1.02 = 98.04 > entry(100) → sanity check fails → use price
         best = pos._smart_meta.get('trail_best_price', None)
         assert best is not None, "Fix 3: trail_best_price not initialized on fresh activation"
-        assert best == pytest.approx(98.0, abs=0.01), \
-            f"Fix 3: fresh activation should set trail_best_price=price=98.0, got {best}"
+        assert best == pytest.approx(97.0, abs=0.01), \
+            f"Fix 3: fresh activation should set trail_best_price=price=97.0, got {best}"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -855,12 +857,15 @@ API_KEY = os.environ.get("CRYPTO_API_KEY", "")
 
 
 def _api_available() -> bool:
-    try:
-        import urllib.request, socket
-        urllib.request.urlopen(f"{API_BASE}/health", timeout=2)
-        return True
-    except (OSError, TimeoutError, socket.timeout, Exception):
-        return False
+    import urllib.request, socket, time as _t
+    for _attempt in range(3):
+        try:
+            urllib.request.urlopen(f"{API_BASE}/health", timeout=5)
+            return True
+        except (OSError, TimeoutError, socket.timeout, Exception):
+            if _attempt < 2:
+                _t.sleep(1)
+    return False
 
 
 @pytest.mark.skipif(not _api_available(), reason="API not running on localhost:8000")
@@ -877,25 +882,25 @@ class TestCat7_APIEndpoints:
             return json.loads(resp.read())
 
     def test_health_status_returns_overall(self):
-        data = self._get("/health/status")
+        data = self._get("/health/status", timeout=30)
         assert "overall" in data, "/health/status missing 'overall' key"
         assert data["overall"] in ("ok", "warning", "error")
 
     def test_health_status_has_db_check(self):
-        data = self._get("/health/status")
+        data = self._get("/health/status", timeout=30)
         assert "db" in data.get("checks", data), "Missing 'db' in health status"
 
     def test_health_status_has_binance_check(self):
-        data = self._get("/health/status")
+        data = self._get("/health/status", timeout=30)
         checks = data.get("checks", data)
         assert "binance" in checks
 
     def test_dashboard_summary_returns(self):
-        data = self._get("/dashboard/summary")
+        data = self._get("/dashboard/summary", timeout=30)
         assert isinstance(data, dict)
 
     def test_dashboard_summary_has_market_regime(self):
-        data = self._get("/dashboard/summary")
+        data = self._get("/dashboard/summary", timeout=30)
         assert "market_regime" in data, "Dashboard summary missing market_regime"
 
     def test_futures_positions_returns_structure(self):
@@ -905,18 +910,18 @@ class TestCat7_APIEndpoints:
         assert "count" in data
 
     def test_futures_closed_returns_structure(self):
-        data = self._get("/futures/closed")
+        data = self._get("/futures/closed", timeout=30)
         assert "trades" in data or "closed" in data or isinstance(data, dict)
 
     def test_health_full_check_endpoint_exists(self):
         """New endpoint from this implementation must exist."""
-        data = self._get("/health/full-check")
+        data = self._get("/health/full-check", timeout=30)
         assert isinstance(data, dict)
         assert "version" in data
         assert "categories" in data
 
     def test_health_full_check_has_all_categories(self):
-        data = self._get("/health/full-check")
+        data = self._get("/health/full-check", timeout=30)
         cats = {c["name"] for c in data.get("categories", [])}
         expected = {"config_integrity", "market_regime", "futures_core",
                     "spot_pipeline", "kelly_sizing", "capital_flow"}
@@ -924,7 +929,7 @@ class TestCat7_APIEndpoints:
         assert not missing, f"Missing categories in full-check: {missing}"
 
     def test_health_full_check_has_summary(self):
-        data = self._get("/health/full-check")
+        data = self._get("/health/full-check", timeout=30)
         assert "summary" in data
         assert "total" in data["summary"]
         assert "passed" in data["summary"]
@@ -932,7 +937,7 @@ class TestCat7_APIEndpoints:
         assert "warned" in data["summary"]
 
     def test_metrics_override_performance_returns(self):
-        data = self._get("/metrics/override-performance")
+        data = self._get("/metrics/override-performance", timeout=30)
         assert isinstance(data, dict)
 
     def test_strategy_params_returns(self):

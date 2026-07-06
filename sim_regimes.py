@@ -17,8 +17,10 @@ comp = get_components()
 bc   = comp.binance_client
 
 MXN_RATE   = 19.5
-COMMISSION = 0.002  # 0.2% Binance spot
-FUTURES_COMMISSION = 0.0004  # 0.04% taker futuros
+# C0: use centralized Binance commission module (defaults: spot 0.001, futures 0.0004)
+from binance_commission import total_commission as _sr_total_commission, get_config as _sr_comm_config
+COMMISSION = _sr_comm_config().rate_for('spot') * 2  # kept for backward compat (round trip)
+FUTURES_COMMISSION = _sr_comm_config().rate_for('futures')  # kept as per-side rate (existing code multiplies by leverage)
 
 # ── Indicadores ───────────────────────────────────────────────────────────────
 def calc_rsi(prices, n=14):

@@ -31,7 +31,9 @@ from unified_governance_supervisor import (
 )
 from binance_truth_guard import (
     evaluate_futures_parity,
+    evaluate_spot_parity,
     persist_truth_status,
+    persist_truth_status_spot,
     audit_truth_mismatches,
     compute_basket_reset_decision,
 )
@@ -2744,6 +2746,39 @@ def _compute_spot_trail_distance(client: BinanceClient, symbol: str, pnl_pct: fl
     return trail_dist
 
 
+def _spot_net_pnl(pos, current_price: float, settings) -> tuple[float, float, float]:
+    """Return (gross_pnl_usdt, net_pnl_usdt, net_pnl_pct) for a SPOT position after Binance fees."""
+    entry_price = float(pos.entry_price or 0)
+    qty = float(pos.quantity or 0)
+    if entry_price <= 0 or qty <= 0:
+        return 0.0, 0.0, 0.0
+    gross_pnl_usdt = (current_price - entry_price) * qty
+    entry_comm = float(pos.entry_commission or 0)
+    if entry_comm <= 0:
+        entry_comm = compute_commission(qty, entry_price, settings, 'spot')
+    exit_comm = compute_commission(qty, current_price, settings, 'spot')
+    net_pnl_usdt = gross_pnl_usdt - entry_comm - exit_comm
+    net_pnl_pct = net_pnl_usdt / (entry_price * qty) if entry_price * qty > 0 else 0.0
+    return gross_pnl_usdt, net_pnl_usdt, net_pnl_pct
+
+
+def _spot_net_pnl_aggregate(pos_list, current_price: float, settings) -> tuple[float, float, float]:
+    """Return (gross_pnl_usdt, net_pnl_usdt, net_pnl_pct) for an aggregated symbol position (escalation)."""
+    total_cost = sum(float(p.entry_price or 0) * float(p.quantity or 0) for p in pos_list)
+    total_qty = sum(float(p.quantity or 0) for p in pos_list)
+    avg_entry = total_cost / total_qty if total_qty > 0 else 0.0
+    if total_cost <= 0 or total_qty <= 0:
+        return 0.0, 0.0, 0.0
+    gross_pnl_usdt = (current_price - avg_entry) * total_qty
+    entry_comm = sum(float(p.entry_commission or 0) for p in pos_list)
+    if entry_comm <= 0:
+        entry_comm = sum(compute_commission(float(p.quantity or 0), float(p.entry_price or 0), settings, 'spot') for p in pos_list)
+    exit_comm = compute_commission(total_qty, current_price, settings, 'spot')
+    net_pnl_usdt = gross_pnl_usdt - entry_comm - exit_comm
+    net_pnl_pct = net_pnl_usdt / total_cost
+    return gross_pnl_usdt, net_pnl_usdt, net_pnl_pct
+
+
 def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, news_client=None, regime: str = None, monitor_only: bool = False) -> List[Dict]:
     """
     Check all open positions against Stop-Loss, Take-Profit, and Trailing Stop rules.
@@ -2810,7 +2845,10 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 if entry_price <= 0:
                     continue
 
-                pnl_pct = (current_price - entry_price) / entry_price
+                # C0: gross PnL for price-based SL/TP triggers; net PnL for supervisors/Kelly/decisions
+                pnl_pct_gross = (current_price - entry_price) / entry_price
+                _pnl_gross_usdt, pnl_usdt_net, pnl_pct_net = _spot_net_pnl(pos, current_price, settings)
+                pnl_pct = pnl_pct_gross  # keep gross for price triggers
                 close_reason = None
                 supervisor_decision = None
                 supervisor_close_pct = 1.0
@@ -2839,8 +2877,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 _ctx_signal_strength = _sig_ctx.get("strength")
                 _ctx_signal_direction = _sig_ctx.get("direction")
                 _ctx_signal_timestamp = _sig_ctx.get("timestamp")
-                if pnl_pct > 0:
-                    _profit_started_dirty = _mark_profit_started(metadata, pnl_pct)
+                if pnl_pct_net > 0:
+                    _profit_started_dirty = _mark_profit_started(metadata, pnl_pct_net)
                     if _profit_started_dirty:
                         try:
                             position_manager.update_position_metadata(pos.position_id, metadata)
@@ -2933,6 +2971,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 # (SSOPositionData.bounce_entry=True + rescue_prediction_ev/signal fed in).
 
                 # ── SSO: Smart Scale-Out (SPOT) ──────────────────────────────
+                _sso_s_action = None  # always defined; advisory result passed to UG
                 _sso_enabled_spot = getattr(settings, 'sso_enabled', True)
                 if close_reason is None and _sso_enabled_spot and (pnl_pct > 0 or _spot_bounce_entry_flag):
                     try:
@@ -2945,11 +2984,10 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         _sso_sym_cost = sum(float(p.entry_price) * float(p.quantity) for p in _sso_sym_all)
                         _sso_sym_qty  = sum(float(p.quantity) for p in _sso_sym_all)
                         _sso_sym_avg_entry = _sso_sym_cost / _sso_sym_qty if _sso_sym_qty > 0 else entry_price
-                        _sso_sym_pnl_usdt  = (current_price - _sso_sym_avg_entry) * _sso_sym_qty
-                        _sso_sym_pnl_pct   = (_sso_sym_pnl_usdt / _sso_sym_cost) if _sso_sym_cost > 0 else pnl_pct
+                        _sso_sym_gross, _sso_sym_pnl_usdt, _sso_sym_pnl_pct = _spot_net_pnl_aggregate(_sso_sym_all, current_price, settings)
                         if len(_sso_sym_all) > 1:
                             print(f"[SSO/S] {symbol}: {len(_sso_sym_all)} entradas escaladas — "
-                                  f"PnL combinado=${_sso_sym_pnl_usdt:.2f} ({_sso_sym_pnl_pct*100:.2f}%) "
+                                  f"PnL combinado NETO=${_sso_sym_pnl_usdt:.2f} ({_sso_sym_pnl_pct*100:.2f}%) "
                                   f"vs individual=${(current_price - entry_price)*float(pos.quantity):.2f}")
                         _sso_spot_at_open = metadata.get('spot_total_at_open')
                         _sso_spot_live = float(client.get_account_balance().get("USDT", 0)) if client else None
@@ -3007,7 +3045,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         _sp_rescue_signal = None
                         _sp_rescue_signal_str = 0.0
                         _sp_rescue_target = getattr(settings, 'spot_bounce_rescue_target_pnl', -0.30)
-                        _sp_pnl_usdt = (current_price - entry_price) * float(pos.quantity)
+                        _sp_pnl_usdt = pnl_usdt_net  # C0: rescue target evaluated on net PnL
                         if _spot_bounce_entry_flag and _sp_pnl_usdt >= _sp_rescue_target:
                             try:
                                 import pnl_service as _sp_pnl_svc
@@ -3033,6 +3071,9 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 _sso_s_opened = None
                         if _sso_s_opened and _sso_s_opened.tzinfo is None:
                             _sso_s_opened = _sso_s_opened.replace(tzinfo=timezone.utc)
+                        _sso_s_peak_pnl_pct = float(
+                            metadata.get('trailing_peak', entry_price) - entry_price
+                        ) / entry_price if entry_price > 0 else 0.0
                         _sso_s_pos = SSOPositionData(
                             symbol=symbol,
                             side="BUY",
@@ -3042,7 +3083,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             entry_price=_sso_sym_avg_entry,
                             current_price=current_price,
                             opened_at=_sso_s_opened,
-                            peak_pnl_pct=float(metadata.get('trailing_peak', entry_price) - entry_price) / entry_price if entry_price > 0 else 0,
+                            peak_pnl_pct=_sso_s_peak_pnl_pct,
                             last_pnl_snapshot=_sso_s_snap,
                             pnl_velocity_1h=_sso_s_vel,
                             sso_levels_done=metadata.get('sso_levels_done', []),
@@ -3068,6 +3109,29 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                   f"{_sso_s_action.reason} | {_sso_s_action.detail}")
                         else:
                             print(f"[SSO/S] {symbol}: NO ACTION | {_sso_s_action.diagnosis}")
+                        try:
+                            position_manager._audit(symbol, 'smart_scale_out_decision', {
+                                'side': 'BUY',
+                                'should_close': bool(_sso_s_action.should_close),
+                                'action': _sso_s_action.action,
+                                'reason': _sso_s_action.reason,
+                                'detail': _sso_s_action.detail,
+                                'diagnosis': _sso_s_action.diagnosis,
+                                'trigger': _sso_s_action.trigger,
+                                'close_pct': float(_sso_s_action.close_pct or 0.0),
+                                'pnl_pct': float(_sso_sym_pnl_pct),
+                                'pnl_usdt': float(_sp_pnl_usdt),
+                                'peak_pnl_pct': float(_sso_s_peak_pnl_pct),
+                                'pnl_velocity_1h': float(_sso_s_vel or 0.0),
+                                'current_signal_strength': float(_sp_rescue_signal_str or 0.0),
+                                'fear_greed_value': float(_ug_fng_value or 50.0),
+                                'regime_mode': regime,
+                                'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                'bounce_entry': bool(_spot_bounce_entry_flag),
+                                'sso_levels_done': metadata.get('sso_levels_done', []),
+                            })
+                        except Exception:
+                            pass
                         # SSO-6 Smart Gate SPOT: persist bounce_gate_* state to metadata + audit
                         if _spot_bounce_entry_flag:
                             _sp_diag = _sso_s_action.diagnosis or ""
@@ -3187,7 +3251,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                     except Exception as _sso_s_exc:
                         print(f"[SSO/SPOT] {symbol} evaluation error: {_sso_s_exc}")
 
-                # ── Profit Realization Supervisor ─────────────────────────────
+                # ── Profit Realization Supervisor (advisory only — UG arbitrates) ──
                 _spot_binance_validated = False
                 try:
                     _vts = metadata.get('binance_validated_at')
@@ -3197,53 +3261,70 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         if _vdt.tzinfo is None:
                             _vdt = _vdt.replace(tzinfo=timezone.utc)
                         _vage = (datetime.now(timezone.utc) - _vdt).total_seconds()
-                        _spot_binance_validated = (_vage <= 20 * 60 and _vqty > 0)
+                        _spot_binance_validated = (_vage <= 60 * 60 and _vqty > 0)
                 except Exception:
                     _spot_binance_validated = False
 
-                if close_reason is None and pnl_pct > 0 and _spot_binance_validated:
+                # F&G value for exit modifier (F8) — shared by PRS/SSO/UG audits
+                _ug_fng_value = None
+                try:
+                    if news_client:
+                        _fng_data = news_client.get_fear_greed()
+                        _ug_fng_value = float(_fng_data.get('value', 50)) if isinstance(_fng_data, dict) else 50.0
+                except Exception:
+                    pass
+
+                _prs_advisory = None
+                if pnl_pct_net > 0 and _spot_binance_validated:
                     _profit_started_at = _parse_profit_dt(metadata.get('profit_realization_started_at'))
                     _trail_peak = float(metadata.get('trailing_peak', entry_price) or entry_price)
-                    _peak_pnl_pct = (_trail_peak - entry_price) / entry_price if entry_price > 0 else pnl_pct
+                    _peak_gross_usdt, _peak_net_usdt, _peak_pnl_pct_net = _spot_net_pnl(pos, _trail_peak, settings)
                     _tp_ext_count = int(metadata.get('tp_extensions_count', 0) or 0)
                     _supervisor_ctx = ProfitRealizationContext(
                         symbol=symbol,
                         trade_type='spot',
                         side='LONG',
-                        pnl_pct=pnl_pct,
-                        pnl_usdt=(current_price - entry_price) * float(pos.quantity),
+                        pnl_pct=pnl_pct_net,
+                        pnl_usdt=pnl_usdt_net,
                         entry_price=entry_price,
                         current_price=current_price,
                         opened_at=getattr(pos, 'entry_time', None) or getattr(pos, 'created_at', None),
                         profit_started_at=_profit_started_at,
-                        peak_pnl_pct=max(_peak_pnl_pct, pnl_pct),
+                        peak_pnl_pct=max(_peak_pnl_pct_net, pnl_pct_net),
                         pnl_velocity_1h=_ctx_pnl_velocity,
                         current_signal_strength=_ctx_signal_strength,
                         regime_mode=regime,
                         profile_label=str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
-                        breakeven_done=bool(trailing_enabled and pnl_pct >= 0.015 and float(pos.stop_loss or 0) >= entry_price),
-                        trailing_active=bool(trailing_enabled and pnl_pct >= trail_activate and float(pos.stop_loss or 0) > 0),
+                        breakeven_done=bool(trailing_enabled and pnl_pct_net >= trail_activate and float(pos.stop_loss or 0) >= entry_price),
+                        trailing_active=bool(trailing_enabled and pnl_pct_net >= trail_activate and float(pos.stop_loss or 0) > 0),
                         tp_extensions=_tp_ext_count,
                         take_profit_price=float(getattr(pos, 'take_profit', 0) or 0) if getattr(pos, 'take_profit', 0) else None,
                         metadata=metadata,
                     )
-                    supervisor_decision = _evaluate_profit_realization(_supervisor_ctx, settings)
-                    if supervisor_decision.should_close:
-                        close_reason = f"{supervisor_decision.reason} ({pnl_pct*100:.2f}%)"
-                        supervisor_close_pct = float(supervisor_decision.close_pct or 1.0)
-                        supervisor_force_close = supervisor_close_pct >= 1.0
-                        metadata.update(supervisor_decision.state_patch or {})
-                        metadata['profit_realization_last_reason'] = supervisor_decision.reason
-                        metadata['profit_realization_last_detail'] = supervisor_decision.detail
-                        metadata['profit_realization_override_target'] = supervisor_decision.override_target
-                        try:
-                            position_manager.update_position_metadata(pos.position_id, metadata)
-                        except Exception:
-                            pass
-                        print(f"[ProfitRealization/SPOT] {symbol}: {supervisor_decision.reason} close={supervisor_close_pct*100:.0f}% "
-                              f"held={supervisor_decision.diagnostics}")
+                    _prs_advisory = _evaluate_profit_realization(_supervisor_ctx, settings)
+                    if _prs_advisory.should_close:
+                        print(f"[PRS/SPOT/advisory] {symbol}: {_prs_advisory.reason} close={_prs_advisory.close_pct*100:.0f}% → passing to UG")
+                    try:
+                        position_manager._audit(symbol, 'profit_realization_supervisor_decision', {
+                            'side': 'BUY',
+                            'should_close': bool(_prs_advisory.should_close),
+                            'action': _prs_advisory.action,
+                            'reason': _prs_advisory.reason,
+                            'detail': _prs_advisory.detail,
+                            'close_pct': float(_prs_advisory.close_pct or 0.0),
+                            'pnl_pct': float(pnl_pct_net),
+                            'peak_pnl_pct': float(max(_peak_pnl_pct_net, pnl_pct_net)),
+                            'pnl_velocity_1h': float(_ctx_pnl_velocity or 0.0),
+                            'current_signal_strength': float(_ctx_signal_strength or 0.0),
+                            'fear_greed_value': float(_ug_fng_value or 50.0),
+                            'regime_mode': regime,
+                            'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                            'tp_extensions': _tp_ext_count,
+                        })
+                    except Exception:
+                        pass
 
-                # ── Unified Governance Supervisor (profit + loss arbitration) ─
+                # ── Unified Governance Supervisor (single arbiter: profit + loss) ─
                 _soft_reason_pre_ug = close_reason
                 if (close_reason is None or not str(close_reason).startswith(("stop_loss", "take_profit", "trailing_stop"))) and _spot_binance_validated:
                     try:
@@ -3254,12 +3335,15 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         if current_price > 0 and _effective_sl_pre > 0:
                             _ug_distance_to_sl = ((current_price - _effective_sl_pre) / current_price) * 100.0
 
+                        # C0: net peak PnL for UG context
+                        _ug_trail_peak = float(metadata.get('trailing_peak', entry_price) or entry_price)
+                        _ug_peak_gross, _ug_peak_net, _ug_peak_pnl_pct_net = _spot_net_pnl(pos, _ug_trail_peak, settings)
                         _ug_ctx = UnifiedGovernanceContext(
                             symbol=symbol,
                             trade_type='spot',
                             side='LONG',
-                            pnl_pct=pnl_pct,
-                            pnl_usdt=(current_price - entry_price) * float(pos.quantity),
+                            pnl_pct=pnl_pct_net,
+                            pnl_usdt=pnl_usdt_net,
                             entry_price=entry_price,
                             current_price=current_price,
                             opened_at=getattr(pos, 'entry_time', None) or getattr(pos, 'created_at', None),
@@ -3271,13 +3355,22 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             current_signal_strength=_ctx_signal_strength,
                             current_signal_direction=_ctx_signal_direction,
                             tp_extensions=int(metadata.get('tp_extensions_count', 0) or 0),
-                            peak_pnl_pct=float(metadata.get('trailing_peak', entry_price) - entry_price) / entry_price if entry_price > 0 else pnl_pct,
+                            peak_pnl_pct=_ug_peak_pnl_pct_net,
                             profit_started_at=_parse_profit_dt(metadata.get('profit_realization_started_at')),
-                            breakeven_done=bool(trailing_enabled and pnl_pct >= 0.015 and float(pos.stop_loss or 0) >= entry_price),
-                            trailing_active=bool(trailing_enabled and pnl_pct >= trail_activate and float(pos.stop_loss or 0) > 0),
+                            breakeven_done=bool(trailing_enabled and pnl_pct_net >= trail_activate and float(pos.stop_loss or 0) >= entry_price),
+                            trailing_active=bool(trailing_enabled and pnl_pct_net >= trail_activate and float(pos.stop_loss or 0) > 0),
                             take_profit_price=float(getattr(pos, 'take_profit', 0) or 0) if getattr(pos, 'take_profit', 0) else None,
                             monitor_only=bool(monitor_only),
                             tier1_soft_reason=_soft_reason_pre_ug,
+                            sso_advisory_should_close=bool(_sso_s_action and _sso_s_action.should_close and _sso_s_action.close_pct >= 1.0),
+                            sso_advisory_close_pct=float(_sso_s_action.close_pct if _sso_s_action and _sso_s_action.should_close else 0.0),
+                            sso_advisory_reason=str(_sso_s_action.reason if _sso_s_action and _sso_s_action.should_close else ''),
+                            sso_advisory_trigger=str(_sso_s_action.trigger if _sso_s_action and _sso_s_action.should_close else ''),
+                            prs_advisory_should_close=bool(_prs_advisory and _prs_advisory.should_close),
+                            prs_advisory_close_pct=float(_prs_advisory.close_pct if _prs_advisory and _prs_advisory.should_close else 0.0),
+                            prs_advisory_reason=str(_prs_advisory.reason if _prs_advisory and _prs_advisory.should_close else ''),
+                            prs_advisory_detail=str(_prs_advisory.detail if _prs_advisory and _prs_advisory.should_close else ''),
+                            fear_greed_value=_ug_fng_value,
                         )
                         _ug_decision = _evaluate_unified_governance(_ug_ctx, settings)
                         if _ug_decision.state_patch:
@@ -3295,6 +3388,18 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 'priority': _ug_decision.priority,
                                 'diagnostics': _ug_decision.diagnostics,
                                 'close_pct': float(_ug_decision.close_pct or 0.0),
+                                'pnl_pct': float(pnl_pct_net),
+                                'pnl_usdt': float(pnl_usdt_net),
+                                'peak_pnl_pct': float(_ug_peak_pnl_pct_net),
+                                'pnl_velocity_1h': float(_ctx_pnl_velocity or 0.0),
+                                'current_signal_strength': float(_ctx_signal_strength or 0.0),
+                                'fear_greed_value': float(_ug_fng_value or 50.0),
+                                'regime_mode': regime,
+                                'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                'sso_advisory_should_close': bool(_sso_s_action and _sso_s_action.should_close and _sso_s_action.close_pct >= 1.0),
+                                'prs_advisory_should_close': bool(_prs_advisory and _prs_advisory.should_close),
+                                'prs_advisory_close_pct': float(_prs_advisory.close_pct if _prs_advisory and _prs_advisory.should_close else 0.0),
+                                'prs_advisory_reason': str(_prs_advisory.reason if _prs_advisory and _prs_advisory.should_close else ''),
                             })
                         except Exception:
                             pass
@@ -3317,6 +3422,17 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                     'priority': _ug_decision.priority,
                                     'diagnostics': _ug_decision.diagnostics,
                                     'close_pct': supervisor_close_pct,
+                                    'pnl_pct': float(pnl_pct_net),
+                                    'pnl_usdt': float(pnl_usdt_net),
+                                    'peak_pnl_pct': float(_ug_peak_pnl_pct_net),
+                                    'pnl_velocity_1h': float(_ctx_pnl_velocity or 0.0),
+                                    'current_signal_strength': float(_ctx_signal_strength or 0.0),
+                                    'fear_greed_value': float(_ug_fng_value or 50.0),
+                                    'regime_mode': regime,
+                                    'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                    'prs_advisory_should_close': bool(_prs_advisory and _prs_advisory.should_close),
+                                    'prs_advisory_close_pct': float(_prs_advisory.close_pct if _prs_advisory and _prs_advisory.should_close else 0.0),
+                                    'prs_advisory_reason': str(_prs_advisory.reason if _prs_advisory and _prs_advisory.should_close else ''),
                                 })
                             except Exception:
                                 pass
@@ -3345,55 +3461,88 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 if close_reason is None and pnl_pct >= tp_pct:
                     close_reason = f"take_profit ({pnl_pct*100:.2f}%)"
 
-                if close_reason and close_reason.startswith("profit_realization_supervisor") and supervisor_close_pct < 1.0:
+                if close_reason and supervisor_close_pct < 1.0 and any(
+                        close_reason.startswith(p) for p in (
+                            "profit_realization_supervisor",
+                            "prs_partial",
+                            "unified_governance",
+                        )
+                ):
                     try:
                         filters = get_symbol_filters(client, symbol)
                         full_qty = float(pos.quantity)
                         sell_qty = align_quantity_to_step(full_qty * supervisor_close_pct, filters["step"])
+
+                        # ── Clamp to actual Binance balance so partial close never fails due to -2010
+                        try:
+                            _asset = symbol.replace('USDT', '')
+                            _bal = client.get_account_balance()
+                            _avail = float(_bal.get(_asset, 0))
+                            if _avail < sell_qty:
+                                _clamped = align_quantity_to_step(_avail, filters["step"])
+                                if _clamped > 0:
+                                    print(f"[ProfitRealization/SPOT] {symbol}: clamping partial qty {sell_qty} -> {_clamped} (Binance balance={_avail})")
+                                    sell_qty = _clamped
+                        except Exception as _be:
+                            print(f"[ProfitRealization/SPOT] balance clamp failed for {symbol}: {_be}")
+
                         valid, reason = is_quantity_valid(sell_qty, current_price, filters)
                         if not valid or sell_qty <= 0:
                             print(f"[ProfitRealization/SPOT] {symbol}: invalid partial qty {sell_qty} — {reason}")
                             close_reason = None
-                        else:
-                            order = client.create_market_order(symbol=symbol, side="SELL", quantity=sell_qty)
-                            if not client.verify_order_filled(order, f"ProfitRealization SELL {symbol}"):
-                                print(f"[WARN] ProfitRealization SELL {symbol}: order NOT confirmed filled — skipping")
-                                continue
-                            remaining_qty = align_quantity_to_step(full_qty - sell_qty, filters["step"])
-                            metadata['profit_realization_last_triggered_at'] = datetime.now(timezone.utc).isoformat()
-                            metadata['profit_realization_partial_qty'] = sell_qty
-                            metadata['profit_realization_partial_reason'] = supervisor_decision.reason if supervisor_decision else 'profit_realization_supervisor_partial'
-                            try:
-                                position_manager.update_position_metadata(pos.position_id, metadata)
-                                position_manager.update_position_quantity(pos.position_id, remaining_qty)
-                                position_manager._audit(symbol, 'profit_realization_supervisor_partial', {
-                                    'side': 'BUY',
-                                    'qty_closed': sell_qty,
-                                    'qty_remaining': remaining_qty,
-                                    'reason': metadata['profit_realization_partial_reason'],
-                                    'detail': supervisor_decision.detail if supervisor_decision else '',
-                                    'diagnostics': supervisor_decision.diagnostics if supervisor_decision else '',
-                                })
-                            except Exception:
-                                pass
-                            print(f"[ProfitRealization/SPOT] {symbol}: partial close {supervisor_close_pct*100:.0f}% qty={sell_qty} reason={close_reason}")
-                            add_signal({
-                                "symbol": symbol,
-                                "action": "SELL",
-                                "price": current_price,
-                                "reason": metadata['profit_realization_partial_reason'],
-                                "pnl_pct": round(pnl_pct * 100, 4),
-                                "source": "profit_realization_supervisor",
-                            })
-                            closed.append({"symbol": symbol, "reason": metadata['profit_realization_partial_reason'], "price": current_price, "order": order, "partial": True})
                             continue
+
+                        order = client.create_market_order(symbol=symbol, side="SELL", quantity=sell_qty)
+                        if not client.verify_order_filled(order, f"ProfitRealization SELL {symbol}"):
+                            print(f"[WARN] ProfitRealization SELL {symbol}: order NOT confirmed filled — skipping")
+                            close_reason = None
+                            continue
+
+                        remaining_qty = align_quantity_to_step(full_qty - sell_qty, filters["step"])
+                        metadata['profit_realization_last_triggered_at'] = datetime.now(timezone.utc).isoformat()
+                        metadata['profit_realization_partial_qty'] = sell_qty
+                        metadata['profit_realization_partial_reason'] = supervisor_decision.reason if supervisor_decision else 'profit_realization_supervisor_partial'
+                        try:
+                            position_manager.update_position_metadata(pos.position_id, metadata)
+                            position_manager.close_position(
+                                symbol=symbol,
+                                exit_price=current_price,
+                                close_reason=metadata['profit_realization_partial_reason'],
+                                commission_rate=commission_rate,
+                                position_id=pos.position_id,
+                                qty_closed=sell_qty,
+                                exit_context={'regime_mode': regime, 'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None},
+                            )
+                            position_manager._audit(symbol, 'profit_realization_supervisor_partial', {
+                                'side': 'BUY',
+                                'qty_closed': sell_qty,
+                                'qty_remaining': remaining_qty,
+                                'reason': metadata['profit_realization_partial_reason'],
+                                'detail': supervisor_decision.detail if supervisor_decision else '',
+                                'diagnostics': supervisor_decision.diagnostics if supervisor_decision else '',
+                            })
+                        except Exception:
+                            pass
+                        print(f"[ProfitRealization/SPOT] {symbol}: partial close {supervisor_close_pct*100:.0f}% qty={sell_qty} reason={close_reason}")
+                        add_signal({
+                            "symbol": symbol,
+                            "action": "SELL",
+                            "price": current_price,
+                            "reason": metadata['profit_realization_partial_reason'],
+                            "pnl_pct": round(pnl_pct * 100, 4),
+                            "source": "profit_realization_supervisor",
+                        })
+                        closed.append({"symbol": symbol, "reason": metadata['profit_realization_partial_reason'], "price": current_price, "order": order, "partial": True})
+                        continue
                     except Exception as _pr_err:
                         print(f"[ProfitRealization/SPOT] partial close failed for {symbol}: {_pr_err}")
+                        close_reason = None
+                        continue
 
                 # ── Breakeven SL (SPOT) ───────────────────────────────────
-                # Move SL to entry price once position reaches 1.5% profit
+                # Move SL to entry price once position reaches trailing_stop_activation_pct profit
                 # Prevents any trailing-active position from going negative
-                if close_reason is None and trailing_enabled and pnl_pct >= 0.015:
+                if close_reason is None and trailing_enabled and pnl_pct >= trail_activate:
                     _cur_sl_val = float(pos.stop_loss or 0)
                     if _cur_sl_val < entry_price:
                         try:
@@ -3616,18 +3765,27 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             print(f"SL/TP: cannot sell {symbol}: {reason}")
                             continue
                         order = client.create_market_order(symbol=symbol, side="SELL", quantity=qty)
-                        if not client.verify_order_filled(order, f"SL/TP SELL {symbol}"):
+                        _sell_fill = client.verify_and_fetch_fills(order, f"SL/TP SELL {symbol}")
+                        if not _sell_fill:
                             print(f"[WARN] SL/TP SELL {symbol}: order NOT confirmed filled — skipping close record")
                             continue
-                        print(f"SL/TP EXIT {symbol}: {close_reason} @ {current_price:.4f}")
+                        _sold_qty = _sell_fill.get('qty', qty)
+                        _exit_commission = _sell_fill.get('commission', 0.0)
+                        print(f"SL/TP EXIT {symbol}: {close_reason} @ {current_price:.4f} (sold={_sold_qty})")
                         ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
-                                     f"SL/TP exit {symbol}: {close_reason} @ {current_price:.4f}")
+                                     f"SL/TP exit {symbol}: {close_reason} @ {current_price:.4f} sold={_sold_qty}")
                         position_manager.close_all_positions_for_symbol(
                             symbol, current_price, close_reason.split(" ")[0], commission_rate,
                             exit_context={
                                 'regime_mode': regime,
                                 'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
-                            }
+                                'exit_order_id': str(_sell_fill.get('order_id', '')),
+                                'exit_filled_qty': float(_sold_qty),
+                                'exit_avg_price': float(_sell_fill.get('avg_price', current_price)),
+                                'exit_commission': float(_exit_commission),
+                                'binance_exit_confirmed': True,
+                            },
+                            qty_closed=_sold_qty,
                         )
                         _overflow_positions.discard(symbol)  # free overflow slot if used
                         # V2: Tracking métricas VolSpike Override (jun 16 2026)
@@ -3952,14 +4110,16 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     _btc_dom_high = False
     if getattr(settings, 'btc_dominance_filter_enabled', True):
         try:
-            import urllib.request as _ur, json as _json
-            with _ur.urlopen('https://api.coingecko.com/api/v3/global', timeout=3) as _r:
+            import urllib.request as _ur, json as _json, socket as _sock
+            with _ur.urlopen('https://api.coingecko.com/api/v3/global', timeout=6) as _r:
                 _gdata = _json.loads(_r.read())
             _btc_dom = _gdata.get('data', {}).get('market_cap_percentage', {}).get('btc', 0)
             _dom_thresh = _get_param(settings, 'btc_dominance_altcoin_threshold')
             if _btc_dom > _dom_thresh:
                 _btc_dom_high = True
                 print(f"BTC Dominance {_btc_dom:.1f}% > {_dom_thresh}% — altcoin entries restricted to NARRATIVE only")
+        except (_sock.timeout, TimeoutError):
+            print("[BtcDom] timeout — skipping BTC dominance filter this cycle")
         except Exception:
             pass
 
@@ -4699,20 +4859,18 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         # ── Funding Rate filter ────────────────────────────────
                         _funding_ok = True
                         try:
-                            _fr_url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={symbol}&limit=1"
-                            import urllib.request as _ureq
-                            with _ureq.urlopen(_fr_url, timeout=4) as _fr_resp:
-                                _fr_data = __import__('json').loads(_fr_resp.read())
-                            if _fr_data:
-                                _fr_val = float(_fr_data[0].get('fundingRate', 0))
-                                if _fr_val > 0.0005:  # > 0.05% = longs muy apalancados → peligro
-                                    _funding_ok = False
-                                    print(f"VolSpike OVERRIDE {symbol}: funding rate={_fr_val:.4%} > 0.05% — skip (overleveraged longs)")
-                                else:
-                                    print(f"VolSpike OVERRIDE {symbol}: funding rate={_fr_val:.4%} ✓")
+                            _fr_val = _get_funding_rate(symbol, settings)
+                            if _fr_val is None:
+                                _funding_ok = False
+                                print(f"VolSpike OVERRIDE {symbol}: funding check unavailable — block entry")
+                            elif _fr_val > 0.0005:  # > 0.05% = longs muy apalancados → peligro
+                                _funding_ok = False
+                                print(f"VolSpike OVERRIDE {symbol}: funding rate={_fr_val:.4%} > 0.05% — skip (overleveraged longs)")
+                            else:
+                                print(f"VolSpike OVERRIDE {symbol}: funding rate={_fr_val:.4%} ✓")
                         except Exception as _fr_err:
                             _funding_ok = False
-                            print(f"VolSpike OVERRIDE {symbol}: funding check unavailable ({_fr_err}) — block entry")
+                            print(f"VolSpike OVERRIDE {symbol}: funding check error ({_fr_err}) — block entry")
                         _meta_rsi_override = float(signal_meta.get(symbol, {}).get('rsi', 50.0))
                         if _meta_rsi_override >= _max_rsi and _spike >= _min_spike:
                             print(f"VolSpike OVERRIDE {symbol}: RSI_1h={_meta_rsi_override:.1f} >= {_max_rsi} — bloqueado (sobrecomprado en 1h)")
@@ -4886,15 +5044,18 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 _set_cooldown(symbol, 'narrative', _NARRATIVE_BUY_COOLDOWN_HOURS)
 
             order = client.create_market_order(symbol=symbol, side="BUY", quantity=qty)
-            if not client.verify_order_filled(order, f"BUY {symbol}"):
+            _fill = client.verify_and_fetch_fills(order, f"BUY {symbol}")
+            if not _fill:
                 print(f"[WARN] BUY {symbol}: order NOT confirmed filled — skipping position record")
                 continue
             _record_order_success()  # R5: reset circuit breaker on success
-            # FIX-8: use real executed qty from Binance fill (net of fees) for accurate tracking
-            _executed_qty = float(order.get('executedQty') or order.get('origQty') or qty)
-            if _executed_qty > 0 and abs(_executed_qty - qty) / qty > 0.01:
+            # FIX-8: use real executed qty and commission from Binance fill
+            _executed_qty = _fill.get('qty', 0.0)
+            if _executed_qty > 0 and abs(_executed_qty - qty) / max(qty, 1e-12) > 0.01:
                 print(f"[FIX-8] BUY {symbol}: requested={qty} executed={_executed_qty} (using executed)")
                 qty = _executed_qty
+            _binance_confirmed = True
+            _real_commission = _fill.get('commission', 0.0)
             orders.append({"symbol": symbol, "side": "BUY", "quantity": qty, "order": order})
             usdt_liquid_now = max(0.0, usdt_liquid_now - qty * price)  # BUG-E5: local deduction, avoids re-fetch
             print(f"Bought {qty} {symbol}")
@@ -4907,7 +5068,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 try:
                     from position_manager import Position
                     from technical_indicators import TechnicalIndicators
-                    entry_commission = compute_commission(qty, price, settings, trade_type='spot')
+                    # Fase 2.3: prefer real commission from Binance fills; fallback to estimated
+                    entry_commission = _real_commission if (_binance_confirmed and _real_commission > 0) else compute_commission(qty, price, settings, trade_type='spot')
 
                     # ── ATR-based dynamic SL/TP ──────────────────────────────────
                     sl_price = tp_price = None
@@ -4969,11 +5131,12 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "reevaluation_count": 0,
                         "spot_total_at_open": usdt_liquid_now,  # SSO gate anchor — protects position from balance changes
                         "btc_price_at_entry": _get_cycle_price(client, 'BTCUSDT') if client else None,  # SSO-6: BTC ref for bounce detection
-                        # FIX-8: trazabilidad Binance para SPOT
-                        "entry_order_id": str(order.get("orderId", "")),
-                        "entry_filled_qty": float(order.get('executedQty') or qty),
-                        "entry_avg_price": float((order.get('fills') or [{}])[0].get('price', price) if order.get('fills') else price),
-                        "binance_entry_confirmed": order.get('status') in ('FILLED',),
+                        # Fase 2.3: trazabilidad Binance real para SPOT
+                        "entry_order_id": str(_fill.get("order_id", order.get("orderId", ""))),
+                        "entry_filled_qty": float(_fill.get('qty', qty)),
+                        "entry_avg_price": float(_fill.get('avg_price', price)),
+                        "entry_commission": float(_fill.get('commission', entry_commission)),
+                        "binance_entry_confirmed": bool(_fill.get('binance_confirmed', False)),
                     }
                     if prediction:
                         metadata['pnl_prediction'] = prediction
@@ -5383,6 +5546,32 @@ def _is_health_results_critical(db_client, max_age_minutes: int = 20) -> bool:
         return False
 
 
+def _persist_safepoint(db_client, settings, position_manager) -> None:
+    """Persist a pre-decision state snapshot for restart/forensic traceability."""
+    if not db_client:
+        return
+    try:
+        _snapshot = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "regime": str(getattr(settings, 'current_regime_mode', '') or '').strip().upper(),
+            "profile": str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper(),
+            "pause_new_entries": bool(_is_new_entries_paused(db_client)),
+            "health_critical": bool(_is_health_results_critical(db_client)),
+            "open_positions": {
+                sym: sum(float(p.quantity or 0) for p in plist)
+                for sym, plist in (position_manager.get_all_positions().items() if position_manager else {})
+            },
+        }
+        _key = f"safepoint_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        db_client.execute_update(
+            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+            (_key, json.dumps(_snapshot), json.dumps(_snapshot)),
+        )
+    except Exception as e:
+        print(f"[Safepoint] failed to persist: {e}")
+
+
 def execute_once(monitor_only: bool = False):
     global _db_client_ref, _FUTURES_MASS_SL_COOLDOWN_UNTIL, _VOLSPIKE_POSITIONS, _OVERRIDE_DAILY_COUNT
     global _consecutive_failures, _circuit_breaker_until
@@ -5440,6 +5629,12 @@ def execute_once(monitor_only: bool = False):
         except Exception as _sp_start_err:
             print(f"[StatePersistence] start checkpoint failed: {_sp_start_err}")
 
+    # Fase 2.4: pre-decision safepoint for forensic traceability
+    try:
+        _persist_safepoint(_db_client_ref, settings, position_manager)
+    except Exception as _safe_err:
+        print(f"[Safepoint] cycle start safepoint failed: {_safe_err}")
+
     # ── K2: Pause new entries if requested via trading_runtime_state (survives restart) ─
     if not monitor_only and _is_new_entries_paused(_db_client_ref):
         print("[execute_once] pause_new_entries=True — running SL/TP monitor only")
@@ -5470,6 +5665,18 @@ def execute_once(monitor_only: bool = False):
                 monitor_only = True
     except Exception as _truth_gate_err:
         print(f"[BinanceTruth] pretrade gate failed: {_truth_gate_err}")
+
+    try:
+        _spot_truth_status = evaluate_spot_parity(position_manager, client)
+        persist_truth_status_spot(_db_client_ref, _spot_truth_status, source='execute_once_pretrade')
+        if (_spot_truth_status.get('mismatch_count') or 0) > 0:
+            audit_truth_mismatches(_db_client_ref, _spot_truth_status, source='execute_once_pretrade_spot')
+            print(
+                f"[SpotTruth] severity={_spot_truth_status.get('severity')} "
+                f"mismatches={_spot_truth_status.get('mismatch_count')}"
+            )
+    except Exception as _spot_truth_err:
+        print(f"[SpotTruth] pretrade gate failed: {_spot_truth_err}")
 
     # ── PAUSED / monitor_only: solo ejecutar SL/TP y retornar ───────────────────
     if monitor_only:

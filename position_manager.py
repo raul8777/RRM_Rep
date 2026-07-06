@@ -550,40 +550,44 @@ class PositionManager:
                             logger.warning(f"Could not persist TP update for {position_id}: {e}")
                     return
 
-    def _calc_close(self, position: Position, exit_price: float, commission_rate: float = None):
+    def _calc_close(self, position: Position, exit_price: float, commission_rate: float = None, qty_closed: Optional[float] = None, entry_comm_for_closed: Optional[float] = None):
         """Shared PnL calculation for closing a position. Returns (qty, entry_p, exit_price, pnl, pnl_pct, exit_comm, pred_accuracy)."""
         from binance_commission import get_config, exit_commission, net_pnl
-        qty        = float(position.quantity)
+        qty        = float(qty_closed) if qty_closed is not None else float(position.quantity)
         entry_p    = float(position.entry_price)
         exit_price = float(exit_price)
         # Use centralized commission module if commission_rate is not explicitly provided
         if commission_rate is None:
-            exit_commission = exit_commission(qty, exit_price, 'spot')
+            _exit_comm = exit_commission(qty, exit_price, 'spot')
         else:
-            exit_commission = qty * exit_price * commission_rate
-        # Preserve stored entry commission if available
-        entry_comm = float(position.entry_commission or 0)
+            _exit_comm = qty * exit_price * commission_rate
+        # Preserve stored entry commission if available; for partial closes caller provides proportional share
+        entry_comm = entry_comm_for_closed if entry_comm_for_closed is not None else float(position.entry_commission or 0)
+        if entry_comm <= 0 and qty > 0:
+            from binance_commission import entry_commission
+            entry_comm = entry_commission(qty, entry_p, 'spot')
         if position.side.upper() == "BUY":
             gross_pnl = (exit_price - entry_p) * qty
         else:
             gross_pnl = (entry_p - exit_price) * qty
-        pnl = gross_pnl - entry_comm - exit_commission
+        pnl = gross_pnl - entry_comm - _exit_comm
         pnl_percentage = (pnl / (qty * entry_p)) * 100 if (qty * entry_p) > 0 else 0.0
         prediction_accuracy = None
         if position.pnl_prediction:
             expected_pnl = float(position.pnl_prediction.get('expected_pnl', 0))
             if expected_pnl != 0:
                 prediction_accuracy = float(((pnl - expected_pnl) / abs(expected_pnl)) * 100)
-        return qty, entry_p, exit_price, pnl, pnl_percentage, exit_commission, prediction_accuracy
+        return qty, entry_p, exit_price, pnl, pnl_percentage, _exit_comm, prediction_accuracy
 
     def close_position(
         self,
         symbol: str,
         exit_price: float,
         close_reason: str = "manual",
-        commission_rate: float = 0.001,
+        commission_rate: Optional[float] = None,
         position_id: Optional[str] = None,
-        exit_context: Optional[Dict[str, Any]] = None
+        exit_context: Optional[Dict[str, Any]] = None,
+        qty_closed: Optional[float] = None,
     ) -> Optional[ClosedPosition]:
         """
         Close a specific open position for a symbol.
@@ -595,6 +599,8 @@ class PositionManager:
             commission_rate: Commission rate for exit trade
             position_id: If provided, closes the entry with this position_id;
                          otherwise closes the oldest entry (FIFO).
+            qty_closed: Optional real quantity sold on Binance. If less than position.quantity
+                        the position is kept open with the residual quantity.
 
         Returns:
             ClosedPosition if position was found, None otherwise
@@ -613,7 +619,23 @@ class PositionManager:
         else:
             target = positions[0]  # FIFO: oldest entry first
 
-        _, entry_p, exit_p, pnl, pnl_pct, exit_comm, pred_acc = self._calc_close(target, exit_price, commission_rate)
+        full_qty = float(target.quantity)
+        _closed_qty = float(qty_closed) if qty_closed is not None else full_qty
+        _closed_qty = min(_closed_qty, full_qty)
+        _is_partial = _closed_qty < full_qty
+
+        # Allocate entry commission proportionally for partial closes
+        _entry_comm_total = float(target.entry_commission or 0)
+        # C0: if entry commission was not stored, estimate it from the full notional
+        if _entry_comm_total <= 0 and full_qty > 0:
+            from binance_commission import entry_commission
+            _entry_comm_total = entry_commission(full_qty, target.entry_price, 'spot')
+        _entry_comm_for_closed = _entry_comm_total * (_closed_qty / full_qty) if full_qty > 0 else _entry_comm_total
+        _entry_comm_remaining = _entry_comm_total - _entry_comm_for_closed
+
+        _, entry_p, exit_p, pnl, pnl_pct, exit_comm, pred_acc = self._calc_close(
+            target, exit_price, commission_rate, qty_closed=_closed_qty, entry_comm_for_closed=_entry_comm_for_closed
+        )
 
         _meta = dict(target.metadata or {}) if isinstance(target.metadata, dict) else {}
         if exit_context:
@@ -623,11 +645,15 @@ class PositionManager:
                 _meta['profile_at_exit'] = exit_context.get('profile_label')
             if exit_context.get('switch_id'):
                 _meta['switch_id'] = exit_context.get('switch_id')
+        if _is_partial:
+            _meta['partial_close'] = True
+            _meta['partial_qty_closed'] = _closed_qty
+            _meta['partial_qty_remaining'] = full_qty - _closed_qty
 
         closed_position = ClosedPosition(
             symbol=target.symbol,
             side=target.side,
-            quantity=float(target.quantity),
+            quantity=_closed_qty,
             entry_price=entry_p,
             exit_price=exit_p,
             entry_time=target.entry_time,
@@ -637,23 +663,33 @@ class PositionManager:
             close_reason=close_reason,
             strategy_id=target.strategy_id,
             metadata=_meta,
-            entry_commission=float(target.entry_commission or 0),
+            entry_commission=_entry_comm_for_closed,
             exit_commission=exit_comm,
             pnl_prediction=target.pnl_prediction,
             indicators_at_entry=target.indicators_at_entry,
             prediction_accuracy=pred_acc
         )
 
-        # Remove this specific entry from in-memory list
-        positions.remove(target)
-        if not positions:
-            del self._open_positions[symbol]
+        # Update or remove the open entry depending on whether this was a full or partial close
+        if _is_partial:
+            target.quantity = full_qty - _closed_qty
+            target.entry_commission = _entry_comm_remaining
+            if not isinstance(target.metadata, dict):
+                target.metadata = {}
+            target.metadata['partial_close'] = True
+            target.metadata['partial_qty_closed'] = _closed_qty
+            target.metadata['partial_qty_remaining'] = full_qty - _closed_qty
+            target.metadata['partial_close_time'] = datetime.now(timezone.utc).isoformat()
+        else:
+            positions.remove(target)
+            if not positions:
+                del self._open_positions[symbol]
 
         self._closed_positions.append(closed_position)
 
         if self.db_client:
             try:
-                self._close_position_in_db(target, closed_position)
+                self._close_position_in_db(target, closed_position, is_partial=_is_partial)
             except Exception as e:
                 logger.error(f"Failed to close position in database: {e}")
                 ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"Failed to close position {symbol} in DB: {e}")
@@ -663,10 +699,10 @@ class PositionManager:
             'side': closed_position.side, 'qty': float(closed_position.quantity or 0),
             'entry_price': float(closed_position.entry_price or 0),
             'exit_price': float(closed_position.exit_price or 0),
-            'pnl': round(float(pnl), 4), 'reason': close_reason,
+            'pnl': round(float(pnl), 4), 'reason': close_reason, 'partial': _is_partial,
             'bounce_entry': bool(_cp_meta.get('bounce_entry', False)),
         }, binance_confirmed=False)
-        logger.info(f"Position closed: {symbol} PnL={pnl:.2f} ({pnl_pct:.2f}%) reason={close_reason}")
+        logger.info(f"Position closed: {symbol} qty={_closed_qty:.4f} PnL={pnl:.2f} ({pnl_pct:.2f}%) reason={close_reason}")
         return closed_position
 
     def close_all_positions_for_symbol(
@@ -675,10 +711,12 @@ class PositionManager:
         exit_price: float,
         close_reason: str = "manual",
         commission_rate: float = 0.001,
-        exit_context: Optional[Dict[str, Any]] = None
+        exit_context: Optional[Dict[str, Any]] = None,
+        qty_closed: Optional[float] = None,
     ) -> List[ClosedPosition]:
         """
-        Close ALL open positions for a symbol (used on full liquidation).
+        Close open positions for a symbol. If qty_closed is provided, it closes up to that
+        total quantity across entries (FIFO). Otherwise, closes all entries.
 
         Returns:
             List of ClosedPosition objects
@@ -686,8 +724,11 @@ class PositionManager:
         positions = list(self._open_positions.get(symbol, []))
         # ── SPOT Escalamiento: assign shared close_group_id when closing N entries ──
         _close_group = str(uuid.uuid4()) if len(positions) > 1 else None
+        _remaining_to_close = float(qty_closed) if qty_closed is not None else None
         results = []
         for _i, pos in enumerate(positions):
+            if _remaining_to_close is not None and _remaining_to_close <= 0:
+                break
             # Inject close_group_id + escalonamiento metadata into the position before closing
             if _close_group:
                 if not isinstance(pos.metadata, dict):
@@ -698,13 +739,30 @@ class PositionManager:
                 pos.metadata['close_group_id'] = _close_group
                 pos.metadata['escalonamiento_index'] = pos.metadata.get('escalonamiento_index', _i + 1)
                 pos.metadata['total_escalonamientos'] = len(positions)
-            closed = self.close_position(symbol, exit_price, close_reason, commission_rate, position_id=pos.position_id, exit_context=exit_context)
+            _entry_close_qty = None
+            if _remaining_to_close is not None:
+                _entry_close_qty = min(_remaining_to_close, float(pos.quantity))
+            _exit_ctx = dict(exit_context) if exit_context else {}
+            if _entry_close_qty is not None and _entry_close_qty < float(pos.quantity):
+                _exit_ctx['partial_qty_closed'] = _entry_close_qty
+            closed = self.close_position(
+                symbol, exit_price, close_reason, commission_rate,
+                position_id=pos.position_id, exit_context=_exit_ctx,
+                qty_closed=_entry_close_qty,
+            )
             if closed:
                 results.append(closed)
+                if _remaining_to_close is not None:
+                    _remaining_to_close -= float(closed.quantity)
         return results
     
-    def _close_position_in_db(self, position: Position, closed_position: ClosedPosition) -> None:
-        """Move a single position entry from trades_open to trades_closed in database."""
+    def _close_position_in_db(
+        self,
+        position: Position,
+        closed_position: ClosedPosition,
+        is_partial: bool = False,
+    ) -> None:
+        """Persist a close in trades_closed. For partial closes, update trades_open quantity instead of deleting."""
         def _to_json(v):
             return json.dumps(v) if isinstance(v, (dict, list)) else v
 
@@ -728,6 +786,8 @@ class PositionManager:
                 _pos_meta = position.metadata if isinstance(position.metadata, dict) else {}
                 if _pos_meta.get('bounce_entry'):
                     _meta['bounce_entry'] = True
+            if is_partial:
+                _meta['partial_close'] = True
         _meta_json = json.dumps(_meta) if isinstance(_meta, dict) else _to_json(_meta)
 
         insert_query = """
@@ -757,18 +817,47 @@ class PositionManager:
             _safe_float(closed_position.prediction_accuracy)
         )
 
-        # Delete by primary key when available, otherwise fallback to symbol+entry_time.
-        if position.db_id:
-            delete_query = "DELETE FROM trades_open WHERE id = %s"
-            delete_params = (position.db_id,)
+        _residual_meta = json.dumps(position.metadata) if isinstance(position.metadata, dict) else '{}'
+        if is_partial and position.db_id:
+            # Update residual quantity, entry commission and partial-close metadata in the open record
+            update_query = "UPDATE trades_open SET quantity = %s, entry_commission = %s, metadata = metadata || %s::jsonb WHERE id = %s"
+            update_params = (
+                _safe_float(position.quantity),
+                _safe_float(position.entry_commission),
+                _residual_meta,
+                position.db_id,
+            )
+            self.db_client.execute_transaction([
+                (insert_query, insert_params),
+                (update_query, update_params),
+            ])
+        elif is_partial:
+            # No db_id fallback: update by symbol+entry_time
+            update_query = "UPDATE trades_open SET quantity = %s, entry_commission = %s, metadata = metadata || %s::jsonb WHERE symbol = %s AND entry_time = %s"
+            update_params = (
+                _safe_float(position.quantity),
+                _safe_float(position.entry_commission),
+                _residual_meta,
+                position.symbol,
+                position.entry_time,
+            )
+            self.db_client.execute_transaction([
+                (insert_query, insert_params),
+                (update_query, update_params),
+            ])
         else:
-            delete_query = "DELETE FROM trades_open WHERE symbol = %s AND entry_time = %s"
-            delete_params = (position.symbol, position.entry_time)
+            # Delete by primary key when available, otherwise fallback to symbol+entry_time.
+            if position.db_id:
+                delete_query = "DELETE FROM trades_open WHERE id = %s"
+                delete_params = (position.db_id,)
+            else:
+                delete_query = "DELETE FROM trades_open WHERE symbol = %s AND entry_time = %s"
+                delete_params = (position.symbol, position.entry_time)
 
-        self.db_client.execute_transaction([
-            (insert_query, insert_params),
-            (delete_query, delete_params),
-        ])
+            self.db_client.execute_transaction([
+                (insert_query, insert_params),
+                (delete_query, delete_params),
+            ])
         # P1.1: Invalidate daily PnL cache — next SSO-4 evaluation will read updated total from BD
         try:
             from daily_pnl_tracker import invalidate_cache as _inv_dpnl

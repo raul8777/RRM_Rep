@@ -41,6 +41,7 @@ from unified_governance_supervisor import (
 )
 from binance_truth_guard import (
     evaluate_futures_parity,
+    auto_reconcile_futures,
     persist_truth_status,
     audit_truth_mismatches,
 )
@@ -484,6 +485,28 @@ class FuturesClient:
             print(f"[Futures/Verify] {symbol} {side}: verification failed: {e}")
             return False
 
+    def _verify_entry_filled(self, symbol: str, side: str) -> bool:
+        """Query Binance positionRisk to confirm entry order was actually executed (qty>0).
+
+        Mirrors _verify_position_closed() but checks for the opposite condition.
+        Called after placing MARKET entry in open_short/open_long before persisting to DB.
+        """
+        if self.dry_run:
+            return True
+        try:
+            positions = self._get("/fapi/v2/positionRisk", {"symbol": symbol}, signed=True)
+            for p in positions:
+                if p.get("positionSide") == side.upper():
+                    amt = abs(float(p.get("positionAmt", 0)))
+                    if amt > 0:
+                        print(f"[Futures/Verify] {symbol} {side}: entry confirmed on Binance (amt={amt}) ✓")
+                        return True
+            print(f"[Futures/Verify] {symbol} {side}: entry NOT confirmed on Binance — positionAmt=0")
+            return False
+        except Exception as e:
+            print(f"[Futures/Verify] {symbol} {side}: entry verification failed: {e} — assuming filled")
+            return True
+
     # ── Position key helpers ──────────────────────────────────────────────────
 
     @staticmethod
@@ -500,6 +523,43 @@ class FuturesClient:
             hashlib.sha256
         ).hexdigest()
 
+    def _request_with_retry(self, req: urllib.request.Request, timeout: int, path: str = "") -> bytes:
+        """Execute a urllib request with retry on transient network errors.
+
+        Retries on: socket.timeout, urllib.error.URLError, TimeoutError.
+        Retries on: HTTP 5xx / 502 / 503.
+        Does NOT retry on: Binance business errors (4xxx codes), HTTP 4xx.
+        Backoff: [0.5s, 1.5s] between attempts (max_retries=2 extra attempts).
+        """
+        import socket as _socket
+        import urllib.error as _ue
+        _backoff = [0.5, 1.5]
+        _max_retries = len(_backoff)
+        for _attempt in range(_max_retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    return r.read()
+            except (_socket.timeout, TimeoutError) as e:
+                if _attempt < _max_retries:
+                    print(f"[FuturesClient] timeout retry {_attempt + 1}/{_max_retries} for {path}: {e}")
+                    time.sleep(_backoff[_attempt])
+                else:
+                    raise
+            except _ue.HTTPError as e:
+                if e.code in (502, 503, 504) and _attempt < _max_retries:
+                    print(f"[FuturesClient] HTTP {e.code} retry {_attempt + 1}/{_max_retries} for {path}")
+                    time.sleep(_backoff[_attempt])
+                else:
+                    body = e.read().decode("utf-8", errors="replace")
+                    raise Exception(f"HTTP {e.code} {e.reason} — {body}") from None
+            except _ue.URLError as e:
+                if _attempt < _max_retries:
+                    print(f"[FuturesClient] URLError retry {_attempt + 1}/{_max_retries} for {path}: {e.reason}")
+                    time.sleep(_backoff[_attempt])
+                else:
+                    raise
+        raise RuntimeError(f"[FuturesClient] _request_with_retry exhausted for {path}")
+
     def _get(self, path: str, params: dict = None, signed: bool = False, timeout: int = 5) -> dict:
         p = params or {}
         if signed:
@@ -510,11 +570,9 @@ class FuturesClient:
             query = urllib.parse.urlencode(p)
         url = f"{FAPI_BASE}{path}?{query}" if query else f"{FAPI_BASE}{path}"
         req = urllib.request.Request(url, headers={"X-MBX-APIKEY": self.api_key})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
+        return json.loads(self._request_with_retry(req, timeout, path))
 
     def _post(self, path: str, params: dict, timeout: int = 8) -> dict:
-        import urllib.error as _ue
         params["timestamp"] = int(time.time() * 1000)
         query = urllib.parse.urlencode(params)
         query += f"&signature={self._sign(query)}"
@@ -524,12 +582,7 @@ class FuturesClient:
             url, data=data, method="POST",
             headers={"X-MBX-APIKEY": self.api_key, "Content-Type": "application/x-www-form-urlencoded"}
         )
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read())
-        except _ue.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")
-            raise Exception(f"HTTP {e.code} {e.reason} — {body}") from None
+        return json.loads(self._request_with_retry(req, timeout, path))
 
     def _delete(self, path: str, params: dict, timeout: int = 8) -> dict:
         params["timestamp"] = int(time.time() * 1000)
@@ -540,8 +593,7 @@ class FuturesClient:
             url, method="DELETE",
             headers={"X-MBX-APIKEY": self.api_key}
         )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
+        return json.loads(self._request_with_retry(req, timeout, path))
 
     # ── Market data ───────────────────────────────────────────────────────────
 
@@ -1134,8 +1186,11 @@ class FuturesClient:
                     # Infer trailing: if SL has moved significantly toward profit (beyond breakeven)
                     try:
                         _cur_price = self.get_price(_p.symbol)
-                        _pnl_pct_sync = _p.unrealized_pnl(_cur_price) / (_p.entry_price * _p.qty) if _p.entry_price > 0 and _p.qty > 0 else 0.0
-                        if _pnl_pct_sync >= 0.015:  # 1.5% = trailing activation threshold
+                        _unr_sync_gross = _p.unrealized_pnl(_cur_price)
+                        from binance_commission import net_pnl as _f_net_pnl_sync
+                        _unr_sync = _f_net_pnl_sync(_unr_sync_gross, _p.qty, _p.entry_price, _cur_price, 'futures', self._cached_settings)
+                        _pnl_pct_sync = _unr_sync / (_p.entry_price * _p.qty) if _p.entry_price > 0 and _p.qty > 0 else 0.0
+                        if _pnl_pct_sync >= 0.015:  # 1.5% = trailing activation threshold (net)
                             # ATR-scaled trail distance for sync inference
                             _trail_dist = self.compute_trail_distance(_p.symbol, _pnl_pct_sync)
                             if _p.side == "SHORT":
@@ -1816,7 +1871,22 @@ class FuturesClient:
             pos._smart_meta['entry_order_id'] = order_id
             pos._smart_meta['entry_filled_qty'] = float(entry_order.get('executedQty', qty))
             pos._smart_meta['entry_avg_price'] = filled_price
-            pos._smart_meta['binance_entry_confirmed'] = entry_order.get('status') in ('FILLED', 'NEW')
+            _entry_confirmed = self._verify_entry_filled(symbol, "SHORT")
+            pos._smart_meta['binance_entry_confirmed'] = _entry_confirmed
+            if not _entry_confirmed:
+                self._audit(symbol, 'entry_not_confirmed_on_binance', {
+                    'side': 'SHORT', 'order_id': order_id, 'status': entry_order.get('status'),
+                    'qty': qty, 'filled_price': filled_price,
+                })
+                print(f"[Futures/WARN] SHORT {symbol}: entry not confirmed on Binance — aborting position record")
+                try:
+                    self._post("/fapi/v1/order", {
+                        "symbol": symbol, "side": "BUY", "type": "MARKET",
+                        "quantity": str(qty), "positionSide": "SHORT",
+                    })
+                except Exception as _ce:
+                    print(f"[Futures/WARN] SHORT {symbol}: cleanup close also failed: {_ce}")
+                return None
             pos._smart_meta['regime_at_entry'] = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
             pos._smart_meta['profile_at_entry'] = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
             if signal_id:
@@ -1962,7 +2032,22 @@ class FuturesClient:
             pos._smart_meta['entry_order_id'] = order_id
             pos._smart_meta['entry_filled_qty'] = float(entry_order.get('executedQty', qty))
             pos._smart_meta['entry_avg_price'] = filled_price
-            pos._smart_meta['binance_entry_confirmed'] = entry_order.get('status') in ('FILLED', 'NEW')
+            _entry_confirmed = self._verify_entry_filled(symbol, "LONG")
+            pos._smart_meta['binance_entry_confirmed'] = _entry_confirmed
+            if not _entry_confirmed:
+                self._audit(symbol, 'entry_not_confirmed_on_binance', {
+                    'side': 'LONG', 'order_id': order_id, 'status': entry_order.get('status'),
+                    'qty': qty, 'filled_price': filled_price,
+                })
+                print(f"[Futures/WARN] LONG {symbol}: entry not confirmed on Binance — aborting position record")
+                try:
+                    self._post("/fapi/v1/order", {
+                        "symbol": symbol, "side": "SELL", "type": "MARKET",
+                        "quantity": str(qty), "positionSide": "LONG",
+                    })
+                except Exception as _ce:
+                    print(f"[Futures/WARN] LONG {symbol}: cleanup close also failed: {_ce}")
+                return None
             pos._smart_meta['regime_at_entry'] = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
             pos._smart_meta['profile_at_entry'] = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
             if signal_id:
@@ -2515,8 +2600,11 @@ class FuturesClient:
             symbol = pos.symbol
             try:
                 price   = self.get_price(symbol)
-                unr     = pos.unrealized_pnl(price)
                 entry   = pos.entry_price
+                unr_gross = pos.unrealized_pnl(price)
+                # C0: all futures calculations use net PnL after Binance fees
+                from binance_commission import net_pnl as _f_net_pnl
+                unr = _f_net_pnl(unr_gross, pos.qty, entry, price, 'futures', settings)
                 pnl_pct = unr / (entry * pos.qty) if entry > 0 and pos.qty > 0 else 0.0
                 _ctx_signal_strength = None
                 _ctx_signal_direction = None
@@ -2625,6 +2713,8 @@ class FuturesClient:
                 # ── 0b. SSO: Smart Scale-Out — replaces fixed PV1 with multi-signal system ─
                 _sso_enabled = getattr(settings, 'sso_enabled', True) if settings else True
                 _bounce_entry_flag = pos._smart_meta.get('bounce_entry', False)
+                _sso_action = None   # W2: initialize so UG can reference regardless of path
+                _pr_decision = None  # W2: initialize so UG can reference regardless of path
                 if _sso_enabled and (pnl_pct > 0 or _bounce_entry_flag):  # SSO-6 also runs on losses
                     try:
                         from smart_scale_out import SmartScaleOut, SSOPositionData, compute_pnl_velocity, extract_sso_level_from_reason
@@ -2819,14 +2909,18 @@ class FuturesClient:
                                 if _sso_ok:
                                     _sso_pnl = (entry - price) * _sso_qty_aligned if pos.side == "SHORT" else (price - entry) * _sso_qty_aligned
                                     pos.qty -= _sso_qty_aligned
+                                    # Save values before clearing advisory reference
+                                    _sso_done_trigger = _sso_action.trigger
+                                    _sso_done_reason = _sso_action.reason
+                                    _sso_action = None  # W2: clear so UG does not re-arbitrate this executed partial
                                     # Track cumulative scale-out PnL
                                     _prev_so_pnl = float(pos._smart_meta.get('scale_out_pnl', 0))
                                     pos._smart_meta['scale_out_pnl'] = _prev_so_pnl + _sso_pnl
                                     pos._smart_meta['scale_out_done'] = True
-                                    pos._smart_meta['sso_last_trigger'] = _sso_action.trigger
-                                    pos._smart_meta['sso_last_reason'] = _sso_action.reason
+                                    pos._smart_meta['sso_last_trigger'] = _sso_done_trigger
+                                    pos._smart_meta['sso_last_reason'] = _sso_done_reason
                                     # Track multilevel progress
-                                    _sso_lvl = extract_sso_level_from_reason(_sso_action.reason)
+                                    _sso_lvl = extract_sso_level_from_reason(_sso_done_reason)
                                     if _sso_lvl:
                                         _done = pos._smart_meta.get('sso_levels_done', [])
                                         if _sso_lvl not in _done:
@@ -2836,18 +2930,18 @@ class FuturesClient:
                                     # Re-place SL/TP with reduced qty (or skip if fully closed)
                                     if pos.qty > 0:
                                         self.update_sl_tp(symbol, pos.side, new_sl=pos.sl_price, new_tp=pos.tp_price)
-                                    print(f"[Futures/SSO] {symbol} {pos.side}: {_sso_action.trigger} "
+                                    print(f"[Futures/SSO] {symbol} {pos.side}: {_sso_done_trigger} "
                                           f"close {_sso_close_pct*100:.0f}% qty={_sso_qty_aligned:.6f} "
-                                          f"PnL=${_sso_pnl:.2f} | {_sso_action.detail}")
+                                          f"PnL=${_sso_pnl:.2f}")
                                     closed.append({"symbol": symbol, "side": pos.side,
-                                                   "reason": _sso_action.reason, "pnl": _sso_pnl,
+                                                   "reason": _sso_done_reason, "pnl": _sso_pnl,
                                                    "partial": _sso_close_pct < 1.0,
-                                                   "sso_trigger": _sso_action.trigger})
+                                                   "sso_trigger": _sso_done_trigger})
                                     if pos.qty <= 0 or _sso_close_pct >= 1.0:
                                         # Fully closed via SSO
                                         if pos.qty > 0:
                                             _close_fn = self.close_long if pos.side == "LONG" else self.close_short
-                                            _close_fn(symbol, reason=_sso_action.reason)
+                                            _close_fn(symbol, reason=_sso_done_reason)
                                         else:
                                             # Cancel orphaned SL/TP algo orders
                                             for _oid in [pos.sl_order_id, pos.tp_order_id]:
@@ -2865,10 +2959,11 @@ class FuturesClient:
                                             pos.pnl = _sso_pnl
                                             _original_qty = _sso_qty_aligned
                                             pos.qty = _original_qty
-                                            self._save_futures_closed(pos, _sso_action.reason)
+                                            self._save_futures_closed(pos, _sso_done_reason)
                                             pos.qty = 0
-                                            print(f"[Futures/SSO] {symbol} {pos.side}: DB saved ✓ (reason={_sso_action.reason}, PnL=${_sso_pnl:.2f})")
-                                        continue  # move to next position
+                                            print(f"[Futures/SSO] {symbol} {pos.side}: DB saved ✓ (reason={_sso_done_reason}, PnL=${_sso_pnl:.2f})")
+                                    if pos.qty <= 0 or pos.closed:
+                                        continue  # fully closed via SSO — move to next position
                     except Exception as _sso_exc:
                         print(f"[Futures/SSO] {symbol} evaluation error: {_sso_exc}")
 
@@ -2922,74 +3017,21 @@ class FuturesClient:
                         self._persist_smart_meta(pos)
                     _pr_decision = _evaluate_profit_realization(_pr_ctx, settings)
                     if _pr_decision.should_close:
+                        # Always persist PRS metadata for audit/observability
                         _pr_meta.update(_pr_decision.state_patch or {})
                         _pr_meta['profit_realization_last_reason'] = _pr_decision.reason
                         _pr_meta['profit_realization_last_detail'] = _pr_decision.detail
                         _pr_meta['profit_realization_override_target'] = _pr_decision.override_target
                         self._persist_smart_meta(pos)
-                        if _pr_decision.close_pct < 1.0:
-                            try:
-                                _step = self._get_step_size(symbol)
-                                _pr_qty = self._align_qty(pos.qty * _pr_decision.close_pct, _step)
-                                if _pr_qty <= 0:
-                                    print(f"[ProfitRealization/Futures] {symbol}: invalid partial qty {_pr_qty} — skipping")
-                                else:
-                                    _side = "BUY" if pos.side == "SHORT" else "SELL"
-                                    _pr_ok = False
-                                    if self.dry_run:
-                                        _pr_ok = True
-                                    else:
-                                        try:
-                                            self._post("/fapi/v1/order", {
-                                                "symbol": symbol, "side": _side, "type": "MARKET",
-                                                "quantity": str(_pr_qty),
-                                                "positionSide": pos.side,
-                                            })
-                                            _pr_ok = True
-                                        except Exception as _pr_err:
-                                            print(f"[ProfitRealization/Futures] {symbol} partial FAILED: {_pr_err}")
-                                    if _pr_ok:
-                                        _pr_pnl = (entry - price) * _pr_qty if pos.side == "SHORT" else (price - entry) * _pr_qty
-                                        pos.qty -= _pr_qty
-                                        _pr_meta['scale_out_done'] = True
-                                        _pr_meta['profit_realization_partial_qty'] = _pr_qty
-                                        _pr_meta['profit_realization_partial_reason'] = _pr_decision.reason
-                                        self._persist_smart_meta(pos)
-                                        if pos.qty > 0:
-                                            self.update_sl_tp(symbol, pos.side, new_sl=pos.sl_price, new_tp=pos.tp_price)
-                                        if self.db_client:
-                                            try:
-                                                self.db_client.execute_update(
-                                                    "UPDATE trades_open SET quantity=%s, metadata=%s, updated_at=NOW() "
-                                                    "WHERE symbol=%s AND side=%s AND closed_at IS NULL",
-                                                    (str(pos.qty), json.dumps({"smart_meta": pos._smart_meta}), symbol, pos.side)
-                                                )
-                                            except Exception:
-                                                pass
-                                        try:
-                                            self._audit(symbol, 'profit_realization_supervisor_partial', {
-                                                'side': pos.side,
-                                                'qty_closed': _pr_qty,
-                                                'qty_remaining': pos.qty,
-                                                'reason': _pr_decision.reason,
-                                                'detail': _pr_decision.detail,
-                                                'diagnostics': _pr_decision.diagnostics,
-                                            })
-                                        except Exception:
-                                            pass
-                                        print(f"[ProfitRealization/Futures] {symbol} {pos.side}: partial close {_pr_decision.close_pct*100:.0f}% qty={_pr_qty:.6f} PnL=${_pr_pnl:.2f}")
-                                        closed.append({"symbol": symbol, "side": pos.side,
-                                                       "reason": _pr_decision.reason, "pnl": _pr_pnl,
-                                                       "partial": True})
-                                        continue
-                            except Exception as _pr_partial_exc:
-                                print(f"[ProfitRealization/Futures] {symbol} partial error: {_pr_partial_exc}")
-                        else:
+                        print(f"[PRS/F/advisory] {symbol} {pos.side}: {_pr_decision.reason} "
+                              f"close={_pr_decision.close_pct*100:.0f}% priority={_pr_decision.priority} → passing to UG")
+                        # W2: peak_protection (priority=95) bypasses UG — critical loss of significant gains
+                        if _pr_decision.reason == "prs_peak_protection":
                             _close_fn = self.close_long if pos.side == "LONG" else self.close_short
-                            _pr_result = _close_fn(symbol, reason=_pr_decision.reason)
-                            if _pr_result:
+                            _pp_result = _close_fn(symbol, reason=_pr_decision.reason)
+                            if _pp_result:
                                 try:
-                                    self._audit(symbol, 'profit_realization_supervisor_full', {
+                                    self._audit(symbol, 'prs_peak_protection_direct', {
                                         'side': pos.side,
                                         'reason': _pr_decision.reason,
                                         'detail': _pr_decision.detail,
@@ -2997,10 +3039,11 @@ class FuturesClient:
                                     })
                                 except Exception:
                                     pass
-                                print(f"[ProfitRealization/Futures] {symbol} {pos.side}: full close reason={_pr_decision.reason}")
+                                print(f"[PRS/F] {symbol} {pos.side}: PEAK PROTECTION direct close (priority=95)")
                                 closed.append({"symbol": symbol, "side": pos.side,
                                                "reason": _pr_decision.reason, "pnl": pos.pnl or unr})
                             continue
+                        # All other PRS decisions: advisory to UG (fall through to UG block below)
 
                 # ── Unified Governance Supervisor (profit + loss arbitration) ─
                 try:
@@ -3020,6 +3063,26 @@ class FuturesClient:
                         else:
                             _ug_distance_to_sl = ((price - pos.sl_price) / price) * 100.0
 
+                    # W2: SSO and PRS advisories — variables initialized as None before their blocks
+                    _ug_sso_close = bool(_sso_action and _sso_action.should_close)
+                    _ug_sso_pct = float(_sso_action.close_pct if _sso_action and _sso_action.should_close else 0.0)
+                    _ug_sso_reason = str(_sso_action.reason if _sso_action and _sso_action.should_close else '')
+                    _ug_sso_trigger = str(_sso_action.trigger if _sso_action and _sso_action.should_close else '')
+                    _ug_prs_close = bool(_pr_decision and _pr_decision.should_close)
+                    _ug_prs_pct = float(_pr_decision.close_pct if _pr_decision and _pr_decision.should_close else 0.0)
+                    _ug_prs_reason = str(_pr_decision.reason if _pr_decision and _pr_decision.should_close else '')
+                    _ug_prs_detail = str(_pr_decision.detail if _pr_decision and _pr_decision.should_close else '')
+                    # W2: Fetch F&G for futures UG (reuse from SSO path if already fetched, else fetch fresh)
+                    _ug_fng_value = None
+                    try:
+                        _bc_ref_fng = getattr(self, '_binance_client_ref', None)
+                        if _bc_ref_fng:
+                            from news_client import NewsClient as _NC
+                            _nc = _NC()
+                            _fng_data = _nc.get_fear_greed()
+                            _ug_fng_value = float(_fng_data.get('value', 50)) if isinstance(_fng_data, dict) else 50.0
+                    except Exception:
+                        pass
                     _ug_ctx = UnifiedGovernanceContext(
                         symbol=symbol,
                         trade_type='futures',
@@ -3044,6 +3107,15 @@ class FuturesClient:
                         take_profit_price=pos.tp_price,
                         monitor_only=bool(monitor_only),
                         tier1_soft_reason=None,
+                        sso_advisory_should_close=_ug_sso_close,
+                        sso_advisory_close_pct=_ug_sso_pct,
+                        sso_advisory_reason=_ug_sso_reason,
+                        sso_advisory_trigger=_ug_sso_trigger,
+                        prs_advisory_should_close=_ug_prs_close,
+                        prs_advisory_close_pct=_ug_prs_pct,
+                        prs_advisory_reason=_ug_prs_reason,
+                        prs_advisory_detail=_ug_prs_detail,
+                        fear_greed_value=_ug_fng_value,
                     )
                     _ug_decision = _evaluate_unified_governance(_ug_ctx, settings)
                     if _ug_decision.state_patch:
@@ -3392,7 +3464,10 @@ class FuturesClient:
                 continue
             try:
                 price = self.get_price(pos.symbol)
-                unr   = pos.unrealized_pnl(price)
+                _unr_gross = pos.unrealized_pnl(price)
+                # C0: dashboard shows net PnL after Binance fees
+                from binance_commission import net_pnl as _f_net_pnl_summary
+                unr = _f_net_pnl_summary(_unr_gross, pos.qty, pos.entry_price, price, 'futures', self._cached_settings)
             except Exception:
                 price = pos.entry_price
                 unr   = 0.0
@@ -3482,4 +3557,14 @@ class FuturesClient:
                     / pos._smart_meta['btc_price_at_entry'] * 100, 2
                 ) if pos._smart_meta.get('btc_price_at_entry') else None,
             })
+
+        # Fase 2.2: advisory futures reconciliation report (dry-run by default)
+        try:
+            if not self.dry_run:
+                _rec_report = auto_reconcile_futures(self, self.db_client, dry_run=True)
+                if _rec_report.get("mismatch_count", 0) > 0:
+                    print(f"[Futures/Reconcile] advisory report: {_rec_report['mismatch_count']} mismatches")
+        except Exception as _rec_err:
+            print(f"[Futures/Reconcile] advisory reconciliation failed: {_rec_err}")
+
         return result

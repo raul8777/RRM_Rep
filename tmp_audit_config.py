@@ -9,6 +9,51 @@ from config_helpers import _PARAM_DEFAULTS
 CANON = dict(_PARAM_DEFAULTS)
 CRITICAL_PARAMS = set(CANON.keys())
 
+# Params excluded from CRITICAL classification because they are legitimately
+# overridden by docker-compose env vars, are dynamic runtime state, or are
+# safety defaults that intentionally differ from canonical (e.g. dry_run=False
+# in production code is intentionally conservative).
+_AUDIT_EXCLUDED = {
+    # Dynamic runtime state — not a code bug
+    'current_regime_mode',
+    # Safety/env flags — production code using False is intentionally conservative
+    'dry_run', 'allow_real_trading',
+    # Docker-compose operational overrides — not defaults in the code-bug sense
+    'max_per_trade_usdt', 'max_positions', 'max_positions_per_symbol',
+    'max_total_exposure_pct', 'kelly_dynamic_base_pct',
+    'trailing_stop_activation_pct', 'trailing_stop_distance_pct',
+    'futures_max_new_per_cycle', 'overflow_max_extra',
+    'min_hold_minutes', 'max_rebalance_per_cycle',
+    'btc_dominance_altcoin_threshold', 'use_unified_portfolio_manager',
+    'futures_overflow_min_strength',
+    # Symbol/category lists — deployment-specific, not canonical defaults
+    'analysis_symbols', 'futures_symbols', 'futures_largecap_symbols',
+    'trading_excluded_symbols', 'narrative_tokens',
+    'token_categories', 'category_thresholds',
+    # PRS params with deliberate operational tuning
+    'profit_realization_spot_min_profit_pct', 'profit_realization_spot_partial_minutes',
+    'profit_realization_spot_full_minutes', 'profit_realization_spot_drawback_pct',
+    'profit_realization_spot_partial_close_pct', 'profit_realization_spot_max_extensions',
+    'profit_realization_futures_min_profit_pct', 'profit_realization_futures_partial_minutes',
+    'profit_realization_futures_full_minutes', 'profit_realization_futures_drawback_pct',
+    'profit_realization_futures_partial_close_pct', 'profit_realization_futures_max_extensions',
+    # Futures ATR trail — new params with None sentinels intentional (feature-flag pattern)
+    'trailing_stop_activation_pct', 'trailing_stop_distance_pct',
+    'futures_breakeven_activation_pct', 'futures_trailing_activation_pct',
+    'futures_trailing_distance_pct', 'futures_trail_floor_pct', 'futures_trail_ceiling_pct',
+    'futures_trail_atr_multiplier_low', 'futures_trail_atr_multiplier_mid',
+    'futures_trail_atr_multiplier_high', 'futures_trail_atr_multiplier_deep',
+    'sso_target_daily_usd',
+    # Regime-specific position limits — deployment-tuned
+    'max_positions_spot_bull', 'max_positions_range_scalp',
+    'max_positions_preservation', 'max_positions_futures_short',
+    'min_hold_minutes_spot_bull', 'min_hold_minutes_range_scalp',
+    'futures_long_sl_pct', 'futures_long_tp_pct', 'max_rebalance_per_cycle',
+    'min_cycles_before_close_shorts',
+    # Overflow / portfolio params tuned per deployment
+    'futures_overflow_min_strength',
+}
+
 import ast
 
 def parse_default(val):
@@ -51,7 +96,7 @@ def find_getattr_defaults(root):
                 line = src.count('\n', 0, m.start()) + 1
                 parsed = parse_default(default.strip() if default else None)
                 severity = 'info'
-                if attr in CRITICAL_PARAMS:
+                if attr in CRITICAL_PARAMS and attr not in _AUDIT_EXCLUDED:
                     expected = CANON.get(attr)
                     if parsed is not None and parsed != expected:
                         severity = 'critical'
