@@ -3947,51 +3947,83 @@ def _get_rollout_readiness_snapshot() -> Dict[str, Any]:
 
 def _get_parity_validation_snapshot() -> Dict[str, Any]:
     try:
-        run_id = _resolve_rollout_baseline_run_id()
-        if run_id is None:
-            return {"ok": False, "status": "unavailable", "error": "no baseline run_id resolved"}
+        baseline = _resolve_rollout_baseline()
+        if not baseline.get('ok'):
+            return {
+                'ok': False,
+                'status': str(baseline.get('status') or 'unavailable'),
+                'error': str(baseline.get('reason') or 'no baseline run_id resolved'),
+                'baseline': baseline,
+            }
 
-        compare = _build_backtest_compare_vs_live(run_id)
-        parity = compare.get('parity') or {}
+        run_id = int(baseline.get('run_id'))
+        effective_runtime = _get_effective_runtime_selection()
+        active_mode = str(effective_runtime.get('mode') or 'SPOT_BULL').strip().upper() or 'SPOT_BULL'
+        active_trade_type = _active_trade_type_for_mode(active_mode)
+
+        compare = _build_backtest_compare_vs_live(run_id, active_trade_type=active_trade_type, active_mode=active_mode)
+        active_scope = compare.get('active_scope') or {}
+        parity = active_scope.get('parity') or compare.get('parity') or {}
+        comparability = active_scope.get('comparability') or {}
         gap = parity.get('pnl_total_gap_pct')
-        trade_gap = int(parity.get('n_trades_gap') or 0)
+        trade_gap = abs(int(parity.get('n_trades_gap') or 0))
         win_gap = float(parity.get('win_rate_gap_pct') or 0.0)
 
         status = 'ok'
         reasons: List[str] = []
-        if gap is None:
-            status = 'inconclusive'
-            reasons.append('live pnl is zero or insufficient for parity gap')
-        else:
-            abs_gap = abs(float(gap))
-            if abs_gap >= 100.0:
-                status = 'critical'
-                reasons.append(f'pnl parity gap {gap:.2f}%')
-            elif abs_gap >= 25.0:
-                status = 'warning'
-                reasons.append(f'pnl parity gap {gap:.2f}%')
+        comparability_status = str(comparability.get('status') or 'not_comparable').lower()
+        sample_status = str(comparability.get('sample_status') or 'none').lower()
 
-        if abs(win_gap) >= 20.0:
-            status = 'critical' if status != 'critical' else status
-            reasons.append(f'win-rate gap {win_gap:.2f}pp')
-        elif abs(win_gap) >= 10.0 and status == 'ok':
+        if comparability_status in ('not_comparable', 'limited'):
             status = 'warning'
-            reasons.append(f'win-rate gap {win_gap:.2f}pp')
+            reasons.extend([str(r) for r in (comparability.get('reasons') or []) if r])
+            if gap is not None:
+                reasons.append(f'active pnl gap observed {gap:.2f}% but comparison is not fully homologable')
+        else:
+            if gap is None:
+                status = 'warning'
+                reasons.append(f'active {active_trade_type} live pnl is zero or insufficient for parity gap')
+            else:
+                abs_gap = abs(float(gap))
+                if abs_gap >= 100.0:
+                    status = 'critical'
+                    reasons.append(f'active {active_trade_type} pnl parity gap {gap:.2f}%')
+                elif abs_gap >= 25.0:
+                    status = 'warning'
+                    reasons.append(f'active {active_trade_type} pnl parity gap {gap:.2f}%')
+
+            if abs(win_gap) >= 20.0:
+                status = 'critical' if status != 'critical' else status
+                reasons.append(f'active {active_trade_type} win-rate gap {win_gap:.2f}pp')
+            elif abs(win_gap) >= 10.0 and status == 'ok':
+                status = 'warning'
+                reasons.append(f'active {active_trade_type} win-rate gap {win_gap:.2f}pp')
 
         if trade_gap > 20:
             if status == 'ok':
                 status = 'warning'
-            reasons.append(f'trade count gap {trade_gap}')
+            reasons.append(f'active {active_trade_type} trade count gap {trade_gap}')
 
         if not reasons:
-            reasons.append('parity within current tolerance')
+            reasons.append(f'parity within current tolerance for active {active_trade_type}')
+
+        deduped_reasons: List[str] = []
+        for reason in reasons:
+            if reason not in deduped_reasons:
+                deduped_reasons.append(reason)
 
         return {
             'ok': True,
             'status': status,
             'run_id': run_id,
-            'reasons': reasons,
+            'active_market': active_trade_type,
+            'active_mode': active_mode,
+            'comparability_status': comparability_status,
+            'sample_status': sample_status,
+            'reasons': deduped_reasons,
             'parity': parity,
+            'comparability': comparability,
+            'baseline': baseline,
             'compare': compare,
         }
     except HTTPException as e:
@@ -8132,6 +8164,7 @@ def _compute_market_health(
     score = 100
     reasons: List[str] = []
     critical_flags: List[str] = []
+    block_flags: List[str] = []
 
     cur_trades = int(current_stats.get("n_trades") or 0)
     cur_net = float(current_stats.get("net_pnl") or 0.0)
@@ -8150,6 +8183,7 @@ def _compute_market_health(
     if active_drift_count > 0:
         score -= 35
         critical_flags.append("config_drift_critical")
+        block_flags.append("config_drift_critical")
         reasons.append(f"{active_drift_count} drift(s) críticos activos")
     elif drift_critical > 0:
         score -= 10
@@ -8161,6 +8195,7 @@ def _compute_market_health(
     if errors_5m > 0:
         score -= 25
         critical_flags.append("errors_recent")
+        block_flags.append("errors_recent")
         reasons.append(f"{errors_5m} error(es) en 5 min")
     elif warnings_5m > 3:
         score -= 8
@@ -8169,6 +8204,7 @@ def _compute_market_health(
     if missing_audit > 0:
         score -= 20
         critical_flags.append("audit_gap")
+        block_flags.append("audit_gap")
         reasons.append(f"{missing_audit} señales sin auditoría")
     elif coverage_pct < 98.0:
         score -= 8
@@ -8178,7 +8214,6 @@ def _compute_market_health(
         abs_gap = abs(parity_gap_pct)
         if abs_gap >= 15.0:
             score -= 22
-            critical_flags.append("parity_gap")
             reasons.append(f"parity gap {parity_gap_pct:.2f}%")
         elif abs_gap >= 7.0:
             score -= 10
@@ -8203,7 +8238,7 @@ def _compute_market_health(
     else:
         status = "ok"
 
-    if cur_trades < 3 and status == "ok":
+    if cur_trades < 3 and not block_flags:
         status = "inconclusive"
 
     return {
@@ -8212,6 +8247,8 @@ def _compute_market_health(
         "score": score,
         "reasons": reasons[:6],
         "critical_flags": critical_flags,
+        "block_new_entries": bool(block_flags),
+        "block_flags": block_flags,
         "kpis": {
             "n_trades": cur_trades,
             "net_pnl": round(cur_net, 4),
@@ -8287,6 +8324,14 @@ def _compute_health_results_snapshot(trigger: str = "manual") -> Dict[str, Any]:
     snapshot = {
         "ok": True,
         "overall": overall_status,
+        "block_new_entries": bool(
+            (spot_health.get("block_new_entries") if isinstance(spot_health, dict) else False)
+            or (futures_health.get("block_new_entries") if isinstance(futures_health, dict) else False)
+        ),
+        "block_reasons": list(dict.fromkeys(
+            list((spot_health.get("block_flags") or []) if isinstance(spot_health, dict) else [])
+            + list((futures_health.get("block_flags") or []) if isinstance(futures_health, dict) else [])
+        )),
         "spot": spot_health,
         "futures": futures_health,
         "errors": err_summary,
@@ -8539,24 +8584,40 @@ def _parity_gap_pct(backtest_value: float, live_value: float) -> Optional[float]
     return round(((backtest_value - live_value) / abs(live_value)) * 100.0, 4)
 
 
-def _resolve_rollout_baseline_run_id() -> Optional[int]:
+def _active_trade_type_for_mode(mode: Any) -> str:
+    _mode = str(mode or '').strip().upper()
+    return 'futures' if _mode == 'FUTURES_SHORT' else 'spot'
+
+
+def _build_parity_metrics(backtest_summary: Dict[str, Any], live_summary: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        'pnl_total_gap_pct': _parity_gap_pct(backtest_summary['pnl_total'], live_summary['pnl_total']),
+        'win_rate_gap_pct': round((backtest_summary['win_rate'] - live_summary['win_rate']) * 100.0, 4),
+        'avg_pnl_gap_pct': _parity_gap_pct(backtest_summary['avg_pnl'], live_summary['avg_pnl']),
+        'n_trades_gap': int(backtest_summary['n_trades'] or 0) - int(live_summary['n_trades'] or 0),
+    }
+
+
+def _resolve_rollout_baseline() -> Dict[str, Any]:
     try:
         rows = db_client.execute_query(
             "SELECT value FROM trading_runtime_state WHERE key LIKE %s ORDER BY updated_at DESC, key DESC LIMIT 1",
             ('performance_changepoint_%',),
         )
         if not rows:
-            return None
+            return {'ok': False, 'status': 'unavailable', 'reason': 'no performance changepoint marker found'}
         value = rows[0].get('value') or {}
         if isinstance(value, str):
             try:
                 value = json.loads(value)
             except Exception:
                 value = {}
+
+        candidate_run_id = None
         if isinstance(value, dict) and value.get('base_run_id') is not None:
-            return int(value.get('base_run_id'))
+            candidate_run_id = int(value.get('base_run_id'))
         baseline_key = value.get('baseline_key') if isinstance(value, dict) else None
-        if baseline_key:
+        if candidate_run_id is None and baseline_key:
             base_rows = db_client.execute_query(
                 "SELECT value FROM trading_runtime_state WHERE key=%s LIMIT 1",
                 (baseline_key,),
@@ -8569,13 +8630,40 @@ def _resolve_rollout_baseline_run_id() -> Optional[int]:
                     except Exception:
                         base_value = {}
                 if isinstance(base_value, dict) and base_value.get('base_run_id') is not None:
-                    return int(base_value.get('base_run_id'))
-    except Exception:
-        return None
+                    candidate_run_id = int(base_value.get('base_run_id'))
+
+        if candidate_run_id is None:
+            return {'ok': False, 'status': 'unavailable', 'reason': 'no base_run_id found in changepoint marker'}
+
+        exists_rows = db_client.execute_query(
+            "SELECT id FROM backtest_run WHERE id=%s LIMIT 1",
+            (candidate_run_id,),
+        )
+        if not exists_rows:
+            return {
+                'ok': False,
+                'status': 'unavailable',
+                'reason': f'baseline run_id {candidate_run_id} not found',
+                'run_id': candidate_run_id,
+            }
+
+        return {'ok': True, 'status': 'ok', 'run_id': candidate_run_id}
+    except Exception as e:
+        return {'ok': False, 'status': 'error', 'reason': str(e), 'error': str(e)}
+
+
+def _resolve_rollout_baseline_run_id() -> Optional[int]:
+    resolved = _resolve_rollout_baseline()
+    if resolved.get('ok') and resolved.get('run_id') is not None:
+        return int(resolved.get('run_id'))
     return None
 
 
-def _build_backtest_compare_vs_live(run_id: int) -> Dict[str, Any]:
+def _build_backtest_compare_vs_live(
+    run_id: int,
+    active_trade_type: Optional[str] = None,
+    active_mode: Optional[str] = None,
+) -> Dict[str, Any]:
     run_rows = db_client.execute_query(
         "SELECT id, label, params, pnl_total, pnl_spot, pnl_futures, win_rate, n_trades, n_spot, n_futures, rank_pnl, window_start, window_end FROM backtest_run WHERE id = %s",
         (run_id,)
@@ -8602,6 +8690,16 @@ def _build_backtest_compare_vs_live(run_id: int) -> Dict[str, Any]:
         (run_id,)
     )
     bt_symbols = sorted({r.get('symbol') for r in backtest_trades if r.get('symbol')})
+    resolved_active_mode = str(
+        active_mode
+        or getattr(orchestrator, 'current_regime_mode', '')
+        or getattr(settings, 'current_regime_mode', '')
+        or regime
+        or 'SPOT_BULL'
+    ).strip().upper() or 'SPOT_BULL'
+    resolved_active_trade_type = str(active_trade_type or _active_trade_type_for_mode(resolved_active_mode)).strip().lower()
+    if resolved_active_trade_type not in ('spot', 'futures'):
+        resolved_active_trade_type = _active_trade_type_for_mode(resolved_active_mode)
 
     live_rows = db_client.execute_query(
         """
@@ -8614,7 +8712,14 @@ def _build_backtest_compare_vs_live(run_id: int) -> Dict[str, Any]:
         (window_start, window_end)
     )
     live_trades: List[Dict[str, Any]] = []
+    live_symbols_all = set()
+    live_symbols_used = set()
+    filtered_out_symbol_count = 0
+    live_missing_trade_type_count = 0
     for row in live_rows:
+        symbol = row.get('symbol')
+        if symbol:
+            live_symbols_all.add(symbol)
         meta = row.get('metadata') or {}
         if isinstance(meta, str):
             try:
@@ -8623,16 +8728,20 @@ def _build_backtest_compare_vs_live(run_id: int) -> Dict[str, Any]:
                 meta = {}
         if not isinstance(meta, dict):
             meta = {}
-        if bt_symbols and row.get('symbol') not in bt_symbols:
+        if bt_symbols and symbol not in bt_symbols:
+            filtered_out_symbol_count += 1
             continue
+        if symbol:
+            live_symbols_used.add(symbol)
 
         inferred_type = str(meta.get('trade_type') or '').strip().lower()
         if inferred_type not in ('spot', 'futures'):
+            live_missing_trade_type_count += 1
             inferred_type = 'spot'
 
         raw_reason = row.get('close_reason') or meta.get('close_reason') or 'unknown'
         live_trades.append({
-            'symbol': row.get('symbol'),
+            'symbol': symbol,
             'trade_type': inferred_type,
             'side': row.get('side'),
             'entry_time': row.get('entry_time'),
@@ -8655,11 +8764,76 @@ def _build_backtest_compare_vs_live(run_id: int) -> Dict[str, Any]:
         for trade_type in ('spot', 'futures')
     }
 
-    parity = {
-        'pnl_total_gap_pct': _parity_gap_pct(bt_summary['pnl_total'], live_summary['pnl_total']),
-        'win_rate_gap_pct': round((bt_summary['win_rate'] - live_summary['win_rate']) * 100.0, 4),
-        'avg_pnl_gap_pct': _parity_gap_pct(bt_summary['avg_pnl'], live_summary['avg_pnl']),
-        'n_trades_gap': bt_summary['n_trades'] - live_summary['n_trades'],
+    parity = _build_parity_metrics(bt_summary, live_summary)
+    active_bt_summary = bt_by_type.get(resolved_active_trade_type) or _trade_summary([], pnl_key='pnl_usdt')
+    active_live_summary = live_by_type.get(resolved_active_trade_type) or _trade_summary([], pnl_key='pnl')
+    active_parity = _build_parity_metrics(active_bt_summary, active_live_summary)
+
+    active_bt_trades = int(active_bt_summary.get('n_trades') or 0)
+    active_live_trades = int(active_live_summary.get('n_trades') or 0)
+    sample_target = 3
+    coverage_ratio = None
+    if active_bt_trades > 0:
+        coverage_ratio = round(active_live_trades / active_bt_trades, 6)
+    symbol_overlap_ratio = None
+    if live_symbols_all:
+        symbol_overlap_ratio = round(len(live_symbols_used) / len(live_symbols_all), 6)
+
+    comparability_status = 'comparable'
+    sample_status = 'sufficient'
+    comparability_reasons: List[str] = []
+    if active_bt_trades <= 0:
+        comparability_status = 'not_comparable'
+        sample_status = 'none'
+        comparability_reasons.append(f'no backtest trades in active {resolved_active_trade_type} slice')
+    elif active_live_trades <= 0:
+        comparability_status = 'not_comparable'
+        sample_status = 'none'
+        comparability_reasons.append(f'no live trades in active {resolved_active_trade_type} slice')
+    elif active_live_trades < sample_target:
+        comparability_status = 'limited'
+        sample_status = 'limited'
+        comparability_reasons.append(
+            f'active {resolved_active_trade_type} sample limited ({active_live_trades}/{sample_target} trades)'
+        )
+
+    if coverage_ratio is not None and coverage_ratio < 0.05:
+        if comparability_status == 'comparable':
+            comparability_status = 'limited'
+        if sample_status == 'sufficient':
+            sample_status = 'limited'
+        comparability_reasons.append(f'active coverage low ({coverage_ratio * 100.0:.2f}% of baseline trades)')
+
+    if symbol_overlap_ratio is not None and symbol_overlap_ratio < 0.5:
+        if comparability_status == 'comparable':
+            comparability_status = 'limited'
+        comparability_reasons.append(
+            f'symbol overlap low ({symbol_overlap_ratio * 100.0:.2f}% of live symbols aligned to baseline)'
+        )
+
+    if resolved_active_trade_type == 'futures' and live_missing_trade_type_count > 0:
+        if comparability_status == 'comparable':
+            comparability_status = 'limited'
+        comparability_reasons.append(
+            f'live trade_type missing on {live_missing_trade_type_count} rows; futures slice may be understated'
+        )
+
+    active_scope = {
+        'mode': resolved_active_mode,
+        'trade_type': resolved_active_trade_type,
+        'backtest': {'summary': active_bt_summary},
+        'live': {'summary': active_live_summary},
+        'parity': active_parity,
+        'comparability': {
+            'status': comparability_status,
+            'sample_status': sample_status,
+            'sample_target': sample_target,
+            'coverage_ratio': coverage_ratio,
+            'symbol_overlap_ratio': symbol_overlap_ratio,
+            'filtered_out_symbol_count': filtered_out_symbol_count,
+            'live_missing_trade_type_count': live_missing_trade_type_count,
+            'reasons': comparability_reasons,
+        },
     }
 
     return {
@@ -8667,6 +8841,8 @@ def _build_backtest_compare_vs_live(run_id: int) -> Dict[str, Any]:
         'run_id': run_id,
         'session_id': session_id,
         'regime': regime,
+        'active_mode': resolved_active_mode,
+        'active_trade_type': resolved_active_trade_type,
         'window_start': window_start.isoformat() if hasattr(window_start, 'isoformat') else str(window_start),
         'window_end': window_end.isoformat() if hasattr(window_end, 'isoformat') else str(window_end),
         'symbols': bt_symbols,
@@ -8691,6 +8867,13 @@ def _build_backtest_compare_vs_live(run_id: int) -> Dict[str, Any]:
             'by_trade_type': live_by_type,
         },
         'parity': parity,
+        'active_scope': active_scope,
+        'diagnostics': {
+            'live_symbol_count': len(live_symbols_all),
+            'matched_live_symbol_count': len(live_symbols_used),
+            'filtered_out_symbol_count': filtered_out_symbol_count,
+            'live_missing_trade_type_count': live_missing_trade_type_count,
+        },
         'ts': to_mexico_time(datetime.utcnow()).isoformat(),
     }
 

@@ -458,3 +458,194 @@ def test_spot_bull_candidate_decision_endpoint(monkeypatch):
     payload = response.json()
     assert payload["go_no_go"] == "GO"
     assert payload["candidate_label"] == "spot_bull_quality_v1"
+
+
+def test_resolve_rollout_baseline_reports_missing_run(monkeypatch):
+    import app as app_module
+
+    class _DB:
+        def execute_query(self, sql, params=None):
+            if "WHERE key LIKE %s" in sql:
+                return [{"value": {"base_run_id": 999}}]
+            if "FROM backtest_run WHERE id=%s" in sql:
+                return []
+            return []
+
+    monkeypatch.setattr(app_module, "db_client", _DB())
+    payload = app_module._resolve_rollout_baseline()
+    assert payload["ok"] is False
+    assert payload["status"] == "unavailable"
+    assert "not found" in payload["reason"]
+
+
+def test_backtest_compare_vs_live_builds_active_scope_limited(monkeypatch):
+    import app as app_module
+
+    window_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    window_end = datetime(2026, 7, 2, tzinfo=timezone.utc)
+
+    class _DB:
+        def execute_query(self, sql, params=None):
+            if "FROM backtest_run WHERE id = %s" in sql:
+                return [{
+                    "id": 7,
+                    "label": "baseline-7",
+                    "params": {"regime": "FUTURES_SHORT", "__run_meta": {"regime": "FUTURES_SHORT"}},
+                    "pnl_total": 1000.0,
+                    "pnl_spot": 0.0,
+                    "pnl_futures": 1000.0,
+                    "win_rate": 0.55,
+                    "n_trades": 100,
+                    "n_spot": 0,
+                    "n_futures": 100,
+                    "rank_pnl": 1,
+                    "window_start": window_start,
+                    "window_end": window_end,
+                }]
+            if "FROM backtest_trade" in sql:
+                return [
+                    {
+                        "symbol": "BTCUSDT",
+                        "trade_type": "futures",
+                        "side": "SELL",
+                        "entry_ts": window_start,
+                        "exit_ts": window_end,
+                        "entry_price": 100000.0,
+                        "exit_price": 99000.0,
+                        "usdt_size": 100.0,
+                        "pnl_usdt": 10.0,
+                        "pnl_pct": 10.0,
+                        "tier": "A",
+                        "regime": "FUTURES_SHORT",
+                        "close_reason": "take_profit",
+                        "kelly_mult": 1.0,
+                    }
+                ] * 100
+            if "FROM trades_closed" in sql:
+                return [
+                    {
+                        "symbol": "BTCUSDT",
+                        "side": "SELL",
+                        "quantity": 0.01,
+                        "entry_time": window_start,
+                        "exit_time": window_end,
+                        "pnl": 12.0,
+                        "pnl_percentage": 1.2,
+                        "close_reason": "take_profit",
+                        "metadata": {"trade_type": "futures"},
+                        "entry_commission": 0.1,
+                        "exit_commission": 0.1,
+                    },
+                    {
+                        "symbol": "ETHUSDT",
+                        "side": "SELL",
+                        "quantity": 0.02,
+                        "entry_time": window_start,
+                        "exit_time": window_end,
+                        "pnl": -5.0,
+                        "pnl_percentage": -0.5,
+                        "close_reason": "stop_loss",
+                        "metadata": {},
+                        "entry_commission": 0.1,
+                        "exit_commission": 0.1,
+                    },
+                ]
+            return []
+
+    monkeypatch.setattr(app_module, "db_client", _DB())
+    payload = app_module._build_backtest_compare_vs_live(
+        7,
+        active_trade_type="futures",
+        active_mode="FUTURES_SHORT",
+    )
+    assert payload["active_scope"]["trade_type"] == "futures"
+    assert payload["active_scope"]["comparability"]["status"] == "limited"
+    assert payload["active_scope"]["comparability"]["sample_status"] == "limited"
+    assert payload["diagnostics"]["filtered_out_symbol_count"] == 1
+
+
+def test_parity_validation_downgrades_non_comparable_active_slice_to_warning(monkeypatch):
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "_resolve_rollout_baseline", lambda: {"ok": True, "status": "ok", "run_id": 42})
+    monkeypatch.setattr(app_module, "_get_effective_runtime_selection", lambda summary_mode=None: {"mode": "FUTURES_SHORT"})
+    monkeypatch.setattr(
+        app_module,
+        "_build_backtest_compare_vs_live",
+        lambda run_id, active_trade_type=None, active_mode=None: {
+            "parity": {"pnl_total_gap_pct": 9999.0, "win_rate_gap_pct": 50.0, "avg_pnl_gap_pct": 500.0, "n_trades_gap": 1000},
+            "active_scope": {
+                "trade_type": "futures",
+                "mode": "FUTURES_SHORT",
+                "parity": {"pnl_total_gap_pct": 9999.0, "win_rate_gap_pct": 50.0, "avg_pnl_gap_pct": 500.0, "n_trades_gap": 1000},
+                "comparability": {
+                    "status": "limited",
+                    "sample_status": "limited",
+                    "reasons": ["active futures sample limited (1/3 trades)", "active coverage low (1.00% of baseline trades)"],
+                },
+            },
+        },
+    )
+
+    payload = app_module._get_parity_validation_snapshot()
+    assert payload["ok"] is True
+    assert payload["status"] == "warning"
+    assert payload["active_market"] == "futures"
+    assert payload["comparability_status"] == "limited"
+    assert any("not fully homologable" in reason for reason in payload["reasons"])
+
+
+def test_parity_validation_can_still_be_critical_when_active_slice_is_comparable(monkeypatch):
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "_resolve_rollout_baseline", lambda: {"ok": True, "status": "ok", "run_id": 84})
+    monkeypatch.setattr(app_module, "_get_effective_runtime_selection", lambda summary_mode=None: {"mode": "SPOT_BULL"})
+    monkeypatch.setattr(
+        app_module,
+        "_build_backtest_compare_vs_live",
+        lambda run_id, active_trade_type=None, active_mode=None: {
+            "parity": {"pnl_total_gap_pct": 10.0, "win_rate_gap_pct": 5.0, "avg_pnl_gap_pct": 8.0, "n_trades_gap": 2},
+            "active_scope": {
+                "trade_type": "spot",
+                "mode": "SPOT_BULL",
+                "parity": {"pnl_total_gap_pct": 120.0, "win_rate_gap_pct": 25.0, "avg_pnl_gap_pct": 50.0, "n_trades_gap": 3},
+                "comparability": {
+                    "status": "comparable",
+                    "sample_status": "sufficient",
+                    "reasons": [],
+                },
+            },
+        },
+    )
+
+    payload = app_module._get_parity_validation_snapshot()
+    assert payload["ok"] is True
+    assert payload["status"] == "critical"
+    assert payload["active_market"] == "spot"
+    assert payload["comparability_status"] == "comparable"
+    assert any("active spot pnl parity gap" in reason for reason in payload["reasons"])
+
+
+def test_promotion_criteria_observes_warning_parity_without_hard_block(monkeypatch):
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "_get_rollout_readiness_snapshot", lambda: {
+        "status": "caution",
+        "active_critical_drift_count": 0,
+    })
+    monkeypatch.setattr(app_module, "_get_performance_changepoint_metrics", lambda: {
+        "ok": True,
+        "current_window": {"summary": {"n_trades": 5, "net_pnl": 3.5}},
+    })
+    monkeypatch.setattr(app_module, "_get_parity_validation_snapshot", lambda: {
+        "ok": True,
+        "status": "warning",
+        "active_market": "spot",
+        "comparability_status": "limited",
+        "reasons": ["active spot sample limited (2/3 trades)"],
+    })
+
+    payload = app_module._get_promotion_criteria_snapshot()
+    assert payload["ok"] is True
+    assert payload["status"] == "observe"
+    assert payload["parity_status"] == "warning"

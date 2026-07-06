@@ -1,0 +1,50 @@
+{
+  "ok": true,
+  "count": 2,
+  "results": [
+    {
+      "cycle": 1,
+      "ok": true,
+      "duration_sec": 23.1,
+      "summary": {
+        "buy_orders": 0,
+        "sell_orders": 0,
+        "sl_tp_closes": 0,
+        "futures_closes": 0,
+        "regime_mode": null
+      },
+      "log_tail": [
+        "[SSO] dynamic gates (spot capital=2332): decay=$4.66 stagnant=$7.0 slow=$2.33 daily=$116.6",
+        "[SSO/SPOT] TRXUSDT evaluation error: name '_regime_mode' is not defined",
+        "[SSO/S] XRPUSDT using spot_total_at_open=$2947 (current=$1892) \u2014 balance changed",
+        "[SSO] dynamic gates (spot capital=2947): decay=$5.89 stagnant=$8.84 slow=$2.95 daily=$147.34",
+        "[SSO/SPOT] XRPUSDT evaluation error: name '_regime_mode' is not defined",
+        "[SSO/S] ZECUSDT using spot_total_at_open=$1615 (current=$1892) \u2014 balance changed",
+        "[SSO] dynamic gates (spot capital=1615): decay=$3.23 stagnant=$4.84 slow=$1.61 daily=$80.73",
+        "[SSO/SPOT] ZECUSDT evaluation error: name '_regime_mode' is not defined"
+      ]
+    },
+    {
+      "cycle": 2,
+      "ok": true,
+      "duration_sec": 8.8,
+      "summary": {
+        "buy_orders": 0,
+        "sell_orders": 0,
+        "sl_tp_closes": 0,
+        "futures_closes": 0,
+        "regime_mode": null
+      },
+      "log_tail": [
+        "[SSO] dynamic gates (spot capital=2332): decay=$4.66 stagnant=$7.0 slow=$2.33 daily=$116.6",
+        "[SSO/SPOT] TRXUSDT evaluation error: name '_regime_mode' is not defined",
+        "[SSO/S] XRPUSDT using spot_total_at_open=$2947 (current=$1892) \u2014 balance changed",
+        "[SSO] dynamic gates (spot capital=2947): decay=$5.89 stagnant=$8.84 slow=$2.95 daily=$147.34",
+        "[SSO/SPOT] XRPUSDT evaluation error: name '_regime_mode' is not defined",
+        "[SSO/S] ZECUSDT using spot_total_at_open=$1615 (current=$1892) \u2014 balance changed",
+        "[SSO] dynamic gates (spot capital=1615): decay=$3.23 stagnant=$4.84 slow=$1.61 daily=$80.73",
+        "[SSO/SPOT] ZECUSDT evaluation error: name '_regime_mode' is not defined"
+      ]
+    }
+  ]
+}

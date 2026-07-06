@@ -1,7 +1,73 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 05 2026 | Sesión 45: hardening anti-bloqueo de `pause_new_entries` (TTL, auto-resume y visibilidad operativa).
+> Última actualización: jul 06 2026 | Sesión 46: fix de paridad active-only con validación de baseline y comparabilidad (no-critical para no homologables).
+
+---
+
+### ✅ Sesión 46 — Fix de Parity Active-Only + Baseline Validation — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+1. Detener escaleado de `parity_critical` cuando la comparación baseline-live no sea metodológicamente homologable.
+2. Evaluar severidad de paridad solo sobre el mercado activo (SPOT o FUTURES según régimen), no sobre agregados globales.
+3. Mantener paridad como gate de promoción/rollout, sin bloquear operación diaria por limitaciones de muestra.
+
+**Implementación aplicada:**
+1. `app.py` nuevos helpers (líneas 8587-8599):
+  - `_active_trade_type_for_mode()`: mapeo determinístico modo→tipo (FUTURES_SHORT→futures, resto→spot);
+  - `_build_parity_metrics()`: factorización de cálculo de PnL/win-rate gap para reutilización;
+  - `_resolve_rollout_baseline()`: validación robusta de existencia del baseline run en BD; devuelve `{ok, status, reason, run_id}` explícito si falta.
+2. `_build_backtest_compare_vs_live()` reescrito para active-scope (líneas 8662-8785):
+  - acepta parámetros `active_trade_type` y `active_mode` para evaluar slice activo específicamente;
+  - construye `active_scope` con métricas de comparabilidad: `sample_status`, `coverage_ratio`, `symbol_overlap_ratio`, `filtered_out_symbol_count`, `live_missing_trade_type_count`;
+  - diagnostics: distingue entre símbolos filtrados por desalineación baseline y trade_type faltante en live;
+  - devuelve payload ampliado con `active_scope` + `diagnostics` para visibilidad total.
+3. `_get_parity_validation_snapshot()` reescrito para severidad condicional (líneas 3948-4030):
+  - evalúa primero comparabilidad (`active_scope.comparability.status`);
+  - si comparabilidad es `not_comparable` o `limited`: status = `warning` (degradación desde critical posible);
+  - si es `comparable`: aplica thresholds de gap solo al slice activo para decidir critical vs warning vs ok;
+  - razones deduplicadas y contextualizadas por mercado activo (`active {spot|futures} parity gap ...`);
+  - payload retorna: `active_market`, `active_mode`, `comparability_status`, `sample_status`, `baseline` para auditoría completa.
+4. Health scoring en `_compute_health_results_snapshot()` (línea 8214+):
+  - elimina flageo automático de `parity_gap` en crítico;
+  - paridad WARNING ya no escala automáticamente el score completo (se mantiene diagnostica).
+
+**Decisiones de usuario (confirmadas y aplicadas):**
+1. No homologable → warning (no critical).
+2. Evaluación active-only (SPOT o FUTURES según modo efectivo, no global).
+3. Paridad sigue gobernando promoción/rollout, no nuevas entradas si operación sigue siendo sana.
+
+**Cobertura de pruebas añadida (5 nuevas en tests/test_health_audit.py):**
+1. `test_resolve_rollout_baseline_reports_missing_run` (línea 463): baseline inexistente → unavailable con reason explícito.
+2. `test_backtest_compare_vs_live_builds_active_scope_limited` (línea 481): construcción de active_scope con comparabilidad limitada y diagnósticos de filter.
+3. `test_parity_validation_downgrades_non_comparable_active_slice_to_warning` (línea 567): comparación no homologable → warning (no critical).
+4. `test_parity_validation_can_still_be_critical_when_active_slice_is_comparable` (línea 598): cuando slice activo es comparable y gap es severo → critical (aún posible).
+5. `test_promotion_criteria_observes_warning_parity_without_hard_block` (línea 630): promotion criteria maneja parity warning sin bloqueo operativo de nuevas entradas.
+
+**Verificación ejecutada:**
+1. Validación estática: sin errores en app.py y tests/test_health_audit.py.
+2. Runner enfocado: `focused_validation_runner.py` → `{"overall": "PASS"}`.
+3. Pytest local: no ejecutable en host por falta de fastapi, pero estructura de pruebas validada contra patrones existentes en test_health_audit.py.
+
+**Cambios en payload de paridad:**
+
+`_get_parity_validation_snapshot()` output (antes → después):
+- Antes: `status ∈ {ok, inconclusive, warning, critical, error}` sin contexto de comparabilidad.
+- Después: `status ∈ {ok, warning, critical, error}` + campos nuevos:
+  - `active_market: 'spot' | 'futures'`
+  - `active_mode: str` (modo efectivo evaluado)
+  - `comparability_status: 'comparable' | 'limited' | 'not_comparable'`
+  - `sample_status: 'sufficient' | 'limited' | 'none'`
+  - `comparability: {...}` (detalles de diagnóstico)
+  - `baseline: {...}` (metadata de resolución del baseline)
+
+`/dashboard/summary` y `/health/results` automáticamente absorben cambios de paridad, pero operador seguirá viendo `parity_critical` solo cuando la comparación sea realmente válida y severa.
+
+**Impacto operativo esperado:**
+1. Fin de falsos positivos `parity_critical` causados por gaps de muestra insuficiente o no comparabilidad.
+2. Promotion criteria puede seguir observando paridad en status `warning` sin bloquear operación diaria.
+3. Baseline inválido/faltante ahora diagnosticable explícitamente, no oculto en errores genéricos.
+4. Operador recibe contexto claro de por qué una paridad es confiable (`comparable`) o condicional (`limited`).
 
 ---
 

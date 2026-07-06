@@ -5356,7 +5356,11 @@ def _is_health_results_critical(db_client, max_age_minutes: int = 20) -> bool:
         if not isinstance(payload, dict):
             return False
         status = str(payload.get('overall') or '').strip().lower()
-        if status not in ('critical', 'error'):
+        block_new_entries = payload.get('block_new_entries')
+        if block_new_entries is None:
+            if status not in ('critical', 'error'):
+                return False
+        elif not bool(block_new_entries):
             return False
 
         ts_raw = payload.get('timestamp')

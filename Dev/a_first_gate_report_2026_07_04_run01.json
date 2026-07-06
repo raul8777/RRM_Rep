@@ -1,0 +1,200 @@
+{
+  "gate_1": {
+    "critical_open_count": 6,
+    "critical_param_checks": [
+      {
+        "actual": 3.996,
+        "aligned": false,
+        "expected": 1.42,
+        "param": "futures_sl_pct",
+        "reason": "outside_tolerance",
+        "relative_diff": 1.8140845070422538
+      },
+      {
+        "actual": 8.2944,
+        "aligned": false,
+        "expected": 2.81,
+        "param": "futures_tp_pct",
+        "reason": "outside_tolerance",
+        "relative_diff": 1.9517437722419926
+      },
+      {
+        "actual": 0.621,
+        "aligned": false,
+        "expected": 0.704,
+        "param": "kelly_max_pct_liquid",
+        "reason": "outside_tolerance",
+        "relative_diff": 0.11789772727272722
+      },
+      {
+        "actual": null,
+        "aligned": true,
+        "expected": null,
+        "param": "risk_per_trade",
+        "reason": "not_in_drift_assumed_aligned",
+        "relative_diff": null
+      },
+      {
+        "actual": 1.236,
+        "aligned": false,
+        "expected": 3.36,
+        "param": "stop_loss_pct",
+        "reason": "outside_tolerance",
+        "relative_diff": 0.6321428571428571
+      },
+      {
+        "actual": 6.2964,
+        "aligned": false,
+        "expected": 4.14,
+        "param": "take_profit_pct",
+        "reason": "outside_tolerance",
+        "relative_diff": 0.5208695652173915
+      }
+    ],
+    "critical_params_all_aligned": false,
+    "critical_params_tolerance_rel": 0.005,
+    "drift_count": 12,
+    "drift_count_threshold": 2,
+    "gate": "gate_1_drift_entry",
+    "notes": [
+      "Any remaining drift beyond threshold must be justified manually as no-impact-PnL."
+    ],
+    "passed": false
+  },
+  "gate_2": {
+    "event_coverage": {
+      "close_reason_normalized": {
+        "count": 118,
+        "ratio_vs_recent_closed": 1.18,
+        "threshold": 0.99
+      },
+      "order_open": {
+        "count": 116,
+        "ratio_vs_recent_closed": 1.16,
+        "threshold": 0.99
+      },
+      "profile_screener_bridge": {
+        "count": 304,
+        "ratio_vs_recent_closed": 3.04,
+        "threshold": 0.99
+      },
+      "screener_selection": {
+        "count": 304,
+        "ratio_vs_recent_closed": 3.04,
+        "threshold": 0.99
+      },
+      "signal_decision": {
+        "count": 1431,
+        "ratio_vs_recent_closed": 14.31,
+        "threshold": 0.99
+      }
+    },
+    "gate": "gate_2_traceability_persistence",
+    "notes": [
+      "Exact pre/post restart equality requires running capture-state before restart and verify-state after restart.",
+      "Use --allow-event-aliases only if your runtime still logs open/close instead of order_open/close_reason_normalized."
+    ],
+    "passed": true,
+    "recent_closed_sample": 100,
+    "stale_unprocessed_signals_over_90m": 0,
+    "trade_type_valid_ratio": 1.0,
+    "volatile_state_has_circuit_breaker_until": true,
+    "volatile_state_has_consecutive_failures": true
+  },
+  "gate_3": {
+    "classification": "INCONCLUSIVE",
+    "futures_current_n": 0,
+    "futures_delta": {
+      "pnl_sum": 0.0,
+      "win_rate_pct": 0.0
+    },
+    "gate": "gate_3_post_adjust_performance",
+    "global_delta": {
+      "net_pnl": -87.8154,
+      "win_rate_pct": -0.56
+    },
+    "passed": false,
+    "sample_ok": false,
+    "sample_requirements": {
+      "futures_min": 15,
+      "spot_min": 30
+    },
+    "spot_current_n": 121,
+    "spot_delta": {
+      "pnl_sum": -76.0238,
+      "stop_loss_reduction_rel": 0.059076,
+      "stop_loss_share_current": 0.438017,
+      "stop_loss_share_previous": 0.465517,
+      "win_rate_pct": -0.56
+    },
+    "thresholds": {
+      "futures": {
+        "net_pnl_delta_gte": 0,
+        "win_rate_delta_gte_pp": 0.0
+      },
+      "global": {
+        "net_pnl_delta_gt": 0,
+        "win_rate_delta_gte_pp": 1.5
+      },
+      "spot": {
+        "net_pnl_delta_gt": 0,
+        "stop_loss_share_reduction_rel_gte": 0.15
+      }
+    }
+  },
+  "gate_4": {
+    "classification": "INCONCLUSIVE",
+    "gate": "gate_4_secondary_parity",
+    "notes": [
+      "Gate 4 is secondary; it does not block tactical deploy if Gate 1-3 pass.",
+      "When pre/post parity gap is unchanged for all comparable runs, classification is INCONCLUSIVE (no evolution)."
+    ],
+    "passed": false,
+    "pre_gap_baseline_loaded": true,
+    "pre_gap_path": "/app/Dev/phase4_pre_gap.json",
+    "rows": [
+      {
+        "bt_pnl_total": 92633.6148,
+        "current_gap_abs": 92478.08876299999,
+        "improved_at_least_20pct": false,
+        "improved_rel": 0.0,
+        "live_pnl_total": 155.526037,
+        "ok": true,
+        "pre_gap_abs": 92478.08876299999,
+        "run_id": 29600
+      },
+      {
+        "bt_pnl_total": 95698.79,
+        "current_gap_abs": 95543.26396299999,
+        "improved_at_least_20pct": false,
+        "improved_rel": 0.0,
+        "live_pnl_total": 155.526037,
+        "ok": true,
+        "pre_gap_abs": 95543.26396299999,
+        "run_id": 48412
+      },
+      {
+        "bt_pnl_total": 97895.2943,
+        "current_gap_abs": 97739.76826299999,
+        "improved_at_least_20pct": false,
+        "improved_rel": 0.0,
+        "live_pnl_total": 155.526037,
+        "ok": true,
+        "pre_gap_abs": 97739.76826299999,
+        "run_id": 51631
+      },
+      {
+        "bt_pnl_total": 129818.072,
+        "current_gap_abs": 129662.545963,
+        "improved_at_least_20pct": false,
+        "improved_rel": 0.0,
+        "live_pnl_total": 155.526037,
+        "ok": true,
+        "pre_gap_abs": 129662.545963,
+        "run_id": 61556
+      }
+    ]
+  },
+  "generated_at": "2026-07-04T15:14:23.546552+00:00",
+  "status": "FAIL_CRITICAL"
+}

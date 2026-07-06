@@ -1,0 +1,11 @@
+{
+  "whitelist_count": 117,
+  "scalar_map_count": 117,
+  "config_fields_count": 297,
+  "overlap_count": 117,
+  "whitelist_only": [],
+  "scalar_only": [],
+  "critical_missing_in_whitelist": [],
+  "critical_missing_in_scalar_map": [],
+  "ok": true
+}

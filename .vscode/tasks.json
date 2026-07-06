@@ -1,0 +1,14 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "focused-validation-runner",
+			"type": "shell",
+			"command": "C:\\Users\\raul8\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+			"args": [
+				"Dev/focused_validation_runner.py"
+			],
+			"isBackground": false
+		}
+	]
+}

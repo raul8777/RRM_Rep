@@ -1,0 +1,522 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="24" skipped="0" tests="121" time="72.646" timestamp="2026-07-03T21:05:09.451874-06:00" hostname="RRM_ROG_G15"><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_sl_lt_tp_global" time="0.158" /><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_futures_sl_lt_tp" time="0.010" /><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_range_scalp_sl_lt_tp" time="0.007" /><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_preservation_sl_lt_tp" time="0.007" /><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_kelly_base_lt_kelly_max" time="0.007" /><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_kelly_max_pct_liquid_matches_backtest" time="0.007"><failure message="AssertionError: kelly_max_pct_liquid=0.621 != 0.704 (backtest run_0677)&#10;assert 0.621 == 0.704&#10; +  where 0.621 = Settings(binance_api_key='vhGx9ir43VjuTzTfrZY5EGjsCwHE3rqLRKuDyC2pPXOtbjoN8u73A3Rllyl4XhRd', binance_api_secret='JWmRs... db_user='crypto_agent', db_password='crypto_agent_password', db_host='postgres', db_port=5432, db_name='crypto_agent').kelly_max_pct_liquid&#10; +    where Settings(binance_api_key='vhGx9ir43VjuTzTfrZY5EGjsCwHE3rqLRKuDyC2pPXOtbjoN8u73A3Rllyl4XhRd', binance_api_secret='JWmRs... db_user='crypto_agent', db_password='crypto_agent_password', db_host='postgres', db_port=5432, db_name='crypto_agent') = &lt;test_system_health.TestCat1_ConfigIntegrity object at 0x0000017E0E4A11C0&gt;.s">self = &lt;test_system_health.TestCat1_ConfigIntegrity object at 0x0000017E0E4A11C0&gt;
+
+    def test_kelly_max_pct_liquid_matches_backtest(self):
+        """K2: kelly_max_pct_liquid must match backtest run_0677 baseline (70.4%)."""
+&gt;       assert self.s.kelly_max_pct_liquid == 0.704, \
+            f"kelly_max_pct_liquid={self.s.kelly_max_pct_liquid} != 0.704 (backtest run_0677)"
+E       AssertionError: kelly_max_pct_liquid=0.621 != 0.704 (backtest run_0677)
+E       assert 0.621 == 0.704
+E        +  where 0.621 = Settings(binance_api_key='vhGx9ir43VjuTzTfrZY5EGjsCwHE3rqLRKuDyC2pPXOtbjoN8u73A3Rllyl4XhRd', binance_api_secret='JWmRs... db_user='crypto_agent', db_password='crypto_agent_password', db_host='postgres', db_port=5432, db_name='crypto_agent').kelly_max_pct_liquid
+E        +    where Settings(binance_api_key='vhGx9ir43VjuTzTfrZY5EGjsCwHE3rqLRKuDyC2pPXOtbjoN8u73A3Rllyl4XhRd', binance_api_secret='JWmRs... db_user='crypto_agent', db_password='crypto_agent_password', db_host='postgres', db_port=5432, db_name='crypto_agent') = &lt;test_system_health.TestCat1_ConfigIntegrity object at 0x0000017E0E4A11C0&gt;.s
+
+tests\test_system_health.py:125: AssertionError</failure></testcase><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_futures_breakeven_lt_trailing_activation" time="0.008"><failure message="AssertionError: futures_breakeven_activation_pct must be &lt; futures_trailing_activation_pct so breakeven fires first&#10;assert 2.0 &lt; 1.5&#10; +  where 2.0 = Settings(binance_api_key='vhGx9ir43VjuTzTfrZY5EGjsCwHE3rqLRKuDyC2pPXOtbjoN8u73A3Rllyl4XhRd', binance_api_secret='JWmRs... db_user='crypto_agent', db_password='crypto_agent_password', db_host='postgres', db_port=5432, db_name='crypto_agent').futures_breakeven_activation_pct&#10; +    where Settings(binance_api_key='vhGx9ir43VjuTzTfrZY5EGjsCwHE3rqLRKuDyC2pPXOtbjoN8u73A3Rllyl4XhRd', binance_api_secret='JWmRs... db_user='crypto_agent', db_password='crypto_agent_password', db_host='postgres', db_port=5432, db_name='crypto_agent') = &lt;test_system_health.TestCat1_ConfigIntegrity object at 0x0000017E0E4A0D70&gt;.s&#10; +  and   1.5 = Settings(binance_api_key='vhGx9ir43VjuTzTfrZY5EGjsCwHE3rqLRKuDyC2pPXOtbjoN8u73A3Rllyl4XhRd', binance_api_secret='JWmRs... db_user='crypto_agent', db_password='crypto_agent_password', db_host='postgres', db_port=5432, db_name='crypto_agent').futures_trailing_activation_pct&#10; +    where Settings(binance_api_key='vhGx9ir43VjuTzTfrZY5EGjsCwHE3rqLRKuDyC2pPXOtbjoN8u73A3Rllyl4XhRd', binance_api_secret='JWmRs... db_user='crypto_agent', db_password='crypto_agent_password', db_host='postgres', db_port=5432, db_name='crypto_agent') = &lt;test_system_health.TestCat1_ConfigIntegrity object at 0x0000017E0E4A0D70&gt;.s">self = &lt;test_system_health.TestCat1_ConfigIntegrity object at 0x0000017E0E4A0D70&gt;
+
+    def test_futures_breakeven_lt_trailing_activation(self):
+        """Breakeven must activate BEFORE trailing to preserve gains correctly."""
+&gt;       assert self.s.futures_breakeven_activation_pct &lt; self.s.futures_trailing_activation_pct, \
+            ("futures_breakeven_activation_pct must be &lt; futures_trailing_activation_pct "
+             "so breakeven fires first")
+E       AssertionError: futures_breakeven_activation_pct must be &lt; futures_trailing_activation_pct so breakeven fires first
+E       assert 2.0 &lt; 1.5
+E        +  where 2.0 = Settings(binance_api_key='vhGx9ir43VjuTzTfrZY5EGjsCwHE3rqLRKuDyC2pPXOtbjoN8u73A3Rllyl4XhRd', binance_api_secret='JWmRs... db_user='crypto_agent', db_password='crypto_agent_password', db_host='postgres', db_port=5432, db_name='crypto_agent').futures_breakeven_activation_pct
+E        +    where Settings(binance_api_key='vhGx9ir43VjuTzTfrZY5EGjsCwHE3rqLRKuDyC2pPXOtbjoN8u73A3Rllyl4XhRd', binance_api_secret='JWmRs... db_user='crypto_agent', db_password='crypto_agent_password', db_host='postgres', db_port=5432, db_name='crypto_agent') = &lt;test_system_health.TestCat1_ConfigIntegrity object at 0x0000017E0E4A0D70&gt;.s
+E        +  and   1.5 = Settings(binance_api_key='vhGx9ir43VjuTzTfrZY5EGjsCwHE3rqLRKuDyC2pPXOtbjoN8u73A3Rllyl4XhRd', binance_api_secret='JWmRs... db_user='crypto_agent', db_password='crypto_agent_password', db_host='postgres', db_port=5432, db_name='crypto_agent').futures_trailing_activation_pct
+E        +    where Settings(binance_api_key='vhGx9ir43VjuTzTfrZY5EGjsCwHE3rqLRKuDyC2pPXOtbjoN8u73A3Rllyl4XhRd', binance_api_secret='JWmRs... db_user='crypto_agent', db_password='crypto_agent_password', db_host='postgres', db_port=5432, db_name='crypto_agent') = &lt;test_system_health.TestCat1_ConfigIntegrity object at 0x0000017E0E4A0D70&gt;.s
+
+tests\test_system_health.py:130: AssertionError</failure></testcase><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_smart_tp_disabled_regimes_are_valid" time="0.007" /><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_futures_smart_tp_extensions_positive" time="0.007" /><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_futures_smart_tp_score_threshold_in_range" time="0.007" /><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_futures_trailing_distance_positive" time="0.007" /><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_min_cycles_before_close_shorts_geq_2" time="0.007" /><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_kelly_dynamic_base_pct_reasonable" time="0.007" /><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_futures_leverage_matches_backtest" time="0.007"><failure message="AssertionError: futures_leverage=2 != 10 (backtest run_0812)&#10;assert 2 == 10">self = &lt;test_system_health.TestCat1_ConfigIntegrity object at 0x0000017E0E4A28D0&gt;
+
+    def test_futures_leverage_matches_backtest(self):
+        """K2: futures_leverage must match backtest run_0812 baseline (10x)."""
+        lev = getattr(self.s, 'futures_leverage', 10)
+&gt;       assert lev == 10, f"futures_leverage={lev} != 10 (backtest run_0812)"
+E       AssertionError: futures_leverage=2 != 10 (backtest run_0812)
+E       assert 2 == 10
+
+tests\test_system_health.py:158: AssertionError</failure></testcase><testcase classname="tests.test_system_health.TestCat1_ConfigIntegrity" name="test_smart_tp_extend_disabled_regimes_is_list" time="0.007" /><testcase classname="tests.test_system_health.TestCat2_MarketRegimeLogic" name="test_build_regime_returns_market_regime" time="0.000" /><testcase classname="tests.test_system_health.TestCat2_MarketRegimeLogic" name="test_spot_bull_has_correct_kelly" time="0.000" /><testcase classname="tests.test_system_health.TestCat2_MarketRegimeLogic" name="test_range_scalp_has_reduced_kelly" time="0.000" /><testcase classname="tests.test_system_health.TestCat2_MarketRegimeLogic" name="test_preservation_has_narrative_only" time="0.000" /><testcase classname="tests.test_system_health.TestCat2_MarketRegimeLogic" name="test_futures_short_has_correct_sl_tp" time="0.000" /><testcase classname="tests.test_system_health.TestCat2_MarketRegimeLogic" name="test_preservation_upgrades_to_futures_short_when_enabled" time="0.007" /><testcase classname="tests.test_system_health.TestCat2_MarketRegimeLogic" name="test_anti_whipsaw_requires_two_cycles" time="0.000" /><testcase classname="tests.test_system_health.TestCat2_MarketRegimeLogic" name="test_market_regime_dataclass_has_required_fields" time="0.000" /><testcase classname="tests.test_system_health.TestCat2_MarketRegimeLogic" name="test_futures_short_kelly_multiplier_reduced" time="0.000" /><testcase classname="tests.test_system_health.TestCat2_MarketRegimeLogic" name="test_spot_bull_not_in_disabled_regimes" time="0.007" /><testcase classname="tests.test_system_health.TestCat2_MarketRegimeLogic" name="test_futures_short_not_in_disabled_regimes" time="0.008" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_smart_meta_is_dataclass_field" time="0.004" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_smart_meta_not_shared_between_instances" time="0.000" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_smart_meta_starts_empty" time="0.000" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_pre_entry_rejects_when_max_shorts_reached" time="0.295" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_pre_entry_rejects_duplicate_symbol_side" time="0.299" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_pre_entry_rejects_largecap_when_cap_hit" time="0.295" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_pre_entry_allows_midcap_when_largecap_full" time="0.553" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_update_sl_tp_updates_in_memory" time="0.001" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_update_sl_tp_false_for_unknown" time="0.000" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_update_sl_tp_false_for_closed" time="0.000" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_update_sl_tp_both" time="0.000" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_sl_hit_closes_short" time="0.008" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_sl_hit_pnl_is_negative_for_short" time="0.008" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_breakeven_moves_sl_to_entry_at_threshold" time="0.736"><failure message="assert 103.0 == 100.0 ± 0.01&#10;  &#10;  comparison failed&#10;  Obtained: 103.0&#10;  Expected: 100.0 ± 0.01">self = &lt;test_system_health.TestCat3_FuturesClientCore object at 0x0000017E0E4A1250&gt;
+
+    def test_breakeven_moves_sl_to_entry_at_threshold(self):
+        pos = make_short(entry=100.0, sl_pct=3.0)
+        fc = make_fc([pos])
+        inject_price(fc, "BTCUSDT", 98.8)  # 1.2% gain
+        fc.check_positions(settings=make_settings())
+&gt;       assert pos.sl_price == pytest.approx(100.0, abs=0.01)
+E       assert 103.0 == 100.0 ± 0.01
+E         
+E         comparison failed
+E         Obtained: 103.0
+E         Expected: 100.0 ± 0.01
+
+tests\test_system_health.py:405: AssertionError</failure></testcase><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_breakeven_fires_only_once" time="1.055" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_tp_hit_closes_when_smarttp_off" time="1.172" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_tp_extend_when_momentum_high" time="3.167" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_tp_extend_capped_at_max_extensions" time="1.092" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_momentum_returns_minus1_when_no_client_ref" time="0.009" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_closed_position_skipped_in_check" time="0.008" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_empty_positions_returns_empty" time="0.007" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_settings_none_does_not_crash" time="0.000" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_Fix3_trail_best_price_inferred_SHORT_after_meta_reset" time="1.524" /><testcase classname="tests.test_system_health.TestCat3_FuturesClientCore" name="test_Fix3_trail_best_price_fresh_activation_when_sl_is_default" time="2.036" /><testcase classname="tests.test_system_health.TestCat4_SpotSLTPPipeline" name="test_regime_range_scalp_disables_smarttp" time="0.007" /><testcase classname="tests.test_system_health.TestCat4_SpotSLTPPipeline" name="test_regime_preservation_disables_smarttp" time="0.007" /><testcase classname="tests.test_system_health.TestCat4_SpotSLTPPipeline" name="test_regime_spot_bull_allows_smarttp" time="0.007" /><testcase classname="tests.test_system_health.TestCat4_SpotSLTPPipeline" name="test_Fix1_effective_sl_uses_saved_stop_loss_after_extend" time="0.002" /><testcase classname="tests.test_system_health.TestCat4_SpotSLTPPipeline" name="test_Fix1_antiwick_uses_effective_sl" time="0.000" /><testcase classname="tests.test_system_health.TestCat4_SpotSLTPPipeline" name="test_regime_futures_short_allows_smarttp" time="0.007" /><testcase classname="tests.test_system_health.TestCat4_SpotSLTPPipeline" name="test_check_sl_tp_accepts_regime_param" time="0.003"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat4_SpotSLTPPipeline object at 0x0000017E0E4CE300&gt;
+
+    def test_check_sl_tp_accepts_regime_param(self):
+        """_check_sl_tp_positions must accept regime kwarg without error."""
+&gt;       from run_trades import _check_sl_tp_positions
+
+tests\test_system_health.py:595: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat4_SpotSLTPPipeline" name="test_check_sl_tp_regime_default_is_none" time="0.002"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat4_SpotSLTPPipeline object at 0x0000017E0E4CE5D0&gt;
+
+    def test_check_sl_tp_regime_default_is_none(self):
+&gt;       from run_trades import _check_sl_tp_positions
+
+tests\test_system_health.py:602: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat4_SpotSLTPPipeline" name="test_wire_futures_client_function_exists" time="0.003"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat4_SpotSLTPPipeline object at 0x0000017E0E4A3680&gt;
+
+    def test_wire_futures_client_function_exists(self):
+&gt;       from run_trades import _wire_futures_client
+
+tests\test_system_health.py:609: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat5_KellySizing" name="test_fuerte_tier_uses_max" time="0.003"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat5_KellySizing object at 0x0000017E0E4A2C00&gt;
+
+    def test_fuerte_tier_uses_max(self):
+&gt;       result = self._kelly(0.65, 0.80, liquid=1000.0)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_system_health.py:629: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\test_system_health.py:623: in _kelly
+    from run_trades import _kelly_position_size
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat5_KellySizing" name="test_base_tier_uses_base" time="0.003"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat5_KellySizing object at 0x0000017E0E4A2540&gt;
+
+    def test_base_tier_uses_base(self):
+        """Low confidence → result near kelly_base range."""
+&gt;       result = self._kelly(0.50, 0.30, liquid=1000.0)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_system_health.py:637: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\test_system_health.py:623: in _kelly
+    from run_trades import _kelly_position_size
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat5_KellySizing" name="test_hard_cap_not_exceeded" time="0.002"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat5_KellySizing object at 0x0000017E0E4A1790&gt;
+
+    def test_hard_cap_not_exceeded(self):
+        """Result must never exceed kelly_max_pct_liquid * liquid."""
+&gt;       result = self._kelly(0.99, 0.99, liquid=500.0)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_system_health.py:644: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\test_system_health.py:623: in _kelly
+    from run_trades import _kelly_position_size
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat5_KellySizing" name="test_zero_liquid_does_not_crash" time="0.004"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat5_KellySizing object at 0x0000017E0E4A3D70&gt;
+
+    def test_zero_liquid_does_not_crash(self):
+&gt;       result = self._kelly(0.65, 0.80, liquid=0.0)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_system_health.py:649: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\test_system_health.py:623: in _kelly
+    from run_trades import _kelly_position_size
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat5_KellySizing" name="test_kelly_disabled_returns_max_per_trade" time="0.003"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat5_KellySizing object at 0x0000017E0E4CE5A0&gt;
+
+    def test_kelly_disabled_returns_max_per_trade(self):
+&gt;       from run_trades import _kelly_position_size
+
+tests\test_system_health.py:653: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat5_KellySizing" name="test_kelly_result_is_positive" time="0.003"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat5_KellySizing object at 0x0000017E0E4CDF10&gt;
+
+    def test_kelly_result_is_positive(self):
+&gt;       result = self._kelly(0.55, 0.60, liquid=500.0)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_system_health.py:659: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\test_system_health.py:623: in _kelly
+    from run_trades import _kelly_position_size
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat5_KellySizing" name="test_sl_zero_does_not_crash" time="0.004"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat5_KellySizing object at 0x0000017E0E4CDD30&gt;
+
+    def test_sl_zero_does_not_crash(self):
+&gt;       from run_trades import _kelly_position_size
+
+tests\test_system_health.py:663: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat5_KellySizing" name="test_alta_tier_between_base_and_max" time="0.003"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat5_KellySizing object at 0x0000017E0E4CD6A0&gt;
+
+    def test_alta_tier_between_base_and_max(self):
+        """ALTA tier: prob&gt;=0.60 + str&gt;=0.70 → between base and max."""
+&gt;       result = self._kelly(0.62, 0.72, liquid=1000.0)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_system_health.py:671: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\test_system_health.py:623: in _kelly
+    from run_trades import _kelly_position_size
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat5b_SmartTotalSelector" name="test_mode_selector_blocks_switch_during_hold" time="0.003"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat5b_SmartTotalSelector object at 0x0000017E0E4CC0E0&gt;
+
+    def test_mode_selector_blocks_switch_during_hold(self):
+&gt;       import run_trades
+
+tests\test_system_health.py:713: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat5b_SmartTotalSelector" name="test_mode_selector_switches_on_confident_delta" time="0.003"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat5b_SmartTotalSelector object at 0x0000017E0E4CC860&gt;
+
+    def test_mode_selector_switches_on_confident_delta(self):
+&gt;       import run_trades
+
+tests\test_system_health.py:742: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat6_PositionManager" name="test_add_and_get_position" time="0.000" /><testcase classname="tests.test_system_health.TestCat6_PositionManager" name="test_get_nonexistent_returns_none" time="0.000" /><testcase classname="tests.test_system_health.TestCat6_PositionManager" name="test_close_buy_position_pnl" time="0.002" /><testcase classname="tests.test_system_health.TestCat6_PositionManager" name="test_close_sell_position_pnl" time="0.000" /><testcase classname="tests.test_system_health.TestCat6_PositionManager" name="test_closed_position_removed_from_active" time="0.000" /><testcase classname="tests.test_system_health.TestCat6_PositionManager" name="test_stop_loss_trigger" time="0.000" /><testcase classname="tests.test_system_health.TestCat6_PositionManager" name="test_take_profit_trigger" time="0.000" /><testcase classname="tests.test_system_health.TestCat6_PositionManager" name="test_multiple_positions" time="0.000" /><testcase classname="tests.test_system_health.TestCat6_PositionManager" name="test_position_summary_values" time="0.000" /><testcase classname="tests.test_system_health.TestCat7_APIEndpoints" name="test_health_status_returns_overall" time="10.014"><failure message="TimeoutError: timed out">self = &lt;test_system_health.TestCat7_APIEndpoints object at 0x0000017E0E4CCAA0&gt;
+
+    def test_health_status_returns_overall(self):
+&gt;       data = self._get("/health/status")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_system_health.py:880: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\test_system_health.py:876: in _get
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:215: in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:515: in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:532: in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:492: in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:1373: in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:1348: in do_open
+    r = h.getresponse()
+        ^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\http\client.py:1430: in getresponse
+    response.begin()
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\http\client.py:331: in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\http\client.py:292: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = &lt;socket.SocketIO object at 0x0000017E0F96FB20&gt;
+b = &lt;memory at 0x0000017E0F9B7400&gt;
+
+    def readinto(self, b):
+        """Read up to len(b) bytes into the writable buffer *b* and return
+        the number of bytes read.  If the socket is non-blocking and no bytes
+        are available, None is returned.
+    
+        If *b* is non-empty, a 0 return value indicates that the connection
+        was shutdown at the other end.
+        """
+        self._checkClosed()
+        self._checkReadable()
+        if self._timeout_occurred:
+            raise OSError("cannot read from timed out object")
+        while True:
+            try:
+&gt;               return self._sock.recv_into(b)
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+E               TimeoutError: timed out
+
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\socket.py:720: TimeoutError</failure></testcase><testcase classname="tests.test_system_health.TestCat7_APIEndpoints" name="test_health_status_has_db_check" time="4.986" /><testcase classname="tests.test_system_health.TestCat7_APIEndpoints" name="test_health_status_has_binance_check" time="10.010"><failure message="TimeoutError: timed out">self = &lt;test_system_health.TestCat7_APIEndpoints object at 0x0000017E0E4CF170&gt;
+
+    def test_health_status_has_binance_check(self):
+&gt;       data = self._get("/health/status")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_system_health.py:889: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\test_system_health.py:876: in _get
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:215: in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:515: in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:532: in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:492: in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:1373: in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:1348: in do_open
+    r = h.getresponse()
+        ^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\http\client.py:1430: in getresponse
+    response.begin()
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\http\client.py:331: in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\http\client.py:292: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = &lt;socket.SocketIO object at 0x0000017E0F96F1F0&gt;
+b = &lt;memory at 0x0000017E0F94CF40&gt;
+
+    def readinto(self, b):
+        """Read up to len(b) bytes into the writable buffer *b* and return
+        the number of bytes read.  If the socket is non-blocking and no bytes
+        are available, None is returned.
+    
+        If *b* is non-empty, a 0 return value indicates that the connection
+        was shutdown at the other end.
+        """
+        self._checkClosed()
+        self._checkReadable()
+        if self._timeout_occurred:
+            raise OSError("cannot read from timed out object")
+        while True:
+            try:
+&gt;               return self._sock.recv_into(b)
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+E               TimeoutError: timed out
+
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\socket.py:720: TimeoutError</failure></testcase><testcase classname="tests.test_system_health.TestCat7_APIEndpoints" name="test_dashboard_summary_returns" time="7.369" /><testcase classname="tests.test_system_health.TestCat7_APIEndpoints" name="test_dashboard_summary_has_market_regime" time="10.037"><failure message="TimeoutError: timed out">self = &lt;test_system_health.TestCat7_APIEndpoints object at 0x0000017E0E4CE870&gt;
+
+    def test_dashboard_summary_has_market_regime(self):
+&gt;       data = self._get("/dashboard/summary")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_system_health.py:898: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\test_system_health.py:876: in _get
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:215: in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:515: in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:532: in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:492: in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:1373: in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py:1348: in do_open
+    r = h.getresponse()
+        ^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\http\client.py:1430: in getresponse
+    response.begin()
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\http\client.py:331: in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\http\client.py:292: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = &lt;socket.SocketIO object at 0x0000017E0FD967D0&gt;
+b = &lt;memory at 0x0000017E0F94C340&gt;
+
+    def readinto(self, b):
+        """Read up to len(b) bytes into the writable buffer *b* and return
+        the number of bytes read.  If the socket is non-blocking and no bytes
+        are available, None is returned.
+    
+        If *b* is non-empty, a 0 return value indicates that the connection
+        was shutdown at the other end.
+        """
+        self._checkClosed()
+        self._checkReadable()
+        if self._timeout_occurred:
+            raise OSError("cannot read from timed out object")
+        while True:
+            try:
+&gt;               return self._sock.recv_into(b)
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+E               TimeoutError: timed out
+
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\socket.py:720: TimeoutError</failure></testcase><testcase classname="tests.test_system_health.TestCat7_APIEndpoints" name="test_futures_positions_returns_structure" time="5.021" /><testcase classname="tests.test_system_health.TestCat7_APIEndpoints" name="test_futures_closed_returns_structure" time="5.971" /><testcase classname="tests.test_system_health.TestCat7_APIEndpoints" name="test_health_full_check_endpoint_exists" time="0.282" /><testcase classname="tests.test_system_health.TestCat7_APIEndpoints" name="test_health_full_check_has_all_categories" time="0.307" /><testcase classname="tests.test_system_health.TestCat7_APIEndpoints" name="test_health_full_check_has_summary" time="0.259" /><testcase classname="tests.test_system_health.TestCat7_APIEndpoints" name="test_metrics_override_performance_returns" time="0.004" /><testcase classname="tests.test_system_health.TestCat7_APIEndpoints" name="test_strategy_params_returns" time="0.020" /><testcase classname="tests.test_system_health.TestCat8_ProfitBlockingBugs" name="test_BH6_momentum_without_client_returns_minus1_not_none" time="0.009" /><testcase classname="tests.test_system_health.TestCat8_ProfitBlockingBugs" name="test_BH6_momentum_closes_tp_when_score_minus1" time="1.466" /><testcase classname="tests.test_system_health.TestCat8_ProfitBlockingBugs" name="test_BH_SL_never_retreats_after_smart_tp_extend" time="0.000" /><testcase classname="tests.test_system_health.TestCat8_ProfitBlockingBugs" name="test_BH_trail_best_price_inferred_from_sl_preserves_gains" time="0.000" /><testcase classname="tests.test_system_health.TestCat8_ProfitBlockingBugs" name="test_BH7_kelly_never_exceeds_40pct_liquid" time="0.003"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat8_ProfitBlockingBugs object at 0x0000017E0E4CFF50&gt;
+
+    def test_BH7_kelly_never_exceeds_40pct_liquid(self):
+        """Hard cap: Kelly result must never exceed 40% of liquid capital."""
+&gt;       from run_trades import _kelly_position_size
+
+tests\test_system_health.py:1008: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat8_ProfitBlockingBugs" name="test_BH10_app_health_uses_aware_datetime" time="0.004" /><testcase classname="tests.test_system_health.TestCat8_ProfitBlockingBugs" name="test_anti_whipsaw_cycles_value" time="0.001" /><testcase classname="tests.test_system_health.TestCat8_ProfitBlockingBugs" name="test_B2_stablecoin_detection_range" time="0.000" /><testcase classname="tests.test_system_health.TestCat8_ProfitBlockingBugs" name="test_min_hold_minutes_timezone_fix" time="0.000" /><testcase classname="tests.test_system_health.TestCat8_ProfitBlockingBugs" name="test_evaluate_tp_momentum_signature" time="0.004"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat8_ProfitBlockingBugs object at 0x0000017E0E4CEA50&gt;
+
+    def test_evaluate_tp_momentum_signature(self):
+&gt;       from run_trades import _evaluate_tp_momentum
+
+tests\test_system_health.py:1067: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat9_CapBridgeCapitalFlow" name="test_smart_rebalance_capital_exists" time="0.000" /><testcase classname="tests.test_system_health.TestCat9_CapBridgeCapitalFlow" name="test_capbridge_min_transfer_not_below_10" time="0.007" /><testcase classname="tests.test_system_health.TestCat9_CapBridgeCapitalFlow" name="test_capbridge_enabled_flag_exists_in_settings" time="0.007" /><testcase classname="tests.test_system_health.TestCat9_CapBridgeCapitalFlow" name="test_smart_rebalance_dry_run_no_crash" time="0.007" /><testcase classname="tests.test_system_health.TestCat9_CapBridgeCapitalFlow" name="test_capbridge_case3_requires_zero_shorts" time="0.266" /><testcase classname="tests.test_system_health.TestCat10_HistoricalBugRegressions" name="test_B1_futures_import_from_run_trades" time="0.003"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat10_HistoricalBugRegressions object at 0x0000017E0E4F07A0&gt;
+
+    def test_B1_futures_import_from_run_trades(self):
+        """FuturesClient must be importable from run_trades (no import error)."""
+&gt;       from run_trades import _get_futures_client
+
+tests\test_system_health.py:1143: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat10_HistoricalBugRegressions" name="test_B3_B4_open_short_uses_short_position_side" time="0.000" /><testcase classname="tests.test_system_health.TestCat10_HistoricalBugRegressions" name="test_B5_align_price_method_exists" time="0.000" /><testcase classname="tests.test_system_health.TestCat10_HistoricalBugRegressions" name="test_sell_holdings_not_in_top_exists" time="0.004"><failure message="ModuleNotFoundError: No module named 'binance'">self = &lt;test_system_health.TestCat10_HistoricalBugRegressions object at 0x0000017E0E4F1250&gt;
+
+    def test_sell_holdings_not_in_top_exists(self):
+&gt;       from run_trades import _sell_holdings_not_in_top
+
+tests\test_system_health.py:1162: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+run_trades.py:8: in &lt;module&gt;
+    from binance_client import BinanceClient
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    import os
+    import time
+&gt;   from binance.client import Client
+E   ModuleNotFoundError: No module named 'binance'
+
+binance_client.py:3: ModuleNotFoundError</failure></testcase><testcase classname="tests.test_system_health.TestCat10_HistoricalBugRegressions" name="test_max_per_trade_aligned_with_kelly_max" time="0.008" /><testcase classname="tests.test_system_health.TestCat10_HistoricalBugRegressions" name="test_F1_trailing_peak_not_shared_across_positions" time="0.001" /><testcase classname="tests.test_system_health.TestCat10_HistoricalBugRegressions" name="test_F2_reversal_detection_logic" time="0.000" /><testcase classname="tests.test_system_health.TestCat10_HistoricalBugRegressions" name="test_position_manager_add_does_not_silently_fail" time="0.000" /><testcase classname="tests.test_system_health.TestCat10_HistoricalBugRegressions" name="test_naive_datetime_comparison_does_not_raise" time="0.000" /><testcase classname="tests.test_system_health.TestCat11_DashboardUXRegression" name="test_D1_entry_price_short_math_fallback" time="0.000" /><testcase classname="tests.test_system_health.TestCat11_DashboardUXRegression" name="test_D1_entry_price_long_math_fallback" time="0.000" /><testcase classname="tests.test_system_health.TestCat11_DashboardUXRegression" name="test_D1_zero_qty_does_not_raise" time="0.000" /><testcase classname="tests.test_system_health.TestCat11_DashboardUXRegression" name="test_D3_multimodal_counter_futures_short_mode" time="0.000" /><testcase classname="tests.test_system_health.TestCat11_DashboardUXRegression" name="test_D3_overflow_detected_correctly" time="0.000" /><testcase classname="tests.test_system_health.TestCat11_DashboardUXRegression" name="test_D3_spot_only_mode_no_futures_counter" time="0.000" /><testcase classname="tests.test_system_health" name="test_health_version_marker" time="0.000" /></testsuite></testsuites>

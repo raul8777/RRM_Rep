@@ -1,0 +1,1500 @@
+{
+  "loop_enabled": false,
+  "interval_seconds": 0.0,
+  "max_runs": 1,
+  "total_runs": 1,
+  "reports": [
+    {
+      "started_at": "2026-07-04T15:14:21.375981+00:00",
+      "config": {
+        "base_url": "http://localhost:8000",
+        "repo_root": "S:\\Tools\\AI\\crypto-agent",
+        "run_ids": [
+          29600,
+          48412,
+          51631,
+          61556
+        ],
+        "effective_bands": {
+          "A": {
+            "spot_sl_mult": 1.2,
+            "futures_sl_mult": 1.2,
+            "spot_tp_mult": 1.08,
+            "futures_tp_mult": 1.08
+          },
+          "B": {
+            "spot_sl_mult": 1.12,
+            "futures_sl_mult": 1.12,
+            "spot_tp_mult": 1.05,
+            "futures_tp_mult": 1.05
+          },
+          "C": {
+            "spot_sl_mult": 1.08,
+            "futures_sl_mult": 1.08,
+            "spot_tp_mult": 1.03,
+            "futures_tp_mult": 1.03
+          }
+        }
+      },
+      "phase_1": {
+        "ok": true,
+        "active_profiles": {
+          "SPOT_BULL": "A",
+          "RANGE_SCALP": "A",
+          "PRESERVATION": "A",
+          "FUTURES_SHORT": "A"
+        },
+        "seed_ok": {
+          "B": true,
+          "C": true,
+          "A": true
+        },
+        "events": [
+          {
+            "regime": "SPOT_BULL",
+            "action": "save",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "SPOT_BULL",
+              "profile": "B",
+              "snapshot_id": "20260704_151421_423321",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.1536,
+                "take_profit_pct": 6.1215,
+                "futures_sl_pct": 3.7296,
+                "futures_tp_pct": 8.064,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "SPOT_BULL",
+            "action": "activate",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "SPOT_BULL",
+              "profile": "B",
+              "snapshot_id": "20260704_151421_455329",
+              "apply": {
+                "applied": {},
+                "skipped": true,
+                "reason": "no_applicable_fields"
+              }
+            }
+          },
+          {
+            "regime": "RANGE_SCALP",
+            "action": "save",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "RANGE_SCALP",
+              "profile": "B",
+              "snapshot_id": "20260704_151421_510612",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.1536,
+                "take_profit_pct": 6.1215,
+                "futures_sl_pct": 3.7296,
+                "futures_tp_pct": 8.064,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "RANGE_SCALP",
+            "action": "activate",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "RANGE_SCALP",
+              "profile": "B",
+              "snapshot_id": "20260704_151421_542130",
+              "apply": {
+                "skipped": true,
+                "reason": "regime_not_active_or_unconfirmed",
+                "current_mode": "SPOT_BULL",
+                "current_confirmed": true
+              }
+            }
+          },
+          {
+            "regime": "PRESERVATION",
+            "action": "save",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "PRESERVATION",
+              "profile": "B",
+              "snapshot_id": "20260704_151421_567327",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.1536,
+                "take_profit_pct": 6.1215,
+                "futures_sl_pct": 3.7296,
+                "futures_tp_pct": 8.064,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "PRESERVATION",
+            "action": "activate",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "PRESERVATION",
+              "profile": "B",
+              "snapshot_id": "20260704_151421_603808",
+              "apply": {
+                "skipped": true,
+                "reason": "regime_not_active_or_unconfirmed",
+                "current_mode": "SPOT_BULL",
+                "current_confirmed": true
+              }
+            }
+          },
+          {
+            "regime": "FUTURES_SHORT",
+            "action": "save",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "FUTURES_SHORT",
+              "profile": "B",
+              "snapshot_id": "20260704_151421_649270",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.1536,
+                "take_profit_pct": 6.1215,
+                "futures_sl_pct": 3.7296,
+                "futures_tp_pct": 8.064,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "FUTURES_SHORT",
+            "action": "activate",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "FUTURES_SHORT",
+              "profile": "B",
+              "snapshot_id": "20260704_151421_678405",
+              "apply": {
+                "skipped": true,
+                "reason": "regime_not_active_or_unconfirmed",
+                "current_mode": "SPOT_BULL",
+                "current_confirmed": true
+              }
+            }
+          },
+          {
+            "regime": "SPOT_BULL",
+            "action": "save",
+            "profile": "C",
+            "result": {
+              "ok": true,
+              "regime": "SPOT_BULL",
+              "profile": "C",
+              "snapshot_id": "20260704_151421_702785",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.1124,
+                "take_profit_pct": 6.0049,
+                "futures_sl_pct": 3.5964,
+                "futures_tp_pct": 7.9104,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "SPOT_BULL",
+            "action": "activate",
+            "profile": "C",
+            "result": {
+              "ok": true,
+              "regime": "SPOT_BULL",
+              "profile": "C",
+              "snapshot_id": "20260704_151421_743054",
+              "apply": {
+                "applied": {
+                  "stop_loss_pct": {
+                    "old": 1.1536,
+                    "new": 1.1124
+                  },
+                  "take_profit_pct": {
+                    "old": 6.1215,
+                    "new": 6.0049
+                  },
+                  "futures_sl_pct": {
+                    "old": 3.7296,
+                    "new": 3.5964
+                  },
+                  "futures_tp_pct": {
+                    "old": 8.064,
+                    "new": 7.9104
+                  }
+                },
+                "rejected": {},
+                "skipped": false,
+                "profile": "C"
+              }
+            }
+          },
+          {
+            "regime": "RANGE_SCALP",
+            "action": "save",
+            "profile": "C",
+            "result": {
+              "ok": true,
+              "regime": "RANGE_SCALP",
+              "profile": "C",
+              "snapshot_id": "20260704_151421_778018",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.1124,
+                "take_profit_pct": 6.0049,
+                "futures_sl_pct": 3.5964,
+                "futures_tp_pct": 7.9104,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "RANGE_SCALP",
+            "action": "activate",
+            "profile": "C",
+            "result": {
+              "ok": true,
+              "regime": "RANGE_SCALP",
+              "profile": "C",
+              "snapshot_id": "20260704_151421_810174",
+              "apply": {
+                "skipped": true,
+                "reason": "regime_not_active_or_unconfirmed",
+                "current_mode": "SPOT_BULL",
+                "current_confirmed": true
+              }
+            }
+          },
+          {
+            "regime": "PRESERVATION",
+            "action": "save",
+            "profile": "C",
+            "result": {
+              "ok": true,
+              "regime": "PRESERVATION",
+              "profile": "C",
+              "snapshot_id": "20260704_151421_852420",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.1124,
+                "take_profit_pct": 6.0049,
+                "futures_sl_pct": 3.5964,
+                "futures_tp_pct": 7.9104,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "PRESERVATION",
+            "action": "activate",
+            "profile": "C",
+            "result": {
+              "ok": true,
+              "regime": "PRESERVATION",
+              "profile": "C",
+              "snapshot_id": "20260704_151421_899862",
+              "apply": {
+                "skipped": true,
+                "reason": "regime_not_active_or_unconfirmed",
+                "current_mode": "SPOT_BULL",
+                "current_confirmed": true
+              }
+            }
+          },
+          {
+            "regime": "FUTURES_SHORT",
+            "action": "save",
+            "profile": "C",
+            "result": {
+              "ok": true,
+              "regime": "FUTURES_SHORT",
+              "profile": "C",
+              "snapshot_id": "20260704_151421_928795",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.1124,
+                "take_profit_pct": 6.0049,
+                "futures_sl_pct": 3.5964,
+                "futures_tp_pct": 7.9104,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "FUTURES_SHORT",
+            "action": "activate",
+            "profile": "C",
+            "result": {
+              "ok": true,
+              "regime": "FUTURES_SHORT",
+              "profile": "C",
+              "snapshot_id": "20260704_151421_958803",
+              "apply": {
+                "skipped": true,
+                "reason": "regime_not_active_or_unconfirmed",
+                "current_mode": "SPOT_BULL",
+                "current_confirmed": true
+              }
+            }
+          },
+          {
+            "regime": "SPOT_BULL",
+            "action": "save",
+            "profile": "A",
+            "result": {
+              "ok": true,
+              "regime": "SPOT_BULL",
+              "profile": "A",
+              "snapshot_id": "20260704_151421_985267",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.236,
+                "take_profit_pct": 6.2964,
+                "futures_sl_pct": 3.996,
+                "futures_tp_pct": 8.2944,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "SPOT_BULL",
+            "action": "activate",
+            "profile": "A",
+            "result": {
+              "ok": true,
+              "regime": "SPOT_BULL",
+              "profile": "A",
+              "snapshot_id": "20260704_151422_015519",
+              "apply": {
+                "applied": {
+                  "stop_loss_pct": {
+                    "old": 1.1124,
+                    "new": 1.236
+                  },
+                  "take_profit_pct": {
+                    "old": 6.0049,
+                    "new": 6.2964
+                  },
+                  "futures_sl_pct": {
+                    "old": 3.5964,
+                    "new": 3.996
+                  },
+                  "futures_tp_pct": {
+                    "old": 7.9104,
+                    "new": 8.2944
+                  }
+                },
+                "rejected": {},
+                "skipped": false,
+                "profile": "A"
+              }
+            }
+          },
+          {
+            "regime": "RANGE_SCALP",
+            "action": "save",
+            "profile": "A",
+            "result": {
+              "ok": true,
+              "regime": "RANGE_SCALP",
+              "profile": "A",
+              "snapshot_id": "20260704_151422_055693",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.236,
+                "take_profit_pct": 6.2964,
+                "futures_sl_pct": 3.996,
+                "futures_tp_pct": 8.2944,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "RANGE_SCALP",
+            "action": "activate",
+            "profile": "A",
+            "result": {
+              "ok": true,
+              "regime": "RANGE_SCALP",
+              "profile": "A",
+              "snapshot_id": "20260704_151422_087200",
+              "apply": {
+                "skipped": true,
+                "reason": "regime_not_active_or_unconfirmed",
+                "current_mode": "SPOT_BULL",
+                "current_confirmed": true
+              }
+            }
+          },
+          {
+            "regime": "PRESERVATION",
+            "action": "save",
+            "profile": "A",
+            "result": {
+              "ok": true,
+              "regime": "PRESERVATION",
+              "profile": "A",
+              "snapshot_id": "20260704_151422_130185",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.236,
+                "take_profit_pct": 6.2964,
+                "futures_sl_pct": 3.996,
+                "futures_tp_pct": 8.2944,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "PRESERVATION",
+            "action": "activate",
+            "profile": "A",
+            "result": {
+              "ok": true,
+              "regime": "PRESERVATION",
+              "profile": "A",
+              "snapshot_id": "20260704_151422_159642",
+              "apply": {
+                "skipped": true,
+                "reason": "regime_not_active_or_unconfirmed",
+                "current_mode": "SPOT_BULL",
+                "current_confirmed": true
+              }
+            }
+          },
+          {
+            "regime": "FUTURES_SHORT",
+            "action": "save",
+            "profile": "A",
+            "result": {
+              "ok": true,
+              "regime": "FUTURES_SHORT",
+              "profile": "A",
+              "snapshot_id": "20260704_151422_186391",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.236,
+                "take_profit_pct": 6.2964,
+                "futures_sl_pct": 3.996,
+                "futures_tp_pct": 8.2944,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "FUTURES_SHORT",
+            "action": "activate",
+            "profile": "A",
+            "result": {
+              "ok": true,
+              "regime": "FUTURES_SHORT",
+              "profile": "A",
+              "snapshot_id": "20260704_151422_240593",
+              "apply": {
+                "skipped": true,
+                "reason": "regime_not_active_or_unconfirmed",
+                "current_mode": "SPOT_BULL",
+                "current_confirmed": true
+              }
+            }
+          }
+        ],
+        "profiles_snapshot": {
+          "ok": true,
+          "regimes": {
+            "RANGE_SCALP": {
+              "active": {
+                "profile": "A",
+                "payload": {
+                  "reason": "phase_1_a_first_baseline",
+                  "regime": "RANGE_SCALP",
+                  "profile": "A",
+                  "updated_at": "2026-07-04T15:14:22.102061+00:00",
+                  "updated_by": null,
+                  "snapshot_id": "20260704_151422_087200"
+                },
+                "updated_at": "2026-07-04T15:14:22.102181+00:00"
+              },
+              "profiles": {
+                "A": {
+                  "payload": {
+                    "meta": {
+                      "strategy": "A-first-gated",
+                      "applied_at": "2026-07-04T15:14:22.052136+00:00",
+                      "created_by": "Dev/scripts/a_first_rollout.py",
+                      "updated_at": "2026-07-04T15:14:22.068880+00:00",
+                      "updated_by": null,
+                      "snapshot_id": "20260704_151422_055693",
+                      "profile_priority": "A_first"
+                    },
+                    "params": {
+                      "slippage_pct": 0.00057,
+                      "stop_loss_pct": 1.236,
+                      "vol_spike_min": 0.83,
+                      "futures_sl_pct": 3.996,
+                      "futures_tp_pct": 8.2944,
+                      "kelly_max_usdt": 663.0,
+                      "kelly_base_usdt": 76.0,
+                      "take_profit_pct": 6.2964,
+                      "min_signal_strength": 0.359,
+                      "kelly_max_pct_liquid": 0.621,
+                      "futures_kelly_max_usdt": 1162.0,
+                      "min_success_probability": 0.527
+                    },
+                    "regime": "RANGE_SCALP",
+                    "profile": "A"
+                  },
+                  "updated_at": "2026-07-04T15:14:22.069025+00:00"
+                },
+                "B": {
+                  "payload": {
+                    "meta": {
+                      "strategy": "A-first-gated",
+                      "applied_at": "2026-07-04T15:14:21.491258+00:00",
+                      "created_by": "Dev/scripts/a_first_rollout.py",
+                      "updated_at": "2026-07-04T15:14:21.525116+00:00",
+                      "updated_by": null,
+                      "snapshot_id": "20260704_151421_510612",
+                      "profile_priority": "A_first"
+                    },
+                    "params": {
+                      "slippage_pct": 0.00057,
+                      "stop_loss_pct": 1.1536,
+                      "vol_spike_min": 0.83,
+                      "futures_sl_pct": 3.7296,
+                      "futures_tp_pct": 8.064,
+                      "kelly_max_usdt": 663.0,
+                      "kelly_base_usdt": 76.0,
+                      "take_profit_pct": 6.1215,
+                      "min_signal_strength": 0.359,
+                      "kelly_max_pct_liquid": 0.621,
+                      "futures_kelly_max_usdt": 1162.0,
+                      "min_success_probability": 0.527
+                    },
+                    "regime": "RANGE_SCALP",
+                    "profile": "B"
+                  },
+                  "updated_at": "2026-07-04T15:14:21.525255+00:00"
+                },
+                "C": {
+                  "payload": {
+                    "meta": {
+                      "strategy": "A-first-gated",
+                      "applied_at": "2026-07-04T15:14:21.774902+00:00",
+                      "created_by": "Dev/scripts/a_first_rollout.py",
+                      "updated_at": "2026-07-04T15:14:21.791874+00:00",
+                      "updated_by": null,
+                      "snapshot_id": "20260704_151421_778018",
+                      "profile_priority": "A_first"
+                    },
+                    "params": {
+                      "slippage_pct": 0.00057,
+                      "stop_loss_pct": 1.1124,
+                      "vol_spike_min": 0.83,
+                      "futures_sl_pct": 3.5964,
+                      "futures_tp_pct": 7.9104,
+                      "kelly_max_usdt": 663.0,
+                      "kelly_base_usdt": 76.0,
+                      "take_profit_pct": 6.0049,
+                      "min_signal_strength": 0.359,
+                      "kelly_max_pct_liquid": 0.621,
+                      "futures_kelly_max_usdt": 1162.0,
+                      "min_success_probability": 0.527
+                    },
+                    "regime": "RANGE_SCALP",
+                    "profile": "C"
+                  },
+                  "updated_at": "2026-07-04T15:14:21.792134+00:00"
+                }
+              }
+            },
+            "SPOT_BULL": {
+              "active": {
+                "profile": "A",
+                "payload": {
+                  "reason": "phase_1_a_first_baseline",
+                  "regime": "SPOT_BULL",
+                  "profile": "A",
+                  "updated_at": "2026-07-04T15:14:22.030363+00:00",
+                  "updated_by": null,
+                  "snapshot_id": "20260704_151422_015519"
+                },
+                "updated_at": "2026-07-04T15:14:22.030466+00:00"
+              },
+              "profiles": {
+                "A": {
+                  "payload": {
+                    "meta": {
+                      "strategy": "A-first-gated",
+                      "applied_at": "2026-07-04T15:14:21.982610+00:00",
+                      "created_by": "Dev/scripts/a_first_rollout.py",
+                      "updated_at": "2026-07-04T15:14:21.998674+00:00",
+                      "updated_by": null,
+                      "snapshot_id": "20260704_151421_985267",
+                      "profile_priority": "A_first"
+                    },
+                    "params": {
+                      "slippage_pct": 0.00057,
+                      "stop_loss_pct": 1.236,
+                      "vol_spike_min": 0.83,
+                      "futures_sl_pct": 3.996,
+                      "futures_tp_pct": 8.2944,
+                      "kelly_max_usdt": 663.0,
+                      "kelly_base_usdt": 76.0,
+                      "take_profit_pct": 6.2964,
+                      "min_signal_strength": 0.359,
+                      "kelly_max_pct_liquid": 0.621,
+                      "futures_kelly_max_usdt": 1162.0,
+                      "min_success_probability": 0.527
+                    },
+                    "regime": "SPOT_BULL",
+                    "profile": "A"
+                  },
+                  "updated_at": "2026-07-04T15:14:21.998768+00:00"
+                },
+                "B": {
+                  "payload": {
+                    "meta": {
+                      "strategy": "A-first-gated",
+                      "applied_at": "2026-07-04T15:14:21.375981+00:00",
+                      "created_by": "Dev/scripts/a_first_rollout.py",
+                      "updated_at": "2026-07-04T15:14:21.438774+00:00",
+                      "updated_by": null,
+                      "snapshot_id": "20260704_151421_423321",
+                      "profile_priority": "A_first"
+                    },
+                    "params": {
+                      "slippage_pct": 0.00057,
+                      "stop_loss_pct": 1.1536,
+                      "vol_spike_min": 0.83,
+                      "futures_sl_pct": 3.7296,
+                      "futures_tp_pct": 8.064,
+                      "kelly_max_usdt": 663.0,
+                      "kelly_base_usdt": 76.0,
+                      "take_profit_pct": 6.1215,
+                      "min_signal_strength": 0.359,
+                      "kelly_max_pct_liquid": 0.621,
+                      "futures_kelly_max_usdt": 1162.0,
+                      "min_success_probability": 0.527
+                    },
+                    "regime": "SPOT_BULL",
+                    "profile": "B"
+                  },
+                  "updated_at": "2026-07-04T15:14:21.438985+00:00"
+                },
+                "C": {
+                  "payload": {
+                    "meta": {
+                      "strategy": "A-first-gated",
+                      "applied_at": "2026-07-04T15:14:21.700119+00:00",
+                      "created_by": "Dev/scripts/a_first_rollout.py",
+                      "updated_at": "2026-07-04T15:14:21.716266+00:00",
+                      "updated_by": null,
+                      "snapshot_id": "20260704_151421_702785",
+                      "profile_priority": "A_first"
+                    },
+                    "params": {
+                      "slippage_pct": 0.00057,
+                      "stop_loss_pct": 1.1124,
+                      "vol_spike_min": 0.83,
+                      "futures_sl_pct": 3.5964,
+                      "futures_tp_pct": 7.9104,
+                      "kelly_max_usdt": 663.0,
+                      "kelly_base_usdt": 76.0,
+                      "take_profit_pct": 6.0049,
+                      "min_signal_strength": 0.359,
+                      "kelly_max_pct_liquid": 0.621,
+                      "futures_kelly_max_usdt": 1162.0,
+                      "min_success_probability": 0.527
+                    },
+                    "regime": "SPOT_BULL",
+                    "profile": "C"
+                  },
+                  "updated_at": "2026-07-04T15:14:21.716354+00:00"
+                }
+              }
+            },
+            "FUTURES_SHORT": {
+              "active": {
+                "profile": "A",
+                "payload": {
+                  "reason": "phase_1_a_first_baseline",
+                  "regime": "FUTURES_SHORT",
+                  "profile": "A",
+                  "updated_at": "2026-07-04T15:14:22.270814+00:00",
+                  "updated_by": null,
+                  "snapshot_id": "20260704_151422_240593"
+                },
+                "updated_at": "2026-07-04T15:14:22.271200+00:00"
+              },
+              "profiles": {
+                "A": {
+                  "payload": {
+                    "meta": {
+                      "strategy": "A-first-gated",
+                      "applied_at": "2026-07-04T15:14:22.183380+00:00",
+                      "created_by": "Dev/scripts/a_first_rollout.py",
+                      "updated_at": "2026-07-04T15:14:22.200234+00:00",
+                      "updated_by": null,
+                      "snapshot_id": "20260704_151422_186391",
+                      "profile_priority": "A_first"
+                    },
+                    "params": {
+                      "slippage_pct": 0.00057,
+                      "stop_loss_pct": 1.236,
+                      "vol_spike_min": 0.83,
+                      "futures_sl_pct": 3.996,
+                      "futures_tp_pct": 8.2944,
+                      "kelly_max_usdt": 663.0,
+                      "kelly_base_usdt": 76.0,
+                      "take_profit_pct": 6.2964,
+                      "min_signal_strength": 0.359,
+                      "kelly_max_pct_liquid": 0.621,
+                      "futures_kelly_max_usdt": 1162.0,
+                      "min_success_probability": 0.527
+                    },
+                    "regime": "FUTURES_SHORT",
+                    "profile": "A"
+                  },
+                  "updated_at": "2026-07-04T15:14:22.200334+00:00"
+                },
+                "B": {
+                  "payload": {
+                    "meta": {
+                      "strategy": "A-first-gated",
+                      "applied_at": "2026-07-04T15:14:21.626938+00:00",
+                      "created_by": "Dev/scripts/a_first_rollout.py",
+                      "updated_at": "2026-07-04T15:14:21.662501+00:00",
+                      "updated_by": null,
+                      "snapshot_id": "20260704_151421_649270",
+                      "profile_priority": "A_first"
+                    },
+                    "params": {
+                      "slippage_pct": 0.00057,
+                      "stop_loss_pct": 1.1536,
+                      "vol_spike_min": 0.83,
+                      "futures_sl_pct": 3.7296,
+                      "futures_tp_pct": 8.064,
+                      "kelly_max_usdt": 663.0,
+                      "kelly_base_usdt": 76.0,
+                      "take_profit_pct": 6.1215,
+                      "min_signal_strength": 0.359,
+                      "kelly_max_pct_liquid": 0.621,
+                      "futures_kelly_max_usdt": 1162.0,
+                      "min_success_probability": 0.527
+                    },
+                    "regime": "FUTURES_SHORT",
+                    "profile": "B"
+                  },
+                  "updated_at": "2026-07-04T15:14:21.662617+00:00"
+                },
+                "C": {
+                  "payload": {
+                    "meta": {
+                      "strategy": "A-first-gated",
+                      "applied_at": "2026-07-04T15:14:21.925051+00:00",
+                      "created_by": "Dev/scripts/a_first_rollout.py",
+                      "updated_at": "2026-07-04T15:14:21.942195+00:00",
+                      "updated_by": null,
+                      "snapshot_id": "20260704_151421_928795",
+                      "profile_priority": "A_first"
+                    },
+                    "params": {
+                      "slippage_pct": 0.00057,
+                      "stop_loss_pct": 1.1124,
+                      "vol_spike_min": 0.83,
+                      "futures_sl_pct": 3.5964,
+                      "futures_tp_pct": 7.9104,
+                      "kelly_max_usdt": 663.0,
+                      "kelly_base_usdt": 76.0,
+                      "take_profit_pct": 6.0049,
+                      "min_signal_strength": 0.359,
+                      "kelly_max_pct_liquid": 0.621,
+                      "futures_kelly_max_usdt": 1162.0,
+                      "min_success_probability": 0.527
+                    },
+                    "regime": "FUTURES_SHORT",
+                    "profile": "C"
+                  },
+                  "updated_at": "2026-07-04T15:14:21.942307+00:00"
+                }
+              }
+            },
+            "PRESERVATION": {
+              "active": {
+                "profile": "A",
+                "payload": {
+                  "reason": "phase_1_a_first_baseline",
+                  "regime": "PRESERVATION",
+                  "profile": "A",
+                  "updated_at": "2026-07-04T15:14:22.173770+00:00",
+                  "updated_by": null,
+                  "snapshot_id": "20260704_151422_159642"
+                },
+                "updated_at": "2026-07-04T15:14:22.173926+00:00"
+              },
+              "profiles": {
+                "A": {
+                  "payload": {
+                    "meta": {
+                      "strategy": "A-first-gated",
+                      "applied_at": "2026-07-04T15:14:22.112197+00:00",
+                      "created_by": "Dev/scripts/a_first_rollout.py",
+                      "updated_at": "2026-07-04T15:14:22.143689+00:00",
+                      "updated_by": null,
+                      "snapshot_id": "20260704_151422_130185",
+                      "profile_priority": "A_first"
+                    },
+                    "params": {
+                      "slippage_pct": 0.00057,
+                      "stop_loss_pct": 1.236,
+                      "vol_spike_min": 0.83,
+                      "futures_sl_pct": 3.996,
+                      "futures_tp_pct": 8.2944,
+                      "kelly_max_usdt": 663.0,
+                      "kelly_base_usdt": 76.0,
+                      "take_profit_pct": 6.2964,
+                      "min_signal_strength": 0.359,
+                      "kelly_max_pct_liquid": 0.621,
+                      "futures_kelly_max_usdt": 1162.0,
+                      "min_success_probability": 0.527
+                    },
+                    "regime": "PRESERVATION",
+                    "profile": "A"
+                  },
+                  "updated_at": "2026-07-04T15:14:22.143794+00:00"
+                },
+                "B": {
+                  "payload": {
+                    "meta": {
+                      "strategy": "A-first-gated",
+                      "applied_at": "2026-07-04T15:14:21.564660+00:00",
+                      "created_by": "Dev/scripts/a_first_rollout.py",
+                      "updated_at": "2026-07-04T15:14:21.581687+00:00",
+                      "updated_by": null,
+                      "snapshot_id": "20260704_151421_567327",
+                      "profile_priority": "A_first"
+                    },
+                    "params": {
+                      "slippage_pct": 0.00057,
+                      "stop_loss_pct": 1.1536,
+                      "vol_spike_min": 0.83,
+                      "futures_sl_pct": 3.7296,
+                      "futures_tp_pct": 8.064,
+                      "kelly_max_usdt": 663.0,
+                      "kelly_base_usdt": 76.0,
+                      "take_profit_pct": 6.1215,
+                      "min_signal_strength": 0.359,
+                      "kelly_max_pct_liquid": 0.621,
+                      "futures_kelly_max_usdt": 1162.0,
+                      "min_success_probability": 0.527
+                    },
+                    "regime": "PRESERVATION",
+                    "profile": "B"
+                  },
+                  "updated_at": "2026-07-04T15:14:21.581791+00:00"
+                },
+                "C": {
+                  "payload": {
+                    "meta": {
+                      "strategy": "A-first-gated",
+                      "applied_at": "2026-07-04T15:14:21.832201+00:00",
+                      "created_by": "Dev/scripts/a_first_rollout.py",
+                      "updated_at": "2026-07-04T15:14:21.869385+00:00",
+                      "updated_by": null,
+                      "snapshot_id": "20260704_151421_852420",
+                      "profile_priority": "A_first"
+                    },
+                    "params": {
+                      "slippage_pct": 0.00057,
+                      "stop_loss_pct": 1.1124,
+                      "vol_spike_min": 0.83,
+                      "futures_sl_pct": 3.5964,
+                      "futures_tp_pct": 7.9104,
+                      "kelly_max_usdt": 663.0,
+                      "kelly_base_usdt": 76.0,
+                      "take_profit_pct": 6.0049,
+                      "min_signal_strength": 0.359,
+                      "kelly_max_pct_liquid": 0.621,
+                      "futures_kelly_max_usdt": 1162.0,
+                      "min_success_probability": 0.527
+                    },
+                    "regime": "PRESERVATION",
+                    "profile": "C"
+                  },
+                  "updated_at": "2026-07-04T15:14:21.869567+00:00"
+                }
+              }
+            }
+          },
+          "timestamp": "2026-07-04T15:14:22.290508+00:00"
+        }
+      },
+      "gate_report": {
+        "ok": true,
+        "returncode": 2,
+        "stdout": "{\n  \"gate_1_passed\": false,\n  \"gate_2_passed\": true,\n  \"gate_3_classification\": \"INCONCLUSIVE\",\n  \"gate_4_classification\": \"INCONCLUSIVE\",\n  \"report_file\": \"/app/Dev/a_first_gate_report_2026_07_04_run01.json\",\n  \"status\": \"FAIL_CRITICAL\"\n}\n",
+        "stderr": "",
+        "report_file": "S:\\Tools\\AI\\crypto-agent\\Dev\\a_first_gate_report_2026_07_04_run01.json",
+        "report": {
+          "gate_1": {
+            "critical_open_count": 6,
+            "critical_param_checks": [
+              {
+                "actual": 3.996,
+                "aligned": false,
+                "expected": 1.42,
+                "param": "futures_sl_pct",
+                "reason": "outside_tolerance",
+                "relative_diff": 1.8140845070422538
+              },
+              {
+                "actual": 8.2944,
+                "aligned": false,
+                "expected": 2.81,
+                "param": "futures_tp_pct",
+                "reason": "outside_tolerance",
+                "relative_diff": 1.9517437722419926
+              },
+              {
+                "actual": 0.621,
+                "aligned": false,
+                "expected": 0.704,
+                "param": "kelly_max_pct_liquid",
+                "reason": "outside_tolerance",
+                "relative_diff": 0.11789772727272722
+              },
+              {
+                "actual": null,
+                "aligned": true,
+                "expected": null,
+                "param": "risk_per_trade",
+                "reason": "not_in_drift_assumed_aligned",
+                "relative_diff": null
+              },
+              {
+                "actual": 1.236,
+                "aligned": false,
+                "expected": 3.36,
+                "param": "stop_loss_pct",
+                "reason": "outside_tolerance",
+                "relative_diff": 0.6321428571428571
+              },
+              {
+                "actual": 6.2964,
+                "aligned": false,
+                "expected": 4.14,
+                "param": "take_profit_pct",
+                "reason": "outside_tolerance",
+                "relative_diff": 0.5208695652173915
+              }
+            ],
+            "critical_params_all_aligned": false,
+            "critical_params_tolerance_rel": 0.005,
+            "drift_count": 12,
+            "drift_count_threshold": 2,
+            "gate": "gate_1_drift_entry",
+            "notes": [
+              "Any remaining drift beyond threshold must be justified manually as no-impact-PnL."
+            ],
+            "passed": false
+          },
+          "gate_2": {
+            "event_coverage": {
+              "close_reason_normalized": {
+                "count": 118,
+                "ratio_vs_recent_closed": 1.18,
+                "threshold": 0.99
+              },
+              "order_open": {
+                "count": 116,
+                "ratio_vs_recent_closed": 1.16,
+                "threshold": 0.99
+              },
+              "profile_screener_bridge": {
+                "count": 304,
+                "ratio_vs_recent_closed": 3.04,
+                "threshold": 0.99
+              },
+              "screener_selection": {
+                "count": 304,
+                "ratio_vs_recent_closed": 3.04,
+                "threshold": 0.99
+              },
+              "signal_decision": {
+                "count": 1431,
+                "ratio_vs_recent_closed": 14.31,
+                "threshold": 0.99
+              }
+            },
+            "gate": "gate_2_traceability_persistence",
+            "notes": [
+              "Exact pre/post restart equality requires running capture-state before restart and verify-state after restart.",
+              "Use --allow-event-aliases only if your runtime still logs open/close instead of order_open/close_reason_normalized."
+            ],
+            "passed": true,
+            "recent_closed_sample": 100,
+            "stale_unprocessed_signals_over_90m": 0,
+            "trade_type_valid_ratio": 1.0,
+            "volatile_state_has_circuit_breaker_until": true,
+            "volatile_state_has_consecutive_failures": true
+          },
+          "gate_3": {
+            "classification": "INCONCLUSIVE",
+            "futures_current_n": 0,
+            "futures_delta": {
+              "pnl_sum": 0.0,
+              "win_rate_pct": 0.0
+            },
+            "gate": "gate_3_post_adjust_performance",
+            "global_delta": {
+              "net_pnl": -87.8154,
+              "win_rate_pct": -0.56
+            },
+            "passed": false,
+            "sample_ok": false,
+            "sample_requirements": {
+              "futures_min": 15,
+              "spot_min": 30
+            },
+            "spot_current_n": 121,
+            "spot_delta": {
+              "pnl_sum": -76.0238,
+              "stop_loss_reduction_rel": 0.059076,
+              "stop_loss_share_current": 0.438017,
+              "stop_loss_share_previous": 0.465517,
+              "win_rate_pct": -0.56
+            },
+            "thresholds": {
+              "futures": {
+                "net_pnl_delta_gte": 0,
+                "win_rate_delta_gte_pp": 0.0
+              },
+              "global": {
+                "net_pnl_delta_gt": 0,
+                "win_rate_delta_gte_pp": 1.5
+              },
+              "spot": {
+                "net_pnl_delta_gt": 0,
+                "stop_loss_share_reduction_rel_gte": 0.15
+              }
+            }
+          },
+          "gate_4": {
+            "classification": "INCONCLUSIVE",
+            "gate": "gate_4_secondary_parity",
+            "notes": [
+              "Gate 4 is secondary; it does not block tactical deploy if Gate 1-3 pass.",
+              "When pre/post parity gap is unchanged for all comparable runs, classification is INCONCLUSIVE (no evolution)."
+            ],
+            "passed": false,
+            "pre_gap_baseline_loaded": true,
+            "pre_gap_path": "/app/Dev/phase4_pre_gap.json",
+            "rows": [
+              {
+                "bt_pnl_total": 92633.6148,
+                "current_gap_abs": 92478.08876299999,
+                "improved_at_least_20pct": false,
+                "improved_rel": 0.0,
+                "live_pnl_total": 155.526037,
+                "ok": true,
+                "pre_gap_abs": 92478.08876299999,
+                "run_id": 29600
+              },
+              {
+                "bt_pnl_total": 95698.79,
+                "current_gap_abs": 95543.26396299999,
+                "improved_at_least_20pct": false,
+                "improved_rel": 0.0,
+                "live_pnl_total": 155.526037,
+                "ok": true,
+                "pre_gap_abs": 95543.26396299999,
+                "run_id": 48412
+              },
+              {
+                "bt_pnl_total": 97895.2943,
+                "current_gap_abs": 97739.76826299999,
+                "improved_at_least_20pct": false,
+                "improved_rel": 0.0,
+                "live_pnl_total": 155.526037,
+                "ok": true,
+                "pre_gap_abs": 97739.76826299999,
+                "run_id": 51631
+              },
+              {
+                "bt_pnl_total": 129818.072,
+                "current_gap_abs": 129662.545963,
+                "improved_at_least_20pct": false,
+                "improved_rel": 0.0,
+                "live_pnl_total": 155.526037,
+                "ok": true,
+                "pre_gap_abs": 129662.545963,
+                "run_id": 61556
+              }
+            ]
+          },
+          "generated_at": "2026-07-04T15:14:23.546552+00:00",
+          "status": "FAIL_CRITICAL"
+        },
+        "status": "FAIL_CRITICAL"
+      },
+      "phase_2": {
+        "ok": true,
+        "critical_pass": false,
+        "action": "degrade_to_B",
+        "events": [
+          {
+            "regime": "SPOT_BULL",
+            "action": "save",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "SPOT_BULL",
+              "profile": "B",
+              "snapshot_id": "20260704_151423_577615",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.1536,
+                "take_profit_pct": 6.1215,
+                "futures_sl_pct": 3.7296,
+                "futures_tp_pct": 8.064,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "SPOT_BULL",
+            "action": "activate",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "SPOT_BULL",
+              "profile": "B",
+              "snapshot_id": "20260704_151423_629701",
+              "apply": {
+                "applied": {
+                  "stop_loss_pct": {
+                    "old": 1.236,
+                    "new": 1.1536
+                  },
+                  "take_profit_pct": {
+                    "old": 6.2964,
+                    "new": 6.1215
+                  },
+                  "futures_sl_pct": {
+                    "old": 3.996,
+                    "new": 3.7296
+                  },
+                  "futures_tp_pct": {
+                    "old": 8.2944,
+                    "new": 8.064
+                  }
+                },
+                "rejected": {},
+                "skipped": false,
+                "profile": "B"
+              }
+            }
+          },
+          {
+            "regime": "RANGE_SCALP",
+            "action": "save",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "RANGE_SCALP",
+              "profile": "B",
+              "snapshot_id": "20260704_151423_670849",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.1536,
+                "take_profit_pct": 6.1215,
+                "futures_sl_pct": 3.7296,
+                "futures_tp_pct": 8.064,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "RANGE_SCALP",
+            "action": "activate",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "RANGE_SCALP",
+              "profile": "B",
+              "snapshot_id": "20260704_151423_700826",
+              "apply": {
+                "skipped": true,
+                "reason": "regime_not_active_or_unconfirmed",
+                "current_mode": "SPOT_BULL",
+                "current_confirmed": true
+              }
+            }
+          },
+          {
+            "regime": "PRESERVATION",
+            "action": "save",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "PRESERVATION",
+              "profile": "B",
+              "snapshot_id": "20260704_151423_727054",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.1536,
+                "take_profit_pct": 6.1215,
+                "futures_sl_pct": 3.7296,
+                "futures_tp_pct": 8.064,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "PRESERVATION",
+            "action": "activate",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "PRESERVATION",
+              "profile": "B",
+              "snapshot_id": "20260704_151423_754924",
+              "apply": {
+                "skipped": true,
+                "reason": "regime_not_active_or_unconfirmed",
+                "current_mode": "SPOT_BULL",
+                "current_confirmed": true
+              }
+            }
+          },
+          {
+            "regime": "FUTURES_SHORT",
+            "action": "save",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "FUTURES_SHORT",
+              "profile": "B",
+              "snapshot_id": "20260704_151423_780418",
+              "accepted": {
+                "kelly_base_usdt": 76.0,
+                "kelly_max_usdt": 663.0,
+                "kelly_max_pct_liquid": 0.621,
+                "futures_kelly_max_usdt": 1162.0,
+                "min_signal_strength": 0.359,
+                "min_success_probability": 0.527,
+                "vol_spike_min": 0.83,
+                "stop_loss_pct": 1.1536,
+                "take_profit_pct": 6.1215,
+                "futures_sl_pct": 3.7296,
+                "futures_tp_pct": 8.064,
+                "slippage_pct": 0.00057
+              },
+              "rejected": {}
+            }
+          },
+          {
+            "regime": "FUTURES_SHORT",
+            "action": "activate",
+            "profile": "B",
+            "result": {
+              "ok": true,
+              "regime": "FUTURES_SHORT",
+              "profile": "B",
+              "snapshot_id": "20260704_151423_811027",
+              "apply": {
+                "skipped": true,
+                "reason": "regime_not_active_or_unconfirmed",
+                "current_mode": "SPOT_BULL",
+                "current_confirmed": true
+              }
+            }
+          }
+        ]
+      },
+      "phase_3": {
+        "ok": true,
+        "status": "FAIL_CRITICAL",
+        "gate_3_classification": "INCONCLUSIVE",
+        "action": "hold",
+        "events": []
+      },
+      "phase_4": {
+        "ok": true,
+        "eligible_for_return": false,
+        "action": "hold",
+        "reason": "gates_not_eligible_for_return_to_A"
+      },
+      "traceability_check": {
+        "ok": true,
+        "gate_2_passed": true,
+        "runtime_state_ok": true,
+        "has_effective_runtime_selection_snapshot": true,
+        "has_regime_transition_state": true,
+        "has_volatile_state": true,
+        "volatile_has_circuit_breaker_until": true,
+        "volatile_has_consecutive_failures": true,
+        "spot_runtime_present": true,
+        "futures_runtime_present": true,
+        "transition_has_switch_context": true
+      },
+      "phase_5": {
+        "ok": true,
+        "gate_report_written": true,
+        "traceability_restart_safe": {
+          "ok": true,
+          "gate_2_passed": true,
+          "runtime_state_ok": true,
+          "has_effective_runtime_selection_snapshot": true,
+          "has_regime_transition_state": true,
+          "has_volatile_state": true,
+          "volatile_has_circuit_breaker_until": true,
+          "volatile_has_consecutive_failures": true,
+          "spot_runtime_present": true,
+          "futures_runtime_present": true,
+          "transition_has_switch_context": true
+        }
+      },
+      "finished_at": "2026-07-04T15:14:24.378576+00:00",
+      "explicit_status": {
+        "Fase I terminada": "SI",
+        "Fase II terminada": "SI",
+        "Fase III terminada": "SI",
+        "Fase IV terminada": "SI",
+        "Fase V terminada": "SI",
+        "Implementacion completa": "SI"
+      }
+    }
+  ],
+  "latest_explicit_status": {
+    "Fase I terminada": "SI",
+    "Fase II terminada": "SI",
+    "Fase III terminada": "SI",
+    "Fase IV terminada": "SI",
+    "Fase V terminada": "SI",
+    "Implementacion completa": "SI"
+  }
+}
