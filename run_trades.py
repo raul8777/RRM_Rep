@@ -1,7 +1,7 @@
 import time
 import types
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import error_collector as ec
@@ -35,6 +35,7 @@ from binance_truth_guard import (
     audit_truth_mismatches,
     compute_basket_reset_decision,
 )
+from universe_selector import select_analysis_universe
 
 
 # Symbols confirmed invalid on Binance (delisted) — skip without API call
@@ -2366,75 +2367,36 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
     if not external_signals:
         print("No external signals found, using autonomous signal generation...")
         try:
-            # Configure symbols for analysis — merge static list with dynamic screener
-            _static_symbols = getattr(settings, 'analysis_symbols', [
+            _universe = select_analysis_universe(
+                settings=settings,
+                regime_mode=regime,
+                profile_label=_active_profile_label,
+                db_client=db_client,
+            )
+            _static_symbols = _universe.get('static_symbols') or getattr(settings, 'analysis_symbols', [
                 'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
                 'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT'
             ])
-            
-            # Check if top-n screener v2 is enabled (100 quality assets)
-            if _get_param(settings, 'screener_top_n_enabled'):
-                try:
-                    from pair_screener import get_screened_pairs
-                    _screened = get_screened_pairs(
-                        spot_min_vol=settings.screener_quality_min_vol_usdt,
-                        max_spot=settings.screener_top_n_count + 20,  # Request extra for filtering
-                        settings=settings,
-                        regime_mode=regime,
-                        profile_label=_active_profile_label,
-                        db_client=db_client,
-                    )
-                    # Apply additional quality filters
-                    symbols = _filter_by_quality(
-                        _screened["spot"],
-                        client,
-                        settings,
-                        target_count=settings.screener_top_n_count
-                    )
-                    print(f"[Screener v2] Selected top {len(symbols)} quality assets (target: {settings.screener_top_n_count})")
-                    _new = [s for s in symbols if s not in _static_symbols]
-                    if _new:
-                        print(f"[Screener v2] New vs static: {_new[:15]}{'...' if len(_new) > 15 else ''}")
-                except Exception as _se:
-                    print(f"[Screener v2] Error, falling back to screener v1: {_se}")
-                    # Fallback to screener v1
-                    if getattr(settings, 'screener_enabled', True):
-                        from pair_screener import get_screened_pairs, merge_with_static
-                        _screened = get_screened_pairs(
-                            settings=settings,
-                            regime_mode=regime,
-                            profile_label=_active_profile_label,
-                            db_client=db_client,
-                        )
-                        symbols = merge_with_static(
-                            _screened["spot"],
-                            _static_symbols,
-                            max_total=getattr(settings, 'screener_max_pairs', 50),
-                        )
-                    else:
-                        symbols = _static_symbols
-            elif getattr(settings, 'screener_enabled', True):
-                try:
-                    from pair_screener import get_screened_pairs, merge_with_static
-                    _screened = get_screened_pairs(
-                        settings=settings,
-                        regime_mode=regime,
-                        profile_label=_active_profile_label,
-                        db_client=db_client,
-                    )
-                    symbols = merge_with_static(
-                        _screened["spot"],
-                        _static_symbols,
-                        max_total=getattr(settings, 'screener_max_pairs', 50),
-                    )
-                    _new = [s for s in symbols if s not in _static_symbols]
-                    if _new:
-                        print(f"[Screener] Added {len(_new)} dynamic pairs: {_new[:10]}")
-                except Exception as _se:
-                    print(f"[Screener] Error, falling back to static list: {_se}")
-                    symbols = _static_symbols
+            _screened_spot = list((_universe.get('spot') or []))
+            _screened_futures = list((_universe.get('futures') or []))
+            if _get_param(settings, 'screener_top_n_enabled') and _screened_spot:
+                symbols = _filter_by_quality(
+                    _screened_spot,
+                    client,
+                    settings,
+                    target_count=settings.screener_top_n_count,
+                )
+                print(f"[Screener v2] Selected top {len(symbols)} quality assets (target: {settings.screener_top_n_count})")
+                _new = [s for s in symbols if s not in _static_symbols]
+                if _new:
+                    print(f"[Screener v2] New vs static: {_new[:15]}{'...' if len(_new) > 15 else ''}")
             else:
-                symbols = _static_symbols
+                symbols = list((_universe.get('symbols') or []))
+                if not symbols:
+                    symbols = list(_screened_spot or _screened_futures or _static_symbols)
+                _new = [s for s in symbols if s not in _static_symbols]
+                if _new:
+                    print(f"[Screener] Added {len(_new)} dynamic pairs: {_new[:10]}")
 
             signal_generator = AutonomousSignalGenerator(client, symbols)  # reuse shared client
             _sel_max = _get_max_positions_for_regime(settings, regime or 'SPOT_BULL')
@@ -5309,13 +5271,70 @@ def _is_new_entries_paused(db_client) -> bool:
         return False
     try:
         rows = db_client.execute_query(
-            "SELECT value FROM trading_runtime_state WHERE key = 'pause_new_entries'"
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key = 'pause_new_entries'"
         )
         if rows:
             val = rows[0].get('value') or {}
             if isinstance(val, str):
                 val = json.loads(val)
-            return bool(val.get('paused', False))
+            if not isinstance(val, dict):
+                return False
+            paused = bool(val.get('paused', False))
+            if not paused:
+                return False
+
+            def _parse_dt(raw):
+                if isinstance(raw, datetime):
+                    return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+                if isinstance(raw, str):
+                    try:
+                        _dt = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+                        return _dt if _dt.tzinfo else _dt.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        return None
+                return None
+
+            now = datetime.now(timezone.utc)
+            started_at = _parse_dt(val.get('started_at')) or rows[0].get('updated_at')
+            expires_at = _parse_dt(val.get('expires_at'))
+            if expires_at is None and started_at is not None:
+                ttl_min_raw = val.get('ttl_minutes', val.get('max_minutes'))
+                if ttl_min_raw is not None:
+                    try:
+                        ttl_min = max(1.0, float(ttl_min_raw))
+                        expires_at = started_at + timedelta(minutes=ttl_min)
+                    except Exception:
+                        expires_at = None
+
+            if expires_at is not None and now >= expires_at:
+                try:
+                    db_client.execute_update(
+                        "DELETE FROM trading_runtime_state WHERE key = 'pause_new_entries'",
+                        (),
+                    )
+                    db_client.execute_update(
+                        "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+                        (
+                            '__config__',
+                            'system',
+                            'pause_new_entries_auto_resume',
+                            json.dumps({
+                                'reason': val.get('reason', 'pause_ttl_expired'),
+                                'started_at': started_at.isoformat() if started_at else None,
+                                'expires_at': expires_at.isoformat() if expires_at else None,
+                                'resumed_at': now.isoformat(),
+                            }),
+                            False,
+                        ),
+                    )
+                    print(
+                        f"[PauseCheck] pause_new_entries TTL expired at {expires_at.isoformat() if expires_at else '?'} — auto-resumed entries"
+                    )
+                except Exception as _resume_err:
+                    print(f"[PauseCheck] auto-resume failed after TTL expiration: {_resume_err}")
+                return False
+
+            return True
     except Exception as e:
         print(f"[PauseCheck] error reading pause_new_entries: {e}")
     return False

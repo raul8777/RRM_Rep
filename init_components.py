@@ -91,6 +91,13 @@ def _build() -> Components:
                     )
             except Exception as _re:
                 logger.warning("Runtime override restore skipped: %s", _re)
+
+            try:
+                from analysis_cache import analysis_cache as _analysis_cache
+                _analysis_cache.set_db_client(c.db_client)
+                logger.info("AnalysisCache wired to DatabaseClient")
+            except Exception as _ac_err:
+                logger.warning("AnalysisCache DB wiring skipped: %s", _ac_err)
     except Exception as e:
         logger.error(f"DatabaseClient init failed: {e}")
 

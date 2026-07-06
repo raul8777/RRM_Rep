@@ -19,6 +19,7 @@ from analysis_cache import analysis_cache
 from signal_store import get_signals
 from strategy import normalize_symbol
 from binance_truth_guard import is_truth_critical
+from universe_selector import select_analysis_universe
 
 logger = logging.getLogger(__name__)
 
@@ -156,15 +157,35 @@ def execute_once() -> None:
         symbols = get_top_symbols_from_signals(limit=5)
 
         if not symbols:
-            # P1.2 FUTURES_SHORT fallback — keep analysis_cache fresh for SSO
-            symbols = _get_futures_short_symbols()
-            if symbols:
+            try:
+                from init_components import get_components as _gc
+                _comp = _gc()
+            except Exception:
+                _comp = None
+
+            settings = _get_settings()
+            active_regime = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
+            active_profile = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
+            short_symbols = _get_futures_short_symbols()
+            universe = select_analysis_universe(
+                settings=settings,
+                regime_mode=active_regime,
+                profile_label=active_profile,
+                db_client=getattr(_comp, 'db_client', None),
+            )
+            symbols = list(dict.fromkeys((short_symbols or []) + (universe.get('symbols') or [])))
+            if short_symbols:
                 logger.info(
                     f"[AnalysisCycle] No BUY signals — FUTURES_SHORT fallback: "
-                    f"analyzing {len(symbols)} active short(s): {symbols}"
+                    f"analyzing {len(short_symbols)} active short(s): {short_symbols}"
                 )
-            else:
-                logger.warning("[AnalysisCycle] No BUY signals and no open shorts — skipping cycle")
+            logger.info(
+                f"[AnalysisCycle] Shared universe selector: regime={universe.get('regime_mode')} "
+                f"profile={universe.get('profile_label') or '-'} source={universe.get('source')} "
+                f"reason={universe.get('reason')} cap={universe.get('cap')} selected={len(symbols)}"
+            )
+            if not symbols:
+                logger.warning("[AnalysisCycle] No BUY signals, shorts, or fallback universe — skipping cycle")
                 return
 
         logger.info(f"[AnalysisCycle] Analyzing {len(symbols)} symbols: {', '.join(symbols)}")

@@ -3,6 +3,7 @@ from typing import Dict, Optional
 from threading import Lock
 from datetime import datetime
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -30,16 +31,17 @@ class AnalysisCache:
         
         if self._db_client:
             try:
+                data_json = json.dumps(data)
                 updated = self._db_client.execute_update(
                     """UPDATE market_data SET data = %s, timestamp = %s
                        WHERE symbol = %s AND data_type = 'technical'""",
-                    (data, data['timestamp'], symbol),
+                    (data_json, data['timestamp'], symbol),
                 )
                 if not updated:
                     self._db_client.execute_update(
                         """INSERT INTO market_data (symbol, data_type, data, timestamp)
                            VALUES (%s, 'technical', %s, %s)""",
-                        (symbol, data, data['timestamp']),
+                        (symbol, data_json, data['timestamp']),
                     )
                 logger.debug(f"Technical analysis saved to database: {symbol}")
             except Exception as e:
@@ -65,7 +67,10 @@ class AnalysisCache:
                 """
                 results = self._db_client.execute_query(query, (symbol,))
                 if results:
-                    return results[0]['data']
+                    data = results[0]['data']
+                    if isinstance(data, str):
+                        return json.loads(data)
+                    return data
             except Exception as e:
                 logger.error(f"Failed to get analysis from database, using in-memory fallback: {e}")
         
@@ -86,7 +91,13 @@ class AnalysisCache:
                     ORDER BY timestamp DESC
                 """
                 results = self._db_client.execute_query(query)
-                return {row['symbol']: row['data'] for row in results}
+                result_dict = {}
+                for row in results:
+                    data = row['data']
+                    if isinstance(data, str):
+                        data = json.loads(data)
+                    result_dict[row['symbol']] = data
+                return result_dict
             except Exception as e:
                 logger.error(f"Failed to get all analyses from database, using in-memory fallback: {e}")
         

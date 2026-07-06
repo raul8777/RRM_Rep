@@ -20,6 +20,7 @@ from strategy import parse_signal
 import run_trades
 import analysis_cycle
 from analysis_cache import analysis_cache
+from universe_selector import select_analysis_universe
 from backtester import Backtester
 from learning_engine import get_learning_engine
 from param_optimizer import get_optimizer
@@ -568,6 +569,11 @@ class ControlRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class PauseEntriesRequest(BaseModel):
+    reason: Optional[str] = None
+    ttl_minutes: Optional[float] = 180.0
+
+
 @app.post("/control/pause")
 async def pause_system(payload: ControlRequest, _auth: None = Depends(_require_api_key)) -> Dict:
     """Pause the system (stop new orders, monitor open positions)."""
@@ -593,6 +599,80 @@ async def start_system(payload: ControlRequest, _auth: None = Depends(_require_a
     if not success:
         raise HTTPException(status_code=400, detail="Failed to start system")
     return orchestrator.get_state()
+
+
+@app.post("/control/pause-new-entries")
+async def pause_new_entries(payload: PauseEntriesRequest, _auth: None = Depends(_require_api_key)) -> Dict:
+    """Pause only new entries via runtime-state key with optional TTL auto-expiry."""
+    if not db_client:
+        raise HTTPException(status_code=503, detail="DB not available")
+    _now = datetime.now(timezone.utc)
+    _ttl = None
+    _expires_at = None
+    if payload.ttl_minutes is not None:
+        try:
+            _ttl = max(1.0, float(payload.ttl_minutes))
+            _expires_at = _now + timedelta(minutes=_ttl)
+        except Exception:
+            raise HTTPException(status_code=400, detail="ttl_minutes must be numeric")
+    _value = {
+        "paused": True,
+        "reason": (payload.reason or "manual_pause_new_entries").strip() or "manual_pause_new_entries",
+        "started_at": _now.isoformat(),
+        "ttl_minutes": _ttl,
+        "expires_at": _expires_at.isoformat() if _expires_at else None,
+        "changed_by": "api",
+    }
+    _payload = json.dumps(_value)
+    db_client.execute_update(
+        "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+        "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+        ('pause_new_entries', _payload, _payload),
+    )
+    try:
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+            ('__config__', 'system', 'pause_new_entries', _payload, False),
+        )
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "pause_new_entries": _get_pause_new_entries_status(),
+    }
+
+
+@app.delete("/control/pause-new-entries")
+async def resume_new_entries(_auth: None = Depends(_require_api_key)) -> Dict:
+    """Resume new entries by removing pause_new_entries key."""
+    if not db_client:
+        raise HTTPException(status_code=503, detail="DB not available")
+    _before = _get_pause_new_entries_status()
+    db_client.execute_update(
+        "DELETE FROM trading_runtime_state WHERE key=%s",
+        ('pause_new_entries',),
+    )
+    try:
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+            (
+                '__config__',
+                'system',
+                'resume_new_entries',
+                json.dumps({
+                    "resumed_at": datetime.now(timezone.utc).isoformat(),
+                    "previous_pause": _before,
+                    "changed_by": "api",
+                }),
+                False,
+            ),
+        )
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "pause_new_entries": _get_pause_new_entries_status(),
+    }
 
 
 @app.get("/control/status")
@@ -1299,6 +1379,79 @@ def _decode_runtime_state_value(value: Any) -> Any:
     return value
 
 
+def _get_pause_new_entries_status() -> Dict[str, Any]:
+    """Return normalized pause_new_entries status including TTL semantics."""
+    _status = {
+        "active": False,
+        "reason": None,
+        "started_at": None,
+        "expires_at": None,
+        "remaining_minutes": None,
+        "source": "runtime_state",
+    }
+    if not db_client:
+        _status["source"] = "no_db"
+        return _status
+    try:
+        _rows = db_client.execute_query(
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key=%s LIMIT 1",
+            ('pause_new_entries',),
+        )
+        if not _rows:
+            return _status
+
+        _raw = _rows[0].get('value')
+        _val = _decode_runtime_state_value(_raw)
+        if not isinstance(_val, dict):
+            _val = {"value": _val}
+
+        def _parse_ts(raw):
+            if isinstance(raw, datetime):
+                return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+            if isinstance(raw, str):
+                try:
+                    _dt = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+                    return _dt if _dt.tzinfo else _dt.replace(tzinfo=timezone.utc)
+                except Exception:
+                    return None
+            return None
+
+        _paused = bool(_val.get('paused', False))
+        _reason = str(_val.get('reason') or '').strip() or None
+        _started_at = _parse_ts(_val.get('started_at')) or _rows[0].get('updated_at')
+        _expires_at = _parse_ts(_val.get('expires_at'))
+        if _expires_at is None and _started_at is not None:
+            _ttl_raw = _val.get('ttl_minutes', _val.get('max_minutes'))
+            if _ttl_raw is not None:
+                try:
+                    _ttl = max(1.0, float(_ttl_raw))
+                    _expires_at = _started_at + timedelta(minutes=_ttl)
+                except Exception:
+                    _expires_at = None
+
+        _now = datetime.now(timezone.utc)
+        _remaining = None
+        _active = _paused
+        if _expires_at is not None:
+            _remaining = round((_expires_at - _now).total_seconds() / 60.0, 2)
+            if _remaining <= 0:
+                _active = False
+                _remaining = 0.0
+
+        _status.update({
+            "active": _active,
+            "reason": _reason,
+            "started_at": _started_at.isoformat() if _started_at else None,
+            "expires_at": _expires_at.isoformat() if _expires_at else None,
+            "remaining_minutes": _remaining,
+            "raw": _val,
+        })
+        return _status
+    except Exception as _e:
+        _status["error"] = str(_e)
+        return _status
+
+
 def _get_effective_runtime_selection(summary_mode: Optional[str] = None) -> Dict[str, Any]:
     """Return effective mode/profile used by the live engine whenever possible."""
     _fallback_mode = str(summary_mode or "SPOT_BULL").strip().upper() or "SPOT_BULL"
@@ -1370,7 +1523,12 @@ def _get_effective_runtime_selection(summary_mode: Optional[str] = None) -> Dict
     }
 
 
-def _build_operator_focus(health: Dict[str, Any], health_results: Dict[str, Any], effective_runtime: Dict[str, Any]) -> Dict[str, Any]:
+def _build_operator_focus(
+    health: Dict[str, Any],
+    health_results: Dict[str, Any],
+    effective_runtime: Dict[str, Any],
+    pause_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Create an actionable operator queue from health/runtime signals."""
     items: List[Dict[str, Any]] = []
     checks = (health or {}).get("checks") or {}
@@ -1392,6 +1550,17 @@ def _build_operator_focus(health: Dict[str, Any], health_results: Dict[str, Any]
     _drift_count = int(_harmony_drift.get("drift_count") or 0)
     _parity_validation = (health_results or {}).get("parity_validation") or {}
     _parity_status = str(_parity_validation.get("status") or "unknown").lower()
+    _pause = pause_state or {}
+    if bool(_pause.get("active")):
+        _rem = _pause.get("remaining_minutes")
+        _rem_txt = f"{_rem:.1f} min" if isinstance(_rem, (int, float)) else "indefinido"
+        _push(
+            "pause_new_entries",
+            "critical",
+            "Entradas nuevas pausadas",
+            f"pause_new_entries activo. Razón={_pause.get('reason') or 'N/A'}; restante={_rem_txt}.",
+            "Reanudar entradas solo cuando finalice auditoría y health/binance_truth estén en estado seguro.",
+        )
 
     _cycle_fail = int((checks.get("cycle_failures") or {}).get("consecutive") or 0)
     if _cycle_fail >= 3:
@@ -1638,6 +1807,7 @@ async def get_dashboard_config(request: Request) -> Dict:
 @app.get("/dashboard/summary")
 async def get_dashboard_summary() -> Dict:
     """Single endpoint that returns all dashboard data to minimize API calls."""
+    comp = get_components()
     _snapshot_started_at = datetime.now(timezone.utc)
     result = {}
     price_cache: Dict[str, float] = {}
@@ -1662,6 +1832,12 @@ async def get_dashboard_summary() -> Dict:
         result["health"] = orchestrator.get_health_status()
     except Exception as e:
         result["health"] = {"error": str(e)}
+
+    # Pause status for new entries (operator visibility + TTL)
+    try:
+        result["pause_new_entries"] = _get_pause_new_entries_status()
+    except Exception as e:
+        result["pause_new_entries"] = {"active": False, "error": str(e)}
 
     # Binance truth parity status (runtime vs exchange)
     try:
@@ -2592,6 +2768,7 @@ async def get_dashboard_summary() -> Dict:
             result.get("health", {}),
             result.get("health_results", {}),
             result.get("effective_runtime", {}),
+            result.get("pause_new_entries", {}),
         )
     except Exception as e:
         result["operator_focus"] = {"items": [], "error": str(e)}
@@ -6306,6 +6483,10 @@ async def get_runtime_state(_auth=Depends(_require_api_key)) -> Dict:
             result["effective_runtime"] = _get_effective_runtime_selection(_summary_mode)
         except Exception:
             pass
+        try:
+            result["pause_new_entries_status"] = _get_pause_new_entries_status()
+        except Exception:
+            pass
         # Enrich with live daily PnL from daily_pnl_tracker cache
         try:
             from daily_pnl_tracker import get_daily_realized_pnl as _gdpnl
@@ -7286,6 +7467,12 @@ async def get_dashboard_screener(_auth=Depends(_require_api_key)) -> Dict:
             profile_label=_profile,
             db_client=_comp.db_client,
         )
+        _analysis_universe = select_analysis_universe(
+            settings=_s,
+            regime_mode=_regime,
+            profile_label=_profile,
+            db_client=_comp.db_client,
+        )
         return {
             "ok": True,
             "regime_mode": _regime,
@@ -7297,6 +7484,12 @@ async def get_dashboard_screener(_auth=Depends(_require_api_key)) -> Dict:
             "top_bullish": _screened.get("_meta", {}).get("top_bullish", []),
             "top_bearish": _screened.get("_meta", {}).get("top_bearish", []),
             "fetched_at": _screened.get("_meta", {}).get("fetched_at"),
+            "analysis_universe": {
+                "symbols": _analysis_universe.get("symbols", []),
+                "source": _analysis_universe.get("source"),
+                "reason": _analysis_universe.get("reason"),
+                "cap": _analysis_universe.get("cap"),
+            },
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as e:

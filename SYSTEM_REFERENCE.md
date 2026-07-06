@@ -1,7 +1,40 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 05 2026 | Sesión 44: cierre final del pendiente E2E (auth+rutas en vivo), hardening de snapshot y restauración de startup tras drift de defaults.
+> Última actualización: jul 05 2026 | Sesión 45: hardening anti-bloqueo de `pause_new_entries` (TTL, auto-resume y visibilidad operativa).
+
+---
+
+### ✅ Sesión 45 — Hardening anti-bloqueo de pause_new_entries — jul 05 2026
+
+**Objetivo operativo (cumplido):**
+1. Evitar que el sistema quede indefinidamente sin aperturas por `pause_new_entries` olvidado.
+2. Exponer estado de pausa (activo/TTL/restante/razón) en runtime y dashboard para decisión táctica rápida.
+3. Añadir controles API explícitos para pausar/reanudar entradas con trazabilidad completa.
+
+**Implementación aplicada:**
+1. `run_trades.py`:
+  - `_is_new_entries_paused()` ahora soporta semántica TTL (`ttl_minutes`/`max_minutes` + `started_at`/`expires_at`);
+  - si la pausa expiró, elimina automáticamente `trading_runtime_state.key='pause_new_entries'`;
+  - registra auditoría `trades_audit.event='pause_new_entries_auto_resume'` con detalle temporal.
+2. `app.py`:
+  - helper `_get_pause_new_entries_status()` normaliza estado de pausa y calcula `remaining_minutes`;
+  - `/dashboard/summary` ahora incluye `pause_new_entries`;
+  - `/system/runtime-state` ahora incluye `pause_new_entries_status`;
+  - `operator_focus` agrega alerta crítica `pause_new_entries` cuando la pausa está activa.
+3. Nuevos endpoints de control:
+  - `POST /control/pause-new-entries` (acepta `reason` + `ttl_minutes`, persiste estado y audita `pause_new_entries`);
+  - `DELETE /control/pause-new-entries` (reanuda entradas y audita `resume_new_entries`).
+
+**Verificación ejecutada:**
+1. Validación estática: `get_errors` sin errores en `app.py` y `run_trades.py`.
+2. Compilación: `python -m py_compile` sin errores.
+3. Runner enfocado: PASS (`Dev/validation_summary.json`).
+4. Smoke funcional en contenedor:
+  - `pause_ok=True`;
+  - `summary_pause_active=True` durante pausa de prueba;
+  - `operator_focus_pause_item=True`;
+  - `resume_ok=True`.
 
 ---
 
