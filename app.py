@@ -840,7 +840,8 @@ async def get_operator_alerts() -> Dict:
         import json as _json
         rows = db_client.execute_query(
             "SELECT key, value, updated_at FROM trading_runtime_state "
-            "WHERE key LIKE 'operator_alert_%' ORDER BY updated_at DESC"
+            "WHERE key LIKE %s ORDER BY updated_at DESC",
+            ('operator_alert_%',),
         )
         alerts = []
         for row in (rows or []):
