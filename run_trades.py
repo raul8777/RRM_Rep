@@ -5020,6 +5020,28 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             except Exception:
                 pass
 
+        # ── A4: Entry quality score gate ────────────────────────────────
+        # Block if 2+ quality dimensions fail simultaneously (prevents OPGUSDT-style RSI=87 entries)
+        if getattr(settings, 'entry_quality_gate_enabled', True) and not volspike_override:
+            _eq_rsi       = float(signal_meta.get(symbol, {}).get('rsi', 50.0))
+            _eq_vol       = float(signal_meta.get(symbol, {}).get('vol_spike', 1.0))
+            _eq_strength  = float(signal_meta.get(symbol, {}).get('strength', strength))
+            _eq_bad = 0
+            _eq_rsi_ok      = 35.0 <= _eq_rsi <= 65.0
+            _eq_vol_ok      = _eq_vol >= float(getattr(settings, 'entry_quality_min_vol_spike', 0.8))
+            _eq_str_ok      = _eq_strength >= float(getattr(settings, 'entry_quality_min_strength', 0.35))
+            if not _eq_rsi_ok:  _eq_bad += 1
+            if not _eq_vol_ok:  _eq_bad += 1
+            if not _eq_str_ok:  _eq_bad += 1
+            _eq_max_bad = int(getattr(settings, 'entry_quality_max_failures', 2))
+            if _eq_bad >= _eq_max_bad:
+                print(f"[A4/Quality] Skipping {symbol}: {_eq_bad} quality failures "
+                      f"(RSI={_eq_rsi:.1f}{'✓' if _eq_rsi_ok else '✗'} "
+                      f"vol={_eq_vol:.2f}x{'✓' if _eq_vol_ok else '✗'} "
+                      f"str={_eq_strength:.2f}{'✓' if _eq_str_ok else '✗'}) — A4 gate")
+                update_signal_decision(symbol, "rejected", "QUALITY_SCORE")
+                continue
+
         # ── Kelly dynamic position sizing ───────────────────────────────
         # Fase E: SL/TP base from category_thresholds (per token type) — fallback to global settings
         _sym_cat_e = getattr(settings, 'token_categories', {}).get(symbol, {}).get('market_behavior', 'MIDCAP_ALT')

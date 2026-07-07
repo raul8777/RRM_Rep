@@ -259,6 +259,11 @@ class Settings(BaseSettings):
     btc_correlation_max_new_entries: int = Field(default=2)
     # C1: PRS SPOT_BULL minimum partial close time when momentum is high
     profit_realization_spot_bull_min_partial_minutes: float = Field(default=45.0)
+    # A4: Entry quality score gate
+    entry_quality_gate_enabled: bool = Field(default=True)
+    entry_quality_min_vol_spike: float = Field(default=0.8)
+    entry_quality_min_strength: float = Field(default=0.35)
+    entry_quality_max_failures: int = Field(default=2)
     # BTC dominance filter
     btc_dominance_filter_enabled: bool = Field(default=True)
     btc_dominance_altcoin_threshold: float = Field(default=56.0)  # if BTC.D > this, skip alts
