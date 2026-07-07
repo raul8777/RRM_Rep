@@ -58,11 +58,11 @@ class Settings(BaseSettings):
     trade_horizon_minutes: int = Field(default=240)  # realistic hold time for PnL prediction (4h)
     # Kelly dynamic position sizing
     kelly_enabled: bool = Field(default=True)
-    kelly_base_usdt: float = Field(default=73.0)  # jun29: 76â†’73 (run_0677)
-    kelly_max_usdt: float = Field(default=747.0)    # jun29: 663â†’747 (run_0677)
-    kelly_max_pct_cap: float = Field(default=0.25)       # Smart Kelly: max = max(floor, liquid * this)
+    kelly_base_usdt: float = Field(default=100.0)  # jul07: 73→100 (wolf-hunter s63: base más digna)
+    kelly_max_usdt: float = Field(default=1000.0)   # jul07: 747→1000 (wolf-hunter s63: cap runner)
+    kelly_max_pct_cap: float = Field(default=0.22)       # jul07: 0.25→0.22 (objetivo ~1000 por posición con portafolio ~5200)
     kelly_max_pct_liquid: float = Field(default=0.704)  # jun29: 0.621â†’0.704 (run_0677)
-    kelly_dynamic_base_pct: float = Field(default=0.15)  # base = capital * this (if > fixed base)
+    kelly_dynamic_base_pct: float = Field(default=0.18)  # jul07: 0.15→0.18 (wolf-hunter s63: crece con capital)
     # Bear market mode
     bear_market_mode_enabled: bool = Field(default=True)
     bear_market_btc_7d_threshold: float = Field(default=-10.0)  # % change
@@ -91,8 +91,8 @@ class Settings(BaseSettings):
     ug_allow_partial_to_full_escalation: bool = Field(default=False)
     # Peak protection in SPOT_BULL: fraction of peak PnL that must be preserved.
     # Higher = more patient, lets winners run in bull markets (0.70 is more permissive than 0.60).
-    peak_protection_spot_bull_pct: float = Field(default=0.70)
-    peak_protection_spot_bull_profile_a_pct: float = Field(default=0.75)  # even more patient for profile A
+    peak_protection_spot_bull_pct: float = Field(default=0.60)  # jul07: 0.70→0.60 (wolf-hunter: más permisivo, deja correr más)
+    peak_protection_spot_bull_profile_a_pct: float = Field(default=0.65)  # jul07: 0.75→0.65 (wolf-hunter: perfil A aún más paciente)
     # Scale-out on take-profit
     scale_out_enabled: bool = Field(default=True)
     scale_out_first_close_pct: float = Field(default=0.5)  # close 50% at TP
@@ -154,19 +154,19 @@ class Settings(BaseSettings):
     sso_enabled: bool = Field(default=True)
     sso_stagnant_min_profit_factor: float = Field(default=0.02)
     sso_stagnant_min_profit_floor: float = Field(default=3.0)
-    sso_stagnant_min_hours: float = Field(default=2.0)
-    sso_stagnant_velocity_window_min: int = Field(default=30)  # SL-OPT: 60â†’30 â€” detect decay faster
-    # SSO-1b: Profit Decay â€” close when position is actively giving back gains
-    sso_decay_threshold_pct: float = Field(default=0.004)     # 0.4% drawback from peak triggers close
+    sso_stagnant_min_hours: float = Field(default=3.0)  # jul07: 2.0→3.0 (wolf-hunter: no declarar estancamiento prematuro)
+    sso_stagnant_velocity_window_min: int = Field(default=60)  # jul07: 30→60 — ventana más estable, menos ruido
+    # SSO-1b: Profit Decay — close when position is actively giving back gains
+    sso_decay_threshold_pct: float = Field(default=0.008)     # jul07: 0.004→0.008 (wolf-hunter: 0.8% caída necesaria)
     sso_decay_min_profit_usd: float = Field(default=2.0)     # min $2 unrealized to bother closing
-    sso_decay_min_hours: float = Field(default=1.5)               # min 1.5h holding before decay check
+    sso_decay_min_hours: float = Field(default=2.5)               # jul07: 1.5→2.5h (wolf-hunter: más tiempo antes de decay check)
     # SSO-1c: Slow Crawl â€” close when velocity too low to justify slot
     sso_slow_velocity_threshold: float = Field(default=0.001)  # 0.1%/h â€” below this, recycle capital
     sso_slow_min_profit_usd: float = Field(default=1.0)           # min $1 profit to close (don't close losses)
     sso_slow_min_hours: float = Field(default=2.0)                     # min 2h holding before slow check
-    sso_slow_tier2_hours: float = Field(default=4.0)               # 4h+: 1.5x threshold (0.15%/h)
-    sso_slow_tier3_hours: float = Field(default=6.0)               # 6h+: 3.5x threshold (0.35%/h)
-    sso_slow_tier4_hours: float = Field(default=8.0)               # 8h+: 5.0x threshold (0.50%/h)
+    sso_slow_tier2_hours: float = Field(default=5.0)               # jul07: 4→5h (wolf-hunter: más paciencia en runners)
+    sso_slow_tier3_hours: float = Field(default=7.0)               # jul07: 6→7h
+    sso_slow_tier4_hours: float = Field(default=9.0)               # jul07: 8→9h
     sso_momentum_rsi_overbought: float = Field(default=70.0)
     sso_momentum_rsi_oversold: float = Field(default=30.0)
     sso_momentum_min_pnl_pct_futures: float = Field(default=1.0)
@@ -211,9 +211,9 @@ class Settings(BaseSettings):
     profit_realization_enabled: bool = Field(default=True)
     profit_realization_spot_enabled: bool = Field(default=True)
     profit_realization_spot_min_profit_pct: float = Field(default=0.0025)
-    profit_realization_spot_partial_minutes: float = Field(default=35.0)
-    profit_realization_spot_full_minutes: float = Field(default=70.0)
-    profit_realization_spot_drawback_pct: float = Field(default=0.0040)
+    profit_realization_spot_partial_minutes: float = Field(default=60.0)  # jul07: 35→60 (wolf-hunter: no estrangular runners)
+    profit_realization_spot_full_minutes: float = Field(default=120.0)  # jul07: 70→120 (wolf-hunter: dar tiempo para madurar)
+    profit_realization_spot_drawback_pct: float = Field(default=0.0080)  # jul07: 0.004→0.008 (wolf-hunter: micro-rebote no cierra)
     profit_realization_spot_partial_close_pct: float = Field(default=0.60)
     profit_realization_spot_max_extensions: int = Field(default=2)
     profit_realization_futures_enabled: bool = Field(default=True)
@@ -227,27 +227,27 @@ class Settings(BaseSettings):
     unified_governance_enabled: bool = Field(default=True)
     unified_governance_profit_enabled: bool = Field(default=True)
     unified_governance_loss_enabled: bool = Field(default=True)
-    unified_governance_loss_min_age_profile_a: float = Field(default=30.0)
-    unified_governance_loss_min_age_profile_b: float = Field(default=60.0)
-    unified_governance_loss_min_age_profile_c: float = Field(default=45.0)
-    unified_governance_futures_loss_min_age_profile_a: float = Field(default=20.0)
-    unified_governance_futures_loss_min_age_profile_b: float = Field(default=45.0)
-    unified_governance_futures_loss_min_age_profile_c: float = Field(default=30.0)
-    unified_governance_loss_escalation_age_profile_a: float = Field(default=120.0)
-    unified_governance_loss_escalation_age_profile_b: float = Field(default=90.0)
-    unified_governance_loss_escalation_age_profile_c: float = Field(default=60.0)
-    unified_governance_futures_loss_escalation_age_profile_a: float = Field(default=90.0)
-    unified_governance_futures_loss_escalation_age_profile_b: float = Field(default=70.0)
-    unified_governance_futures_loss_escalation_age_profile_c: float = Field(default=45.0)
+    unified_governance_loss_min_age_profile_a: float = Field(default=90.0)  # jul07: 30→90 (wolf-hunter: SL lógico primero)
+    unified_governance_loss_min_age_profile_b: float = Field(default=120.0)  # jul07: 60→120
+    unified_governance_loss_min_age_profile_c: float = Field(default=90.0)  # jul07: 45→90
+    unified_governance_futures_loss_min_age_profile_a: float = Field(default=30.0)  # jul07: 20→30 (futures sigue más rápido)
+    unified_governance_futures_loss_min_age_profile_b: float = Field(default=60.0)  # jul07: 45→60
+    unified_governance_futures_loss_min_age_profile_c: float = Field(default=45.0)  # jul07: 30→45
+    unified_governance_loss_escalation_age_profile_a: float = Field(default=240.0)  # jul07: 120→240 (wolf-hunter: dejar que el SL actúe)
+    unified_governance_loss_escalation_age_profile_b: float = Field(default=180.0)  # jul07: 90→180
+    unified_governance_loss_escalation_age_profile_c: float = Field(default=120.0)  # jul07: 60→120
+    unified_governance_futures_loss_escalation_age_profile_a: float = Field(default=120.0)  # jul07: 90→120
+    unified_governance_futures_loss_escalation_age_profile_b: float = Field(default=90.0)  # jul07: 70→90
+    unified_governance_futures_loss_escalation_age_profile_c: float = Field(default=60.0)  # jul07: 45→60
     unified_governance_loss_distance_to_sl_min_pct: float = Field(default=0.50)
     unified_governance_loss_trajectory_acceleration_pct: float = Field(default=0.50)
     unified_governance_loss_signal_reversal_strength: float = Field(default=0.65)
     unified_governance_monitor_only_force_loss_pct: float = Field(default=2.0)
     unified_governance_monitor_only_force_age_minutes: float = Field(default=90.0)
-    unified_governance_loss_min_usdt: float = Field(default=1.50)
+    unified_governance_loss_min_usdt: float = Field(default=3.00)  # jul07: 1.50→3.00 (wolf-hunter: pérdida mínima antes de activar loss branch)
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True)
-    wr_screener_consecutive_sl_block: int = Field(default=3)  # block after N consecutive SL
+    wr_screener_consecutive_sl_block: int = Field(default=5)  # block after N consecutive SL
     # B3: SPOT mass-SL cooldown
     spot_mass_sl_threshold: int = Field(default=3)
     spot_mass_sl_cooldown_hours: float = Field(default=2.0)
@@ -258,12 +258,12 @@ class Settings(BaseSettings):
     btc_correlation_drop_threshold_pct: float = Field(default=0.3)
     btc_correlation_max_new_entries: int = Field(default=2)
     # C1: PRS SPOT_BULL minimum partial close time when momentum is high
-    profit_realization_spot_bull_min_partial_minutes: float = Field(default=45.0)
+    profit_realization_spot_bull_min_partial_minutes: float = Field(default=90.0)  # jul07: 45→90 (wolf-hunter: SPOT_BULL necesita tiempo)
     # A4: Entry quality score gate
     entry_quality_gate_enabled: bool = Field(default=True)
-    entry_quality_min_vol_spike: float = Field(default=0.8)
-    entry_quality_min_strength: float = Field(default=0.35)
-    entry_quality_max_failures: int = Field(default=2)
+    entry_quality_min_vol_spike: float = Field(default=1.0)  # jul07: 0.8→1.0 (wolf-hunter: volumen neutro como mínimo)
+    entry_quality_min_strength: float = Field(default=0.40)  # jul07: 0.35→0.40
+    entry_quality_max_failures: int = Field(default=1)  # jul07: 2→1 (wolf-hunter: si 2 dimensiones fallan, no entrar)
     # BTC dominance filter
     btc_dominance_filter_enabled: bool = Field(default=True)
     btc_dominance_altcoin_threshold: float = Field(default=56.0)  # if BTC.D > this, skip alts
@@ -333,9 +333,9 @@ class Settings(BaseSettings):
     atr_sl_min_pct: float = Field(default=0.015)         # floor ATR SL at 1.5% (SL-OPT: 1%â†’1.5% â€” prevent micro-stops on volatile tokens)
     # M3: Kelly conviction multiplier â€” scale position size by signal strength
     kelly_conviction_enabled: bool = Field(default=True)
-    kelly_conviction_vol2x: float = Field(default=1.5)   # vol 2-3x â†’ 1.5x sizing
-    kelly_conviction_vol3x: float = Field(default=2.0)   # vol >3x â†’ 2.0x sizing
-    kelly_conviction_max_pct: float = Field(default=0.10)  # hard cap: never >10% portfolio in 1 trade
+    kelly_conviction_vol2x: float = Field(default=1.8)   # jul07: 1.5→1.8 (wolf-hunter s63: vol 2-3x +80%)
+    kelly_conviction_vol3x: float = Field(default=2.5)   # jul07: 2.0→2.5 (wolf-hunter s63: vol >3x +150%)
+    kelly_conviction_max_pct: float = Field(default=0.20)  # jul07: 0.15→0.20 (objetivo ~1000: 20% de ~5200 ≈ 1040)
     # Smart exit: anti-wick SL confirmation
     sl_confirmation_candles: int = Field(default=1)  # 0=immediate, 1=require last 1m candle close below SL
     # Smart exit: rebalance skips if predictor sees upside
@@ -398,8 +398,8 @@ class Settings(BaseSettings):
     cycle_futures_short: int = Field(default=4)     # H-FIX: 6â†’4 min (trailing mÃ¡s reactivo a movimientos rÃ¡pidos)
 
     # Signal quality filter
-    min_signal_strength: float = Field(default=0.389)  # jun29: 0.359â†’0.389 (run_0677)
-    min_success_probability: float = Field(default=0.499)  # jun29: 0.527â†’0.499 (run_0677)
+    min_signal_strength: float = Field(default=0.45)  # jul07: 0.389→0.45 (wolf-hunter: solo señales con convicción real)
+    min_success_probability: float = Field(default=0.52)  # jul07: 0.499→0.52 (wolf-hunter: edge estadístico mínimo)
     # P1.3: Signal cache TTL dinÃ¡mico â€” reduce de 600s fijo a 1 ciclo por rÃ©gimen
     signal_cache_ttl_seconds: int = Field(default=240)  # default 4 min (1 ciclo FUTURES_SHORT)
 
@@ -477,8 +477,8 @@ class Settings(BaseSettings):
     # min_volspike: VolSpike mÃ­nimo para confirmar seÃ±al (informativo, no enforcement aquÃ­)
     # MEJO-A: NARRATIVE trailing aumentado (8%/3%) para capturar breakouts +15-30% completos
     category_thresholds: Dict[str, Any] = Field(default={
-        "LARGE_CAP":  {"min_prob": 0.527, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 2.5, "take_profit_pct": 3.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.8, "tp_extension_pct": 1.5},  # jun28: min_prob 0.55â†’0.527
-        "MIDCAP_ALT": {"min_prob": 0.527, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 2.5, "take_profit_pct": 3.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.8, "tp_extension_pct": 2.0},  # jun28: min_prob 0.50â†’0.527
+        "LARGE_CAP":  {"min_prob": 0.527, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 3.5, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 0.8, "tp_extension_pct": 1.5},  # jul07: sl 2.5→3.5, trail_act 2.0→2.5 (wolf-hunter: SL más amplio)
+        "MIDCAP_ALT": {"min_prob": 0.527, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 0.8, "tp_extension_pct": 2.0},  # jul07: sl 2.5→3.5, trail_act 2.0→2.5 (wolf-hunter: SL más amplio)
         "NARRATIVE":  {"min_prob": 0.527, "min_pnl": -1.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 2.0, "tp_extension_pct": 3.0},  # jun28: min_prob 0.45â†’0.527
         "MEME":       {"min_prob": 0.527, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.5, "take_profit_pct": 4.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.0, "tp_extension_pct": 2.5},  # jun28: min_prob 0.52â†’0.527
     })
@@ -604,6 +604,27 @@ class Settings(BaseSettings):
     bnb_min_balance_usd: float = Field(default=5.0)
     bnb_extra_buffer_usd: float = Field(default=10.0)
     futures_max_escalamientos: int = Field(default=2)  # max entries per symbol (escalamiento cap)
+
+    # ── Capital Rotator (SSO-6) ──────────────────────────────────────────────
+    # SSO-7: Stagnation Trailing + Opportunity Collapse
+    # En lugar de cerrar por timeout, sube el SL de la posición estancada hacia
+    # el precio actual progresivamente. Si hay un candidato significativamente mejor,
+    # colapsa el SL al precio actual para que el mercado saque la posición.
+    sso7_enabled: bool = Field(default=True)
+    sso7_min_age_hours: float = Field(default=1.0)          # anti-flip: mínimo antes de evaluar
+    sso7_max_pnl_usdt: float = Field(default=3.0)           # posición graduada si PnL >= esto
+    sso7_vol_spike_breakout_min: float = Field(default=2.0) # vol_spike que bloquea todo apriete
+    sso7_min_velocity: float = Field(default=0.0003)        # velocity mínima para considerar "avanzando" (ratio/h)
+    sso7_stagnation_cycles_threshold: int = Field(default=3) # ciclos sin avance antes de apretar SL
+    sso7_trail_base_dist: float = Field(default=0.010)      # distancia base del stagnation trail (1.0%)
+    sso7_trail_squeeze_per_cycle: float = Field(default=0.10) # reducción de distancia por ciclo estancado
+    sso7_trail_min_dist: float = Field(default=0.003)       # distancia mínima de trail (0.3% ≈ comisión)
+    sso7_opp_enabled: bool = Field(default=True)            # activar Opportunity Collapse
+    sso7_opp_min_cycles_stagnant: int = Field(default=3)    # ciclos mínimos estancados para Opp Collapse
+    sso7_opp_ev_min_ratio: float = Field(default=1.35)      # EV candidato / EV posición actual
+    sso7_opp_prob_min_delta: float = Field(default=0.06)    # prob candidato - prob posición actual
+    sso7_opp_min_strength: float = Field(default=0.55)      # strength mínima del candidato
+    sso7_opp_min_vol_spike: float = Field(default=1.2)      # vol_spike mínimo del candidato
     
     # Currency conversion configuration
     usd_to_mxn_rate: float = Field(default=17.0)  # Default USD to MXN exchange rate
