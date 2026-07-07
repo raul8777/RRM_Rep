@@ -787,6 +787,23 @@ body {
     display:inline-block; font-size:9px; font-weight:700; padding:2px 5px;
     border-radius:3px; background:rgba(155,89,182,0.20); color:#9b59b6; margin-right:3px; letter-spacing:0.5px;
 }
+.badge-context {
+    display:inline-block; font-size:9px; font-weight:700; padding:2px 5px;
+    border-radius:3px; margin-left:4px; letter-spacing:0.5px; vertical-align:middle;
+    border:1px solid transparent;
+}
+.badge-context.ctx-current {
+    background:rgba(78,204,163,0.16); color:#4ecca3; border-color:rgba(78,204,163,0.32);
+}
+.badge-context.ctx-legacy {
+    background:rgba(231,76,60,0.16); color:#ff7070; border-color:rgba(231,76,60,0.30);
+}
+.badge-context.ctx-partial {
+    background:rgba(243,156,18,0.16); color:#f39c12; border-color:rgba(243,156,18,0.30);
+}
+.badge-context.ctx-unknown {
+    background:rgba(255,255,255,0.05); color:#8a8aa8; border-color:rgba(255,255,255,0.10);
+}
 .badge-lev {
     display:inline-block; font-size:9px; font-weight:700; padding:2px 5px;
     border-radius:3px; background:rgba(231,76,60,0.15); color:#e74c3c; margin-left:4px;
@@ -1487,6 +1504,9 @@ body {
 .row-bounce { background:rgba(230,126,34,0.10) !important; border-left:3px solid #e67e22; }
 .row-bounce td { border-left: none; }
 .row-bounce-closed { background:rgba(230,126,34,0.06) !important; }
+.row-context-legacy { background:rgba(231,76,60,0.06) !important; border-left:3px solid rgba(231,76,60,0.45); }
+.row-context-partial { background:rgba(243,156,18,0.05) !important; border-left:3px solid rgba(243,156,18,0.35); }
+.row-context-current { border-left:3px solid rgba(78,204,163,0.30); }
 
 .badge-bounce {
     display:inline-block; background:#e67e22; color:#fff;

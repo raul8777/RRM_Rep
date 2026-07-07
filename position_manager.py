@@ -216,6 +216,34 @@ class PositionManager:
         # Ensure trade_type is always persisted for parity/reporting.
         if isinstance(position.metadata, dict):
             position.metadata.setdefault('trade_type', 'spot')
+            position.metadata.setdefault(
+                'regime_at_entry',
+                position.metadata.get('regime_mode') or position.metadata.get('current_regime_mode'),
+            )
+            position.metadata.setdefault(
+                'profile_at_entry',
+                position.metadata.get('profile_label') or position.metadata.get('current_profile_label'),
+            )
+            if not position.metadata.get('config_snapshot_id') and self.db_client:
+                try:
+                    _snap_rows = self.db_client.execute_query(
+                        "SELECT value FROM trading_runtime_state WHERE key='config_snapshot_latest' LIMIT 1"
+                    )
+                    if _snap_rows:
+                        _snap_val = _snap_rows[0].get('value')
+                        if isinstance(_snap_val, str):
+                            try:
+                                _snap_val = json.loads(_snap_val)
+                            except Exception:
+                                _snap_val = {'snapshot_id': _snap_val}
+                        if isinstance(_snap_val, dict):
+                            _snapshot_id = str(_snap_val.get('snapshot_id') or _snap_val.get('id') or '').strip()
+                        else:
+                            _snapshot_id = str(_snap_val or '').strip()
+                        if _snapshot_id:
+                            position.metadata['config_snapshot_id'] = _snapshot_id
+                except Exception:
+                    pass
         position.metadata['escalonamiento_index'] = _esc_idx
         position.metadata['es_escalonamiento'] = (_esc_idx > 1)
         # Update total_escalonamientos on all existing entries for this symbol

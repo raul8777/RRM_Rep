@@ -1103,6 +1103,7 @@ async def get_open_positions() -> Dict:
     try:
         positions = position_manager.get_all_positions()
         positions_data = []
+        _runtime_ctx = _get_dashboard_context_reference()
         price_cache: Dict[str, float] = {}
         
         for symbol, pos_list in positions.items():
@@ -1151,11 +1152,22 @@ async def get_open_positions() -> Dict:
                     "take_profit_price": tp_price,
                     "trailing_peak": float(trailing_peak) if trailing_peak else None,
                     "trail_stop_price": trail_stop_price,
+                    **_normalize_transaction_context(getattr(position, 'metadata', {}) or {}, _runtime_ctx),
                 })
         
+        _context_counts = {
+            "legacy": sum(1 for _p in positions_data if _p.get('config_context_state') == 'legacy'),
+            "partial": sum(1 for _p in positions_data if _p.get('config_context_state') == 'partial'),
+            "current": sum(1 for _p in positions_data if _p.get('config_context_state') == 'current'),
+            "unknown": sum(1 for _p in positions_data if _p.get('config_context_state') == 'unknown'),
+        }
         return {
             "positions": positions_data,
             "count": len(positions_data),
+            "legacy_count": _context_counts["legacy"],
+            "partial_context_count": _context_counts["partial"],
+            "current_context_count": _context_counts["current"],
+            "unknown_context_count": _context_counts["unknown"],
             "timestamp": to_mexico_time(datetime.utcnow()).isoformat()
         }
     except Exception as e:
@@ -1195,6 +1207,7 @@ async def get_closed_positions(limit: int = 20) -> Dict:
     try:
         closed_positions = position_manager.get_closed_positions(limit)
         positions_data = []
+        _runtime_ctx = _get_dashboard_context_reference()
         
         for pos in closed_positions:
             positions_data.append({
@@ -1203,6 +1216,7 @@ async def get_closed_positions(limit: int = 20) -> Dict:
                 "quantity": pos.quantity,
                 "entry_price": pos.entry_price,
                 "exit_price": pos.exit_price,
+                "invested_usdt": round(float(pos.entry_price or 0) * float(pos.quantity or 0), 4),
                 "pnl": pos.pnl,
                 "pnl_percentage": pos.pnl_percentage,
                 "entry_time": to_mexico_time_str(pos.entry_time),
@@ -1211,11 +1225,22 @@ async def get_closed_positions(limit: int = 20) -> Dict:
                 "entry_commission": pos.entry_commission,
                 "exit_commission": pos.exit_commission,
                 "bounce_entry": (getattr(pos, 'metadata', None) or {}).get('bounce_entry', False),
+                **_normalize_transaction_context(getattr(pos, 'metadata', {}) or {}, _runtime_ctx),
             })
         
+        _context_counts = {
+            "legacy": sum(1 for _p in positions_data if _p.get('config_context_state') == 'legacy'),
+            "partial": sum(1 for _p in positions_data if _p.get('config_context_state') == 'partial'),
+            "current": sum(1 for _p in positions_data if _p.get('config_context_state') == 'current'),
+            "unknown": sum(1 for _p in positions_data if _p.get('config_context_state') == 'unknown'),
+        }
         return {
             "positions": positions_data,
             "count": len(positions_data),
+            "legacy_count": _context_counts["legacy"],
+            "partial_context_count": _context_counts["partial"],
+            "current_context_count": _context_counts["current"],
+            "unknown_context_count": _context_counts["unknown"],
             "timestamp": to_mexico_time(datetime.utcnow()).isoformat()
         }
     except Exception as e:
@@ -1970,6 +1995,131 @@ def _get_active_profile_summary(mode: str) -> Dict[str, Any]:
     }
 
 
+def _get_dashboard_context_reference() -> Dict[str, Any]:
+    """Return the live runtime context used to classify transaction lineage."""
+    _summary_mode = str(getattr(orchestrator, 'current_regime_mode', '') or 'SPOT_BULL').strip().upper() or 'SPOT_BULL'
+    _effective = {}
+    try:
+        _effective = _get_effective_runtime_selection(_summary_mode) or {}
+    except Exception:
+        _effective = {}
+
+    _mode = str(_effective.get('mode') or _summary_mode).strip().upper() or 'SPOT_BULL'
+    _profile = str(_effective.get('profile_label') or _effective.get('profile') or 'A').strip().upper() or 'A'
+    _snapshot_id = None
+    try:
+        if db_client:
+            _rows = db_client.execute_query(
+                "SELECT value FROM trading_runtime_state WHERE key='config_snapshot_latest' LIMIT 1"
+            )
+            if _rows:
+                _raw = _decode_runtime_state_value(_rows[0].get('value'))
+                if isinstance(_raw, dict):
+                    _snapshot_id = str(_raw.get('snapshot_id') or _raw.get('id') or '').strip() or None
+                elif _raw is not None:
+                    _snapshot_id = str(_raw).strip() or None
+    except Exception:
+        _snapshot_id = None
+
+    return {
+        "mode": _mode,
+        "profile": _profile,
+        "snapshot_id": _snapshot_id,
+        "profile_alias": _PROFILE_ALIAS.get(_profile, _profile or "N/A"),
+    }
+
+
+def _normalize_transaction_context(meta: Any, current_ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Classify a trade as current/legacy/partial/unknown for dashboard visibility."""
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+
+    current_ctx = current_ctx or _get_dashboard_context_reference()
+
+    def _pick(keys, upper: bool = True):
+        for key in keys:
+            value = meta.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                value = value.strip()
+                if not value:
+                    continue
+                return value.upper() if upper else value
+            value = str(value).strip()
+            if not value:
+                continue
+            return value.upper() if upper else value
+        return None
+
+    entry_mode = _pick(('regime_at_entry', 'regime_mode', 'current_regime_mode', 'entry_regime_mode'))
+    entry_profile = _pick(('profile_at_entry', 'profile_label', 'current_profile_label', 'entry_profile_label'))
+    entry_snapshot_id = _pick(('config_snapshot_id', 'snapshot_id', 'applied_snapshot_id', 'runtime_snapshot_id', 'effective_runtime_snapshot_id'), upper=False)
+    current_mode = str(current_ctx.get('mode') or '').strip().upper() or None
+    current_profile = str(current_ctx.get('profile') or '').strip().upper() or None
+    current_snapshot_id = str(current_ctx.get('snapshot_id') or '').strip() or None
+
+    has_entry_signal = any((entry_mode, entry_profile, entry_snapshot_id))
+    has_current_signal = any((current_mode, current_profile, current_snapshot_id))
+    mismatch_reasons = []
+
+    if entry_snapshot_id and current_snapshot_id and entry_snapshot_id != current_snapshot_id:
+        mismatch_reasons.append('snapshot')
+    if entry_mode and current_mode and entry_mode != current_mode:
+        mismatch_reasons.append('mode')
+    if entry_profile and current_profile and entry_profile != current_profile:
+        mismatch_reasons.append('profile')
+
+    if mismatch_reasons:
+        state = 'legacy'
+        label = 'LEGACY'
+    elif not has_entry_signal and not has_current_signal:
+        state = 'unknown'
+        label = 'SIN CONTEXTO'
+    elif entry_mode and entry_profile:
+        state = 'current'
+        label = 'ACTUAL'
+    elif entry_snapshot_id and (entry_mode or entry_profile):
+        state = 'current' if not mismatch_reasons else 'legacy'
+        label = 'ACTUAL' if state == 'current' else 'LEGACY'
+    elif has_entry_signal or has_current_signal:
+        state = 'partial'
+        label = 'CONTEXTO PARCIAL'
+    else:
+        state = 'unknown'
+        label = 'SIN CONTEXTO'
+
+    if mismatch_reasons:
+        reason = ','.join(mismatch_reasons)
+    elif state == 'current':
+        reason = 'match'
+    elif state == 'partial':
+        reason = 'missing_entry_context'
+    else:
+        reason = 'no_context'
+
+    return {
+        'config_context_state': state,
+        'config_context_label': label,
+        'config_context_reason': reason,
+        'entry_regime_mode': entry_mode,
+        'entry_profile_label': entry_profile,
+        'entry_snapshot_id': entry_snapshot_id,
+        'current_regime_mode': current_mode,
+        'current_regime_profile_label': current_profile,
+        'current_snapshot_id': current_snapshot_id,
+        'current_profile_alias': current_ctx.get('profile_alias'),
+        'has_context_match': state == 'current',
+        'is_legacy_context': state == 'legacy',
+        'is_partial_context': state == 'partial',
+    }
+
+
 @app.get("/dashboard/config")
 async def get_dashboard_config(request: Request) -> Dict:
     """Return frontend runtime config. Only serves API key to local/docker clients."""
@@ -1991,6 +2141,8 @@ async def get_dashboard_summary() -> Dict:
     _snapshot_started_at = datetime.now(timezone.utc)
     result = {}
     price_cache: Dict[str, float] = {}
+    _runtime_ctx = _get_dashboard_context_reference()
+    _runtime_ctx = _get_dashboard_context_reference()
 
     # Exchange rate (computed once, reused across blocks)
     _usd_mxn = 17.5  # Fixed display rate MXN/USD (USDCUSDT ≈1.0 on Binance, not a real FX source)
@@ -2516,6 +2668,7 @@ async def get_dashboard_summary() -> Dict:
                 "bounce_gate_first_qualified_at": _sp_meta_last.get('bounce_gate_first_qualified_at'),
                 "btc_chg_since_entry_pct": None,
                 "metadata": _sp_meta_last,
+                **_normalize_transaction_context(_sp_meta_last, _runtime_ctx),
             })
         # Add futures positions to the dashboard
         try:
@@ -2691,6 +2844,7 @@ async def get_dashboard_summary() -> Dict:
                     "btc_chg_since_entry_pct": fp.get("btc_chg_since_entry_pct"),
                     "escalamientos": max(len(_dash_esc_map.get(fp["symbol"], [])), max((e.get('escalonamiento_index', 1) for e in _dash_esc_map.get(fp["symbol"], [])), default=1)),
                     "entries": _enrich_entries(_dash_esc_map.get(fp["symbol"], []), fp["current_price"], fp["side"]),
+                    **_normalize_transaction_context(fp.get('_smart_meta') or fp.get('metadata') or {}, _runtime_ctx),
                 })
         except Exception as e:
             # If futures client fails, continue with spot positions only
@@ -2700,12 +2854,22 @@ async def get_dashboard_summary() -> Dict:
         _spot_count = sum(1 for p in open_list if p.get('trade_type') != 'futures')
         _fut_count  = sum(1 for p in open_list if p.get('trade_type') == 'futures')
         _open_unrealized_total = round(sum(float(p.get('unrealized_pnl', 0.0) or 0.0) for p in open_list), 4)
+        _open_context_counts = {
+            "legacy": sum(1 for p in open_list if p.get('config_context_state') == 'legacy'),
+            "partial": sum(1 for p in open_list if p.get('config_context_state') == 'partial'),
+            "current": sum(1 for p in open_list if p.get('config_context_state') == 'current'),
+            "unknown": sum(1 for p in open_list if p.get('config_context_state') == 'unknown'),
+        }
         result["open_positions"] = {
             "positions": open_list,
             "count": len(open_list),
             "spot_count": _spot_count,
             "futures_count": _fut_count,
             "total_unrealized_pnl": _open_unrealized_total,
+            "legacy_count": _open_context_counts["legacy"],
+            "partial_context_count": _open_context_counts["partial"],
+            "current_context_count": _open_context_counts["current"],
+            "unknown_context_count": _open_context_counts["unknown"],
         }
     except Exception as e:
         result["open_positions"] = {"positions": [], "count": 0, "error": str(e)}
@@ -2727,6 +2891,7 @@ async def get_dashboard_summary() -> Dict:
                 "quantity": float(pos.quantity) if pos.quantity else 0.0,
                 "entry_price": float(pos.entry_price) if pos.entry_price else 0.0,
                 "exit_price": float(pos.exit_price) if pos.exit_price else 0.0,
+                "invested_usdt": round(float(pos.entry_price or 0) * float(pos.quantity or 0), 4),
                 "pnl": float(pos.pnl) if pos.pnl else 0.0,
                 "pnl_percentage": float(pos.pnl_percentage) if pos.pnl_percentage else 0.0,
                 "entry_time": to_mexico_time_str(pos.entry_time) if pos.entry_time else "",
@@ -2745,6 +2910,7 @@ async def get_dashboard_summary() -> Dict:
                 "tp_extensions": int(_cl_meta.get('tp_extensions_count', 0)),
                 "metadata": _cl_meta,
                 "bounce_entry": bool(_cl_meta.get('bounce_entry', False)),
+                **_normalize_transaction_context(_cl_meta, _runtime_ctx),
                 "_close_group_id": _cl_meta.get('close_group_id'),
             })
         # ESC-AGG-C: Group rows with same close_group_id into one parent row
@@ -2779,6 +2945,7 @@ async def get_dashboard_summary() -> Dict:
                 "quantity": round(_g_total_qty, 8),
                 "entry_price": round(_g_wap, 8),
                 "exit_price": round(_g_exit_price, 8),
+                "invested_usdt": round(_g_total_cost, 4),
                 "pnl": round(_g_total_pnl, 4),
                 "pnl_percentage": round(_g_pnl_pct, 4),
                 "entry_time": _g_entry_time,
@@ -2790,12 +2957,22 @@ async def get_dashboard_summary() -> Dict:
             _cl.pop('_close_group_id', None)
         _cl_spot = sum(1 for p in closed_list if p.get('trade_type') != 'futures')
         _cl_fut  = sum(1 for p in closed_list if p.get('trade_type') == 'futures')
+        _closed_context_counts = {
+            "legacy": sum(1 for p in closed_list if p.get('config_context_state') == 'legacy'),
+            "partial": sum(1 for p in closed_list if p.get('config_context_state') == 'partial'),
+            "current": sum(1 for p in closed_list if p.get('config_context_state') == 'current'),
+            "unknown": sum(1 for p in closed_list if p.get('config_context_state') == 'unknown'),
+        }
         result["closed_positions"] = {
             "positions": closed_list,
             "count": len(closed_list),
             "spot_count": _cl_spot,
             "futures_count": _cl_fut,
             "period_days": 7,
+            "legacy_count": _closed_context_counts["legacy"],
+            "partial_context_count": _closed_context_counts["partial"],
+            "current_context_count": _closed_context_counts["current"],
+            "unknown_context_count": _closed_context_counts["unknown"],
         }
     except Exception as e:
         result["closed_positions"] = {"positions": [], "count": 0, "error": str(e), "period_days": 7}
@@ -4844,6 +5021,7 @@ async def get_futures_positions() -> Dict:
         from run_trades import _get_futures_client
         from config import get_settings as _get_s
         _s = _get_s()
+        _runtime_ctx = _get_dashboard_context_reference()
         if not getattr(_s, 'futures_enabled', True):
             return {"enabled": False, "positions": [], "count": 0}
         if bool(getattr(_s, 'dry_run', False)):
@@ -4996,9 +5174,20 @@ async def get_futures_positions() -> Dict:
                 "dynamic_trail_dist_pct": _vis_dyn_trail,
                 "escalamientos":   len(_sym_entries),
                 "entries":         _sym_entries,
+                **_normalize_transaction_context(getattr(_tpos, '_smart_meta', {}) if _tpos else {}, _runtime_ctx),
             })
 
+        _ctx_counts = {
+            "legacy": sum(1 for p in positions if p.get('config_context_state') == 'legacy'),
+            "partial": sum(1 for p in positions if p.get('config_context_state') == 'partial'),
+            "current": sum(1 for p in positions if p.get('config_context_state') == 'current'),
+            "unknown": sum(1 for p in positions if p.get('config_context_state') == 'unknown'),
+        }
         return {"enabled": True, "positions": positions, "count": len(positions),
+                "legacy_count": _ctx_counts["legacy"],
+                "partial_context_count": _ctx_counts["partial"],
+                "current_context_count": _ctx_counts["current"],
+                "unknown_context_count": _ctx_counts["unknown"],
                 "timestamp": datetime.utcnow().isoformat()}
     except Exception as e:
         return {"enabled": False, "positions": [], "count": 0, "error": str(e)}
@@ -5086,6 +5275,7 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 7) -> Dict:
         from run_trades import _get_futures_client
         from config import get_settings as _get_s
         _s = _get_s()
+        _runtime_ctx = _get_dashboard_context_reference()
         if not getattr(_s, 'futures_enabled', True):
             return {"enabled": False, "positions": [], "count": 0}
         if bool(getattr(_s, 'dry_run', False)):
@@ -5193,12 +5383,24 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 7) -> Dict:
                 "trade_type":          "futures",
                 "metadata":            _db_meta,
                 "bounce_entry":        bool((_db_meta.get('smart_meta') or {}).get('bounce_entry', False)),
+                **_normalize_transaction_context(_db_meta, _runtime_ctx),
             })
+
+        _ctx_counts = {
+            "legacy": sum(1 for p in closed if p.get('config_context_state') == 'legacy'),
+            "partial": sum(1 for p in closed if p.get('config_context_state') == 'partial'),
+            "current": sum(1 for p in closed if p.get('config_context_state') == 'current'),
+            "unknown": sum(1 for p in closed if p.get('config_context_state') == 'unknown'),
+        }
 
         return {
             "enabled": True,
             "positions": closed[:limit],
             "count": len(closed[:limit]),
+            "legacy_count": _ctx_counts["legacy"],
+            "partial_context_count": _ctx_counts["partial"],
+            "current_context_count": _ctx_counts["current"],
+            "unknown_context_count": _ctx_counts["unknown"],
             "period_days": days,
             "timestamp": to_mexico_time(datetime.utcnow()).isoformat()
         }

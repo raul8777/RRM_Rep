@@ -1,7 +1,98 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 06 2026 | Sesión 58: Fixes klines, filtro 1000PEPEUSDT, guards notional SPOT/FUTURES.
+> Última actualización: jul 06 2026 | Sesión 60: Visibilidad de transacciones legacy en dashboard y persistencia de contexto de entrada.
+
+---
+
+### ✅ Sesión 60 — Visibilidad De Transacciones Legacy En Dashboard — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Hacer visible en el dashboard qué transacciones pertenecen a la configuración/regímen anterior, sin reescribir histórico ni alterar la lógica de trading.
+
+**Implementación aplicada:**
+
+1. **Clasificación de contexto en backend (`app.py`):**
+  - agregado el helper `_get_dashboard_context_reference()` para capturar el runtime vivo (modo/perfil/snapshot) con una sola fuente de verdad;
+  - agregado `_normalize_transaction_context()` para derivar `config_context_state`, `config_context_label` y `config_context_reason` por posición;
+  - expuesto el contexto en `open_positions`, `closed_positions`, `futures/positions` y `futures/closed`;
+  - añadido conteo agregado `legacy_count` / `partial_context_count` / `current_context_count` / `unknown_context_count` para cards y summary.
+
+2. **Persistencia de nueva entrada (`position_manager.py`):**
+  - al crear posiciones Spot nuevas se persisten `regime_at_entry`, `profile_at_entry` y `config_snapshot_id` cuando están disponibles;
+  - esto evita que las entradas nuevas queden ambiguas tras reinicio y permite diferenciar transición vs estado actual.
+
+3. **Frontend dashboard (`frontend/dashboard.js` + `frontend/styles.css`):**
+  - añadido badge visual de contexto `LEGACY` / `ACTUAL` / `PARCIAL` / `SIN CONTEXTO`;
+  - el badge aparece en Spot y Futures, tanto abiertas como cerradas, y también en los modales de detalle;
+  - añadidos estilos suaves de resaltado por fila para legacy y contexto parcial;
+  - el resumen de cards muestra conteos de legacy/parcial para visibilidad operativa inmediata.
+
+**Validación ejecutada:**
+1. `get_errors` sobre `app.py`, `frontend/dashboard.js`, `frontend/styles.css` y `position_manager.py` → **sin errores**.
+2. Se mantuvo la lógica de trading intacta; el cambio es puramente de observabilidad/persistencia de contexto.
+
+**Impacto operativo esperado:**
+1. El operador puede identificar de un vistazo qué posiciones nacieron bajo la configuración anterior.
+2. Las posiciones legacy no se re-clasifican retroactivamente; se administran por transición.
+3. Nuevas entradas quedan mejor trazadas para futuros cambios de tuning.
+
+---
+
+### ✅ Sesión 59 — Estrategia Canónica De Tuning + Norma De Cambios Con Evidencia — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Formalizar una política obligatoria de tuning para futuros cambios, consolidando lo aprendido en sesiones previas y evitando regresiones por ajustes sin evidencia.
+
+**Norma activa (obligatoria para futuros tunings):**
+
+1. **Modo Único por capital activo:**
+  - La asignación de capital se define por modo activo dominante.
+  - SPOT_BULL/RANGE_SCALP priorizan SPOT; FUTURES_SHORT prioriza FUTURES; PRESERVATION minimiza exposición.
+  - Queda prohibido introducir mezcla no justificada de mercados dentro del mismo objetivo táctico.
+
+2. **Wolf Hunter como motor de captura de picos:**
+  - Cadena oficial: **F&G Kelly + SmartTP + SSO + PRS + UG**.
+  - Objetivo: capturar picos rápido sin estrangular runners.
+  - Los parciales tempranos **no** son regla global; son condicionales por modo/perfil.
+
+3. **Política condicional de parciales (cierre de criterio):**
+  - **SPOT_BULL + Perfil A:** priorizar extensión de momentum (SmartTP/trailing/peak protection), evitar parciales tempranos agresivos por defecto.
+  - **RANGE_SCALP/FUTURES_SHORT:** permitir parciales tempranos (SSO-3/SSO-4) para asegurar caja en entornos de reversión frecuente.
+  - **PRESERVATION:** priorizar defensa de capital con salidas tempranas permitidas.
+
+4. **Política de posiciones legacy (grandfathering de transición):**
+  - Las posiciones abiertas antes de un cambio de configuración conservan su contexto de entrada original (`regime_at_entry`, `profile_at_entry`, `trade_type`, `peak_pnl`, `sso_levels_done`).
+  - No se reescribe retroactivamente su tesis de entrada ni se les aplica la nueva lógica como si hubieran nacido bajo ella.
+  - Solo reciben la nueva capa de protección universal si mejora el riesgo sin destruir upside (SL lógico, breakeven, trailing, reconciliación, persistencia y salidas de deterioro real).
+  - Criterios de transición:
+    - **keep:** la posición sigue fuerte, alineada y con momentum válido.
+    - **monitor:** hay desalineación parcial, pero el trade aún conserva edge y no conviene forzar salida.
+    - **trim:** existe fatiga o pérdida parcial de edge; se permite reducción controlada.
+    - **close:** la posición legacy perdió edge, está desalineada con el modo actual o el régimen cambió de forma estructural contra ella.
+  - Las posiciones legacy no deben usarse para validar la nueva configuración; la validación de tuning debe medir principalmente nuevas entradas y la cohorte posterior al changepoint.
+
+5. **Regla dura de cambio (evidencia obligatoria):**
+  - Ningún parámetro crítico de Kelly, PredExit, SSO, PRS, UG, Hard SL/TP, breakeven, trailing o comisiones se cambia sin análisis comparativo.
+  - Si no hay mejora defendible o aumenta riesgo operativo, se mantiene configuración vigente.
+
+6. **Evidencia mínima para aprobar cambios:**
+  - Mejora en 3y/6000 (iteración).
+  - Confirmación en 3y/60000 (aprobación final).
+  - Coherencia táctica en 3m/10000 (régimen actual).
+  - Sin regresión en paridad activa comparable, trazabilidad, persistencia restart-safe, salud operativa ni drift crítico.
+
+7. **No-regresión y rollback selectivo:**
+  - Si falla un gate crítico, rollback al último snapshot estable.
+  - No se promueven cambios por mejora aislada de una sola métrica.
+  - Toda excepción debe quedar auditada y justificada.
+
+8. **Trazabilidad y persistencia obligatorias:**
+  - Decisiones de entrada/salida/sizing deben quedar en `trades_audit` y `kelly_sizing_log`.
+  - Estado crítico runtime debe persistirse en `trading_runtime_state` para continuidad tras reinicio.
+
+**Mandato para sesiones futuras:**
+Todo tuning nuevo debe tomar estos puntos como baseline oficial y solo modificarse cuando exista análisis que demuestre mejora real, con validación ejecutable y evidencia auditable.
 
 ---
 
@@ -972,6 +1063,16 @@ Antes de merge en producción, cada cambio debe responder explícitamente:
 6. ¿Qué endpoint/dashboard mostrará la salud del cambio?
 
 Si una propuesta no responde estos 6 puntos, no está lista para rollout.
+
+### 8) Estrategia canónica obligatoria para futuros tunings (Norma activa)
+
+Este documento consolida como **norma activa** lo definido en Sesión 59:
+
+1. La estrategia base de tuning es **Modo Único + Wolf Hunter**.
+2. La modificación de parámetros críticos está condicionada a evidencia comparativa multi-horizonte.
+3. Cualquier tuning que contradiga esta norma requiere justificación técnica explícita, validación ejecutable y trazabilidad completa en BD.
+4. En ausencia de evidencia de mejora, prevalece la configuración canónica vigente.
+5. Las posiciones legacy se administran por transición y no se recalifican retroactivamente como nuevas entradas.
 
 ---
 

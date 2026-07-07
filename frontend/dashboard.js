@@ -218,6 +218,20 @@ function fmtCloseReason(r) {
     return `<span class="close-reason reason-neutral">${r}</span>`;
 }
 
+function fmtContextBadge(p) {
+    if (!p) return '<span class="badge-context ctx-unknown" title="Sin contexto">SIN CONTEXTO</span>';
+    const state = (p.config_context_state || p.context_state || '').toString().toLowerCase();
+    const label = p.config_context_label || (state === 'legacy' ? 'LEGACY' : state === 'current' ? 'ACTUAL' : state === 'partial' ? 'PARCIAL' : 'SIN CONTEXTO');
+    const cls = state === 'legacy' ? 'ctx-legacy' : state === 'current' ? 'ctx-current' : state === 'partial' ? 'ctx-partial' : 'ctx-unknown';
+    const entryMode = p.entry_regime_mode || '—';
+    const entryProfile = p.entry_profile_label || '—';
+    const currentMode = p.current_regime_mode || '—';
+    const currentProfile = p.current_regime_profile_label || '—';
+    const reason = p.config_context_reason || 'no_context';
+    const title = `Entrada ${entryMode}/${entryProfile} | Actual ${currentMode}/${currentProfile} | ${reason}`;
+    return `<span class="badge-context ${cls}" title="${title}">${label}</span>`;
+}
+
 // ── Category helpers (must be before any render function) ───────────────────
 const CAT_ICON  = { 'LARGE_CAP': '🏦', 'MIDCAP_ALT': '📊', 'NARRATIVE': '🤖', 'MEME': '🎭' };
 const CAT_LABEL = { 'LARGE_CAP': 'LARGE CAP', 'MIDCAP_ALT': 'MID ALT', 'NARRATIVE': 'NARRATIVE', 'MEME': 'MEME' };
@@ -1088,7 +1102,12 @@ function renderOpenPositions(d) {
     const rows = [];
     for (const p of visiblePositions) {
         const _isBounce = !!p.bounce_entry;
-        const rowCls = _isBounce ? 'row-bounce' : parseFloat(p.unrealized_pnl||0) > 0 ? 'row-pnl-pos' : parseFloat(p.unrealized_pnl||0) < -0.01 ? 'row-pnl-neg' : '';
+        const _ctxCls = p.config_context_state === 'legacy' ? 'row-context-legacy' : p.config_context_state === 'partial' ? 'row-context-partial' : p.config_context_state === 'current' ? 'row-context-current' : '';
+        const rowCls = [
+            _isBounce ? 'row-bounce' : '',
+            _ctxCls,
+            parseFloat(p.unrealized_pnl||0) > 0 ? 'row-pnl-pos' : parseFloat(p.unrealized_pnl||0) < -0.01 ? 'row-pnl-neg' : ''
+        ].filter(Boolean).join(' ');
         const curP   = parseFloat(p.current_price || 0);
         const entryP = parseFloat(p.entry_price || 0);
         const _escEntries = p.entries || [];
@@ -1135,6 +1154,7 @@ function renderOpenPositions(d) {
         const partialBadge = isPartialOpen
             ? ` <span class="badge-partial" title="${_partialTooltip}">✂️PARCIAL</span>`
             : '';
+        const contextBadge = fmtContextBadge(p);
 
         const tp = parseFloat(p.take_profit || 0);
         let progressHtml = '—';
@@ -1148,10 +1168,15 @@ function renderOpenPositions(d) {
             ? fmtEntryTime(firstEntry.opened_at, realHrs)
             : fmtEntryTime(p.entry_time, realHrs);
 
+        const invVal = parseFloat(p.invested_usdt || 0);
+        const invMargin = p.trade_type === 'futures' && p.margin_usdt
+            ? `<br><small class="inv-margin" title="Margin comprometido">mgn $${fmt(p.margin_usdt)}</small>`
+            : '';
         rows.push(`
         <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id}', 'open')" style="cursor:pointer" data-symbol="${p.symbol}">
-            <td>${typeBadge} <strong>${p.symbol}</strong>${overflowBadge}${escBadge}${partialBadge}${bounceBadge}</td>
+            <td>${typeBadge} <strong>${p.symbol}</strong>${contextBadge}${overflowBadge}${escBadge}${partialBadge}${bounceBadge}</td>
             <td>$${fmt(entryP)}<br><small class="entry-time">${entryTimeStr}</small></td>
+            <td class="inv-cell" title="${p.trade_type === 'futures' ? 'Notional invertido' : 'Costo total'}">$${fmt(invVal)} USDT${invMargin}</td>
             <td class="sl-tp-cell">${fmtSlTpCell(p)}</td>
             <td class="sl-tp-badges">${fmtSlTpBadges(p)}</td>
             <td>${progressHtml}</td>
@@ -1173,7 +1198,7 @@ function renderOpenPositions(d) {
                 <span style="color:#888;font-weight:600">Esc${_idx}</span>
                 <small style="color:#555;font-style:italic">&nbsp;(entrada anterior — no disponible tras reinicio)</small>
             </td>
-            <td colspan="6" style="color:#555;font-size:11px;font-style:italic">Datos no recuperables: posición promediada por Binance al sincronizar</td>
+            <td colspan="7" style="color:#555;font-size:11px;font-style:italic">Datos no recuperables: posición promediada por Binance al sincronizar</td>
         </tr>`);
                 }
             }
@@ -1193,6 +1218,7 @@ function renderOpenPositions(d) {
                 <small style="color:#666">(~$${fmt(escCost)})</small>
             </td>
             <td><small class="entry-time">${escEntryFmt}</small></td>
+            <td></td>
             <td colspan="3" style="color:#888;font-size:12px">
                 PnL entrada: <span class="${escPnl>=0?'positive':'negative'}" style="font-weight:600">${escPnl>=0?'+':''}${fmt(escPnl)} USDT (${escPct>=0?'+':''}${fmt(escPct)}%)</span>
             </td>
@@ -1210,6 +1236,7 @@ function renderOpenPositions(d) {
                 <tr>
                     <th>Símbolo</th>
                     <th>Entrada</th>
+                    <th>Invertido</th>
                     <th>SL / TP</th>
                     <th>Estado SL/TP</th>
                     <th>Progreso</th>
@@ -1222,6 +1249,8 @@ function renderOpenPositions(d) {
         </div>
         <div class="positions-summary">
             ${visiblePositions.length} posiciones${_allPos.length !== visiblePositions.length ? ` (de ${_allPos.length} total)` : ''}
+            ${d.legacy_count != null ? `&nbsp;|&nbsp;<span style="color:#ff7070;font-weight:700">LEGACY ${d.legacy_count}</span>` : ''}
+            ${d.partial_context_count != null ? `&nbsp;|&nbsp;<span style="color:#f39c12;font-weight:700">PARCIAL ${d.partial_context_count}</span>` : ''}
             ${(()=>{const _bc=visiblePositions.filter(p=>p.bounce_entry).length;return _bc>0?`&nbsp;|&nbsp;<span style="color:#e67e22;font-weight:700">⚠️ ${_bc} en rebote — Rescue Mode activo</span>`:'';})()} &nbsp;|&nbsp;
             Invertido: <strong>$${fmt(totalInvested)} USDT</strong>
             &nbsp;|&nbsp;
@@ -1304,6 +1333,7 @@ function renderClosedPositions(d) {
     const avgAccuracy = withPred.length > 0
         ? withPred.reduce((s, p) => s + parseFloat(p.prediction_accuracy || 0), 0) / withPred.length
         : 0;
+    const totalInvestedClosed = sortedPositions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
 
     el.innerHTML = `
         <div class="table-scroll-10">
@@ -1312,6 +1342,7 @@ function renderClosedPositions(d) {
                 <tr>
                     <th>Símbolo</th>
                     <th>Entrada → Salida</th>
+                    <th>Invertido</th>
                     <th>Resultado</th>
                     <th>Razón</th>
                     <th>SL/TP Lifecycle</th>
@@ -1322,8 +1353,14 @@ function renderClosedPositions(d) {
                 ${sortedPositions.map(p => {
                     const actualPnl = parseFloat(p.pnl || 0);
                     const _clIsBounce = !!p.bounce_entry || p.close_reason === 'sso_bounce_rescue';
-                    const rowCls = _clIsBounce ? 'row-bounce-closed' : actualPnl > 0 ? 'row-pnl-pos' : actualPnl < -0.01 ? 'row-pnl-neg' : '';
+                    const _ctxCls = p.config_context_state === 'legacy' ? 'row-context-legacy' : p.config_context_state === 'partial' ? 'row-context-partial' : p.config_context_state === 'current' ? 'row-context-current' : '';
+                    const rowCls = [
+                        _clIsBounce ? 'row-bounce-closed' : '',
+                        _ctxCls,
+                        actualPnl > 0 ? 'row-pnl-pos' : actualPnl < -0.01 ? 'row-pnl-neg' : ''
+                    ].filter(Boolean).join(' ');
                     const typeBadge = tradeTypeBadge(p.trade_type);
+                    const contextBadge = fmtContextBadge(p);
                     const exitTimeFmt = fmtDateLocal(p.exit_time);
 
                     // VIS-3b: SL/TP lifecycle badges for closed
@@ -1358,8 +1395,9 @@ function renderClosedPositions(d) {
 
                     return `
                     <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'closed')" style="cursor:pointer">
-                        <td>${typeBadge} ${catIcon(p.category || 'MIDCAP_ALT')} <strong>${p.symbol}</strong></td>
+                        <td>${typeBadge} ${catIcon(p.category || 'MIDCAP_ALT')} <strong>${p.symbol}</strong>${contextBadge}</td>
                         <td>$${fmt(p.entry_price)} → $${fmt(p.exit_price)}</td>
+                        <td class="inv-cell" title="${p.trade_type === 'futures' ? 'Notional invertido' : 'Costo total'}">$${fmt(p.invested_usdt || 0)} USDT</td>
                         <td class="${pnlClass(actualPnl)}">${actualPnl >= 0 ? '+' : ''}${fmt(actualPnl)} USDT<br><small>${fmt(p.pnl_percentage)}%</small></td>
                         <td>${fmtCloseReason(p.close_reason)}</td>
                         <td class="sl-tp-badges">${lifecycleBadges}</td>
@@ -1371,6 +1409,10 @@ function renderClosedPositions(d) {
         </div>
         <div class="positions-summary">
             ${sortedPositions.length} trades${_allClosed.length !== filteredClosed.length ? ` (de ${_allClosed.length} total)` : ''} cerrados (últimos ${periodDays} días) &nbsp;|&nbsp;
+            ${d.legacy_count != null ? `<span style="color:#ff7070;font-weight:700">LEGACY ${d.legacy_count}</span> &nbsp;|&nbsp;` : ''}
+            ${d.partial_context_count != null ? `<span style="color:#f39c12;font-weight:700">PARCIAL ${d.partial_context_count}</span> &nbsp;|&nbsp;` : ''}
+            Total invertido: <strong>$${fmt(totalInvestedClosed)} USDT</strong>
+            &nbsp;|&nbsp;
             PnL Total: <strong class="${pnlClass(sortedPositions.reduce((s,p) => s + parseFloat(p.pnl||0), 0))}">${sortedPositions.reduce((s,p) => s + parseFloat(p.pnl||0), 0) >= 0 ? '+' : ''}${fmt(sortedPositions.reduce((s,p) => s + parseFloat(p.pnl||0), 0))} USDT</strong>
             ${withPred.length > 0 ? `&nbsp;|&nbsp;Precisión Pred. Promedio: ${fmtAccuracyFromField(avgAccuracy)}` : ''}
         </div>
@@ -1618,6 +1660,7 @@ function showPositionDetailModal(symbol, positionId, status) {
     const _modalMaxIdx = _modalEntries.length > 0
         ? Math.max(..._modalEntries.map(e => e.escalonamiento_index || 1)) : 1;
     const _showEscTable = _modalEntries.length > 1 || _modalMaxIdx >= 2;
+    const _contextBadge = fmtContextBadge(position);
     const _escTableHtml = _showEscTable ? (() => {
         const _knownModalIdx = new Set(_modalEntries.map(e => e.escalonamiento_index || 1));
         const totalCost = _modalEntries.reduce((s, e) => s + parseFloat(e.entry_price||0)*parseFloat(e.qty||0), 0);
@@ -1691,6 +1734,7 @@ function showPositionDetailModal(symbol, positionId, status) {
                             <div><label>Cantidad:</label><span>${fmt(position.quantity, 4)}</span></div>
                             <div><label>Invertido:</label><span>$${fmt(position.invested_usdt || (position.entry_price * position.quantity))} USDT</span></div>
                             <div><label>Apertura:</label><span>${fmtModalDate(position.entry_time)}</span></div>
+                            <div><label>Contexto:</label><span>${_contextBadge}</span></div>
                         </div>
                     </div>
                     ${_escTableHtml}
@@ -2269,6 +2313,8 @@ function showFuturesDetailModal(symbol, side) {
     const sideLabel = isShort
         ? '<span style="color:#9b59b6;font-weight:700">▼ SHORT</span>'
         : '<span style="color:#27ae60;font-weight:700">▲ LONG</span>';
+    const contextBadge = fmtContextBadge(pos);
+    const contextBadge = fmtContextBadge(pos);
     modal.innerHTML = `
         <div class="modal-overlay" onclick="closePositionDetailModal()">
             <div class="modal-content" onclick="event.stopPropagation()">
@@ -2284,6 +2330,7 @@ function showFuturesDetailModal(symbol, side) {
                             <div><label>Lado:</label><span>${sideLabel}</span></div>
                             <div><label>Cantidad:</label><span>${parseFloat(pos.qty || 0).toFixed(4)}</span></div>
                             <div><label>Abierto:</label><span>${pos.opened_at ? relativeTime(pos.opened_at) : '—'}</span></div>
+                            <div><label>Contexto:</label><span>${contextBadge}</span></div>
                         </div>
                     </div>
                     <div class="modal-section">
@@ -3730,8 +3777,10 @@ async function renderFuturesPositions() {
                 const _fEsc = p.escalamientos || 0;
                 const _fEscTip = (_fEsc > 1 && p.entries) ? p.entries.map(e => `Esc${e.escalonamiento_index}: $${fmt(e.entry_price)} \u00d7 ${e.qty} (${e.age_h}h)`).join('&#10;') : '';
                 const _fEscBadge = _fEsc > 1 ? ` <span class="badge-esc" title="${_fEscTip}">\u{1F4CA}\u00d7${_fEsc}</span>` : '';
-                return `<tr style="cursor:pointer" onclick="showFuturesDetailModal('${p.symbol}','${p.side}')">
-                    <td style="color:#9b59b6;font-weight:600">${p.symbol}${_fEscBadge}</td>
+                const contextBadge = fmtContextBadge(p);
+                const rowCls = p.config_context_state === 'legacy' ? 'row-context-legacy' : p.config_context_state === 'partial' ? 'row-context-partial' : p.config_context_state === 'current' ? 'row-context-current' : '';
+                return `<tr class="${rowCls}" style="cursor:pointer" onclick="showFuturesDetailModal('${p.symbol}','${p.side}')">
+                    <td style="color:#9b59b6;font-weight:600">${p.symbol}${contextBadge}${_fEscBadge}</td>
                     <td>${sideLabel}</td>
                     <td>${parseFloat(p.qty || 0).toFixed(4)}</td>
                     <td>$${fmt(p.entry_price)}</td>
@@ -3751,6 +3800,8 @@ async function renderFuturesPositions() {
             Total PnL No Realizado (Futuros):
             <span class="${pnlCls}"><strong>${fmt(totalPnl, 4)} USDT</strong></span>
             &nbsp;|&nbsp; Posiciones: <strong>${data.count}</strong>
+            ${data.legacy_count != null ? `&nbsp;|&nbsp;<span style="color:#ff7070;font-weight:700">LEGACY ${data.legacy_count}</span>` : ''}
+            ${data.partial_context_count != null ? `&nbsp;|&nbsp;<span style="color:#f39c12;font-weight:700">PARCIAL ${data.partial_context_count}</span>` : ''}
         </div>`;
     } catch (e) {
         el.innerHTML = '<p class="loading">Error cargando futuros</p>';
@@ -3828,8 +3879,10 @@ async function renderFuturesClosed() {
                 const _fcEscBadge = (_fcEscTotal > 1 && _fcEscIdx)
                     ? ` <span class="sl-badge esc" title="Escalonamiento ${_fcEscIdx}/${_fcEscTotal}${_fcCgid ? ' grp:' + _fcCgid.substring(0,8) : ''}">📊${_fcEscIdx}/${_fcEscTotal}</span>`
                     : '';
-                return `<tr style="cursor:pointer" onclick="showFuturesClosedDetailModal('${p.symbol}','${p.side}',${i})">
-                    <td><span class="badge-futures">FUT</span> <strong style="color:#9b59b6">${p.symbol}</strong>${_fcEscBadge}</td>
+                const contextBadge = fmtContextBadge(p);
+                const rowCls = p.config_context_state === 'legacy' ? 'row-context-legacy' : p.config_context_state === 'partial' ? 'row-context-partial' : p.config_context_state === 'current' ? 'row-context-current' : '';
+                return `<tr class="${rowCls}" style="cursor:pointer" onclick="showFuturesClosedDetailModal('${p.symbol}','${p.side}',${i})">
+                    <td><span class="badge-futures">FUT</span> <strong style="color:#9b59b6">${p.symbol}</strong>${contextBadge}${_fcEscBadge}</td>
                     <td><span style="color:#9b59b6">${p.side === 'SHORT' ? '▼ SHORT' : '▲ LONG'}</span></td>
                     <td>$${fmt(p.entry_price)} → $${fmt(p.exit_price)}</td>
                     <td class="${pnlCls}">${p.pnl >= 0 ? '+' : ''}${fmt(p.pnl, 4)} USDT</td>
@@ -3842,6 +3895,8 @@ async function renderFuturesClosed() {
         <div class="positions-summary">
             ${d.positions.length} futuros cerrados (últimos ${periodDays} días) &nbsp;|&nbsp;
             PnL Total: <span class="${pnlCls}"><strong>${totalPnl >= 0 ? '+' : ''}${fmt(totalPnl, 4)} USDT</strong></span>
+            ${d.legacy_count != null ? `&nbsp;|&nbsp;<span style="color:#ff7070;font-weight:700">LEGACY ${d.legacy_count}</span>` : ''}
+            ${d.partial_context_count != null ? `&nbsp;|&nbsp;<span style="color:#f39c12;font-weight:700">PARCIAL ${d.partial_context_count}</span>` : ''}
         </div>`;
     } catch (e) {
         el.innerHTML = '<p class="loading">Error cargando futuros cerrados</p>';
@@ -3910,6 +3965,7 @@ function showFuturesClosedDetailModal(symbol, side, idx) {
                             <div><label>Lado:</label><span>${sideLabel}</span></div>
                             <div><label>Cantidad:</label><span>${parseFloat(pos.qty || 0).toFixed(4)}</span></div>
                             <div><label>Cerrado:</label><span>${fmtDateLocal(pos.closed_at || pos.opened_at)}</span></div>
+                            <div><label>Contexto:</label><span>${contextBadge}</span></div>
                         </div>
                     </div>
                     
