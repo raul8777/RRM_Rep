@@ -76,7 +76,6 @@ class AutonomousSignalGenerator:
                 symbol=symbol,
                 interval=interval,
                 limit=limit,
-                request_params={"timeout": 10},
             )
             
             # Parse klines into structured data

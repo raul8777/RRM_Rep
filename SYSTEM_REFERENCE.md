@@ -1,7 +1,31 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 06 2026 | Sesión 57: Estandarización de herramientas de cierre SPOT (rutas Dev/tools).
+> Última actualización: jul 06 2026 | Sesión 58: Fixes klines, filtro 1000PEPEUSDT, guards notional SPOT/FUTURES.
+
+---
+
+### ✅ Sesión 58 — Fixes klines, filtro inválido, guards notional SPOT/FUTURES — jul 06 2026
+
+**Objetivo operativo (cumplido):**
+Corregir firma de llamadas kline que causaban errores en ciclos de entrada futures, filtrar símbolo inválido 1000PEPEUSDT, y añadir guardas de notional mínimo en SPOT y FUTURES.
+
+**Implementación aplicada:**
+
+1. **`autonomous_signals.py`:**
+   - Removido `request_params={"timeout": 10}` del call a `get_klines` (argumento no soportado por el wrapper interno).
+
+2. **`run_trades.py`:**
+   - `1000PEPEUSDT` añadido a `_INVALID_FUTURES_SYMBOLS` para evitar rechazos en el scanner.
+   - 4 llamadas de klines corregidas de `client.get_klines(...)` a `client.client.get_klines(symbol=..., interval=..., limit=...)` (BTC 1h bounce, BTC 3h momentum, símbolo 5m, BTC 5m fallback).
+   - Guard NOTIONAL_MINIMO SPOT: si el nocional calculado (`qty * price`) está por debajo de `max(10.0, spot_min_entry_notional_usdt)`, rechaza la entrada antes de validar filtros del exchange.
+
+3. **`futures_client.py`:**
+   - `open_short`: guard `actual_notional < 10.0` antes de calcular SL/TP — rechaza y loguea sin enviar orden.
+   - `open_long`: ídem, guard `actual_notional < 10.0` antes de calcular SL/TP.
+
+**Principio operativo:**
+Toda orden SPOT o FUTURES con nocional por debajo de $10 debe ser rechazada en tiempo de ejecución antes de intentar el envío a Binance, para evitar rechazos -1111 del exchange y registros de intento fallido en logs.
 
 ---
 

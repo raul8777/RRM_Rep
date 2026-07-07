@@ -1770,6 +1770,14 @@ class FuturesClient:
             print(f"[Futures] SHORT {symbol}: qty=0 after alignment (usdt={usdt_amount}, price={price})")
             return None
 
+        actual_notional = qty * price
+        if actual_notional < 10.0:
+            print(
+                f"[Futures] SHORT {symbol}: notional=${actual_notional:.4f} < $10.0 minimum "
+                f"(qty={qty}, price={price:.6f}) — rejected"
+            )
+            return None
+
         tick = self._get_tick_size(symbol)
         sl_price = self._align_price(price * (1 + sl_pct / 100), tick)
         tp_price = self._align_price(price * (1 - tp_pct / 100), tick)
@@ -1939,6 +1947,14 @@ class FuturesClient:
 
         if qty <= 0:
             print(f"[Futures] LONG {symbol}: qty=0 after alignment")
+            return None
+
+        actual_notional = qty * price
+        if actual_notional < 10.0:
+            print(
+                f"[Futures] LONG {symbol}: notional=${actual_notional:.4f} < $10.0 minimum "
+                f"(qty={qty}, price={price:.6f}) — rejected"
+            )
             return None
 
         tick     = self._get_tick_size(symbol)

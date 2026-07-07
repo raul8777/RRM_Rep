@@ -46,6 +46,7 @@ _INVALID_SYMBOLS: set = {"EONUSDT", "ADDUSDT", "MEETONEUSDT", "ATDUSDT", "EOPUSD
 _INVALID_FUTURES_SYMBOLS: set = {
     "USD1USDT", "PAXGUSDT", "XAUTUSDT", "RLUSDUSDT", "USDCUSDT", "BUSDUSDT",
     "TUSDUSDT", "FDUSDUSDT", "DAIUSDT", "USDDUSDT", "GUSDUSDT", "UUSDUSDT",
+    "1000PEPEUSDT",
 }
 _INVALID_SYMBOLS_STATE_LOADED: bool = False
 
@@ -4396,7 +4397,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 # FIX-F2: Block new SHORTs if BTC is in an intraday bounce (1h candle)
                 _no_short_btc_1h_threshold = getattr(settings, 'futures_no_short_btc_1h_threshold', 0.8)
                 try:
-                    _btc_1h_klines = client.get_klines('BTCUSDT', '1h', limit=2)
+                    _btc_1h_klines = client.client.get_klines(symbol='BTCUSDT', interval='1h', limit=2)
                     _btc_1h_chg = (float(_btc_1h_klines[-1][4]) - float(_btc_1h_klines[-1][1])) / float(_btc_1h_klines[-1][1]) * 100 if _btc_1h_klines else 0.0
                     if _btc_1h_chg >= _no_short_btc_1h_threshold:
                         print(f'[Futures] SHORT {symbol} SKIPPED: BTC 1h bounce={_btc_1h_chg:+.2f}% >= {_no_short_btc_1h_threshold}% — no new SHORTs in rally')
@@ -4409,7 +4410,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 # PB5: BTC 3h rolling momentum filter — catches gradual rallies
                 _no_short_btc_3h_threshold = getattr(settings, 'futures_no_short_btc_3h_threshold', 1.0)
                 try:
-                    _btc_3h_klines = client.get_klines('BTCUSDT', '1h', limit=4)  # 4 candles = last 3 completed + current
+                    _btc_3h_klines = client.client.get_klines(symbol='BTCUSDT', interval='1h', limit=4)  # 4 candles = last 3 completed + current
                     if _btc_3h_klines and len(_btc_3h_klines) >= 4:
                         _btc_3h_open = float(_btc_3h_klines[-4][1])  # open of 3h ago candle
                         _btc_3h_close = float(_btc_3h_klines[-1][4])  # close of current candle
@@ -4426,14 +4427,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 _confirm_red = getattr(settings, 'futures_confirm_red_candle', True)
                 if _confirm_red:
                     try:
-                        _5m_klines = client.get_klines(symbol, '5m', limit=2)
+                        _5m_klines = client.client.get_klines(symbol=symbol, interval='5m', limit=2)
                         if _5m_klines and len(_5m_klines) >= 2:
                             _last_5m = _5m_klines[-2]  # last COMPLETED 5m candle
                             _5m_open = float(_last_5m[1])
                             _5m_close = float(_last_5m[4])
                             if _5m_close > _5m_open:  # green candle = price rising
                                 # Fallback: check BTC 5m instead
-                                _btc_5m = client.get_klines('BTCUSDT', '5m', limit=2)
+                                _btc_5m = client.client.get_klines(symbol='BTCUSDT', interval='5m', limit=2)
                                 _btc_5m_close = float(_btc_5m[-2][4]) if _btc_5m and len(_btc_5m) >= 2 else 0
                                 _btc_5m_open = float(_btc_5m[-2][1]) if _btc_5m and len(_btc_5m) >= 2 else 0
                                 if _btc_5m_close > _btc_5m_open:
@@ -5019,8 +5020,18 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         trade_allocation = _apply_fng_kelly_boost(trade_allocation, _fng_value, settings)
 
         qty = align_quantity_to_step(trade_allocation / price, filters["step"])
-        valid, reason = is_quantity_valid(qty, price, filters)
         _signal_id = signal_meta.get(symbol, {}).get('signal_id') if isinstance(signal_meta, dict) else None
+        _entry_notional = qty * price
+        _spot_min_entry_notional = max(10.0, float(getattr(settings, 'spot_min_entry_notional_usdt', 10.0)))
+        if _entry_notional < _spot_min_entry_notional:
+            print(
+                f"Skipping buy {symbol}: entry notional ${_entry_notional:.4f} < "
+                f"${_spot_min_entry_notional:.2f} minimum"
+            )
+            update_signal_decision(symbol, "rejected", "NOTIONAL_MINIMO", signal_id=_signal_id)
+            continue
+
+        valid, reason = is_quantity_valid(qty, price, filters)
 
         if not valid:
             print(f"Skipping buy {symbol}: {reason}")
