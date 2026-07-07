@@ -33,6 +33,7 @@ from binance_truth_guard import (
     get_truth_status_spot,
     get_truth_status_futures,
     evaluate_spot_parity,
+    evaluate_futures_parity,
     auto_reconcile_spot,
     auto_reconcile_futures,
 )
@@ -2951,6 +2952,7 @@ async def get_dashboard_summary() -> Dict:
                 "entry_time": _g_entry_time,
                 "exit_time": _g_exit_time,
                 "metadata": _g_meta,
+                **_normalize_transaction_context(_g_meta, _runtime_ctx),
             })
         # Strip internal tracking field before exposing
         for _cl in closed_list:
@@ -4003,26 +4005,26 @@ def _quantify_spot_bull_root_causes(hours: int = 168, cycle_minutes: int = 5) ->
 
 _SPOT_BULL_CANDIDATE_V1: Dict[str, Any] = {
     "candidate_label": "spot_bull_quality_v1",
-    "objective": "less marginal entries, higher conviction sizing, explicit mirror in futures",
+    "objective": "single-mode, high-conviction sizing with anti-strangling entry gates and explicit futures mirror",
     "spot_changes": {
-        "min_signal_strength": 0.44,
-        "min_success_probability": 0.57,
-        "max_positions_spot_bull": 14,
-        "replace_ev_min_ratio": 1.2,
-        "overflow_min_strength": 0.85,
-        "overflow_min_prob": 0.68,
-        "kelly_conviction_max_pct": 0.12,
+        "min_signal_strength": 0.41,
+        "min_success_probability": 0.54,
+        "max_positions_spot_bull": 24,
+        "replace_ev_min_ratio": 1.05,
+        "overflow_min_strength": 0.80,
+        "overflow_min_prob": 0.62,
+        "kelly_conviction_max_pct": 0.13,
     },
     "futures_mirror_changes": {
-        "futures_min_prob": 0.54,
-        "futures_vol_spike_min": 1.05,
-        "futures_max_new_per_cycle": 3,
-        "futures_overflow_min_strength": 0.60,
-        "futures_overflow_min_vol_spike": 2.2,
-        "max_positions_futures_short": 10,
+        "futures_min_prob": 0.52,
+        "futures_vol_spike_min": 1.00,
+        "futures_max_new_per_cycle": 4,
+        "futures_overflow_min_strength": 0.58,
+        "futures_overflow_min_vol_spike": 2.0,
+        "max_positions_futures_short": 12,
     },
     "notes": [
-        "Mirror is explicit: each quality-tightening move in SPOT has a bounded equivalent in FUTURES.",
+        "Mirror is explicit: each anti-strangling SPOT move has a bounded equivalent in FUTURES.",
         "Candidate does not auto-apply runtime config; it must pass Smart Backtest validation gate.",
         "Use with /smart-backtest/validation/start or /tuning/candidates/spot-bull-v1/validate-start.",
     ],
@@ -4542,25 +4544,28 @@ async def get_profit_realization_metrics(_auth=Depends(_require_api_key)) -> Dic
                 except Exception:
                     continue
                 for _pos in _pos_list:
-                    _entry = float(getattr(_pos, 'entry_price', 0) or 0)
-                    if _entry <= 0:
+                    try:
+                        _entry = float(getattr(_pos, 'entry_price', 0) or 0)
+                        if _entry <= 0:
+                            continue
+                        _pnl_pct = (_price - _entry) / _entry
+                        if _pnl_pct <= 0:
+                            continue
+                        _spot_positive += 1
+                        _spot_meta = dict(getattr(_pos, 'metadata', {}) or {})
+                        _locked = float(getattr(_pos, 'stop_loss', 0) or 0) >= _entry or float(_spot_meta.get('trailing_peak', 0) or 0) > _entry
+                        if _locked:
+                            _spot_locked += 1
+                        else:
+                            _spot_unlocked += 1
+                            _spot_ref = _parse_profit_dt(_spot_meta.get(PROFIT_START_KEY)) or getattr(_pos, 'entry_time', None) or getattr(_pos, 'created_at', None)
+                            if _spot_ref:
+                                _spot_hold_minutes.append(max(0, int((_now - _spot_ref).total_seconds() // 60)))
+                        _spot_peak_pct = max(0.0, (float(_spot_meta.get('trailing_peak', _entry) or _entry) - _entry) / _entry)
+                        _spot_peak += _spot_peak_pct
+                        _spot_giveback += max(0.0, _spot_peak_pct - _pnl_pct)
+                    except Exception:
                         continue
-                    _pnl_pct = (_price - _entry) / _entry
-                    if _pnl_pct <= 0:
-                        continue
-                    _spot_positive += 1
-                    _spot_meta = dict(getattr(_pos, 'metadata', {}) or {})
-                    _locked = float(getattr(_pos, 'stop_loss', 0) or 0) >= _entry or float(_spot_meta.get('trailing_peak', 0) or 0) > _entry
-                    if _locked:
-                        _spot_locked += 1
-                    else:
-                        _spot_unlocked += 1
-                        _spot_ref = _parse_profit_dt(_spot_meta.get(PROFIT_START_KEY)) or getattr(_pos, 'entry_time', None) or getattr(_pos, 'created_at', None)
-                        if _spot_ref:
-                            _spot_hold_minutes.append(max(0, int((_now - _spot_ref).total_seconds() // 60)))
-                    _spot_peak_pct = max(0.0, (float(_spot_meta.get('trailing_peak', _entry) or _entry) - _entry) / _entry)
-                    _spot_peak += _spot_peak_pct
-                    _spot_giveback += max(0.0, _spot_peak_pct - _pnl_pct)
 
         _futures_open = []
         try:
@@ -4579,28 +4584,28 @@ async def get_profit_realization_metrics(_auth=Depends(_require_api_key)) -> Dic
         for _pos in _futures_open:
             try:
                 _fc_price = float(_fc_ref.get_price(_pos.symbol)) if _fc_ref else 0.0
+                _entry = float(getattr(_pos, 'entry_price', 0) or 0)
+                _qty = float(getattr(_pos, 'qty', 0) or 0)
+                if _entry <= 0 or _qty <= 0:
+                    continue
+                _pnl_pct = _pos.unrealized_pnl(_fc_price) / (_entry * _qty)
+                if _pnl_pct <= 0:
+                    continue
+                _fut_positive += 1
+                _meta = dict(getattr(_pos, '_smart_meta', {}) or {})
+                _locked = bool(_meta.get('breakeven_done')) or bool(_meta.get('trail_best_price'))
+                if _locked:
+                    _fut_locked += 1
+                else:
+                    _fut_unlocked += 1
+                    _fut_ref = _parse_profit_dt(_meta.get(PROFIT_START_KEY)) or getattr(_pos, 'opened_at', None)
+                    if _fut_ref:
+                        _fut_hold_minutes.append(max(0, int((_now - _fut_ref).total_seconds() // 60)))
+                _fut_peak_pct = max(0.0, float(_meta.get('peak_pnl_pct', 0.0) or 0.0))
+                _fut_peak += _fut_peak_pct
+                _fut_giveback += max(0.0, _fut_peak_pct - _pnl_pct)
             except Exception:
                 continue
-            _entry = float(getattr(_pos, 'entry_price', 0) or 0)
-            _qty = float(getattr(_pos, 'qty', 0) or 0)
-            if _entry <= 0 or _qty <= 0:
-                continue
-            _pnl_pct = _pos.unrealized_pnl(_fc_price) / (_entry * _qty)
-            if _pnl_pct <= 0:
-                continue
-            _fut_positive += 1
-            _meta = dict(getattr(_pos, '_smart_meta', {}) or {})
-            _locked = bool(_meta.get('breakeven_done')) or bool(_meta.get('trail_best_price'))
-            if _locked:
-                _fut_locked += 1
-            else:
-                _fut_unlocked += 1
-                _fut_ref = _parse_profit_dt(_meta.get(PROFIT_START_KEY)) or getattr(_pos, 'opened_at', None)
-                if _fut_ref:
-                    _fut_hold_minutes.append(max(0, int((_now - _fut_ref).total_seconds() // 60)))
-            _fut_peak_pct = max(0.0, float(_meta.get('peak_pnl_pct', 0.0) or 0.0))
-            _fut_peak += _fut_peak_pct
-            _fut_giveback += max(0.0, _fut_peak_pct - _pnl_pct)
 
         _total_positive = _spot_positive + _fut_positive
         _total_unlocked = _spot_unlocked + _fut_unlocked
@@ -4611,10 +4616,16 @@ async def get_profit_realization_metrics(_auth=Depends(_require_api_key)) -> Dic
             _avg_minutes = round(sum(_minutes_pool) / len(_minutes_pool), 1)
         _giveback_ratio = round((_spot_giveback + _fut_giveback) / (_spot_peak + _fut_peak), 4) if (_spot_peak + _fut_peak) > 0 else 0.0
 
-        _audit_rows = db_client.execute_query(
-            "SELECT COUNT(*) AS n FROM trades_audit WHERE event LIKE 'profit_realization_supervisor%' AND created_at >= NOW() - INTERVAL '24 hours'"
-        )
-        _supervisor_24h = int((_audit_rows[0].get('n') if _audit_rows else 0) or 0)
+        _supervisor_24h = 0
+        for _ts_col in ("ts", "created_at"):
+            try:
+                _audit_rows = db_client.execute_query(
+                    f"SELECT COUNT(*) AS n FROM trades_audit WHERE event LIKE 'profit_realization_supervisor%%' AND {_ts_col} >= NOW() - INTERVAL '24 hours'"
+                )
+                _supervisor_24h = int((_audit_rows[0].get('n') if _audit_rows else 0) or 0)
+                break
+            except Exception:
+                continue
 
         return {
             "ok": True,
@@ -4691,10 +4702,16 @@ async def get_unified_governance_metrics(_auth=Depends(_require_api_key)) -> Dic
                 _loss_positions += 1
                 _watchdog_levels.append(int(_loss.get('watchdog_level', 0) or 0))
 
-        _audit_24h = db_client.execute_query(
-            "SELECT COUNT(*) AS n FROM trades_audit WHERE event='unified_governance_decision' AND created_at >= NOW() - INTERVAL '24 hours'"
-        )
-        _audit_n = int((_audit_24h[0].get('n') if _audit_24h else 0) or 0)
+        _audit_n = 0
+        for _ts_col in ("created_at", "ts"):
+            try:
+                _audit_24h = db_client.execute_query(
+                    f"SELECT COUNT(*) AS n FROM trades_audit WHERE event='unified_governance_decision' AND {_ts_col} >= NOW() - INTERVAL '24 hours'"
+                )
+                _audit_n = int((_audit_24h[0].get('n') if _audit_24h else 0) or 0)
+                break
+            except Exception:
+                continue
 
         return {
             "ok": True,

@@ -96,6 +96,12 @@ class PositionManager:
         """FIX-9: Write a traceability record to trades_audit for SPOT events."""
         if not self.db_client:
             return
+        original_event = event
+        if len(event) > 40:
+            event = event[:40]
+            logger.warning(
+                f"SPOT audit event truncated ({symbol}): '{original_event}' -> '{event}'"
+            )
         try:
             self.db_client.execute_update(
                 "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "

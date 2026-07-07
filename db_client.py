@@ -5,6 +5,8 @@ Handles PostgreSQL database connections and operations with connection pooling.
 """
 
 import logging
+import re
+import traceback
 from typing import Dict, List, Optional, Any
 from contextlib import contextmanager
 import psycopg2
@@ -84,14 +86,30 @@ class DatabaseClient:
                 conn = None
             raise
         except Exception as e:
-            logger.error(f"Error getting connection from pool: {e}")
+            logger.error(f"Error during DB operation: {e}")
             if conn:
-                conn.rollback()
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             raise
         finally:
             if conn:
                 self.connection_pool.putconn(conn)
     
+    def _log_query_error(self, query: str, params: Optional[Any], exc: Exception) -> None:
+        """Log query diagnostic details without exposing sensitive values."""
+        try:
+            param_type = type(params).__name__ if params is not None else 'None'
+            param_len = len(params) if hasattr(params, '__len__') else 'N/A'
+            placeholder_count = len(re.findall(r'(?<!%)%s(?!%)', query or ''))
+            logger.error(
+                f"DB execute error: {exc} | placeholders={placeholder_count} | "
+                f"params_type={param_type} | params_len={param_len} | query={query[:200]}"
+            )
+        except Exception:
+            pass
+
     def execute_query(self, query: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
         """
         Execute a SELECT query and return results.
@@ -105,7 +123,11 @@ class DatabaseClient:
         """
         with self.get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(query, params or ())
+                try:
+                    cursor.execute(query, params or ())
+                except (IndexError, TypeError) as exc:
+                    self._log_query_error(query, params, exc)
+                    raise
                 results = cursor.fetchall()
                 return [dict(row) for row in results]
     
@@ -122,7 +144,11 @@ class DatabaseClient:
         """
         with self.get_connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(query, params or ())
+                try:
+                    cursor.execute(query, params or ())
+                except (IndexError, TypeError) as exc:
+                    self._log_query_error(query, params, exc)
+                    raise
                 affected = cursor.rowcount
                 conn.commit()
                 return affected
@@ -143,7 +169,11 @@ class DatabaseClient:
             return 0
         with self.get_connection() as conn:
             with conn.cursor() as cursor:
-                pg_execute_batch(cursor, query, params_list, page_size=page_size)
+                try:
+                    pg_execute_batch(cursor, query, params_list, page_size=page_size)
+                except (IndexError, TypeError) as exc:
+                    self._log_query_error(query, params_list, exc)
+                    raise
                 total_affected = len(params_list)
                 conn.commit()
                 return total_affected
@@ -164,7 +194,11 @@ class DatabaseClient:
             with conn.cursor() as cursor:
                 affected_rows: List[int] = []
                 for query, params in statements:
-                    cursor.execute(query, params or ())
+                    try:
+                        cursor.execute(query, params or ())
+                    except (IndexError, TypeError) as exc:
+                        self._log_query_error(query, params, exc)
+                        raise
                     affected_rows.append(cursor.rowcount)
                 conn.commit()
                 return affected_rows

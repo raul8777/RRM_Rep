@@ -1,7 +1,36 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 06 2026 | Sesión 60: Visibilidad de transacciones legacy en dashboard y persistencia de contexto de entrada.
+> Última actualización: jul 07 2026 | Sesión 61: Revisión de incidente por sobre-apertura y rollback de aislamiento legacy en gates de entrada.
+
+---
+
+### ✅ Sesión 61 — Revisión De Incidente Por Sobre-Apertura + Rollback — jul 07 2026
+
+**Contexto operativo (incidente):**
+Se detectó apertura acelerada de múltiples posiciones nuevas pequeñas en SPOT tras cambio de configuración en transición de contexto legacy.
+
+**Revisión contra estrategia canónica de tuning (Sesión 59):**
+1. El cambio no debía promoverse sin evidencia completa de no-regresión en live/backtest/changepoint.
+2. El criterio de cohorte nueva debía mantenerse trazable sin confundir rotación de snapshot con cambio estructural de tesis.
+3. Ante riesgo operativo en vivo, correspondía rollback selectivo + contención inmediata.
+
+**Hallazgos técnicos clave:**
+1. Snapshot runtime (`config_snapshot_latest`) puede rotar y marcar entradas recientes como `legacy` por `snapshot mismatch` en clasificación contextual de dashboard.
+2. Si esa clasificación contextual se usa como gate de entrada, se corre riesgo de desalinear el control de exposición/cupo de nuevas entradas.
+3. El comportamiento observado (varias entradas pequeñas) es consistente con una relajación excesiva del gate en presencia de cohortes clasificadas como `legacy`.
+
+**Acciones aplicadas en esta sesión:**
+1. Activada contención operativa: `POST /control/pause-new-entries` con TTL 240 min.
+2. Ejecutado rollback completo del feature de aislamiento legacy en gates de entrada:
+  - revertidos cambios en `run_trades.py` (gates de exposición/cupo + helpers de clasificación para gating);
+  - revertidos flags y API/UI de configuración asociados en `config.py`, `app.py`, `frontend/config.html`, `frontend/config.js`;
+  - eliminada prueba específica temporal `tests/test_legacy_entry_isolation.py`.
+3. Verificación post-rollback: `get_errors` sin errores en archivos revertidos.
+
+**Estado y criterio de continuidad:**
+1. Se restaura comportamiento previo estable mientras se redefine una versión segura alineada a Sesión 59.
+2. Cualquier rediseño futuro de cohortes de entrada debe usar evidencia ejecutable y no depender de `snapshot_id` rotatorio como señal dominante de legacy para gating de riesgo.
 
 ---
 

@@ -417,7 +417,7 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
     if _signal_against:
         _adverse_signal_cycles += 1
     else:
-        _adverse_signal_cycles = 0  # reset when signal clears
+        _adverse_signal_cycles = max(0, _adverse_signal_cycles - 1)  # B4: decay instead of hard reset — prevents oscillating signals from never reaching threshold
 
     deterioration = False
     if context.pnl_velocity_1h is not None:

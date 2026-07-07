@@ -2314,7 +2314,6 @@ function showFuturesDetailModal(symbol, side) {
         ? '<span style="color:#9b59b6;font-weight:700">▼ SHORT</span>'
         : '<span style="color:#27ae60;font-weight:700">▲ LONG</span>';
     const contextBadge = fmtContextBadge(pos);
-    const contextBadge = fmtContextBadge(pos);
     modal.innerHTML = `
         <div class="modal-overlay" onclick="closePositionDetailModal()">
             <div class="modal-content" onclick="event.stopPropagation()">

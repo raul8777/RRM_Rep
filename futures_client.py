@@ -301,6 +301,10 @@ class FuturesClient:
         """FIX-9: Write a traceability record to trades_audit for every critical event."""
         if not self.db_client:
             return
+        original_event = event
+        if len(event) > 40:
+            event = event[:40]
+            print(f"[Futures/Audit] event truncated ({symbol}): '{original_event}' -> '{event}'")
         try:
             self.db_client.execute_update(
                 "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
@@ -2610,6 +2614,15 @@ class FuturesClient:
         _smart_tp_threshold   = get_param(settings, 'futures_smart_tp_extend_score_threshold') if settings else 2
         _smart_tp_ext_pct     = get_param(settings, 'futures_smart_tp_extension_pct')  if settings else 2.0
 
+        # C2: Fetch F&G once per cycle — shared across all positions in loop
+        _cycle_fng_value: float = 50.0
+        try:
+            from news_client import NewsClient as _NC2
+            _fng_data2 = _NC2().get_fear_greed()
+            _cycle_fng_value = float(_fng_data2.get('value', 50)) if isinstance(_fng_data2, dict) else 50.0
+        except Exception:
+            pass
+
         for key, pos in list(self._open_positions.items()):
             if pos.closed:
                 continue
@@ -2935,6 +2948,9 @@ class FuturesClient:
                                     pos._smart_meta['scale_out_done'] = True
                                     pos._smart_meta['sso_last_trigger'] = _sso_done_trigger
                                     pos._smart_meta['sso_last_reason'] = _sso_done_reason
+                                    # C3: reset peak baseline for residual position after partial
+                                    if _sso_close_pct < 1.0:
+                                        pos._smart_meta['peak_pnl_pct'] = pnl_pct
                                     # Track multilevel progress
                                     _sso_lvl = extract_sso_level_from_reason(_sso_done_reason)
                                     if _sso_lvl:
@@ -3064,7 +3080,7 @@ class FuturesClient:
                 # ── Unified Governance Supervisor (profit + loss arbitration) ─
                 try:
                     if not _pos_live_in_binance:
-                        self._audit(symbol, 'unified_governance_skipped_binance_unconfirmed', {
+                        self._audit(symbol, 'ug_skipped_binance_unconfirmed', {
                             'side': pos.side,
                             'reason': 'binance_not_confirmed',
                             'truth_severity': _truth_status.get('severity'),
@@ -3088,17 +3104,8 @@ class FuturesClient:
                     _ug_prs_pct = float(_pr_decision.close_pct if _pr_decision and _pr_decision.should_close else 0.0)
                     _ug_prs_reason = str(_pr_decision.reason if _pr_decision and _pr_decision.should_close else '')
                     _ug_prs_detail = str(_pr_decision.detail if _pr_decision and _pr_decision.should_close else '')
-                    # W2: Fetch F&G for futures UG (reuse from SSO path if already fetched, else fetch fresh)
-                    _ug_fng_value = None
-                    try:
-                        _bc_ref_fng = getattr(self, '_binance_client_ref', None)
-                        if _bc_ref_fng:
-                            from news_client import NewsClient as _NC
-                            _nc = _NC()
-                            _fng_data = _nc.get_fear_greed()
-                            _ug_fng_value = float(_fng_data.get('value', 50)) if isinstance(_fng_data, dict) else 50.0
-                    except Exception:
-                        pass
+                    # W2/C2: Use pre-fetched F&G from cycle cache (fetched once before position loop)
+                    _ug_fng_value = _cycle_fng_value
                     _ug_ctx = UnifiedGovernanceContext(
                         symbol=symbol,
                         trade_type='futures',

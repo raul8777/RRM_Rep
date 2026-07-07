@@ -253,6 +253,14 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
     elif momentum_low:
         partial_minutes = max(10.0, partial_minutes * 0.75)
 
+    # C1: SPOT_BULL + high momentum floor — never exit profitable positions before 45min
+    # Prevents PRS from closing at 23min in SPOT_BULL where the trend has more room to run
+    if (trade_type == "spot"
+            and str(context.regime_mode or "").upper() == "SPOT_BULL"
+            and momentum_high):
+        _spot_bull_floor = float(get_param(settings, "profit_realization_spot_bull_min_partial_minutes", 45.0))
+        partial_minutes = max(partial_minutes, _spot_bull_floor)
+
     held_min = _held_minutes(now, context.profit_started_at, context.opened_at)
     peak = max(float(context.peak_pnl_pct or 0.0), float(context.pnl_pct or 0.0))
     giveback_pct = max(0.0, peak - float(context.pnl_pct or 0.0))

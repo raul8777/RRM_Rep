@@ -279,6 +279,9 @@ _FUTURES_SL_COOLDOWN: Dict[str, datetime] = {}
 # PB2: Mass SL circuit breaker — global pause when 3+ positions stop in one check cycle
 _FUTURES_MASS_SL_COOLDOWN_UNTIL: Optional[datetime] = None  # UTC — None = not paused
 
+# B3: SPOT mass-SL cooldown — pause new SPOT entries when N SLs hit in same cycle
+_SPOT_MASS_SL_COOLDOWN_UNTIL: Optional[datetime] = None  # UTC — None = not paused
+
 # ── Circuit breaker: consecutive order failures (technical errors only) ──────
 _consecutive_failures: int = 0
 _circuit_breaker_until: datetime = None  # UTC — None = not paused
@@ -531,6 +534,7 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'kelly_max_pct_liquid': 'kelly_max_pct_liquid',
             'kelly_dynamic_base_pct': 'kelly_dynamic_base_pct',
             'kelly_max_pct_cap': 'kelly_max_pct_cap',
+            'kelly_conviction_max_pct': 'kelly_conviction_max_pct',
             'futures_kelly_max_usdt': 'futures_kelly_max_usdt',
             'futures_kelly_base_usdt': 'futures_kelly_base_usdt',
             'futures_kelly_max_pct_liquid': 'futures_kelly_max_pct_liquid',
@@ -941,7 +945,11 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
             'futures_trail_atr_multiplier_high': 0.97,
             'futures_trail_atr_multiplier_deep': 0.98,
             'max_positions_spot_bull': 1.12,
-            'max_positions_range_scalp': 1.10,
+            'max_total_exposure_pct': 1.05,
+            'kelly_conviction_max_pct': 1.10,
+            'overflow_max_extra': 1.35,
+            'prediction_add_min_strength': 0.90,
+            'prediction_add_min_ev_ratio': 0.90,
             'max_positions_preservation': 1.00,
             'max_positions_futures_short': 1.10,
             'futures_max_new_per_cycle': 1.10,
@@ -1038,6 +1046,7 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
         ('max_positions_range_scalp', (3, 20)),
         ('max_positions_preservation', (1, 12)),
         ('max_positions_futures_short', (4, 24)),
+        ('overflow_max_extra', (1, 8)),
         ('futures_max_new_per_cycle', (1, 10)),
         ('min_hold_minutes', (30, 360)),
         ('min_hold_minutes_spot_bull', (30, 360)),
@@ -1045,6 +1054,10 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
         ('futures_long_sl_pct', (1.0, 5.0)),
         ('futures_long_tp_pct', (2.0, 10.0)),
         ('max_rebalance_per_cycle', (1, 5)),
+        ('max_total_exposure_pct', (0.20, 0.95)),
+        ('kelly_conviction_max_pct', (0.05, 0.25)),
+        ('prediction_add_min_strength', (0.30, 0.90)),
+        ('prediction_add_min_ev_ratio', (0.80, 2.50)),
     ):
         _apply_field(_f, minimum=_bounds[0], maximum=_bounds[1])
 
@@ -2787,9 +2800,12 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
     Sells any position that has breached its exit threshold.
     Returns list of closed position dicts.
     """
+    global _SPOT_MASS_SL_COOLDOWN_UNTIL
     closed = []
     if not position_manager:
         return closed
+
+    _spot_sl_count_this_cycle = [0]  # B3: mutable counter for mass-SL detection
 
     _global_sl_pct = _get_param(settings, 'stop_loss_pct')
     _global_tp_pct = _get_param(settings, 'take_profit_pct')
@@ -3441,7 +3457,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         print(f"[UnifiedGov/SPOT] {symbol}: evaluation error: {_ug_err}")
                 elif not _spot_binance_validated:
                     try:
-                        position_manager._audit(symbol, 'soft_supervisor_skipped_binance_unconfirmed', {
+                        position_manager._audit(symbol, 'soft_supervisor_skip_unconfirmed', {
                             'side': 'BUY',
                             'reason': 'spot_not_recently_validated_against_binance',
                             'has_validation_ts': bool(metadata.get('binance_validated_at')),
@@ -3457,6 +3473,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 _effective_sl_price = max(_sl_floor, _sl_saved)
                 if close_reason is None and current_price <= _effective_sl_price:
                     close_reason = f"stop_loss ({pnl_pct*100:.2f}%, sl={_effective_sl_price:.6f})"
+                    _spot_sl_count_this_cycle[0] += 1  # B3: track mass-SL events this cycle
 
                 # ── Take-Profit ────────────────────────────────────────────
                 if close_reason is None and pnl_pct >= tp_pct:
@@ -3830,6 +3847,16 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                      f"SL/TP sell failed {symbol}: {exc}")
             except Exception as e:
                 print(f"SL/TP check error for {symbol}: {e}")
+
+    # B3: SPOT mass-SL cooldown — activate global pause if N SLs hit in this cycle
+    _mass_thr = int(getattr(settings, 'spot_mass_sl_threshold', 3))
+    if _spot_sl_count_this_cycle[0] >= _mass_thr:
+        from datetime import timedelta as _td_sms
+        _cd_h = float(getattr(settings, 'spot_mass_sl_cooldown_hours', 2.0))
+        _SPOT_MASS_SL_COOLDOWN_UNTIL = datetime.now(timezone.utc) + _td_sms(hours=_cd_h)
+        print(f'[SPOT/MASS-SL] {_spot_sl_count_this_cycle[0]} SLs in one cycle! '
+              f'COOLDOWN {_cd_h}h — no new SPOT buys until {_SPOT_MASS_SL_COOLDOWN_UNTIL.strftime("%H:%M UTC")}')
+
     return closed
 
 
@@ -4163,6 +4190,25 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     # PB1: Stagger entries — track new shorts opened this cycle (max N per cycle)
     _pb_new_shorts_this_cycle = 0
     _pb_max_new_per_cycle = int(getattr(settings, 'futures_max_new_per_cycle', 5))
+
+    # ── A3: BTC 1h correlation filter — reduce new entries on BTC downdraft ─────
+    _btc_1h_drop_pct = 0.0
+    _btc_corr_max_new = None  # None = no restriction
+    if getattr(settings, 'btc_correlation_filter_enabled', True):
+        try:
+            _btc_1h_kl = client.client.get_klines(symbol='BTCUSDT', interval='1h', limit=2)
+            if _btc_1h_kl:
+                _btc_open_1h  = float(_btc_1h_kl[-1][1])
+                _btc_close_1h = float(_btc_1h_kl[-1][4])
+                _btc_1h_drop_pct = (_btc_close_1h - _btc_open_1h) / _btc_open_1h * 100
+                _btc_corr_thr = getattr(settings, 'btc_correlation_drop_threshold_pct', 0.3)
+                if _btc_1h_drop_pct < -_btc_corr_thr:
+                    _btc_corr_max_new = int(getattr(settings, 'btc_correlation_max_new_entries', 2))
+                    print(f"[A3/BtcCorr] BTC 1h={_btc_1h_drop_pct:+.2f}% < -{_btc_corr_thr:.1f}% → SPOT new entries cap={_btc_corr_max_new} this cycle")
+        except Exception as _btc_corr_err:
+            pass
+    _spot_new_entries_this_cycle = 0
+
     for symbol in top_symbols:
         _signal_id = None
         volspike_override = False
@@ -4573,6 +4619,26 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 update_signal_decision(symbol, "rejected", f"WR_BLOCK_{_wr_n}SL")
                 continue
 
+        # ── A2: Regime gate — block SPOT entries when regime not confirmed ────
+        if getattr(settings, 'spot_require_confirmed_regime', True):
+            if _regime is None or not _regime.confirmed:
+                print(f"Skipping buy {symbol}: regime not confirmed (mode={_regime_mode}) — A2 gate")
+                update_signal_decision(symbol, "rejected", "REGIME_UNCONFIRMED")
+                continue
+
+        # ── B3: SPOT mass-SL cooldown gate ────────────────────────────────
+        if _SPOT_MASS_SL_COOLDOWN_UNTIL and datetime.now(timezone.utc) < _SPOT_MASS_SL_COOLDOWN_UNTIL:
+            _cd_rem = (_SPOT_MASS_SL_COOLDOWN_UNTIL - datetime.now(timezone.utc)).total_seconds() / 3600
+            print(f'[SPOT/MASS-SL] {symbol}: SPOT cooldown active ({_cd_rem:.1f}h remaining) — no new spot buys')
+            update_signal_decision(symbol, 'rejected', 'SPOT_MASS_SL_COOLDOWN')
+            continue
+
+        # ── A3: BTC correlation cap enforcement ─────────────────────────────
+        if _btc_corr_max_new is not None and _spot_new_entries_this_cycle >= _btc_corr_max_new:
+            print(f"Skipping buy {symbol}: BTC 1h={_btc_1h_drop_pct:+.2f}% drop — cycle entry cap {_btc_corr_max_new} reached — A3 gate")
+            update_signal_decision(symbol, "rejected", "BTC_CORR_CAP")
+            continue
+
         try:
             price = _get_cycle_price(client, symbol)
             filters = get_symbol_filters(client, symbol)
@@ -4855,7 +4921,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         for _c in _closes[1:]: _e9 = _c*_k9 + _e9*(1-_k9); _e21 = _c*_k21 + _e21*(1-_k21)
                         _trend_up = _e9 > _e21
                         _min_spike = getattr(settings, 'volspike_override_min_spike', 1.5)
-                        _max_rsi   = getattr(settings, 'volspike_override_max_rsi', 65.0)
+                        _max_rsi   = min(getattr(settings, 'volspike_override_max_rsi', 65.0), 75.0)  # A1: hard cap at 75 — no override in overbought (OPGUSDT RSI=87.77 case)
                         _need_trend = getattr(settings, 'volspike_override_trend_required', True)
                         # ── Funding Rate filter ────────────────────────────────
                         _funding_ok = True
@@ -5069,6 +5135,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             _real_commission = _fill.get('commission', 0.0)
             orders.append({"symbol": symbol, "side": "BUY", "quantity": qty, "order": order})
             usdt_liquid_now = max(0.0, usdt_liquid_now - qty * price)  # BUG-E5: local deduction, avoids re-fetch
+            _spot_new_entries_this_cycle += 1  # A3: track entries for BTC correlation cap
             print(f"Bought {qty} {symbol}")
             ec.add_error(ec.SOURCE_BINANCE, ec.LEVEL_INFO, f"Bought {qty} {symbol} @ ~{price:.4f} USDT")
             update_signal_decision(symbol, "executed", "EJECUTADO", signal_id=_signal_id)

@@ -70,8 +70,8 @@ services:
       - ANALYSIS_SYMBOLS=["DOGEUSDT","RENDERUSDT","BNBUSDT","SOLUSDT","TAOUSDT","FETUSDT","AVAXUSDT","ADAUSDT","XRPUSDT","DOTUSDT","SUIUSDT","PEPEUSDT","WIFUSDT","BTCUSDT","ETHUSDT","LINKUSDT","NEARUSDT","WLDUSDT","INJUSDT","AGIXUSDT","ONDOUSDT","JUPUSDT","OPUSDT","HBARUSDT","AAVEUSDT","ARBUSDT","MATICUSDT","ATOMUSDT","GRTUSDT","AIOZUSDT","SEIUSDT","SUSHIUSDT"]
       # Futures SHORT — pares elegibles, SL/TP, límites (F2 expansión jun 18 2026: 8→19 pares)
       - FUTURES_SYMBOLS=["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ADAUSDT","NEARUSDT","SUIUSDT","DOGEUSDT","AVAXUSDT","LINKUSDT","TAOUSDT","UNIUSDT","DOTUSDT","BCHUSDT","AAVEUSDT","FILUSDT","INJUSDT"]
-      - FUTURES_SL_PCT=1.42               # jun29: 3.33→1.42 (backtest run_0677)
-      - FUTURES_TP_PCT=2.81               # jun29: 7.68→2.81 (backtest run_0677)
+      - FUTURES_SL_PCT=2.5                # jul07: 1.42→2.5 (B1: too tight, SLs firing prematurely at 10x leverage)
+      - FUTURES_TP_PCT=5.0                # jul07: 2.81→5.0 (B1: R:R=2.0 minimum acceptable)
       - FUTURES_MAX_SHORTS=12
       - FUTURES_MAX_LARGECAP_SHORTS=5
       - FUTURES_LARGECAP_SYMBOLS=["BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","SOLUSDT"]
@@ -98,6 +98,12 @@ services:
       - FUTURES_MAX_NEW_PER_CYCLE=5        # K2: 3→5 — more throughput in FUTURES_SHORT without explosion
       - FUTURES_MASS_SL_THRESHOLD=3
       - FUTURES_MASS_SL_COOLDOWN_HOURS=4.0
+      - SPOT_MASS_SL_THRESHOLD=3            # B3: N SLs in one cycle triggers SPOT cooldown
+      - SPOT_MASS_SL_COOLDOWN_HOURS=2.0     # B3: duration of SPOT mass-SL cooldown
+      - SPOT_REQUIRE_CONFIRMED_REGIME=true  # A2: block SPOT entries when regime not confirmed
+      - BTC_CORRELATION_FILTER_ENABLED=true # A3: cap new entries when BTC drops >threshold
+      - BTC_CORRELATION_DROP_THRESHOLD_PCT=0.3  # A3: BTC 1h drop % that activates cap
+      - BTC_CORRELATION_MAX_NEW_ENTRIES=2   # A3: max new SPOT entries when BTC is dropping
       - FUTURES_CONFIRM_RED_CANDLE=true
       - FUTURES_NO_SHORT_BTC_3H_THRESHOLD=1.0
       - FUTURES_USDT_PER_TRADE=100.0      # PB4: minimum margin floor per short (NOT a hard cap for Kelly-sized SHORTs)
@@ -106,7 +112,7 @@ services:
       # SL-OPT sesion 19 jun22 2026 — wider SL + SSO adaptive exits
       - STOP_LOSS_PCT=3.36                # jun29: 1.03→3.36 (backtest run_0677)
       - TAKE_PROFIT_PCT=4.14              # jun29: 5.83→4.14 (backtest run_0677)
-      - ATR_SL_MIN_PCT=0.015
+      - ATR_SL_MIN_PCT=0.020              # jul07: 0.015→0.020 (B2: floor raised so SLs don't fire at -0.5%/-0.7%)
       # SSO-1 Capital Velocity (jun 22 2026) — close decaying/slow positions faster
       # RECALIBRADO jun 23 2026: gates USD escalados al nuevo tamaño de posición (~$330 margin post-transfer $1,390 SPOT->FUT)
       # TODO FASE-FUTURA: hacer estos valores dinámicos en función de futures_wallet_total

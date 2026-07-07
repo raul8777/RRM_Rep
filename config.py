@@ -248,6 +248,17 @@ class Settings(BaseSettings):
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True)
     wr_screener_consecutive_sl_block: int = Field(default=3)  # block after N consecutive SL
+    # B3: SPOT mass-SL cooldown
+    spot_mass_sl_threshold: int = Field(default=3)
+    spot_mass_sl_cooldown_hours: float = Field(default=2.0)
+    # A2: Regime confirmation gate for SPOT entries
+    spot_require_confirmed_regime: bool = Field(default=True)
+    # A3: BTC 1h correlation filter
+    btc_correlation_filter_enabled: bool = Field(default=True)
+    btc_correlation_drop_threshold_pct: float = Field(default=0.3)
+    btc_correlation_max_new_entries: int = Field(default=2)
+    # C1: PRS SPOT_BULL minimum partial close time when momentum is high
+    profit_realization_spot_bull_min_partial_minutes: float = Field(default=45.0)
     # BTC dominance filter
     btc_dominance_filter_enabled: bool = Field(default=True)
     btc_dominance_altcoin_threshold: float = Field(default=56.0)  # if BTC.D > this, skip alts
