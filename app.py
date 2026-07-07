@@ -828,6 +828,71 @@ async def get_control_status() -> Dict:
     return orchestrator.get_state()
 
 
+@app.get("/system/operator-alerts")
+async def get_operator_alerts() -> Dict:
+    """Return all active (unacknowledged) operator alerts persisted by run_trades.py.
+    These are non-blocking notifications that require the operator to take action
+    (e.g. press STOP manually) — they never auto-pause the system.
+    """
+    if not db_client:
+        return {"ok": False, "alerts": [], "error": "DB not available"}
+    try:
+        import json as _json
+        rows = db_client.execute_query(
+            "SELECT key, value, updated_at FROM trading_runtime_state "
+            "WHERE key LIKE 'operator_alert_%' ORDER BY updated_at DESC"
+        )
+        alerts = []
+        for row in (rows or []):
+            try:
+                payload = row.get("value") or {}
+                if isinstance(payload, str):
+                    payload = _json.loads(payload)
+                if not isinstance(payload, dict):
+                    continue
+                if not payload.get("acknowledged", False):
+                    alerts.append({
+                        "key": row.get("key"),
+                        "alert_type": payload.get("alert_type"),
+                        "message": payload.get("message"),
+                        "ts": payload.get("ts"),
+                        "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+                    })
+            except Exception:
+                continue
+        return {"ok": True, "alerts": alerts, "count": len(alerts)}
+    except Exception as e:
+        return {"ok": False, "alerts": [], "error": str(e)}
+
+
+@app.post("/system/operator-alerts/{alert_type}/ack")
+async def ack_operator_alert(alert_type: str, _auth: None = Depends(_require_api_key)) -> Dict:
+    """Acknowledge an operator alert (removes it from the active list)."""
+    if not db_client:
+        raise HTTPException(status_code=503, detail="DB not available")
+    try:
+        import json as _json
+        _key = f"operator_alert_{alert_type}"
+        rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key=%s", (_key,)
+        )
+        if not rows:
+            return {"ok": True, "acknowledged": False, "reason": "alert not found"}
+        payload = rows[0].get("value") or {}
+        if isinstance(payload, str):
+            payload = _json.loads(payload)
+        if isinstance(payload, dict):
+            payload["acknowledged"] = True
+        _updated = _json.dumps(payload)
+        db_client.execute_update(
+            "UPDATE trading_runtime_state SET value=%s, updated_at=NOW() WHERE key=%s",
+            (_updated, _key),
+        )
+        return {"ok": True, "acknowledged": True, "alert_type": alert_type}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/health")
 async def health_check() -> Dict:
     """Get overall health status of the system."""
@@ -8386,27 +8451,27 @@ async def _config_snapshot_loop() -> None:
 
 
 _BACKTEST_BASELINE: Dict[str, Any] = {
-    'kelly_base_usdt': 73.0,
-    'kelly_max_usdt': 747.0,
-    'kelly_max_pct_liquid': 0.704,
+    'kelly_base_usdt': 76.0,           # s63 wolf-hunter
+    'kelly_max_usdt': 663.0,           # s63 wolf-hunter
+    'kelly_max_pct_liquid': 0.704,     # env: KELLY_MAX_PCT_LIQUID
     'kelly_max_pct_cap': 0.25,
     'max_per_trade_usdt': 500.0,
     'futures_leverage': 10,
     'futures_max_shorts': 12,
     'futures_max_new_per_cycle': 5,
     'futures_usdt_per_trade': 100.0,
-    'futures_sl_pct': 1.42,
-    'futures_tp_pct': 2.81,
+    'futures_sl_pct': 2.5,             # env: FUTURES_SL_PCT
+    'futures_tp_pct': 5.0,             # env: FUTURES_TP_PCT
     'futures_kelly_base_usdt': 73.0,
-    'futures_kelly_max_usdt': 1111.0,
+    'futures_kelly_max_usdt': 1162.0,  # s63 wolf-hunter
     'futures_kelly_max_pct_liquid': 0.704,
-    'stop_loss_pct': 3.36,
-    'take_profit_pct': 4.14,
-    'min_signal_strength': 0.389,
-    'min_success_probability': 0.499,
+    'stop_loss_pct': 1.236,            # s63 wolf-hunter
+    'take_profit_pct': 6.2964,         # s63 wolf-hunter
+    'min_signal_strength': 0.359,      # s63 wolf-hunter
+    'min_success_probability': 0.527,  # s63 wolf-hunter
     'futures_min_prob': 0.499,
-    'vol_spike_min': 0.91,
-    'slippage_pct': 0.00052,
+    'vol_spike_min': 0.83,             # s63 wolf-hunter
+    'slippage_pct': 0.00057,           # s63 wolf-hunter
     'use_bnb_for_commission': True,
 }
 
@@ -9494,24 +9559,24 @@ async def get_config_drift(_auth=Depends(_require_api_key)) -> Dict:
         _validation = validate_config(_s)
         _snapshot = dump_active_config(_s)
         _backtest_baseline = {
-            'kelly_base_usdt': 73.0,
-            'kelly_max_usdt': 747.0,
-            'kelly_max_pct_liquid': 0.704,
+            'kelly_base_usdt': 76.0,           # s63 wolf-hunter
+            'kelly_max_usdt': 663.0,           # s63 wolf-hunter
+            'kelly_max_pct_liquid': 0.704,     # env: KELLY_MAX_PCT_LIQUID
             'futures_kelly_base_usdt': 73.0,
-            'futures_kelly_max_usdt': 1111.0,
+            'futures_kelly_max_usdt': 1162.0,  # s63 wolf-hunter
             'futures_kelly_max_pct_liquid': 0.704,
             'futures_leverage': 10,
             'futures_max_shorts': 12,
             'futures_max_new_per_cycle': 5,
-            'futures_sl_pct': 1.42,
-            'futures_tp_pct': 2.81,
-            'stop_loss_pct': 3.36,
-            'take_profit_pct': 4.14,
-            'min_signal_strength': 0.389,
-            'min_success_probability': 0.499,
+            'futures_sl_pct': 2.5,             # env: FUTURES_SL_PCT
+            'futures_tp_pct': 5.0,             # env: FUTURES_TP_PCT
+            'stop_loss_pct': 1.236,            # s63 wolf-hunter
+            'take_profit_pct': 6.2964,         # s63 wolf-hunter
+            'min_signal_strength': 0.359,      # s63 wolf-hunter
+            'min_success_probability': 0.527,  # s63 wolf-hunter
             'futures_min_prob': 0.499,
-            'vol_spike_min': 0.91,
-            'slippage_pct': 0.00052,
+            'vol_spike_min': 0.83,             # s63 wolf-hunter
+            'slippage_pct': 0.00057,           # s63 wolf-hunter
             'use_bnb_for_commission': True,
         }
         _drift = []

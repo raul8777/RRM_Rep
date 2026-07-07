@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import error_collector as ec
 from binance_client import BinanceClient
-from market_regime import get_regime, MarketRegime
+from market_regime import get_regime, MarketRegime, prime_cache_from_db as _prime_regime_from_db
 from futures_client import FuturesClient
 from news_client import NewsClient
 from signal_store import get_signals, add_signal, mark_signal_as_processed, update_signal_decision as _store_update_signal_decision, expire_stale_signals
@@ -281,6 +281,11 @@ _FUTURES_MASS_SL_COOLDOWN_UNTIL: Optional[datetime] = None  # UTC — None = not
 
 # B3: SPOT mass-SL cooldown — pause new SPOT entries when N SLs hit in same cycle
 _SPOT_MASS_SL_COOLDOWN_UNTIL: Optional[datetime] = None  # UTC — None = not paused
+
+# SSO-7: Best candidate cache — best non-held signal from previous cycle's scanner output.
+# Populated after Step 2 predictions; consumed at next cycle's Step 0 monitoring.
+# Format: {"symbol": str, "strength": float, "prob": float, "vol_spike": float, "ev": float}
+_SSO7_BEST_CANDIDATE_CACHE: Optional[Dict] = None
 
 # ── Circuit breaker: consecutive order failures (technical errors only) ──────
 _consecutive_failures: int = 0
@@ -768,7 +773,7 @@ def _get_kelly_context_multiplier(settings, regime: str = None, trade_type: str 
     _regime = str(regime or getattr(settings, 'current_regime_mode', '') or '').strip().upper()
 
     _profile_mult = {
-        'A': 1.12,
+        'A': 1.18,   # jul07: 1.12→1.18 (wolf-hunter s63: A entra con más fuerza)
         'B': 1.00,
         'C': 0.88,
     }.get(_profile, 1.00)
@@ -781,7 +786,10 @@ def _get_kelly_context_multiplier(settings, regime: str = None, trade_type: str 
 
     if str(trade_type).strip().lower() == 'futures':
         _profile_mult *= 1.02 if _profile == 'A' else (0.98 if _profile == 'C' else 1.0)
-    return max(0.75, min(1.20, _profile_mult * _regime_mult))
+    # Wolf Hunter s63: Perfil A + SPOT_BULL tiene cap 1.35 (vs 1.20 general)
+    # para permitir posiciones más grandes en el régimen más favorable
+    _cap = 1.35 if (_profile == 'A' and _regime == 'SPOT_BULL') else 1.20
+    return max(0.75, min(_cap, _profile_mult * _regime_mult))
 
 
 def _get_kpi_context_multiplier(db_client) -> float:
@@ -2793,12 +2801,13 @@ def _spot_net_pnl_aggregate(pos_list, current_price: float, settings) -> tuple[f
     return gross_pnl_usdt, net_pnl_usdt, net_pnl_pct
 
 
-def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, news_client=None, regime: str = None, monitor_only: bool = False) -> List[Dict]:
+def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, news_client=None, regime: str = None, monitor_only: bool = False, sso7_candidate_cache: Optional[Dict] = None) -> List[Dict]:
     """
     Check all open positions against Stop-Loss, Take-Profit, and Trailing Stop rules.
     Also performs prediction-based exit when EV deteriorates (C1).
     Sells any position that has breached its exit threshold.
     Returns list of closed position dicts.
+    sso7_candidate_cache: best non-held candidate from previous cycle scanner (for SSO-7 Opp Collapse).
     """
     global _SPOT_MASS_SL_COOLDOWN_UNTIL
     closed = []
@@ -3091,6 +3100,16 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         _sso_s_peak_pnl_pct = float(
                             metadata.get('trailing_peak', entry_price) - entry_price
                         ) / entry_price if entry_price > 0 else 0.0
+                        # SSO-7: extract stagnation state from metadata
+                        _sso7_cycles = int(metadata.get('sso7_stagnation_cycles', 0) or 0)
+                        _sso7_last_adv = metadata.get('sso7_last_advance_pnl')
+                        # SSO-7: best candidate from previous cycle (must not be this symbol)
+                        _sso7_cand = sso7_candidate_cache or {}
+                        _sso7_cand_sym = _sso7_cand.get('symbol', '')
+                        _sso7_cand_str = float(_sso7_cand.get('strength', 0.0)) if _sso7_cand_sym != symbol else 0.0
+                        _sso7_cand_prob = float(_sso7_cand.get('prob', 0.0)) if _sso7_cand_sym != symbol else 0.0
+                        _sso7_cand_vol = float(_sso7_cand.get('vol_spike', 0.0)) if _sso7_cand_sym != symbol else 0.0
+                        _sso7_cand_ev = float(_sso7_cand.get('ev', 0.0)) if _sso7_cand_sym != symbol else 0.0
                         _sso_s_pos = SSOPositionData(
                             symbol=symbol,
                             side="BUY",
@@ -3118,6 +3137,13 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             rescue_signal_strength=_sp_rescue_signal_str,
                             _gate_block_count=metadata.get('bounce_gate_blocked_count') if _spot_bounce_entry_flag else None,
                             _gate_last_pnl_pct=metadata.get('bounce_gate_first_pnl_pct') if _spot_bounce_entry_flag else None,
+                            current_sl_price=float(pos.stop_loss or 0) or None,
+                            sso7_stagnation_cycles=_sso7_cycles,
+                            sso7_last_advance_pnl=float(_sso7_last_adv) if _sso7_last_adv is not None else None,
+                            best_candidate_strength=_sso7_cand_str,
+                            best_candidate_prob=_sso7_cand_prob,
+                            best_candidate_vol_spike=_sso7_cand_vol,
+                            best_candidate_pred_ev=_sso7_cand_ev,
                         )
                         _sso_s_action = _sso_spot.evaluate(_sso_s_pos)
                         # Full SSO visibility — always log evaluation result
@@ -3222,6 +3248,40 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                     position_manager.update_position_metadata(pos.position_id, metadata)
                                 except Exception:
                                     pass
+                        # ── SSO-7: Persist stagnation state + execute SL update ──────────
+                        _sso7_reason = _sso_s_action.reason or ""
+                        _sso7_detail = _sso_s_action.detail or ""
+                        _sso7_meta_changed = False
+                        if _sso7_reason == "sso7_advance_reset":
+                            # Position advancing — reset stagnation counter
+                            if metadata.get('sso7_stagnation_cycles', 0) != 0:
+                                metadata['sso7_stagnation_cycles'] = 0
+                                metadata['sso7_last_advance_pnl'] = round(_sso_sym_pnl_usdt, 4)
+                                _sso7_meta_changed = True
+                        elif _sso7_reason in ("sso7_stagnation_count", "sso7_stagnation_trail",
+                                              "sso7_opportunity_collapse"):
+                            # Increment stagnation cycle counter
+                            _sso7_new_cyc = _sso7_cycles + 1
+                            metadata['sso7_stagnation_cycles'] = _sso7_new_cyc
+                            _sso7_meta_changed = True
+                            # SL update for trail or collapse
+                            if "sso7_stagnation_trail:" in _sso7_detail or "sso7_opportunity_collapse:" in _sso7_detail:
+                                try:
+                                    _sso7_new_sl_str = _sso7_detail.split(":")[1].split()[0]
+                                    _sso7_new_sl = float(_sso7_new_sl_str)
+                                    _sso7_cur_sl = float(pos.stop_loss or 0)
+                                    if _sso7_new_sl > _sso7_cur_sl and _sso7_new_sl > 0:
+                                        position_manager.update_position_sl(pos.position_id, round(_sso7_new_sl, 8))
+                                        print(f"[SSO-7] {symbol}: SL updated {_sso7_cur_sl:.6f}→{_sso7_new_sl:.6f} "
+                                              f"({_sso7_reason}) cycles={_sso7_new_cyc}")
+                                except Exception as _sso7_sl_err:
+                                    print(f"[SSO-7] {symbol}: SL update failed: {_sso7_sl_err}")
+                        if _sso7_meta_changed:
+                            try:
+                                position_manager.update_position_metadata(pos.position_id, metadata)
+                            except Exception:
+                                pass
+
                         if _sso_s_action.should_close:
                             if _sso_s_action.close_pct >= 1.0:
                                 close_reason = f"{_sso_s_action.reason} ({pnl_pct*100:.2f}%)"
@@ -4613,10 +4673,20 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
 
         # ── WR Screener: bloquear pares con N SL consecutivos recientes ─────────
         if position_manager and getattr(settings, 'wr_screener_enabled', True):
-            _wr_n = int(getattr(settings, 'wr_screener_consecutive_sl_block', 3))
+            _wr_n = int(getattr(settings, 'wr_screener_consecutive_sl_block', 5))
             if _wr_n > 0 and _consecutive_sl_count(symbol, position_manager, _wr_n):
                 print(f"[WRScreener] Skipping {symbol}: {_wr_n} consecutive SL — pair on losing streak")
                 update_signal_decision(symbol, "rejected", f"WR_BLOCK_{_wr_n}SL")
+                try:
+                    if _db_client_ref:
+                        _db_client_ref.execute_update(
+                            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                            "VALUES (%s, %s, %s, %s, %s)",
+                            (symbol, 'spot', 'wr_screener_block',
+                             json.dumps({'consecutive_sl': _wr_n, 'regime': _regime_mode}), False),
+                        )
+                except Exception:
+                    pass
                 continue
 
         # ── A2: Regime gate — block SPOT entries when regime not confirmed ────
@@ -5646,6 +5716,40 @@ def _is_health_results_critical(db_client, max_age_minutes: int = 20) -> bool:
         return False
 
 
+def _persist_operator_alert(db_client, alert_type: str, message: str) -> None:
+    """Persist a non-blocking operator alert to DB for dashboard visibility.
+
+    Unlike the old auto-pause gates, this never stops new entries.
+    The operator sees the alert in the dashboard and decides to press STOP or not.
+    Alerts are upserted per alert_type so the dashboard always shows the latest state.
+    Also appended to trades_audit for full trazabilidad.
+    """
+    if db_client is None:
+        return
+    try:
+        _ts = datetime.now(timezone.utc).isoformat()
+        _payload = json.dumps({
+            "alert_type": alert_type,
+            "message": message,
+            "ts": _ts,
+            "acknowledged": False,
+        })
+        db_client.execute_update(
+            "INSERT INTO trading_runtime_state (key, value, updated_at) "
+            "VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+            (f"operator_alert_{alert_type}", _payload, _payload),
+        )
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            ("__system__", "system", f"operator_alert_{alert_type}",
+             json.dumps({"alert_type": alert_type, "message": message, "ts": _ts}), False),
+        )
+    except Exception as _ae:
+        print(f"[OperatorAlert] persist failed (non-fatal): {_ae}")
+
+
 def _persist_safepoint(db_client, settings, position_manager) -> None:
     """Persist a pre-decision state snapshot for restart/forensic traceability."""
     if not db_client:
@@ -5674,7 +5778,7 @@ def _persist_safepoint(db_client, settings, position_manager) -> None:
 
 def execute_once(monitor_only: bool = False):
     global _db_client_ref, _FUTURES_MASS_SL_COOLDOWN_UNTIL, _VOLSPIKE_POSITIONS, _OVERRIDE_DAILY_COUNT
-    global _consecutive_failures, _circuit_breaker_until
+    global _consecutive_failures, _circuit_breaker_until, _SSO7_BEST_CANDIDATE_CACHE
     from init_components import get_components
     comp = get_components()
     settings = comp.settings
@@ -5735,15 +5839,26 @@ def execute_once(monitor_only: bool = False):
     except Exception as _safe_err:
         print(f"[Safepoint] cycle start safepoint failed: {_safe_err}")
 
-    # ── K2: Pause new entries if requested via trading_runtime_state (survives restart) ─
+    # ── Regime cache warm-up: restore confirmed regime from DB after restart ─────
+    # Ensures the first cycle after a restart doesn't block with confirmed=False.
+    # Anti-whipsaw is preserved for actual regime *changes*.
+    try:
+        _prime_regime_from_db(_db_client_ref)
+    except Exception as _prc_err:
+        print(f"[MarketRegime] prime_cache_from_db error (non-fatal): {_prc_err}")
+
+    # ── K2: Pause new entries ONLY if operator explicitly requested it ───────────
+    # Auto-pauses by the system are replaced with operator_alert notifications.
+    # Only a manual pause (source='operator') blocks new entries here.
     if not monitor_only and _is_new_entries_paused(_db_client_ref):
-        print("[execute_once] pause_new_entries=True — running SL/TP monitor only")
+        print("[execute_once] pause_new_entries=True (operator request) — running SL/TP monitor only")
         monitor_only = True
 
-    # Safety gate: when SMART health is critical, avoid new entries until recovery.
-    if not monitor_only and _is_health_results_critical(_db_client_ref):
-        print("[execute_once] health_results_latest=critical — switching to monitor_only")
-        monitor_only = True
+    # ── Health critical: notify operator instead of auto-pausing ─────────────────
+    # SL/TP and all protections continue running. Operator decides whether to STOP.
+    if _is_health_results_critical(_db_client_ref):
+        _persist_operator_alert(_db_client_ref, "health_critical", "SMART health=critical — revise config drift o errores. Las protecciones SL/TP siguen activas.")
+        print("[execute_once] ⚠️  health_results_latest=critical — ALERTA al operador (no auto-pausa). Revisa el dashboard.")
 
     # Binance-first gate: runtime-vs-exchange parity for futures must be healthy
     # before allowing new entries. Hard protections (SL/TP) stay enabled.
@@ -5761,8 +5876,8 @@ def execute_once(monitor_only: bool = False):
                     f"mismatches={_binance_truth_status.get('mismatch_count')}"
                 )
             if (not monitor_only) and str(_binance_truth_status.get('severity', '')).lower() == 'critical':
-                print("[execute_once] binance_truth_status=critical — switching to monitor_only")
-                monitor_only = True
+                _persist_operator_alert(_db_client_ref, "binance_truth_critical", f"Binance futures parity critical — mismatches={_binance_truth_status.get('mismatch_count',0)}. Las protecciones SL/TP siguen activas.")
+                print(f"[execute_once] ⚠️  binance_truth_status=critical — ALERTA al operador (no auto-pausa). mismatches={_binance_truth_status.get('mismatch_count',0)}")
     except Exception as _truth_gate_err:
         print(f"[BinanceTruth] pretrade gate failed: {_truth_gate_err}")
 
@@ -5792,7 +5907,8 @@ def execute_once(monitor_only: bool = False):
                     pass
             _mon_closes = _check_sl_tp_positions(
                 client, settings, position_manager,
-                news_client=news_client, regime=_regime_mode_mon, monitor_only=True
+                news_client=news_client, regime=_regime_mode_mon, monitor_only=True,
+                sso7_candidate_cache=_SSO7_BEST_CANDIDATE_CACHE,
             )
             try:
                 _fc_mon = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None))
@@ -6163,6 +6279,7 @@ def execute_once(monitor_only: bool = False):
         news_client=news_client,
         regime=_regime_mode,
         monitor_only=False,
+        sso7_candidate_cache=_SSO7_BEST_CANDIDATE_CACHE,
     )
     if sl_tp_closes:
         print(f"SL/TP closed {len(sl_tp_closes)} position(s): {[c['symbol'] for c in sl_tp_closes]}")
@@ -6583,6 +6700,37 @@ def execute_once(monitor_only: bool = False):
         top_signals = sorted(top_signals, key=_ev_sort_key, reverse=True)
         top_symbols = [s['symbol'] if isinstance(s, dict) else s for s in top_signals]
         print(f"[EV-sort] Re-ranked {len(top_symbols)} candidates by predicted EV: {[(s, round(predictions.get(s, {}).get('expected_pnl', 0), 2)) for s in top_symbols[:5]]}")
+
+    # ── SSO-7: Populate best candidate cache for next cycle's monitoring ────────
+    try:
+        _open_syms = set()
+        if position_manager:
+            try:
+                _open_syms = set(position_manager.get_all_positions().keys())
+            except Exception:
+                pass
+        _sso7_best: Optional[Dict] = None
+        _sso7_best_ev = -9999.0
+        for _sso7_sig in top_signals:
+            _sso7_sym = _sso7_sig['symbol'] if isinstance(_sso7_sig, dict) else _sso7_sig
+            if _sso7_sym in _open_syms:
+                continue  # skip already-held symbols
+            _sso7_pred = predictions.get(_sso7_sym, {})
+            _sso7_ev = float(_sso7_pred.get('expected_pnl', 0.0))
+            _sso7_prob = float(_sso7_pred.get('success_probability', 0.0))
+            _sso7_str = float(_sso7_sig.get('strength', 0.0) if isinstance(_sso7_sig, dict) else 0.0)
+            _sso7_vol = float(_sso7_sig.get('vol_spike', 0.0) if isinstance(_sso7_sig, dict) else 0.0)
+            if _sso7_ev > _sso7_best_ev:
+                _sso7_best_ev = _sso7_ev
+                _sso7_best = {'symbol': _sso7_sym, 'strength': _sso7_str,
+                              'prob': _sso7_prob, 'vol_spike': _sso7_vol, 'ev': _sso7_ev}
+        _SSO7_BEST_CANDIDATE_CACHE = _sso7_best
+        if _sso7_best:
+            print(f"[SSO-7/Cache] Best candidate: {_sso7_best['symbol']} "
+                  f"ev={_sso7_best['ev']:.2f} prob={_sso7_best['prob']:.2f} "
+                  f"str={_sso7_best['strength']:.2f} vol={_sso7_best['vol_spike']:.1f}x")
+    except Exception as _sso7_cache_err:
+        print(f"[SSO-7/Cache] Error: {_sso7_cache_err}")
 
     # ── Step 3: Slot-pressure reallocation (only when MAX_POSITIONS reached) ──────
     _close_prediction_based(top_symbols, client, settings, portfolio_manager, position_manager, predictions, regime_mode=_regime_mode)

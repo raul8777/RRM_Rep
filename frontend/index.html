@@ -67,6 +67,16 @@
     </div>
 </div>
 
+<!-- ══ OPERATOR ALERT BANNER ═════════════════════════════════════════════════ -->
+<div id="operatorAlertBanner" style="display:none;background:#7c3200;border-bottom:2px solid #ff6b00;padding:8px 20px;display:none;align-items:center;gap:12px;flex-wrap:wrap;">
+    <span style="font-size:18px">⚠️</span>
+    <span style="color:#ffcc80;font-weight:600;font-size:13px" id="operatorAlertText">Alerta del sistema</span>
+    <div style="margin-left:auto;display:flex;gap:8px;flex-shrink:0">
+        <button onclick="handleOperatorStop()" style="background:#e53935;color:#fff;border:none;padding:5px 14px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:700">⛔ DETENER</button>
+        <button onclick="ackOperatorAlerts()" style="background:#424242;color:#ccc;border:none;padding:5px 14px;border-radius:5px;cursor:pointer;font-size:12px">✓ Enterado</button>
+    </div>
+</div>
+
 <!-- ══ STATUS BAR ════════════════════════════════════════════════════════════ -->
 <div class="status-bar" id="statusBar">
     <div class="sb-item" id="sbProfileItem" title="A=Agresivo | B=Balance | C=Defensa">

@@ -2930,6 +2930,63 @@ async function updateReconciliation() {
     }
 }
 
+// ── Operator Alert Banner ──────────────────────────────────────────────────────
+// Shows a non-blocking warning banner when run_trades detects critical conditions.
+// Operator must press STOP manually — the system never auto-pauses.
+let _activeAlertKeys = [];
+
+async function updateOperatorAlerts() {
+    try {
+        const res = await fetch(`${API_BASE}/system/operator-alerts`, { headers: _authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        const banner = document.getElementById('operatorAlertBanner');
+        const textEl = document.getElementById('operatorAlertText');
+        if (!banner || !textEl) return;
+        const alerts = data.alerts || [];
+        _activeAlertKeys = alerts.map(a => a.alert_type);
+        if (alerts.length === 0) {
+            banner.style.display = 'none';
+            return;
+        }
+        const msgs = alerts.map(a => `<b>${a.alert_type}</b>: ${a.message}`).join(' &nbsp;|&nbsp; ');
+        textEl.innerHTML = msgs;
+        banner.style.display = 'flex';
+    } catch (e) {
+        // Silent — banner just stays hidden
+    }
+}
+
+async function handleOperatorStop() {
+    if (!confirm('¿Deseas DETENER nuevas entradas? Las posiciones abiertas y SL/TP seguirán activos.')) return;
+    try {
+        await fetch(`${API_BASE}/control/pause-new-entries`, {
+            method: 'POST',
+            headers: _authHeaders(),
+            body: JSON.stringify({ reason: 'operator_manual_stop', ttl_minutes: null }),
+        });
+        alert('Sistema DETENIDO — nuevas entradas pausadas. Usa Reanudar para volver a operar.');
+        await updateOperatorAlerts();
+    } catch (e) {
+        alert('Error al detener el sistema: ' + e.message);
+    }
+}
+
+async function ackOperatorAlerts() {
+    try {
+        await Promise.all(_activeAlertKeys.map(key =>
+            fetch(`${API_BASE}/system/operator-alerts/${key}/ack`, {
+                method: 'POST',
+                headers: _authHeaders(),
+            })
+        ));
+        document.getElementById('operatorAlertBanner').style.display = 'none';
+        _activeAlertKeys = [];
+    } catch (e) {
+        console.error('Ack alert error:', e);
+    }
+}
+
 // ── Backtest polling ───────────────────────────────────────────────────────────
 let _pendingBacktests = [];
 
@@ -6122,11 +6179,13 @@ document.addEventListener('DOMContentLoaded', () => {
     updateDashboard();
     updateHealthAndErrors();
     updateReconciliation();
+    updateOperatorAlerts();
     pollBacktestResults();
     updateBacktestProgressWidget();
     setInterval(updateDashboard, POLL_INTERVAL_MS);
     setInterval(updateReconciliation, 60000);
     setInterval(updateHealthAndErrors, 60000);  // Health & errors refresh every 60s
+    setInterval(updateOperatorAlerts, 30000);   // Operator alerts every 30s
     setInterval(updateBacktestProgressWidget, BACKTEST_PROGRESS_POLL_MS);
     // Toggle MXN re-renders open positions
     const toggleMxnEl = document.getElementById('toggleMxn');

@@ -419,6 +419,47 @@ def reset_cache() -> None:
     _cache = {"regime": None, "ts": 0.0, "pending_mode": None, "pending_count": 0}
 
 
+def prime_cache_from_db(db_client) -> None:
+    """Initialize the in-memory regime cache from the last persisted regime_confidence row.
+
+    Called once at the start of execute_once(). If the DB shows a confirmed regime
+    that matches what the current raw detection would propose, we skip the 2-cycle
+    anti-whipsaw delay so the *first* cycle after a restart can already trade.
+
+    The anti-whipsaw is preserved for *regime changes* — it only relaxes when the
+    cached mode equals the proposed mode (stable market, no flip).
+    """
+    global _cache
+    if _cache.get("regime") is not None:
+        return  # already initialized in this process — nothing to do
+    if db_client is None:
+        return
+    try:
+        import json as _json
+        rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key='regime_confidence'"
+        )
+        if not rows:
+            return
+        payload = rows[0].get("value") or {}
+        if isinstance(payload, str):
+            payload = _json.loads(payload)
+        if not isinstance(payload, dict):
+            return
+        db_mode      = str(payload.get("mode") or "").strip()
+        db_confirmed = bool(payload.get("confirmed", False))
+        if not db_mode or not db_confirmed:
+            return
+        # Pre-load pending counter so the next get_regime() call confirms this mode
+        # (mirrors what prime_cache() does for the severe-bear fast-path)
+        _cache["pending_mode"]  = db_mode
+        _cache["pending_count"] = _CONFIRM_CYCLES  # triggers confirmation on next call
+        _cache["ts"] = -9999.0  # force re-detection so fresh data is used
+        print(f"[MarketRegime] prime_cache_from_db: restored {db_mode} (confirmed in DB) — anti-whipsaw bypass for restart")
+    except Exception as _e:
+        print(f"[MarketRegime] prime_cache_from_db failed (non-fatal): {_e}")
+
+
 def prime_cache(mode: str) -> None:
     """Pre-load the pending counter so the *next* get_regime() call confirms *mode*.
     Used by execute_once() to bypass the 2-cycle anti-whipsaw when market conditions

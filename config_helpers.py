@@ -28,7 +28,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'kelly_base_usdt': 73.0,
     'kelly_max_usdt': 747.0,
     'kelly_max_pct_liquid': 0.704,
-    'kelly_max_pct_cap': 0.25,
+    'kelly_max_pct_cap': 0.22,
     'kelly_dynamic_base_pct': 0.15,
     'max_per_trade_usdt': 10.0,
 
@@ -64,9 +64,17 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'trailing_stop_activation_pct': 2.0,
     'trailing_stop_distance_pct': 1.0,
 
+    # Kelly position sizing (Wolf Hunter s63)
+    'kelly_base_usdt': 100.0,          # jul07: 73→100 (wolf-hunter s63)
+    'kelly_max_usdt': 1000.0,          # jul07: 747→1000 (wolf-hunter s63)
+    'kelly_dynamic_base_pct': 0.18,    # jul07: 0.15→0.18 (wolf-hunter s63)
+    'kelly_conviction_vol2x': 1.8,     # jul07: 1.5→1.8 (wolf-hunter s63)
+    'kelly_conviction_vol3x': 2.5,     # jul07: 2.0→2.5 (wolf-hunter s63)
+    'kelly_conviction_max_pct': 0.20,  # jul07: 0.15→0.20 (objetivo ~1000 por posición)
+
     # Signal filters
-    'min_signal_strength': 0.389,
-    'min_success_probability': 0.499,
+    'min_signal_strength': 0.45,       # jul07: 0.389→0.45 (wolf-hunter)
+    'min_success_probability': 0.52,   # jul07: 0.499→0.52 (wolf-hunter)
     'futures_min_prob': 0.499,
     'futures_vol_spike_min': 0.91,
     'vol_spike_min': 0.91,
@@ -97,12 +105,6 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'fng_capitulation_multiplier': 1.50,
     'fng_extreme_fear_multiplier': 1.35,
     'fng_extreme_greed_multiplier': 0.65,
-
-    # Kelly conviction (SPOT)
-    'kelly_conviction_enabled': True,
-    'kelly_conviction_vol2x': 1.5,
-    'kelly_conviction_vol3x': 2.0,
-    'kelly_conviction_max_pct': 0.10,
 
     # ATR SL (SPOT)
     'atr_sl_enabled': True,
@@ -222,6 +224,28 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     # SSO
     'sso_enabled': True,
     'sso_target_daily_usd': 40.0,
+    'sso_stagnant_min_hours': 3.0,          # jul07: 2.0→3.0 (wolf-hunter)
+    'sso_decay_threshold_pct': 0.008,       # jul07: 0.004→0.008 (wolf-hunter)
+    'sso_decay_min_hours': 2.5,             # jul07: 1.5→2.5 (wolf-hunter)
+    'sso_slow_tier2_hours': 5.0,            # jul07: 4→5h (wolf-hunter)
+    'sso_slow_tier3_hours': 7.0,            # jul07: 6→7h (wolf-hunter)
+
+    # SSO-7: Stagnation Trailing + Opportunity Collapse (wolf-hunter s63 redesign)
+    'sso7_enabled': True,
+    'sso7_min_age_hours': 1.0,
+    'sso7_max_pnl_usdt': 3.0,
+    'sso7_vol_spike_breakout_min': 2.0,
+    'sso7_min_velocity': 0.0003,
+    'sso7_stagnation_cycles_threshold': 3,
+    'sso7_trail_base_dist': 0.010,
+    'sso7_trail_squeeze_per_cycle': 0.10,
+    'sso7_trail_min_dist': 0.003,
+    'sso7_opp_enabled': True,
+    'sso7_opp_min_cycles_stagnant': 3,
+    'sso7_opp_ev_min_ratio': 1.35,
+    'sso7_opp_prob_min_delta': 0.06,
+    'sso7_opp_min_strength': 0.55,
+    'sso7_opp_min_vol_spike': 1.2,
 
     # Funding rate filter
     'funding_rate_spot_filter_enabled': True,
@@ -229,7 +253,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
 
     # WR screener
     'wr_screener_enabled': True,
-    'wr_screener_consecutive_sl_block': 3,
+    'wr_screener_consecutive_sl_block': 5,
 
     # Market Regime
     'current_regime_mode': 'SPOT_BULL',
@@ -293,11 +317,12 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'profit_realization_enabled': True,
     'profit_realization_spot_enabled': True,
     'profit_realization_spot_min_profit_pct': 0.0025,
-    'profit_realization_spot_partial_minutes': 35.0,
-    'profit_realization_spot_full_minutes': 70.0,
-    'profit_realization_spot_drawback_pct': 0.0040,
+    'profit_realization_spot_partial_minutes': 60.0,   # jul07: 35→60 (wolf-hunter)
+    'profit_realization_spot_full_minutes': 120.0,     # jul07: 70→120 (wolf-hunter)
+    'profit_realization_spot_drawback_pct': 0.0080,    # jul07: 0.004→0.008 (wolf-hunter)
     'profit_realization_spot_partial_close_pct': 0.60,
     'profit_realization_spot_max_extensions': 2,
+    'profit_realization_spot_bull_min_partial_minutes': 90.0,  # jul07: 45→90 (wolf-hunter)
     'profit_realization_futures_enabled': True,
     'profit_realization_futures_min_profit_pct': 0.0030,
     'profit_realization_futures_partial_minutes': 20.0,
@@ -308,24 +333,24 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'unified_governance_enabled': True,
     'unified_governance_profit_enabled': True,
     'unified_governance_loss_enabled': True,
-    'unified_governance_loss_min_age_profile_a': 30.0,
-    'unified_governance_loss_min_age_profile_b': 60.0,
-    'unified_governance_loss_min_age_profile_c': 45.0,
-    'unified_governance_futures_loss_min_age_profile_a': 20.0,
-    'unified_governance_futures_loss_min_age_profile_b': 45.0,
-    'unified_governance_futures_loss_min_age_profile_c': 30.0,
-    'unified_governance_loss_escalation_age_profile_a': 120.0,
-    'unified_governance_loss_escalation_age_profile_b': 90.0,
-    'unified_governance_loss_escalation_age_profile_c': 60.0,
-    'unified_governance_futures_loss_escalation_age_profile_a': 90.0,
-    'unified_governance_futures_loss_escalation_age_profile_b': 70.0,
-    'unified_governance_futures_loss_escalation_age_profile_c': 45.0,
+    'unified_governance_loss_min_age_profile_a': 90.0,    # jul07: 30→90 (wolf-hunter: SL lógico primero)
+    'unified_governance_loss_min_age_profile_b': 120.0,   # jul07: 60→120
+    'unified_governance_loss_min_age_profile_c': 90.0,    # jul07: 45→90
+    'unified_governance_futures_loss_min_age_profile_a': 30.0,   # jul07: 20→30
+    'unified_governance_futures_loss_min_age_profile_b': 60.0,   # jul07: 45→60
+    'unified_governance_futures_loss_min_age_profile_c': 45.0,   # jul07: 30→45
+    'unified_governance_loss_escalation_age_profile_a': 240.0,   # jul07: 120→240
+    'unified_governance_loss_escalation_age_profile_b': 180.0,   # jul07: 90→180
+    'unified_governance_loss_escalation_age_profile_c': 120.0,   # jul07: 60→120
+    'unified_governance_futures_loss_escalation_age_profile_a': 120.0,  # jul07: 90→120
+    'unified_governance_futures_loss_escalation_age_profile_b': 90.0,   # jul07: 70→90
+    'unified_governance_futures_loss_escalation_age_profile_c': 60.0,   # jul07: 45→60
     'unified_governance_loss_distance_to_sl_min_pct': 0.50,
     'unified_governance_loss_trajectory_acceleration_pct': 0.50,
     'unified_governance_loss_signal_reversal_strength': 0.65,
     'unified_governance_monitor_only_force_loss_pct': 2.0,
     'unified_governance_monitor_only_force_age_minutes': 90.0,
-    'unified_governance_loss_min_usdt': 1.50,
+    'unified_governance_loss_min_usdt': 3.00,  # jul07: 1.50→3.00 (wolf-hunter)
     'futures_binance_verify_interval_cycles': 3,
 
     # Futures capital bridge
