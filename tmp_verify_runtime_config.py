@@ -1,9 +1,14 @@
 import json
-from config import get_settings
-from config_helpers import dump_active_config, _PARAM_DEFAULTS
+from config import Settings
+from config_helpers import _PARAM_DEFAULTS
 
-settings = get_settings()
-actual = dump_active_config(settings)
+# Local governance parity should compare the model-declared defaults against the
+# canonical config map, not env-influenced runtime values. Live runtime drift is
+# covered separately by /config/verify and drift-check endpoints.
+actual = {
+    name: field.default
+    for name, field in Settings.model_fields.items()
+}
 
 # Environment/safety overrides, symbol lists, and docker-compose operational overrides
 # are intentionally different from canonical defaults at runtime.
@@ -37,4 +42,4 @@ if mismatches:
     print(json.dumps(mismatches, indent=2, default=str))
     raise SystemExit(1)
 
-print("Runtime config matches baseline run_0812 defaults. OK")
+print("Model defaults match canonical baseline. OK")

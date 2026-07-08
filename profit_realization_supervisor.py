@@ -109,8 +109,8 @@ def _peak_protection_pct(regime_mode: Optional[str], trade_type: Optional[str], 
         # Fase 2.5: configurable via settings; default is more patient than the old 0.60
         _profile = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper()
         if _profile == 'A':
-            return float(getattr(settings, 'peak_protection_spot_bull_profile_a_pct', 0.65))
-        return float(getattr(settings, 'peak_protection_spot_bull_pct', 0.60))
+            return float(getattr(settings, 'peak_protection_spot_bull_profile_a_pct', 0.70))
+        return float(getattr(settings, 'peak_protection_spot_bull_pct', 0.65))
     return 0.65      # neutral default
 
 

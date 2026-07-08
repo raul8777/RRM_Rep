@@ -640,10 +640,10 @@ class TestConfigParams:
         assert self._get('futures_trailing_enabled') is True
 
     def test_futures_trailing_activation_pct(self):
-        assert self._get('futures_trailing_activation_pct') == pytest.approx(2.0)  # SL-OPT: was 2.5
+        assert self._get('futures_trailing_activation_pct') == pytest.approx(2.5)  # concentrated
 
     def test_futures_trailing_distance_pct(self):
-        assert self._get('futures_trailing_distance_pct') == pytest.approx(1.5)
+        assert self._get('futures_trailing_distance_pct') == pytest.approx(2.0)  # concentrated
 
     def test_futures_breakeven_activation_pct(self):
         assert self._get('futures_breakeven_activation_pct') == pytest.approx(1.0)

@@ -1321,7 +1321,7 @@ class FuturesClient:
             try:
                 _settings = getattr(self, '_cached_settings', None)  # set by check_positions if called first; None is fine
                 _br_max_peak = getattr(_settings, 'futures_bounce_rescue_max_peak_pct', 0.5) / 100.0 if _settings else 0.005
-                _br_min_h   = getattr(_settings, 'futures_bounce_rescue_min_hours', 4.0) if _settings else 4.0
+                _br_min_h   = getattr(_settings, 'futures_bounce_rescue_min_hours', 3.0) if _settings else 3.0
                 _br_enabled = getattr(_settings, 'futures_bounce_rescue_enabled', True) if _settings else True
                 if _br_enabled:
                     _retag_count = 0
@@ -2725,7 +2725,7 @@ class FuturesClient:
                     try:
                         _br_age_h = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
                         _br_max_peak = getattr(settings, 'futures_bounce_rescue_max_peak_pct', 0.5) / 100.0 if settings else 0.005
-                        _br_min_h = getattr(settings, 'futures_bounce_rescue_min_hours', 4.0) if settings else 4.0
+                        _br_min_h = getattr(settings, 'futures_bounce_rescue_min_hours', 3.0) if settings else 3.0
                         if _br_age_h >= _br_min_h and _prev_peak < _br_max_peak:
                             pos._smart_meta['bounce_entry'] = True
                             self._persist_smart_meta(pos)
@@ -3425,7 +3425,7 @@ class FuturesClient:
 
             # Run predictor to get success probability
             import pnl_service as _pnl_service_module
-            _default_size = float(getattr(settings, 'futures_usdt_per_trade', 100.0))
+            _default_size = float(getattr(settings, 'futures_usdt_per_trade', 150.0))
             _max_size = float(getattr(settings, 'max_per_trade_usdt', 500.0))
             _effective_size = min(position_size_usdt, _max_size) if position_size_usdt else _default_size
             prediction, _ = _pnl_service_module.predict_for_symbol(

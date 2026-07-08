@@ -29,7 +29,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 # ── version marker (bump con cada sesión) ─────────────────────────────────────
-HEALTH_VERSION = "2026-06-20-v4"
+HEALTH_VERSION = "2026-07-07-v1"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,9 +121,9 @@ class TestCat1_ConfigIntegrity:
             "kelly_base_usdt must be < kelly_max_usdt"
 
     def test_kelly_max_pct_liquid_matches_backtest(self):
-        """K2: kelly_max_pct_liquid must match backtest run_0677 baseline (70.4%)."""
-        assert self.s.kelly_max_pct_liquid == 0.704, \
-            f"kelly_max_pct_liquid={self.s.kelly_max_pct_liquid} != 0.704 (backtest run_0677)"
+        """Concentrated: kelly_max_pct_liquid raised to 85% of liquid capital."""
+        assert self.s.kelly_max_pct_liquid == 0.85, \
+            f"kelly_max_pct_liquid={self.s.kelly_max_pct_liquid} != 0.85 (concentrated policy)"
 
     def test_futures_breakeven_lt_trailing_activation(self):
         """Breakeven must activate BEFORE trailing to preserve gains correctly."""
@@ -773,6 +773,121 @@ class TestCat5b_SmartTotalSelector:
         assert 'FUTURES_SHORT' in active_mode_payload
 
 
+class TestCat5c_RegimeProfilePersistence:
+    """Regime profile apply must persist only explicitly defined fields."""
+
+    class _DB:
+        def __init__(self, runtime_state=None):
+            self.runtime_state = runtime_state or {}
+            self.audit_events = []
+
+        def execute_query(self, sql, params=None):
+            if "WHERE key='kelly_config_override'" in sql:
+                value = self.runtime_state.get('kelly_config_override')
+                return [] if value is None else [{"value": value}]
+            if "FROM trading_runtime_state WHERE key=%s" in sql and params:
+                key = params[0]
+                value = self.runtime_state.get(key)
+                return [] if value is None else [{"value": value}]
+            return []
+
+        def execute_update(self, sql, params=None):
+            if "trades_audit" in sql and params:
+                self.audit_events.append(params)
+                return 1
+            if "trading_runtime_state" in sql and params and len(params) >= 2:
+                self.runtime_state[params[0]] = params[1]
+                return 1
+            return 0
+
+        def execute_transaction(self, stmts):
+            for sql, params in stmts:
+                if "kelly_config_override" in sql:
+                    self.runtime_state['kelly_config_override'] = params[0]
+                elif "trading_runtime_state" in sql and params and len(params) >= 2:
+                    self.runtime_state[params[0]] = params[1]
+            return True
+
+    def test_apply_regime_params_does_not_persist_unscoped_scalars(self):
+        import json
+        import run_trades
+
+        db = self._DB(runtime_state={
+            'regime_profile_active_SPOT_BULL': {'profile': 'A'},
+            'regime_profile_SPOT_BULL_A': {
+                'stop_loss_pct': 9.99,
+            },
+            'kelly_config_override': {
+                'take_profit_pct': {'new': 7.77},
+            },
+        })
+        settings = make_settings(stop_loss_pct=3.36, take_profit_pct=4.14, min_signal_strength=0.45)
+
+        run_trades._last_applied_regime_mode = None
+        run_trades._last_applied_regime_profile = None
+        run_trades._regime_param_baseline = None
+
+        result = run_trades._apply_regime_params(settings, 'SPOT_BULL', db)
+
+        assert result['skipped'] is False
+        assert settings.stop_loss_pct == pytest.approx(9.99)
+        persisted = json.loads(db.runtime_state['kelly_config_override'])
+        assert persisted['stop_loss_pct']['new'] == pytest.approx(9.99)
+        assert persisted['take_profit_pct']['new'] == pytest.approx(7.77)
+        assert 'min_signal_strength' not in persisted
+
+    def test_apply_regime_params_covers_prs_and_adverse_exit_fields(self):
+        import run_trades
+
+        db = self._DB(runtime_state={
+            'regime_profile_active_SPOT_BULL': {'profile': 'A'},
+            'regime_profile_SPOT_BULL_A': {
+                'profit_realization_spot_partial_minutes': 77.0,
+                'futures_adverse_exit_min_hours': 2.5,
+            },
+        })
+        settings = make_settings(
+            profit_realization_spot_partial_minutes=60.0,
+            futures_adverse_exit_min_hours=4.0,
+        )
+
+        run_trades._last_applied_regime_mode = None
+        run_trades._last_applied_regime_profile = None
+        run_trades._regime_param_baseline = None
+
+        result = run_trades._apply_regime_params(settings, 'SPOT_BULL', db)
+
+        assert result['skipped'] is False
+        assert settings.profit_realization_spot_partial_minutes == pytest.approx(77.0)
+        assert settings.futures_adverse_exit_min_hours == pytest.approx(2.5)
+
+
+class TestCat5d_BreakevenAuditSchema:
+    """Breakeven audit must use the canonical trades_audit schema."""
+
+    def test_spot_breakeven_does_not_use_legacy_event_data_column(self):
+        import inspect
+        import run_trades
+
+        source = inspect.getsource(run_trades._check_sl_tp_positions)
+
+        assert 'breakeven_activated' in source
+        assert 'INSERT INTO trades_audit (event_data)' not in source
+
+
+class TestCat5e_PredExitNetGate:
+    """PredExit must gate on net PnL, not gross PnL."""
+
+    def test_spot_predexit_uses_net_pnl_gate(self):
+        import inspect
+        import run_trades
+
+        source = inspect.getsource(run_trades._check_sl_tp_positions)
+
+        assert "prediction_exit_enabled', True) and pnl_pct_net < 0" in source
+        assert "prediction_exit_enabled', True) and pnl_pct < 0" not in source
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # CAT 6 — Position Manager
 # ═════════════════════════════════════════════════════════════════════════════
@@ -794,22 +909,24 @@ class TestCat6_PositionManager:
         assert self.pm.get_position("XYZUSDT") is None
 
     def test_close_buy_position_pnl(self):
+        from binance_commission import entry_commission, exit_commission
+
         pos = self.Position("BTCUSDT", "BUY", 1.0, 50000.0, "2024-01-01T00:00:00Z")
         self.pm.add_position(pos)
         closed = self.pm.close_position("BTCUSDT", 52000.0, "take_profit")
         assert closed is not None
-        # PositionManager deducts commissions (0.1% entry + 0.1% exit)
-        # entry_comm=0 (no entry_commission set), exit_comm=52000*0.001=52
-        # pnl = (52000-50000)*1.0 - 0 - 52 = 1948
-        assert closed.pnl == pytest.approx(1948.0, abs=5.0)
+        expected_pnl = (52000.0 - 50000.0) - entry_commission(1.0, 50000.0, 'spot') - exit_commission(1.0, 52000.0, 'spot')
+        assert closed.pnl == pytest.approx(expected_pnl, abs=0.01)
         assert closed.pnl_percentage == pytest.approx(3.9, abs=0.2)
 
     def test_close_sell_position_pnl(self):
+        from binance_commission import entry_commission, exit_commission
+
         pos = self.Position("BTCUSDT", "SELL", 0.5, 50000.0, "2024-01-01T00:00:00Z")
         self.pm.add_position(pos)
         closed = self.pm.close_position("BTCUSDT", 48000.0, "take_profit")
-        # pnl = (50000-48000)*0.5 - 0 - 48000*0.5*0.001 = 1000 - 24 = 976
-        assert closed.pnl == pytest.approx(976.0, abs=5.0)
+        expected_pnl = ((50000.0 - 48000.0) * 0.5) - entry_commission(0.5, 50000.0, 'spot') - exit_commission(0.5, 48000.0, 'spot')
+        assert closed.pnl == pytest.approx(expected_pnl, abs=0.01)
 
     def test_closed_position_removed_from_active(self):
         pos = self.Position("ETHUSDT", "BUY", 1.0, 2000.0, "2024-01-01T00:00:00Z")

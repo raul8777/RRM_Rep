@@ -49,8 +49,8 @@ class Settings(BaseSettings):
     binance_use_testnet: bool = Field(default=True)
     # Risk and operation controls
     max_daily_loss_usdt: float = Field(default=100.0)
-    max_per_trade_usdt: float = Field(default=10.0)
-    max_positions: int = Field(default=5)
+    max_per_trade_usdt: float = Field(default=1500.0)
+    max_positions: int = Field(default=4)
     max_positions_per_symbol: int = Field(default=3)
     dry_run: bool = Field(default=True)
     allow_real_trading: bool = Field(default=False)
@@ -58,11 +58,11 @@ class Settings(BaseSettings):
     trade_horizon_minutes: int = Field(default=240)  # realistic hold time for PnL prediction (4h)
     # Kelly dynamic position sizing
     kelly_enabled: bool = Field(default=True)
-    kelly_base_usdt: float = Field(default=100.0)  # jul07: 73→100 (wolf-hunter s63: base más digna)
-    kelly_max_usdt: float = Field(default=1000.0)   # jul07: 747→1000 (wolf-hunter s63: cap runner)
-    kelly_max_pct_cap: float = Field(default=0.22)       # jul07: 0.25→0.22 (objetivo ~1000 por posición con portafolio ~5200)
-    kelly_max_pct_liquid: float = Field(default=0.704)  # jun29: 0.621â†’0.704 (run_0677)
-    kelly_dynamic_base_pct: float = Field(default=0.18)  # jul07: 0.15→0.18 (wolf-hunter s63: crece con capital)
+    kelly_base_usdt: float = Field(default=150.0)  # concentrated: base digna para capital $5,100
+    kelly_max_usdt: float = Field(default=1500.0)   # concentrated: cap por posición elevado
+    kelly_max_pct_cap: float = Field(default=0.30)       # concentrated: ~$1,530/posición con $5,100
+    kelly_max_pct_liquid: float = Field(default=0.85)  # concentrated: hasta 85% del líquido en convicción extrema
+    kelly_dynamic_base_pct: float = Field(default=0.20)  # concentrated: base crece con capital disponible
     # Bear market mode
     bear_market_mode_enabled: bool = Field(default=True)
     bear_market_btc_7d_threshold: float = Field(default=-10.0)  # % change
@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     # Protect profitable shorts on regime change â€” only close if unrealized PnL < this threshold (USD)
     futures_protect_profit_usdt: float = Field(default=-5.0)  # H-FIX: 1.0â†’-5.0 â€” solo cierra en regime change si pÃ©rdida > $5
     # Aggressive exposure in SPOT_BULL + F&G Fear: use higher cap when conditions are optimal
-    max_total_exposure_spot_bull_fear: float = Field(default=0.80)
+    max_total_exposure_spot_bull_fear: float = Field(default=0.95)
     max_total_exposure_spot_bull_fear_fng_threshold: int = Field(default=40)
     # Futures: no short when BTC 4h candle just moved up strongly (avoid shorting into momentum)
     futures_no_short_btc_4h_threshold: float = Field(default=2.0)  # %
@@ -91,8 +91,8 @@ class Settings(BaseSettings):
     ug_allow_partial_to_full_escalation: bool = Field(default=False)
     # Peak protection in SPOT_BULL: fraction of peak PnL that must be preserved.
     # Higher = more patient, lets winners run in bull markets (0.70 is more permissive than 0.60).
-    peak_protection_spot_bull_pct: float = Field(default=0.60)  # jul07: 0.70→0.60 (wolf-hunter: más permisivo, deja correr más)
-    peak_protection_spot_bull_profile_a_pct: float = Field(default=0.65)  # jul07: 0.75→0.65 (wolf-hunter: perfil A aún más paciente)
+    peak_protection_spot_bull_pct: float = Field(default=0.65)  # concentrated: proteger más pico
+    peak_protection_spot_bull_profile_a_pct: float = Field(default=0.70)  # concentrated: perfil A aún más protector
     # Scale-out on take-profit
     scale_out_enabled: bool = Field(default=True)
     scale_out_first_close_pct: float = Field(default=0.5)  # close 50% at TP
@@ -112,8 +112,8 @@ class Settings(BaseSettings):
     smart_tp_extension_pct: float = Field(default=2.0)  # SPOT smart TP extension %
     # Futures trailing stop: protect unrealized gains during position lifecycle
     futures_trailing_enabled: bool = Field(default=True)
-    futures_trailing_activation_pct: float = Field(default=2.0)  # SL-OPT: 1.5â†’2.0 (earlier trailing compensates wider SL)
-    futures_trailing_distance_pct: float = Field(default=1.5)      # FIX-F4: trail SL/TP 1.5% from best price (was 1.0 â€” avoids premature exits on volatility)
+    futures_trailing_activation_pct: float = Field(default=2.5)  # concentrated: activar trailing más arriba
+    futures_trailing_distance_pct: float = Field(default=2.0)      # concentrated: evitar cierces en rebotes normales
     # ATR-scaled trailing: trail_dist = max(floor, min(ceiling, ATR_5m * multiplier))
     # This prevents stops from triggering on normal volatility wicks
     futures_trail_atr_enabled: bool = Field(default=True)
@@ -128,7 +128,7 @@ class Settings(BaseSettings):
     # FIX-F1: Cooldown after futures SL hit â€” prevents re-entering same symbol immediately after stop out
     futures_sl_cooldown_hours: float = Field(default=4.0)  # PB6: 1hâ†’4h â€” stop chasing after SL
     # PB1: Stagger entries â€” max new shorts per single cycle (de-correlates entries)
-    futures_max_new_per_cycle: int = Field(default=3)  # max 3 new shorts opened per 4min cycle
+    futures_max_new_per_cycle: int = Field(default=2)  # concentrated: menos entradas por ciclo
     # PB2: Mass SL circuit breaker â€” global pause after N+ positions stop in same check
     futures_mass_sl_threshold: int = Field(default=3)  # trigger if 3+ positions stop together
     futures_mass_sl_cooldown_hours: float = Field(default=4.0)  # 4h global pause
@@ -147,19 +147,19 @@ class Settings(BaseSettings):
     futures_momentum_reversal_drawback: float = Field(default=0.8)  # close if given back 0.8% from peak
     # Early adverse exit: if signal flips against open futures position while already in loss, cut earlier than hard SL
     futures_adverse_exit_enabled: bool = Field(default=True)
-    futures_adverse_exit_loss_pct: float = Field(default=0.8)
+    futures_adverse_exit_loss_pct: float = Field(default=1.2)  # concentrated: corte más amplio
     futures_adverse_exit_min_hours: float = Field(default=1.5)
     futures_adverse_exit_min_strength: float = Field(default=0.55)
     # SSO (Smart Scale-Out) â€” adaptive multi-signal exit system
     sso_enabled: bool = Field(default=True)
     sso_stagnant_min_profit_factor: float = Field(default=0.02)
     sso_stagnant_min_profit_floor: float = Field(default=3.0)
-    sso_stagnant_min_hours: float = Field(default=3.0)  # jul07: 2.0→3.0 (wolf-hunter: no declarar estancamiento prematuro)
+    sso_stagnant_min_hours: float = Field(default=2.5)  # concentrated: ligeramente más agresivo en rotación de capital
     sso_stagnant_velocity_window_min: int = Field(default=60)  # jul07: 30→60 — ventana más estable, menos ruido
     # SSO-1b: Profit Decay — close when position is actively giving back gains
     sso_decay_threshold_pct: float = Field(default=0.008)     # jul07: 0.004→0.008 (wolf-hunter: 0.8% caída necesaria)
     sso_decay_min_profit_usd: float = Field(default=2.0)     # min $2 unrealized to bother closing
-    sso_decay_min_hours: float = Field(default=2.5)               # jul07: 1.5→2.5h (wolf-hunter: más tiempo antes de decay check)
+    sso_decay_min_hours: float = Field(default=2.0)               # concentrated: reacción más rápida a decay
     # SSO-1c: Slow Crawl â€” close when velocity too low to justify slot
     sso_slow_velocity_threshold: float = Field(default=0.001)  # 0.1%/h â€” below this, recycle capital
     sso_slow_min_profit_usd: float = Field(default=1.0)           # min $1 profit to close (don't close losses)
@@ -187,12 +187,12 @@ class Settings(BaseSettings):
     # SSO-6: Bounce Rescue Mode â€” close positions trapped in BTC bounce as soon as they approach breakeven
     futures_bounce_rescue_enabled: bool = Field(default=True)
     futures_bounce_rescue_max_peak_pct: float = Field(default=0.5)   # peak < 0.5% after min_hours = bounce detected
-    futures_bounce_rescue_min_hours: float = Field(default=4.0)         # must hold min 4h before tagging
+    futures_bounce_rescue_min_hours: float = Field(default=3.0)         # concentrated: liberar margen estancado más rápido
     futures_bounce_rescue_target_pnl: float = Field(default=-0.50)     # close when pnl >= -$0.50 (near breakeven)
     spot_bounce_rescue_enabled: bool = Field(default=True)
     spot_bounce_rescue_max_peak_pct: float = Field(default=0.8)         # SPOT: wider peak threshold (no leverage)
-    spot_bounce_rescue_min_hours: float = Field(default=8.0)               # SPOT: wait 8h before activating
-    spot_bounce_rescue_target_pnl: float = Field(default=-0.30)           # SPOT: close when pnl >= -$0.30
+    spot_bounce_rescue_min_hours: float = Field(default=6.0)               # concentrated: liberar capital estancado más rápido
+    spot_bounce_rescue_target_pnl: float = Field(default=-0.50)           # concentrated: corte más amplio, evita micro-pérdidas
     # SSO-6: Bounce Rescue Smart Gate â€” block rescue when position is already recovering
     # AND-partial logic: G1_strong alone OR COUNT(G2,G3,G4) >= rescue_gate_min_concurrent
     rescue_smart_gate_enabled: bool = Field(default=True)
@@ -218,8 +218,8 @@ class Settings(BaseSettings):
     profit_realization_spot_max_extensions: int = Field(default=2)
     profit_realization_futures_enabled: bool = Field(default=True)
     profit_realization_futures_min_profit_pct: float = Field(default=0.0030)
-    profit_realization_futures_partial_minutes: float = Field(default=20.0)
-    profit_realization_futures_full_minutes: float = Field(default=45.0)
+    profit_realization_futures_partial_minutes: float = Field(default=30.0)  # concentrated: menos estrangulamiento
+    profit_realization_futures_full_minutes: float = Field(default=60.0)  # concentrated: dejar madurar ganancias
     profit_realization_futures_drawback_pct: float = Field(default=0.0035)
     profit_realization_futures_partial_close_pct: float = Field(default=0.60)
     profit_realization_futures_max_extensions: int = Field(default=1)
@@ -244,7 +244,7 @@ class Settings(BaseSettings):
     unified_governance_loss_signal_reversal_strength: float = Field(default=0.65)
     unified_governance_monitor_only_force_loss_pct: float = Field(default=2.0)
     unified_governance_monitor_only_force_age_minutes: float = Field(default=90.0)
-    unified_governance_loss_min_usdt: float = Field(default=3.00)  # jul07: 1.50→3.00 (wolf-hunter: pérdida mínima antes de activar loss branch)
+    unified_governance_loss_min_usdt: float = Field(default=7.50)  # concentrated: 0.5% de $1,500 = umbral real
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True)
     wr_screener_consecutive_sl_block: int = Field(default=5)  # block after N consecutive SL
@@ -261,9 +261,9 @@ class Settings(BaseSettings):
     profit_realization_spot_bull_min_partial_minutes: float = Field(default=90.0)  # jul07: 45→90 (wolf-hunter: SPOT_BULL necesita tiempo)
     # A4: Entry quality score gate
     entry_quality_gate_enabled: bool = Field(default=True)
-    entry_quality_min_vol_spike: float = Field(default=1.0)  # jul07: 0.8→1.0 (wolf-hunter: volumen neutro como mínimo)
+    entry_quality_min_vol_spike: float = Field(default=1.2)  # concentrated: volumen confirma dirección
     entry_quality_min_strength: float = Field(default=0.40)  # jul07: 0.35→0.40
-    entry_quality_max_failures: int = Field(default=1)  # jul07: 2→1 (wolf-hunter: si 2 dimensiones fallan, no entrar)
+    entry_quality_max_failures: int = Field(default=0)  # concentrated: todos los gates deben pasar
     # BTC dominance filter
     btc_dominance_filter_enabled: bool = Field(default=True)
     btc_dominance_altcoin_threshold: float = Field(default=56.0)  # if BTC.D > this, skip alts
@@ -297,14 +297,14 @@ class Settings(BaseSettings):
 
     # VolSpike override: bypass PnL predictor for narrative tokens with strong volume
     volspike_override_enabled: bool = Field(default=True)
-    volspike_override_min_spike: float = Field(default=1.5)   # x avg volume
+    volspike_override_min_spike: float = Field(default=2.0)   # concentrated: volumen excepcional
     volspike_override_max_rsi: float = Field(default=65.0)      # RSI must be below this
     volspike_override_trend_required: bool = Field(default=True)  # must be 4h UP
     volspike_override_narrative_only: bool = Field(default=True)  # only for narrative tokens
     # V2: Controles adicionales para hacer override mÃ¡s selectivo (jun 16 2026)
-    volspike_override_min_strength: float = Field(default=0.65)  # Requerir alta convicciÃ³n tÃ©cnica
-    volspike_override_max_positions: int = Field(default=2)  # MÃ¡x 2 posiciones override simultÃ¡neas
-    volspike_override_daily_limit: int = Field(default=3)      # MÃ¡x 3 overrides por dÃ­a
+    volspike_override_min_strength: float = Field(default=0.75)  # concentrated: alta convicción obligatoria
+    volspike_override_max_positions: int = Field(default=1)  # concentrated: compite por 1 de 4-5 slots
+    volspike_override_daily_limit: int = Field(default=1)      # concentrated: máx 1 override/día
     
     # Prediction-based position closure configuration
     min_pnl_improvement_threshold: float = Field(default=0.5)  # 50% improvement
@@ -325,8 +325,8 @@ class Settings(BaseSettings):
     min_hold_minutes_spot_bull: int = Field(default=120)     # SPOT_BULL: 2h hold before replacement
     max_rebalance_per_cycle: int = Field(default=2)  # max sells per rebalance cycle
     rebalance_excluded_symbols: List[str] = Field(default=['USD1USDT', 'USDCUSDT', 'BUSDUSDT', 'TUSDUSDT', 'FDUSDUSDT'])  # F4: stablecoins never rebalanced
-    rebalance_max_abs_pnl_pct: float = Field(default=2.0)  # s66: H6 — skip rebalance if abs(PnL%) > this (let SL/TP/SSO manage active positions); was hardcoded 0.5
-    max_total_exposure_pct: float = Field(default=0.65)  # max portfolio % in open spot positions
+    rebalance_max_abs_pnl_pct: float = Field(default=3.0)  # concentrated: posiciones grandes necesitan más tolerancia
+    max_total_exposure_pct: float = Field(default=0.90)  # concentrated: máxima exposición permitida del portafolio
     # M1: ATR-Based dynamic SL â€” replaces fixed SL% with 1.5Ã—ATR for volatile tokens
     atr_sl_enabled: bool = Field(default=True)           # enable ATR-based SL calculation
     atr_sl_multiplier: float = Field(default=1.5)     # SL = max(category_sl, atr_mult Ã— ATR14)
@@ -336,7 +336,7 @@ class Settings(BaseSettings):
     kelly_conviction_enabled: bool = Field(default=True)
     kelly_conviction_vol2x: float = Field(default=1.8)   # jul07: 1.5→1.8 (wolf-hunter s63: vol 2-3x +80%)
     kelly_conviction_vol3x: float = Field(default=2.5)   # jul07: 2.0→2.5 (wolf-hunter s63: vol >3x +150%)
-    kelly_conviction_max_pct: float = Field(default=0.20)  # jul07: 0.15→0.20 (objetivo ~1000: 20% de ~5200 ≈ 1040)
+    kelly_conviction_max_pct: float = Field(default=0.25)  # concentrated: vol >3x permite 25% de portafolio
     # Smart exit: anti-wick SL confirmation
     sl_confirmation_candles: int = Field(default=1)  # 0=immediate, 1=require last 1m candle close below SL
     # Smart exit: rebalance skips if predictor sees upside
@@ -345,18 +345,29 @@ class Settings(BaseSettings):
     rebalance_skip_if_bullish_signal: bool = Field(default=True)  # require technical negative signal before rebalancing
     rebalance_rsi_overbought: float = Field(default=60.0)  # RSI1h threshold â€” rebalance only if RSI > this OR EMA9 descending
     # Dynamic max positions by regime (replaces single MAX_POSITIONS when regime is known)
-    max_positions_spot_bull: int = Field(default=20)    # jun17: 15â†’20 (32 activos disponibles)
-    max_positions_range_scalp: int = Field(default=10)  # jun17: 8â†’10
-    max_positions_preservation: int = Field(default=5)
-    max_positions_futures_short: int = Field(default=12)  # K2: 4â†’12 â€” backtest run_0812 uses 12 concurrent shorts
+    max_positions_spot_bull: int = Field(default=5)    # concentrated: 4-5 posiciones en bull
+    max_positions_range_scalp: int = Field(default=3)  # concentrated: pocos setups en rango
+    max_positions_preservation: int = Field(default=1)  # concentrated: capital preservado en bear
+    max_positions_futures_short: int = Field(default=5)  # concentrated: 3-5 shorts simultáneos
+    # QUBO Portfolio Selection (combinatorial optimizer)
+    qubo_enabled: bool = Field(default=True)
+    qubo_lambda_corr: float = Field(default=1.0)       # penalty weight for pairwise correlation
+    qubo_lambda_size: float = Field(default=5.0)       # penalty weight for cardinality constraint (keep high)
+    qubo_lambda_risk: float = Field(default=0.5)         # penalty weight for individual risk
+    qubo_solver: str = Field(default="sqa")            # sqa | greedy | brute
+    qubo_population_size: int = Field(default=30)        # SQA population
+    qubo_iterations: int = Field(default=80)           # SQA iterations
+    qubo_seed: int = Field(default=42)                 # random seed
+    qubo_min_candidates: int = Field(default=2)          # min candidates to activate QUBO selector
+    qubo_include_open_positions: bool = Field(default=True)  # include open positions in correlation matrix
     # Active replacement: swap weakest open position for a better new signal
     replace_only_losing: bool = Field(default=True)  # only replace positions in loss/flat
     replace_ev_min_ratio: float = Field(default=1.1)  # MEJO-1: 1.3â†’1.1 â€” more permissive given small EV values
     replace_strength_min_delta: float = Field(default=0.05)  # MEJO-2: 0.15â†’0.05 â€” BUG-B fix: avg is now real, not hardcoded 0.5
     # Overflow slots: allow extra positions beyond regime max when signal quality is exceptional
-    overflow_min_strength: float = Field(default=0.80)  # Kelly FUERTE tier threshold
-    overflow_min_prob: float = Field(default=0.65)          # Kelly FUERTE tier threshold
-    overflow_max_extra: int = Field(default=3)             # max simultaneous overflow slots
+    overflow_min_strength: float = Field(default=0.85)  # concentrated: overflow solo convicción extrema
+    overflow_min_prob: float = Field(default=0.70)          # concentrated: overflow solo probabilidad extrema
+    overflow_max_extra: int = Field(default=1)             # concentrated: máx 1 slot extra
     # â”€â”€ Behavioral Finance: F&G Kelly multiplier (agresivo) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     fng_kelly_boost_enabled: bool = Field(default=True)
     fng_extreme_fear_threshold: int = Field(default=20)   # <= this â†’ boost
@@ -376,10 +387,10 @@ class Settings(BaseSettings):
     # â”€â”€ Correlaciones: lÃ­mite de posiciones por categorÃ­a â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     category_max_positions_enabled: bool = Field(default=True)
     category_max_positions: Dict[str, Any] = Field(default={
-        "LARGE_CAP":  3,   # BTC/ETH/BNB â€” max 3
-        "MIDCAP_ALT": 8,   # E2: 7â†’8 slots (12 midcap disponibles en screener)
-        "NARRATIVE":  6,   # E2: 5â†’6 slots (10 AI/data narratives disponibles)
-        "MEME":       2,   # DOGE/PEPE/WIF â€” max 2 (alta correlaciÃ³n)
+        "LARGE_CAP":  1,   # concentrated: máx 1 large cap
+        "MIDCAP_ALT": 2,   # concentrated: máx 2 midcaps
+        "NARRATIVE":  1,   # concentrated: máx 1 narrative
+        "MEME":       1,   # concentrated: máx 1 meme
     })
 
     # â”€â”€ Circuit breaker tÃ©cnico (solo fallas de sistema, no pÃ©rdidas) â”€â”€â”€â”€â”€â”€â”€
@@ -399,8 +410,8 @@ class Settings(BaseSettings):
     cycle_futures_short: int = Field(default=4)     # H-FIX: 6â†’4 min (trailing mÃ¡s reactivo a movimientos rÃ¡pidos)
 
     # Signal quality filter
-    min_signal_strength: float = Field(default=0.45)  # jul07: 0.389→0.45 (wolf-hunter: solo señales con convicción real)
-    min_success_probability: float = Field(default=0.52)  # jul07: 0.499→0.52 (wolf-hunter: edge estadístico mínimo)
+    min_signal_strength: float = Field(default=0.60)  # concentrated: solo señales fuertes
+    min_success_probability: float = Field(default=0.60)  # concentrated: edge estadístico alto
     # P1.3: Signal cache TTL dinÃ¡mico â€” reduce de 600s fijo a 1 ciclo por rÃ©gimen
     signal_cache_ttl_seconds: int = Field(default=240)  # default 4 min (1 ciclo FUTURES_SHORT)
 
@@ -506,11 +517,11 @@ class Settings(BaseSettings):
     # â”€â”€ Futures trading (USDM, fapi.binance.com) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     futures_enabled: bool = Field(default=True)  # K2: True â€” backtest run_0812 uses futures
     futures_leverage: int = Field(default=10)          # K2: 2â†’10 â€” backtest run_0812 validated 10x
-    futures_max_shorts: int = Field(default=12)       # K2: 5â†’12 â€” backtest run_0812 uses 12 concurrent shorts
-    futures_max_largecap_shorts: int = Field(default=5)  # max LARGE_CAP shorts simultaneously (diversification guard â€” raise MAX_SHORTS but keep this at 5 to force MID-CAP slots)
-    futures_usdt_per_trade: float = Field(default=100.0)  # K2: 50â†’100 â€” minimum margin floor per short (backtest run_0812)
-    futures_sl_pct: float = Field(default=1.42)          # jun29: 3.33â†’1.42 (run_0677)
-    futures_tp_pct: float = Field(default=2.81)          # jun29: 7.68â†’2.81 (run_0677)
+    futures_max_shorts: int = Field(default=5)       # concentrated: 3-5 shorts simultáneos
+    futures_max_largecap_shorts: int = Field(default=3)  # concentrated: no concentrar todo en BTC/ETH
+    futures_usdt_per_trade: float = Field(default=150.0)  # concentrated: floor de margen igualado a SPOT
+    futures_sl_pct: float = Field(default=2.00)          # concentrated: mayor tolerancia al ruido
+    futures_tp_pct: float = Field(default=4.00)          # concentrated: mejor R:R
     futures_min_btc_7d_drop: float = Field(default=-7.0)  # only short in bear
     futures_symbols: List[str] = Field(default=[
         'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT',
@@ -523,14 +534,14 @@ class Settings(BaseSettings):
     ])   # LARGE_CAP futures symbols for category cap
     futures_no_short_btc_4h_threshold: float = Field(default=2.0)
     # Futures overflow: allow extra SHORTs beyond futures_max_shorts when signal is exceptional
-    futures_overflow_max_extra: int   = Field(default=3)    # max extra simultaneous overflow SHORTs (3+3=6 total) â€” review after 1 week
+    futures_overflow_max_extra: int   = Field(default=1)    # concentrated: máx 1 overflow
     futures_overflow_min_strength: float = Field(default=0.65)  # H-FIX: 0.75â†’0.65 (habilita overflow en condiciones de alta vol moderada)
     futures_overflow_min_vol_spike: float = Field(default=2.0)  # H-FIX: 2.5â†’2.0 (mÃ¡s accesible para overflow en pÃ¡nico moderado)
     futures_overflow_min_drop_24h: float  = Field(default=-3.0)  # min 24h drop %
     # M1: Minimum strength to inject a symbol into the futures signal pool (filters weak HOLDs)
-    futures_min_inject_strength: float = Field(default=0.40)
+    futures_min_inject_strength: float = Field(default=0.50)  # concentrated: evitar rebotes (lección AAVE -5.88%)
     # Futures Kelly dynamic cap
-    futures_kelly_cap_pct: float = Field(default=0.20)  # PB4: 15â†’20% of available futures margin (bigger positions)
+    futures_kelly_cap_pct: float = Field(default=0.30)  # concentrated: ~30% del margen disponible
     # Futures signal filtering: minimum probability and vol spike (backtest-optimizable)
     futures_min_prob: float = Field(default=0.499)  # jun29: 0.527â†’0.499 (run_0677)
     futures_vol_spike_min: float = Field(default=0.91)  # jun29: 0.83â†’0.91 (run_0677)
@@ -552,9 +563,9 @@ class Settings(BaseSettings):
     futures_capital_bridge_min_transfer: float = Field(default=10.0)  # min USDT to trigger transfer
     # Unified Portfolio Manager: PortfolioManager as capital director for both SPOT and Futures
     use_unified_portfolio_manager: bool = Field(default=False)  # feature flag â€” false = legacy behavior
-    futures_kelly_base_usdt: float = Field(default=73.0)  # jun29: 76â†’73 (run_0677)
-    futures_kelly_max_usdt: float = Field(default=1111.0)    # jun29: 800â†’1111 (run_0677)
-    futures_kelly_max_pct_liquid: float = Field(default=0.704)  # jun29: 0.621â†’0.704 (run_0677)
+    futures_kelly_base_usdt: float = Field(default=150.0)  # concentrated: base igualada a SPOT
+    futures_kelly_max_usdt: float = Field(default=1500.0)    # concentrated: cap por short elevado
+    futures_kelly_max_pct_liquid: float = Field(default=0.85)  # concentrated: consistente con SPOT
 
     # â”€â”€ Dynamic pair screener â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     screener_enabled: bool = Field(default=True)
@@ -575,7 +586,7 @@ class Settings(BaseSettings):
     # â”€â”€ Futures LONG / hedge bidireccional â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     futures_hedge_mode_enabled: bool = Field(default=True)
     futures_long_enabled: bool = Field(default=True)
-    futures_max_longs: int = Field(default=3)
+    futures_max_longs: int = Field(default=2)  # concentrated: hedge más concentrado
     futures_long_sl_pct: float = Field(default=2.5)
     futures_long_tp_pct: float = Field(default=5.0)
     futures_long_in_range_scalp: bool = Field(default=True)

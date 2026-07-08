@@ -1,11 +1,106 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 07 2026 | Sesión 67: Auditoría IV — 14 bugs corregidos acumulados (s65-s67). Sistema limpio. Próximo paso: `docker-compose up -d --build`.
+> Última actualización: jul 08 2026 | Sesión 69: Selector de Cartera QUBO/PD + Matriz de Correlación en Vivo. Implementado combinatorial optimizer para SPOT/FUTURES_SHORT; Docker rebuilt; validación 351 passed / 0 critical mismatches.
 
 ---
 
-## 🗺️ Estado del Sistema — jul 07 2026 (post-s67)
+## 🗺️ Estado del Sistema — jul 08 2026 (post-s69)
+
+### ✅ Sesión 69 — Selector de Cartera QUBO/PD + Correlación en Vivo — jul 08 2026
+
+**Objetivo:** Convertir el criterio de entrada "pasa filtro → entra" en un selector explícito de las K mejores posiciones ortogonales, usando la matriz de correlación y maximizando el retorno ajustado por riesgo, para hacer la política agresiva-concentrada realmente inteligente.
+
+**Decisiones de diseño**
+- Scope: SPOT_BULL, RANGE_SCALP y FUTURES_SHORT. PRESERVATION no abre nuevas posiciones.
+- K: límite del régimen activo (`max_positions_spot_bull`, `max_positions_range_scalp`, `futures_max_shorts`), tomado vía `get_param` para evitar defaults hardcodeados.
+- Función objetivo: maximizar PnL esperado absoluto, penalizar correlación par-a-par y riesgo individual, forzar cardinalidad K.
+- Solver: Simulated Quantum Annealing (SQA) binario clásico, reutilizando la filosofía de `hybrid_optimizer/quantum_space.py`; sin dependencias de QPU/API externas.
+- Fallbacks: `brute` para N≤12 (óptimo garantizado) y `greedy` para debug rápido.
+
+**Archivos creados**
+- `portfolio_selector.py` — core QUBO, SQA binario, wrappers por régimen, pesos de capital.
+- `spot_correlation.py` — matriz Pearson 1h (48 barras), cache TTL 15 min, Kelly reduction 0.65–1.0 para SPOT LONG.
+- `tests/test_portfolio_selector.py` — 8 tests unitarios.
+- `tests/test_spot_correlation.py` — 8 tests de Pearson y Kelly reduction.
+
+**Archivos modificados**
+- `futures_correlation.py` — añadido `get_correlation_matrix()` para consumo del selector.
+- `config.py` — 9 campos QUBO configurables (`qubo_enabled`, `qubo_lambda_corr`, `qubo_lambda_size`, `qubo_lambda_risk`, `qubo_solver`, `qubo_population_size`, `qubo_iterations`, `qubo_seed`, `qubo_min_candidates`, `qubo_include_open_positions`).
+- `config_helpers.py` — defaults canónicos QUBO en `_PARAM_DEFAULTS`.
+- `run_trades.py` — `_apply_qubo_selector()` integrado en `execute_once` tras predicciones; reemplaza el simple EV-sort; inyecta `qubo_weight` en metadatos de señales.
+
+**SL/TP ATR scaling**
+- Revisado: `_calc_atr_sl_pct` ya escala SL por ATR14 (mult 1.5, floor 1.5%, cap 8%). No se detectaron estrangulamientos; no se requirieron cambios.
+
+**Validación**
+- `pytest` completo (excluyendo integración/webhook/Cat7): **351 passed, 0 failed**.
+- `tmp_audit_config.py`: **0 critical mismatches**.
+- `tmp_verify_runtime_config.py`: **OK**.
+- Docker rebuilt y contenedores saludables.
+
+---
+
+### ✅ Sesión 68 — Auditoría V: Profile Override Hygiene + Startup Restore + PredExit NET + Test Portability — jul 08 2026
+
+**J1 — ALTA: `_apply_regime_params()` contaminaba `kelly_config_override` con todos los escalares activos** (`run_trades.py`)
+- El merge persistía todos los campos de `_scalar_map`, incluso si el perfil no los definía.
+- Impacto: sobreescritura silenciosa de hot-config manual y drift de snapshots por perfil.
+- Fix: persistir solo campos explícitamente presentes en `_raw` y no rechazados.
+
+**J2 — ALTA: breakeven SPOT auditaba contra columna legacy `event_data`** (`run_trades.py`)
+- El write no seguía el esquema canónico `trades_audit(symbol, trade_type, event, detail, binance_confirmed)`.
+- Impacto: trazabilidad de breakeven potencialmente perdida o fallando en silencio.
+- Fix: INSERT canónico con `event='breakeven_activated'` y JSON en `detail`.
+
+**J3 — ALTA: restore duplicado en startup de `app.py` podía reintroducir `MIDCAP` y borrar `MEME` tras restart** (`app.py`, `config_helpers.py`)
+- `app.py` tenía lógica manual distinta de `config_helpers.load_runtime_overrides_from_db()`.
+- Impacto: divergencia restart-safe entre startup y runtime helper; `futures_category_thresholds` legacy podía recontaminar el sistema.
+- Fix: `app.py` ahora delega el restore al helper canónico; el helper normaliza `MIDCAP -> MIDCAP_ALT` y mergea sobre defaults actuales preservando `MEME`.
+
+**J4 — MEDIA: perfiles DB no podían gobernar PRS ni `futures_adverse_exit_*`** (`run_trades.py`)
+- Esos campos estaban en hot-config whitelist pero faltaban en `_scalar_map`.
+- Impacto: perfiles por modo/perfil no podían ajustar tiempos/umbrales de profit realization ni adverse exit.
+- Fix: añadidas entradas faltantes de `profit_realization_*` y `futures_adverse_exit_*` a `_scalar_map`.
+
+**J5 — MEDIA: asimetría de gobernanza entre perfiles y hot-config** (`app.py`)
+- `futures_breakeven_activation_pct` y `rebalance_max_abs_pnl_pct` estaban fuera de `_KELLY_EDITABLE_FIELDS`.
+- Impacto: algunos campos podían gobernarse por perfil pero no vía hot-config/API.
+- Fix: ambos campos añadidos a la whitelist de hot-config.
+
+**J6 — ALTA: PredExit SPOT se activaba con `pnl_pct_gross < 0` en vez de neto** (`run_trades.py`)
+- Una posición con gross ligeramente positivo pero net negativo por comisiones quedaba fuera de reevaluación.
+- Impacto: pérdidas netas podían prolongarse injustificadamente, sesgando el objetivo de capital velocity.
+- Fix: gate de PredExit cambiado a `pnl_pct_net < 0`; logs actualizados a `pnl_net`.
+
+**J7 — MEDIA: suite local de gobernanza no era portable en Windows** (`tests/test_config_governance.py`)
+- Hardcodeaba `'/app'` para `cwd`, `sys.path` y artefactos.
+- Impacto: falsos FAIL en entorno local Windows, bloqueando validación de Fase 8.
+- Fix: paths derivados desde `Path(__file__).resolve().parent.parent`.
+
+**J8 — MEDIA: `tmp_verify_runtime_config.py` comparaba contra `get_settings()` contaminado por env** (`tmp_verify_runtime_config.py`)
+- El verificador mezclaba defaults canónicos con overrides de entorno, dando mismatches no atribuibles a código.
+- Impacto: falsa señal de drift local al validar baseline.
+- Fix: ahora compara los defaults declarados en `Settings.model_fields` contra `_PARAM_DEFAULTS`.
+
+**J9 — BAJA: tests de `PositionManager` seguían asumiendo comisión de salida solamente** (`tests/test_system_health.py`)
+- El código ya deduce entry+exit commission para SPOT.
+- Impacto: `focused_validation_runner` quedaba FAIL por expectativas stale, no por lógica errónea.
+- Fix: tests alineados al módulo central `binance_commission`.
+
+**Validación ejecutada (s68):**
+- `tests/test_system_health.py -k 'RegimeProfilePersistence or BreakevenAuditSchema or PredExitNetGate'` → PASS
+- `tests/test_config_governance.py -k 'legacy_futures_category_keys'` → PASS
+- `tests/test_config_governance.py tests/test_state_persistence.py tests/test_restart_reconciliation.py -v` → 9 PASS, 2 SKIP (API key)
+- `tests/test_system_health.py -k 'close_buy_position_pnl or close_sell_position_pnl'` → PASS
+- `get_errors` en archivos tocados → sin errores
+
+**Nota operativa s68:**
+- `tests/test_audit_consistency.py` no pudo ejecutarse en el intérprete global actual por falta de `fastapi`; el venv del repo carece de `pytest`. Es bloqueo de entorno, no fallo de código detectado en esta sesión.
+- El plan de limpieza de 8 fases quedó completado en código, memorias y referencia viva. La única deuda remanente de la sesión es habilitar un entorno único que tenga `pytest` y `fastapi` para ejecutar esa suite adicional.
+
+**Artefactos temporales de sesión:**
+- Se eliminaron los archivos temporales locales usados para pruebas de shell (`Dev/tmp_ping.txt`, `Dev/tmp_validation_governance.txt`) para no dejar basura no versionada en el workspace.
 
 ### Valores Canónicos Activos
 

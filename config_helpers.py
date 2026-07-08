@@ -25,28 +25,28 @@ logger = logging.getLogger(__name__)
 _PARAM_DEFAULTS: Dict[str, Any] = {
     # SPOT Kelly
     'kelly_enabled': True,
-    'kelly_base_usdt': 73.0,
-    'kelly_max_usdt': 747.0,
-    'kelly_max_pct_liquid': 0.704,
-    'kelly_max_pct_cap': 0.22,
-    'kelly_dynamic_base_pct': 0.15,
-    'max_per_trade_usdt': 10.0,
+    'kelly_base_usdt': 150.0,
+    'kelly_max_usdt': 1500.0,
+    'kelly_max_pct_liquid': 0.85,
+    'kelly_max_pct_cap': 0.30,
+    'kelly_dynamic_base_pct': 0.20,
+    'max_per_trade_usdt': 1500.0,
 
     # FUTURES Kelly
-    'futures_kelly_base_usdt': 73.0,
-    'futures_kelly_max_usdt': 1111.0,
-    'futures_kelly_max_pct_liquid': 0.704,
-    'futures_kelly_cap_pct': 0.20,
+    'futures_kelly_base_usdt': 150.0,
+    'futures_kelly_max_usdt': 1500.0,
+    'futures_kelly_max_pct_liquid': 0.85,
+    'futures_kelly_cap_pct': 0.30,
 
     # FUTURES trading
     'futures_enabled': True,
     'futures_leverage': 10,
-    'futures_max_shorts': 12,
-    'futures_max_largecap_shorts': 5,
-    'futures_max_new_per_cycle': 3,
-    'futures_usdt_per_trade': 100.0,
-    'futures_sl_pct': 1.42,
-    'futures_tp_pct': 2.81,
+    'futures_max_shorts': 5,
+    'futures_max_largecap_shorts': 3,
+    'futures_max_new_per_cycle': 2,
+    'futures_usdt_per_trade': 150.0,
+    'futures_sl_pct': 2.00,
+    'futures_tp_pct': 4.00,
     'futures_long_sl_pct': 2.5,
     'futures_long_tp_pct': 5.0,
     'futures_symbols': [
@@ -65,27 +65,45 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'trailing_stop_distance_pct': 1.0,
 
     # Kelly position sizing (Wolf Hunter s63)
-    'kelly_base_usdt': 100.0,          # jul07: 73→100 (wolf-hunter s63)
-    'kelly_max_usdt': 1000.0,          # jul07: 747→1000 (wolf-hunter s63)
-    'kelly_dynamic_base_pct': 0.18,    # jul07: 0.15→0.18 (wolf-hunter s63)
+    'kelly_base_usdt': 150.0,          # concentrated: base digna para $5,100
+    'kelly_max_usdt': 1500.0,          # concentrated: cap por posición elevado
+    'kelly_dynamic_base_pct': 0.20,    # concentrated: base crece con capital disponible
     'kelly_conviction_vol2x': 1.8,     # jul07: 1.5→1.8 (wolf-hunter s63)
     'kelly_conviction_vol3x': 2.5,     # jul07: 2.0→2.5 (wolf-hunter s63)
-    'kelly_conviction_max_pct': 0.20,  # jul07: 0.15→0.20 (objetivo ~1000 por posición)
+    'kelly_conviction_max_pct': 0.25,  # concentrated: vol >3x permite 25% de portafolio
 
     # Signal filters
-    'min_signal_strength': 0.45,       # jul07: 0.389→0.45 (wolf-hunter)
-    'min_success_probability': 0.52,   # jul07: 0.499→0.52 (wolf-hunter)
+    'min_signal_strength': 0.60,       # concentrated: solo señales fuertes
+    'min_success_probability': 0.60,   # concentrated: edge estadístico alto
     'futures_min_prob': 0.499,
     'futures_vol_spike_min': 0.91,
     'vol_spike_min': 0.91,
 
+    # Entry quality score gate
+    'entry_quality_gate_enabled': True,
+    'entry_quality_min_vol_spike': 1.2,  # concentrated: volumen confirma dirección
+    'entry_quality_min_strength': 0.40,
+    'entry_quality_max_failures': 0,  # concentrated: todos los gates deben pasar
+
     # Exposure / regime
-    'max_total_exposure_pct': 0.65,
-    'max_positions_spot_bull': 20,
-    'max_positions_range_scalp': 10,
-    'max_positions_preservation': 5,
-    'max_positions_futures_short': 12,
-    'max_positions': 5,
+    'max_total_exposure_pct': 0.90,
+    'max_positions_spot_bull': 5,
+    'max_positions_range_scalp': 3,
+    'max_positions_preservation': 1,
+    'max_positions_futures_short': 5,
+    'max_positions': 4,
+
+    # QUBO portfolio selection
+    'qubo_enabled': True,
+    'qubo_lambda_corr': 1.0,
+    'qubo_lambda_size': 5.0,
+    'qubo_lambda_risk': 0.5,
+    'qubo_solver': 'sqa',
+    'qubo_population_size': 30,
+    'qubo_iterations': 80,
+    'qubo_seed': 42,
+    'qubo_min_candidates': 2,
+    'qubo_include_open_positions': True,
 
     # Commissions / BNB — rates are controlled by Binance, not backtest.
     # Defaults are the documented standard rates; live rates are refreshed from API.
@@ -131,18 +149,18 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     # Spot bounce rescue
     'spot_bounce_rescue_enabled': True,
     'spot_bounce_rescue_max_peak_pct': 0.8,
-    'spot_bounce_rescue_min_hours': 8.0,
-    'spot_bounce_rescue_target_pnl': -0.30,
+    'spot_bounce_rescue_min_hours': 6.0,
+    'spot_bounce_rescue_target_pnl': -0.50,
 
     # VolSpike override
     'volspike_override_enabled': True,
     'volspike_override_narrative_only': True,
-    'volspike_override_min_spike': 1.5,
+    'volspike_override_min_spike': 2.0,
     'volspike_override_max_rsi': 65.0,
     'volspike_override_trend_required': True,
-    'volspike_override_min_strength': 0.65,
-    'volspike_override_max_positions': 2,
-    'volspike_override_daily_limit': 3,
+    'volspike_override_min_strength': 0.75,
+    'volspike_override_max_positions': 1,
+    'volspike_override_daily_limit': 1,
 
     # Screener
     'screener_enabled': True,
@@ -162,14 +180,14 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     # Category / position limits
     'category_max_positions_enabled': True,
     'category_max_positions': {
-        "LARGE_CAP": 3, "MIDCAP_ALT": 8, "NARRATIVE": 6, "MEME": 2,
+        "LARGE_CAP": 1, "MIDCAP_ALT": 2, "NARRATIVE": 1, "MEME": 1,
     },
     'token_categories': {},
     'category_thresholds': {},
     'max_positions_per_symbol': 3,
-    'overflow_min_strength': 0.80,
-    'overflow_min_prob': 0.65,
-    'overflow_max_extra': 3,
+    'overflow_min_strength': 0.85,
+    'overflow_min_prob': 0.70,
+    'overflow_max_extra': 1,
 
     # Min hold
     'min_hold_minutes': 120,
@@ -201,7 +219,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'spot_bull_pnl_boost_large_cap': 0.0,
     'spot_bull_pnl_boost_midcap': -0.10,
     'max_total_exposure_spot_bull_fear_fng_threshold': 40,
-    'max_total_exposure_spot_bull_fear': 0.80,
+    'max_total_exposure_spot_bull_fear': 0.95,
 
     # Cycle lengths
     'cycle_spot_bull': 10,
@@ -224,10 +242,10 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     # SSO
     'sso_enabled': True,
     'sso_target_daily_usd': 40.0,
-    'sso_stagnant_min_hours': 3.0,          # jul07: 2.0→3.0 (wolf-hunter)
+    'sso_stagnant_min_hours': 2.5,          # concentrated: ligeramente más agresivo en rotación
     'sso_stagnant_velocity_window_min': 60, # jul07: 30→60 (wolf-hunter: more stable window)
     'sso_decay_threshold_pct': 0.008,       # jul07: 0.004→0.008 (wolf-hunter)
-    'sso_decay_min_hours': 2.5,             # jul07: 1.5→2.5 (wolf-hunter)
+    'sso_decay_min_hours': 2.0,             # concentrated: reacción más rápida a decay
     'sso_slow_tier2_hours': 5.0,            # jul07: 4→5h (wolf-hunter)
     'sso_slow_tier3_hours': 7.0,            # jul07: 6→7h (wolf-hunter)
     'sso_slow_tier4_hours': 9.0,            # jul07: 8→9h (wolf-hunter)
@@ -262,7 +280,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
 
     # Futures mode
     'futures_hedge_mode_enabled': True,
-    'futures_max_longs': 3,
+    'futures_max_longs': 2,
     'futures_long_enabled': True,
     'futures_long_in_range_scalp': True,
     'futures_long_in_spot_bull': True,
@@ -272,7 +290,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'futures_no_short_btc_3h_threshold': 1.0,
     'futures_confirm_red_candle': True,
     'futures_min_btc_7d_drop': -7.0,
-    'futures_min_inject_strength': 0.40,
+    'futures_min_inject_strength': 0.50,
     'futures_sl_cooldown_hours': 4.0,
     'futures_mass_sl_threshold': 3,
     'futures_mass_sl_cooldown_hours': 4.0,
@@ -284,13 +302,13 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     # Futures overflow
     'futures_overflow_min_strength': 0.65,
     'futures_overflow_min_drop_24h': -3.0,
-    'futures_overflow_max_extra': 3,
+    'futures_overflow_max_extra': 1,
     'futures_overflow_min_vol_spike': 2.0,
 
     # Futures trailing / smart exits
     'futures_trailing_enabled': True,
-    'futures_trailing_activation_pct': 2.0,
-    'futures_trailing_distance_pct': 1.5,
+    'futures_trailing_activation_pct': 2.5,
+    'futures_trailing_distance_pct': 2.0,
     'futures_breakeven_activation_pct': 1.0,
     'futures_smart_tp_enabled': True,
     'futures_smart_tp_max_extensions': 2,
@@ -307,13 +325,13 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'futures_trail_atr_multiplier_low': 1.5,
     'futures_bounce_rescue_enabled': True,
     'futures_bounce_rescue_max_peak_pct': 0.5,
-    'futures_bounce_rescue_min_hours': 4.0,
+    'futures_bounce_rescue_min_hours': 3.0,
     'futures_bounce_rescue_target_pnl': -0.50,
     'futures_momentum_reversal_enabled': True,
     'futures_momentum_reversal_min_peak': 2.0,
     'futures_momentum_reversal_drawback': 0.8,
     'futures_adverse_exit_enabled': True,
-    'futures_adverse_exit_loss_pct': 0.8,
+    'futures_adverse_exit_loss_pct': 1.2,
     'futures_adverse_exit_min_hours': 1.5,
     'futures_adverse_exit_min_strength': 0.55,
     'profit_realization_enabled': True,
@@ -327,8 +345,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'profit_realization_spot_bull_min_partial_minutes': 90.0,  # jul07: 45→90 (wolf-hunter)
     'profit_realization_futures_enabled': True,
     'profit_realization_futures_min_profit_pct': 0.0030,
-    'profit_realization_futures_partial_minutes': 20.0,
-    'profit_realization_futures_full_minutes': 45.0,
+    'profit_realization_futures_partial_minutes': 30.0,
+    'profit_realization_futures_full_minutes': 60.0,
     'profit_realization_futures_drawback_pct': 0.0035,
     'profit_realization_futures_partial_close_pct': 0.60,
     'profit_realization_futures_max_extensions': 1,
@@ -352,7 +370,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'unified_governance_loss_signal_reversal_strength': 0.65,
     'unified_governance_monitor_only_force_loss_pct': 2.0,
     'unified_governance_monitor_only_force_age_minutes': 90.0,
-    'unified_governance_loss_min_usdt': 3.00,  # jul07: 1.50→3.00 (wolf-hunter)
+    'unified_governance_loss_min_usdt': 7.50,  # concentrated: 0.5% de $1,500 = umbral real
     'futures_binance_verify_interval_cycles': 3,
 
     # Futures capital bridge
@@ -390,11 +408,11 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'backtest_safe_only': True,
 
     # Rebalancing cap (s66: H6/H7 — was hardcoded 0.5 in getattr fallback)
-    'rebalance_max_abs_pnl_pct': 2.0,
+    'rebalance_max_abs_pnl_pct': 3.0,
 
     # Peak protection SPOT_BULL (s66: H7 — ensure get_param() has correct fallback)
-    'peak_protection_spot_bull_pct': 0.60,
-    'peak_protection_spot_bull_profile_a_pct': 0.65,
+    'peak_protection_spot_bull_pct': 0.65,
+    'peak_protection_spot_bull_profile_a_pct': 0.70,
 }
 
 
@@ -593,7 +611,19 @@ def load_runtime_overrides_from_db(settings, db_client) -> Dict[str, Any]:
             if isinstance(raw, str):
                 raw = json.loads(raw)
             if isinstance(raw, dict):
-                setattr(settings, attr, deepcopy(raw))
+                restored = deepcopy(getattr(settings, attr, {}) or {})
+                raw_map = deepcopy(raw)
+                if attr == "futures_category_thresholds" and "MIDCAP" in raw_map:
+                    legacy_midcap = raw_map.pop("MIDCAP")
+                    raw_map.setdefault("MIDCAP_ALT", legacy_midcap)
+                for key, value in raw_map.items():
+                    if isinstance(value, dict) and isinstance(restored.get(key), dict):
+                        merged = dict(restored.get(key, {}))
+                        merged.update(value)
+                        restored[key] = merged
+                    else:
+                        restored[key] = deepcopy(value)
+                setattr(settings, attr, restored)
                 result["applied_thresholds"].append(attr)
         except Exception as e:
             result["errors"].append(f"{state_key}: {e}")

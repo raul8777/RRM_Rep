@@ -1,60 +1,19 @@
 ============================= test session starts =============================
 platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0
 rootdir: S:\Tools\AI\crypto-agent
-collected 121 items / 12 deselected / 109 selected
+collected 125 items / 12 deselected / 113 selected
 
-tests\test_system_health.py ............................................ [ 40%]
-...........................FF....................................        [100%]
+tests\test_system_health.py ............................................ [ 38%]
+.....................................................................    [100%]
 
-================================== FAILURES ===================================
-____________ TestCat6_PositionManager.test_close_buy_position_pnl _____________
-
-self = <test_system_health.TestCat6_PositionManager object at 0x0000012AD3680D40>
-
-    def test_close_buy_position_pnl(self):
-        pos = self.Position("BTCUSDT", "BUY", 1.0, 50000.0, "2024-01-01T00:00:00Z")
-        self.pm.add_position(pos)
-        closed = self.pm.close_position("BTCUSDT", 52000.0, "take_profit")
-        assert closed is not None
-        # PositionManager deducts commissions (0.1% entry + 0.1% exit)
-        # entry_comm=0 (no entry_commission set), exit_comm=52000*0.001=52
-        # pnl = (52000-50000)*1.0 - 0 - 52 = 1948
->       assert closed.pnl == pytest.approx(1948.0, abs=5.0)
-E       assert 1898.0 == 1948.0 � 5
-E         
-E         comparison failed
-E         Obtained: 1898.0
-E         Expected: 1948.0 � 5
-
-tests\test_system_health.py:804: AssertionError
-____________ TestCat6_PositionManager.test_close_sell_position_pnl ____________
-
-self = <test_system_health.TestCat6_PositionManager object at 0x0000012AD3680680>
-
-    def test_close_sell_position_pnl(self):
-        pos = self.Position("BTCUSDT", "SELL", 0.5, 50000.0, "2024-01-01T00:00:00Z")
-        self.pm.add_position(pos)
-        closed = self.pm.close_position("BTCUSDT", 48000.0, "take_profit")
-        # pnl = (50000-48000)*0.5 - 0 - 48000*0.5*0.001 = 1000 - 24 = 976
->       assert closed.pnl == pytest.approx(976.0, abs=5.0)
-E       assert 951.0 == 976.0 � 5
-E         
-E         comparison failed
-E         Obtained: 951.0
-E         Expected: 976.0 � 5
-
-tests\test_system_health.py:812: AssertionError
 ============================== warnings summary ===============================
-tests/test_system_health.py: 34 warnings
+tests/test_system_health.py: 36 warnings
   S:\Tools\AI\crypto-agent\tests\test_system_health.py:44: PydanticDeprecatedSince211: Accessing the 'model_fields' attribute on the instance is deprecated. Instead, you should access this attribute from the model class. Deprecated in Pydantic V2.11 to be removed in V3.0.
     f: getattr(base, f) for f in base.model_fields
 
 tests/test_system_health.py::TestCat6_PositionManager::test_position_summary_values
-  S:\Tools\AI\crypto-agent\tests\..\position_manager.py:960: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  S:\Tools\AI\crypto-agent\tests\..\position_manager.py:966: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
     "timestamp": datetime.utcnow().isoformat()
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-=========================== short test summary info ===========================
-FAILED tests/test_system_health.py::TestCat6_PositionManager::test_close_buy_position_pnl
-FAILED tests/test_system_health.py::TestCat6_PositionManager::test_close_sell_position_pnl
-========= 2 failed, 107 passed, 12 deselected, 35 warnings in 19.20s ==========
+============== 113 passed, 12 deselected, 37 warnings in 15.65s ===============

@@ -3,25 +3,28 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, "/app")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+sys.path.insert(0, str(REPO_ROOT))
 
 
 def _run_audit():
     """Run tmp_audit_config.py and return parsed summary."""
     result = subprocess.run(
         [sys.executable, "tmp_audit_config.py"],
-        cwd="/app",
+        cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
     )
     # The script writes audit_getattr.txt; read it back.
-    audit_path = "/app/audit_getattr.txt"
-    if not os.path.exists(audit_path):
+    audit_path = REPO_ROOT / "audit_getattr.txt"
+    if not audit_path.exists():
         raise RuntimeError(f"audit_getattr.txt not found: {result.stderr}")
-    with open(audit_path) as f:
+    with audit_path.open() as f:
         lines = f.readlines()
     total = 0
     critical = 0
@@ -58,7 +61,7 @@ def test_runtime_config_matches_baseline():
     """F3: Runtime settings must match canonical defaults."""
     result = subprocess.run(
         [sys.executable, "tmp_verify_runtime_config.py"],
-        cwd="/app",
+        cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
     )
@@ -76,6 +79,37 @@ def test_validate_config_reports_no_errors_on_canonical_defaults():
     assert validation["ok"] is True
     errors = [issue for issue in validation["issues"] if issue["severity"] == "error"]
     assert errors == []
+
+
+def test_runtime_restore_normalizes_legacy_futures_category_keys_and_keeps_new_defaults():
+    """Legacy MIDCAP DB payloads must restore into MIDCAP_ALT without dropping MEME."""
+    from config import Settings
+    from config_helpers import load_runtime_overrides_from_db
+
+    class _DB:
+        def execute_query(self, sql, params=None):
+            if params == ('kelly_config_override',):
+                return []
+            if params == ('category_thresholds_override',):
+                return []
+            if params == ('futures_category_thresholds_override',):
+                return [{
+                    "value": {
+                        "MIDCAP": {"stop_loss_pct": 9.9},
+                        "LARGE_CAP": {"take_profit_pct": 8.8},
+                    }
+                }]
+            return []
+
+    settings = Settings()
+    result = load_runtime_overrides_from_db(settings, _DB())
+
+    assert result["ok"] is True
+    assert "futures_category_thresholds" in result["applied_thresholds"]
+    assert "MIDCAP" not in settings.futures_category_thresholds
+    assert settings.futures_category_thresholds["MIDCAP_ALT"]["stop_loss_pct"] == pytest.approx(9.9)
+    assert settings.futures_category_thresholds["LARGE_CAP"]["take_profit_pct"] == pytest.approx(8.8)
+    assert "MEME" in settings.futures_category_thresholds
 
 
 def _api_headers():

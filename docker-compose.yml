@@ -60,42 +60,42 @@ services:
       - DASHBOARD_API_KEY=${DASHBOARD_API_KEY:-}
       - REDIS_PASSWORD=${REDIS_PASSWORD:-changeme_redis_2024}
       - CRYPTOCOMPARE_API_KEY=${CRYPTOCOMPARE_API_KEY:-}
-      - MAX_PER_TRADE_USDT=${MAX_PER_TRADE_USDT:-500.0}
-      - MAX_POSITIONS=${MAX_POSITIONS:-15}
-      - MAX_POSITIONS_PER_SYMBOL=${MAX_POSITIONS_PER_SYMBOL:-1}
-      - MAX_POSITIONS_SPOT_BULL=${MAX_POSITIONS_SPOT_BULL:-20}
-      - MAX_POSITIONS_RANGE_SCALP=${MAX_POSITIONS_RANGE_SCALP:-10}
-      - OVERFLOW_MAX_EXTRA=${OVERFLOW_MAX_EXTRA:-5}
+      - MAX_PER_TRADE_USDT=1500.0
+      - MAX_POSITIONS=4
+      - MAX_POSITIONS_PER_SYMBOL=1
+      - MAX_POSITIONS_SPOT_BULL=5
+      - MAX_POSITIONS_RANGE_SCALP=3
+      - OVERFLOW_MAX_EXTRA=1
       # E1: Expansión activos 24→32 tokens (formato JSON array para pydantic)
       - ANALYSIS_SYMBOLS=["DOGEUSDT","RENDERUSDT","BNBUSDT","SOLUSDT","TAOUSDT","FETUSDT","AVAXUSDT","ADAUSDT","XRPUSDT","DOTUSDT","SUIUSDT","PEPEUSDT","WIFUSDT","BTCUSDT","ETHUSDT","LINKUSDT","NEARUSDT","WLDUSDT","INJUSDT","AGIXUSDT","ONDOUSDT","JUPUSDT","OPUSDT","HBARUSDT","AAVEUSDT","ARBUSDT","MATICUSDT","ATOMUSDT","GRTUSDT","AIOZUSDT","SEIUSDT","SUSHIUSDT"]
       # Futures SHORT — pares elegibles, SL/TP, límites (F2 expansión jun 18 2026: 8→19 pares)
       - FUTURES_SYMBOLS=["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ADAUSDT","NEARUSDT","SUIUSDT","DOGEUSDT","AVAXUSDT","LINKUSDT","TAOUSDT","UNIUSDT","DOTUSDT","BCHUSDT","AAVEUSDT","FILUSDT","INJUSDT"]
-      - FUTURES_SL_PCT=2.5                # jul07: 1.42→2.5 (B1: too tight, SLs firing prematurely at 10x leverage)
-      - FUTURES_TP_PCT=5.0                # jul07: 2.81→5.0 (B1: R:R=2.0 minimum acceptable)
-      - FUTURES_MAX_SHORTS=12
-      - FUTURES_MAX_LARGECAP_SHORTS=5
+      - FUTURES_SL_PCT=2.0                # concentrated: mayor tolerancia al ruido
+      - FUTURES_TP_PCT=4.0                # concentrated: mejor R:R
+      - FUTURES_MAX_SHORTS=5
+      - FUTURES_MAX_LARGECAP_SHORTS=3
       - FUTURES_LARGECAP_SYMBOLS=["BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","SOLUSDT"]
-      - FUTURES_OVERFLOW_MAX_EXTRA=${FUTURES_OVERFLOW_MAX_EXTRA:-3}
-      - FUTURES_OVERFLOW_MIN_STRENGTH=0.55
-      - FUTURES_OVERFLOW_MIN_VOL_SPIKE=${FUTURES_OVERFLOW_MIN_VOL_SPIKE:-2.0}
+      - FUTURES_OVERFLOW_MAX_EXTRA=1
+      - FUTURES_OVERFLOW_MIN_STRENGTH=0.65
+      - FUTURES_OVERFLOW_MIN_VOL_SPIKE=2.0
       - FUTURES_OVERFLOW_MIN_DROP_24H=-3.0
-      - FUTURES_KELLY_CAP_PCT=0.20
+      - FUTURES_KELLY_CAP_PCT=0.30
       - FUTURES_CAPITAL_BRIDGE_ENABLED=true
       - FUTURES_CAPITAL_BRIDGE_MIN_TRANSFER=10.0
       # Unified Portfolio Manager (jun 23 2026) — PortfolioManager as capital director
       - USE_UNIFIED_PORTFOLIO_MANAGER=true
-      - FUTURES_KELLY_BASE_USDT=73.0        # jun29: 76→73 (backtest run_0677)
-      - FUTURES_KELLY_MAX_USDT=1111.0     # jun29: 1162→1111 (backtest run_0677)
-      - FUTURES_KELLY_MAX_PCT_LIQUID=0.704  # jun29: 0.621→0.704 (backtest run_0677)
+      - FUTURES_KELLY_BASE_USDT=150.0        # concentrated: base igualada a SPOT
+      - FUTURES_KELLY_MAX_USDT=1500.0     # concentrated: cap por short elevado
+      - FUTURES_KELLY_MAX_PCT_LIQUID=0.85  # concentrated: consistente con SPOT
       - FUTURES_LEVERAGE=10                 # K2: 2→10 — backtest run_0812 validated 10x
       # K1: SPOT Kelly agresivo (era $40/$350/0.28 en .env)
-      - KELLY_BASE_USDT=73.0              # jun29: 76→73 (backtest run_0677)
-      - KELLY_MAX_USDT=747.0              # jun29: 663→747 (backtest run_0677)
-      - KELLY_MAX_PCT_LIQUID=0.704        # jun29: 0.621→0.704 (backtest run_0677)
+      - KELLY_BASE_USDT=150.0              # concentrated: base digna para $5,100
+      - KELLY_MAX_USDT=1500.0              # concentrated: cap por posición elevado
+      - KELLY_MAX_PCT_LIQUID=0.85        # concentrated: hasta 85% del líquido
       # PB (Profit Boost) sesion 16 jun21 2026
       - FUTURES_SL_COOLDOWN_HOURS=4.0
-      - MAX_POSITIONS_FUTURES_SHORT=12     # K2: 4→12 — backtest run_0812 uses 12 concurrent shorts
-      - FUTURES_MAX_NEW_PER_CYCLE=5        # K2: 3→5 — more throughput in FUTURES_SHORT without explosion
+      - MAX_POSITIONS_FUTURES_SHORT=5     # concentrated: 3-5 shorts simultáneos
+      - FUTURES_MAX_NEW_PER_CYCLE=2        # concentrated: menos entradas por ciclo
       - FUTURES_MASS_SL_THRESHOLD=3
       - FUTURES_MASS_SL_COOLDOWN_HOURS=4.0
       - SPOT_MASS_SL_THRESHOLD=3            # B3: N SLs in one cycle triggers SPOT cooldown
@@ -106,13 +106,13 @@ services:
       - BTC_CORRELATION_MAX_NEW_ENTRIES=2   # A3: max new SPOT entries when BTC is dropping
       - FUTURES_CONFIRM_RED_CANDLE=true
       - FUTURES_NO_SHORT_BTC_3H_THRESHOLD=1.0
-      - FUTURES_USDT_PER_TRADE=100.0      # PB4: minimum margin floor per short (NOT a hard cap for Kelly-sized SHORTs)
+      - FUTURES_USDT_PER_TRADE=150.0      # concentrated: floor de margen igualado a SPOT
       # H-FIXES sesion 8 jun21 2026
-      - FUTURES_TRAILING_ACTIVATION_PCT=2.0
+      - FUTURES_TRAILING_ACTIVATION_PCT=2.5
       # SL-OPT sesion 19 jun22 2026 — wider SL + SSO adaptive exits
       - STOP_LOSS_PCT=3.36                # jun29: 1.03→3.36 (backtest run_0677)
       - TAKE_PROFIT_PCT=4.14              # jun29: 5.83→4.14 (backtest run_0677)
-      - ATR_SL_MIN_PCT=0.020              # jul07: 0.015→0.020 (B2: floor raised so SLs don't fire at -0.5%/-0.7%)
+      - ATR_SL_MIN_PCT=0.015              # canonical: alineado con config.py default
       # SSO-1 Capital Velocity (jun 22 2026) — close decaying/slow positions faster
       # RECALIBRADO jun 23 2026: gates USD escalados al nuevo tamaño de posición (~$330 margin post-transfer $1,390 SPOT->FUT)
       # TODO FASE-FUTURA: hacer estos valores dinámicos en función de futures_wallet_total
@@ -121,24 +121,24 @@ services:
       #   SSO_SLOW_MIN_PROFIT_USD = futures_total * 0.001
       #   SSO_TARGET_DAILY_USD = futures_total * 0.05  (5% del wallet como meta diaria)
       #   Implementar en SmartScaleOut.__init__() leyendo get_unified_balance() si portfolio_manager disponible
-      - SSO_STAGNANT_VELOCITY_WINDOW_MIN=30
-      - SSO_DECAY_THRESHOLD_PCT=0.004
+      - SSO_STAGNANT_VELOCITY_WINDOW_MIN=60
+      - SSO_DECAY_THRESHOLD_PCT=0.008
       - SSO_DECAY_MIN_PROFIT_USD=2.0
-      - SSO_DECAY_MIN_HOURS=1.5
+      - SSO_DECAY_MIN_HOURS=2.0
       - SSO_SLOW_VELOCITY_THRESHOLD=0.001
       - SSO_SLOW_MIN_PROFIT_USD=1.0
       - SSO_SLOW_MIN_HOURS=2.0
-      - SSO_SLOW_TIER2_HOURS=4.0
-      - SSO_SLOW_TIER3_HOURS=6.0
-      - SSO_SLOW_TIER4_HOURS=8.0
+      - SSO_SLOW_TIER2_HOURS=5.0
+      - SSO_SLOW_TIER3_HOURS=7.0
+      - SSO_SLOW_TIER4_HOURS=9.0
       - FUTURES_BREAKEVEN_ACTIVATION_PCT=1.0
       - FUTURES_SMART_TP_EXTEND_SCORE_THRESHOLD=2
       - FUTURES_PROTECT_PROFIT_USDT=-5.0
       - MIN_CYCLES_BEFORE_CLOSE_SHORTS=5
       - CYCLE_FUTURES_SHORT=4
-      - FUTURES_MIN_INJECT_STRENGTH=0.40
-      - MIN_SIGNAL_STRENGTH=0.389
-      - MIN_SUCCESS_PROBABILITY=0.499
+      - FUTURES_MIN_INJECT_STRENGTH=0.50
+      - MIN_SIGNAL_STRENGTH=0.60
+      - MIN_SUCCESS_PROBABILITY=0.60
       - VOL_SPIKE_MIN=0.91
       - FUTURES_MIN_PROB=0.499
       - FUTURES_VOL_SPIKE_MIN=0.91
@@ -161,7 +161,7 @@ services:
       - FUTURES_MOMENTUM_REVERSAL_DRAWBACK=0.8
       # SSO (Smart Scale-Out) sesion 19 jun22 2026
       - SSO_ENABLED=true
-      - SSO_STAGNANT_MIN_HOURS=2.0
+      - SSO_STAGNANT_MIN_HOURS=2.5
       - SSO_STAGNANT_MIN_PROFIT_FLOOR=3.0
       - SSO_MOMENTUM_RSI_OVERBOUGHT=70
       - SSO_MULTILEVEL_ENABLED=true

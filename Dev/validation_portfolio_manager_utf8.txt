@@ -11,4 +11,4 @@ tests/test_portfolio_manager.py::TestPortfolioManager::test_get_total_balance_re
     "timestamp": datetime.utcnow().isoformat()
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-======================== 10 passed, 1 warning in 0.44s ========================
+======================== 10 passed, 1 warning in 0.27s ========================

@@ -223,58 +223,16 @@ def startup_event():
     except Exception as e:
         print(f"Bootstrap startup error: {e}")
     # ── Restore hot-config overrides persisted in trading_runtime_state ────────
-    # Ensures PATCH /config/kelly changes survive restarts (kelly params + category_thresholds)
+    # Use the canonical helper so startup restore matches runtime governance logic.
     try:
-        import json as _json
         _comp_s = get_components()
         _live_s = _comp_s.settings
-
-        # 1. Restore scalar kelly/sl/tp overrides
-        _ov_rows = db_client.execute_query(
-            "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
-        )
-        if _ov_rows and _ov_rows[0].get('value'):
-            _ov = _ov_rows[0]['value']
-            if isinstance(_ov, str):
-                _ov = _json.loads(_ov)
-            _restored = 0
-            for field, change in _ov.items():
-                if field == 'category_thresholds':
-                    continue  # handled separately below
-                _new_value = None
-                if isinstance(change, dict) and 'new' in change:
-                    _new_value = change['new']
-                elif not isinstance(change, dict):
-                    # Backward compatibility: some legacy apply routes stored plain scalar values.
-                    _new_value = change
-                if _new_value is None:
-                    continue
-                try:
-                    if not hasattr(_live_s, field):
-                        continue
-                    _cur = getattr(_live_s, field, None)
-                    setattr(_live_s, field, type(_cur)(_new_value) if _cur is not None else _new_value)
-                    _restored += 1
-                except Exception:
-                    pass
-            if _restored:
-                print(f"Config restore: {_restored} kelly overrides re-applied from DB")
-
-        # 2. Restore category_thresholds (SPOT and FUTURES)
-        for _ct_attr, _ct_state_key in (
-            ("category_thresholds", "category_thresholds_override"),
-            ("futures_category_thresholds", "futures_category_thresholds_override"),
-        ):
-            _ct_rows = db_client.execute_query(
-                "SELECT value FROM trading_runtime_state WHERE key=%s", (_ct_state_key,)
-            )
-            if _ct_rows and _ct_rows[0].get('value'):
-                _ct = _ct_rows[0]['value']
-                if isinstance(_ct, str):
-                    _ct = _json.loads(_ct)
-                if isinstance(_ct, dict):
-                    setattr(_live_s, _ct_attr, _ct)
-                    print(f"Config restore: {_ct_attr} re-applied ({list(_ct.keys())})")
+        _restore_result = config_helpers.load_runtime_overrides_from_db(_live_s, db_client)
+        if _restore_result.get("applied_scalars"):
+            print(f"Config restore: {_restore_result['applied_scalars']} kelly overrides re-applied from DB")
+        for _ct_attr in _restore_result.get("applied_thresholds", []):
+            _ct_val = getattr(_live_s, _ct_attr, {}) or {}
+            print(f"Config restore: {_ct_attr} re-applied ({list(_ct_val.keys())})")
     except Exception as _re:
         print(f"Config restore error (non-fatal): {_re}")
     # Refresh live commission rates from Binance API (Binance-controlled values)
@@ -3515,8 +3473,8 @@ async def get_override_performance() -> Dict:
                 "total_pnl": round(total_pnl, 2),
                 "active_positions": len(_VOLSPIKE_POSITIONS),
                 "todays_count": _OVERRIDE_DAILY_COUNT.get(datetime.utcnow().strftime('%Y-%m-%d'), 0),
-                "daily_limit": getattr(settings, 'volspike_override_daily_limit', 3),
-                "positions_limit": getattr(settings, 'volspike_override_max_positions', 2),
+                "daily_limit": getattr(settings, 'volspike_override_daily_limit', 1),
+                "positions_limit": getattr(settings, 'volspike_override_max_positions', 1),
             },
             "by_symbol": {
                 sym: {
@@ -4259,7 +4217,7 @@ def _get_mode_profile_harmony_drift() -> Dict[str, Any]:
         _compare_float("futures_trail_atr_multiplier_high", snapshot.get("futures_trail_atr_multiplier_high"), getattr(settings, 'futures_trail_atr_multiplier_high', None))
         _compare_float("futures_trail_atr_multiplier_deep", snapshot.get("futures_trail_atr_multiplier_deep"), getattr(settings, 'futures_trail_atr_multiplier_deep', None))
         _compare_float("sso_target_daily_usd", snapshot.get("sso_target_daily_usd"), getattr(settings, 'sso_target_daily_usd', None))
-        _compare_float("sso_stagnant_min_hours", snapshot.get("sso_stagnant_min_hours"), getattr(settings, 'sso_stagnant_min_hours', None))
+        _compare_float("sso_stagnant_min_hours", snapshot.get("sso_stagnant_min_hours"), getattr(settings, 'sso_stagnant_min_hours', 2.5))
         _compare_float("sso_slow_velocity_threshold", snapshot.get("sso_slow_velocity_threshold"), getattr(settings, 'sso_slow_velocity_threshold', None))
         _compare_float("sso_reentry_min_strength_diff", snapshot.get("sso_reentry_min_strength_diff"), getattr(settings, 'sso_reentry_min_strength_diff', None))
         _compare_float("max_positions_spot_bull", snapshot.get("max_positions_spot_bull"), getattr(settings, 'max_positions_spot_bull', None))
@@ -7100,9 +7058,9 @@ async def get_kelly_config(_auth=Depends(_require_api_key)) -> Dict:
                 },
                 "conviction_m3": {
                     "enabled":   getattr(_s, 'kelly_conviction_enabled', True),
-                    "vol2x_mult":getattr(_s, 'kelly_conviction_vol2x', 1.5),
-                    "vol3x_mult":getattr(_s, 'kelly_conviction_vol3x', 2.0),
-                    "max_pct":   getattr(_s, 'kelly_conviction_max_pct', 0.10),
+                    "vol2x_mult":getattr(_s, 'kelly_conviction_vol2x', 1.8),
+                    "vol3x_mult":getattr(_s, 'kelly_conviction_vol3x', 2.5),
+                    "max_pct":   getattr(_s, 'kelly_conviction_max_pct', 0.25),
                 },
             },
             "futures": {
@@ -7191,8 +7149,10 @@ _KELLY_EDITABLE_FIELDS = {
     "max_total_exposure_pct", "max_total_exposure_spot_bull_fear",
     "min_hold_minutes", "min_hold_minutes_range_scalp",
     "max_rebalance_per_cycle",
+    "rebalance_max_abs_pnl_pct",
     "min_hold_minutes_spot_bull", "min_hold_for_prediction_exit",
     "min_cycles_before_close_shorts",
+    "futures_breakeven_activation_pct",
     "futures_trailing_activation_pct", "futures_sl_cooldown_hours",
     "futures_smart_tp_max_pnl_pct", "futures_smart_tp_max_extensions",
     "futures_bounce_rescue_enabled", "futures_bounce_rescue_max_peak_pct", "futures_bounce_rescue_min_hours", "futures_bounce_rescue_target_pnl",
@@ -8304,7 +8264,7 @@ async def get_backtest_best(_auth=Depends(_require_api_key)) -> Dict:
         )
         futures_cat_patch = _build_cat_patch(
             getattr(_live_s, "futures_category_thresholds", {}) or {},
-            list(getattr(_live_s, "futures_category_thresholds", {}).keys()) or ["LARGE_CAP", "MIDCAP", "NARRATIVE"],
+            list(getattr(_live_s, "futures_category_thresholds", {}).keys()) or ["LARGE_CAP", "MIDCAP_ALT", "NARRATIVE", "MEME"],
             _opt_min_prob, _opt_fut_tp, _opt_fut_sl
         )
 
@@ -8466,27 +8426,27 @@ async def _config_snapshot_loop() -> None:
 
 
 _BACKTEST_BASELINE: Dict[str, Any] = {
-    'kelly_base_usdt': 76.0,           # s63 wolf-hunter
-    'kelly_max_usdt': 663.0,           # s63 wolf-hunter
-    'kelly_max_pct_liquid': 0.704,     # env: KELLY_MAX_PCT_LIQUID
-    'kelly_max_pct_cap': 0.25,
-    'max_per_trade_usdt': 500.0,
+    'kelly_base_usdt': 150.0,           # concentrated: base digna para $5,100
+    'kelly_max_usdt': 1500.0,           # concentrated: cap por posición elevado
+    'kelly_max_pct_liquid': 0.85,       # concentrated: hasta 85% del líquido
+    'kelly_max_pct_cap': 0.30,
+    'max_per_trade_usdt': 1500.0,
     'futures_leverage': 10,
-    'futures_max_shorts': 12,
-    'futures_max_new_per_cycle': 5,
-    'futures_usdt_per_trade': 100.0,
-    'futures_sl_pct': 2.5,             # env: FUTURES_SL_PCT
-    'futures_tp_pct': 5.0,             # env: FUTURES_TP_PCT
-    'futures_kelly_base_usdt': 73.0,
-    'futures_kelly_max_usdt': 1162.0,  # s63 wolf-hunter
-    'futures_kelly_max_pct_liquid': 0.704,
-    'stop_loss_pct': 1.236,            # s63 wolf-hunter
-    'take_profit_pct': 6.2964,         # s63 wolf-hunter
-    'min_signal_strength': 0.359,      # s63 wolf-hunter
-    'min_success_probability': 0.527,  # s63 wolf-hunter
+    'futures_max_shorts': 5,            # concentrated: 3-5 shorts simultáneos
+    'futures_max_new_per_cycle': 2,
+    'futures_usdt_per_trade': 150.0,
+    'futures_sl_pct': 2.0,              # concentrated: mayor tolerancia al ruido
+    'futures_tp_pct': 4.0,              # concentrated: mejor R:R
+    'futures_kelly_base_usdt': 150.0,
+    'futures_kelly_max_usdt': 1500.0,
+    'futures_kelly_max_pct_liquid': 0.85,
+    'stop_loss_pct': 3.36,              # run_0677
+    'take_profit_pct': 4.14,            # run_0677
+    'min_signal_strength': 0.60,        # concentrated: solo señales fuertes
+    'min_success_probability': 0.60,      # concentrated: edge estadístico alto
     'futures_min_prob': 0.499,
-    'vol_spike_min': 0.83,             # s63 wolf-hunter
-    'slippage_pct': 0.00057,           # s63 wolf-hunter
+    'vol_spike_min': 0.91,              # run_0677
+    'slippage_pct': 0.00052,            # run_0677
     'use_bnb_for_commission': True,
 }
 
@@ -9504,7 +9464,7 @@ async def post_backtest_apply(body: Dict, _auth=Depends(_require_api_key)) -> Di
 
         _futures_cat_patch = {}
         _live_fct = getattr(_s, "futures_category_thresholds", {}) or {}
-        for _cat in list(_live_fct.keys()) or ["LARGE_CAP", "MIDCAP", "NARRATIVE"]:
+        for _cat in list(_live_fct.keys()) or ["LARGE_CAP", "MIDCAP_ALT", "NARRATIVE", "MEME"]:
             _fields = _selected_futures_cat.get(_cat, []) if isinstance(_selected_futures_cat, dict) else []
             _ct = _live_fct.get(_cat, {})
             _changes = {}
@@ -9574,24 +9534,24 @@ async def get_config_drift(_auth=Depends(_require_api_key)) -> Dict:
         _validation = validate_config(_s)
         _snapshot = dump_active_config(_s)
         _backtest_baseline = {
-            'kelly_base_usdt': 76.0,           # s63 wolf-hunter
-            'kelly_max_usdt': 663.0,           # s63 wolf-hunter
-            'kelly_max_pct_liquid': 0.704,     # env: KELLY_MAX_PCT_LIQUID
-            'futures_kelly_base_usdt': 73.0,
-            'futures_kelly_max_usdt': 1162.0,  # s63 wolf-hunter
-            'futures_kelly_max_pct_liquid': 0.704,
+            'kelly_base_usdt': 150.0,           # concentrated: base digna para $5,100
+            'kelly_max_usdt': 1500.0,           # concentrated: cap por posición elevado
+            'kelly_max_pct_liquid': 0.85,       # concentrated: hasta 85% del líquido
+            'futures_kelly_base_usdt': 150.0,
+            'futures_kelly_max_usdt': 1500.0,
+            'futures_kelly_max_pct_liquid': 0.85,
             'futures_leverage': 10,
-            'futures_max_shorts': 12,
-            'futures_max_new_per_cycle': 5,
-            'futures_sl_pct': 2.5,             # env: FUTURES_SL_PCT
-            'futures_tp_pct': 5.0,             # env: FUTURES_TP_PCT
-            'stop_loss_pct': 1.236,            # s63 wolf-hunter
-            'take_profit_pct': 6.2964,         # s63 wolf-hunter
-            'min_signal_strength': 0.359,      # s63 wolf-hunter
-            'min_success_probability': 0.527,  # s63 wolf-hunter
+            'futures_max_shorts': 5,            # concentrated: 3-5 shorts simultáneos
+            'futures_max_new_per_cycle': 2,
+            'futures_sl_pct': 2.0,              # concentrated: mayor tolerancia al ruido
+            'futures_tp_pct': 4.0,              # concentrated: mejor R:R
+            'stop_loss_pct': 3.36,              # run_0677
+            'take_profit_pct': 4.14,            # run_0677
+            'min_signal_strength': 0.60,        # concentrated: solo señales fuertes
+            'min_success_probability': 0.60,      # concentrated: edge estadístico alto
             'futures_min_prob': 0.499,
-            'vol_spike_min': 0.83,             # s63 wolf-hunter
-            'slippage_pct': 0.00057,           # s63 wolf-hunter
+            'vol_spike_min': 0.91,              # run_0677
+            'slippage_pct': 0.00052,            # run_0677
             'use_bnb_for_commission': True,
         }
         _drift = []

@@ -156,6 +156,30 @@ def get_portfolio_correlation(
     return round(avg_r, 4), kelly_mult
 
 
+def get_correlation_matrix(
+    binance_client,
+    symbols: List[str],
+    force_refresh: bool = False,
+) -> Dict[Tuple[str, str], float]:
+    """Return the full |r| correlation matrix for the given symbols."""
+    if len(symbols) < 2:
+        return {}
+
+    with _lock:
+        now = time.monotonic()
+        stale = (now - _cache["ts"]) > _CACHE_TTL
+        syms_changed = set(symbols) != set(_cache["symbols"])
+
+        if force_refresh or stale or syms_changed:
+            try:
+                _refresh_cache(binance_client, symbols)
+            except Exception as e:
+                logger.warning(f"[Correlation] Matrix refresh failed: {e}")
+                return {}
+
+        return dict(_cache["matrix"])
+
+
 def invalidate_cache() -> None:
     """Force cache refresh on next call (e.g. after opening/closing a position)."""
     with _lock:
