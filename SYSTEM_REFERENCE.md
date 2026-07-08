@@ -1,11 +1,31 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 08 2026 | Sesión 70: Rediseño arquitectural de parámetros. 30 campos per-régimen. RANGE_SCALP afinado. 369 tests pasan.
+> Última actualización: jul 08 2026 | Sesión 70c: PRS bases por régimen. RANGE_SCALP partial=35min full=70min. cycle_range_scalp=3. 369 tests pasan.
 
 ---
 
-## 🗺️ Estado del Sistema — jul 08 2026 (post-s70)
+## 🗺️ Estado del Sistema — jul 08 2026 (post-s70c)
+
+### ✅ Sesión 70c — PRS Regime-Aware Base Times (Wolf Hunter alignment) — jul 08 2026
+
+**Problema resuelto:** `partial_minutes=60` y `full_minutes=120` eran bases globales calibradas para SPOT_BULL runners. Para RANGE_SCALP con TP=1.8%, el multiplicador `profile_A(1.25) × regime_scale(0.70) × fng(0.85) = 0.744` resultaba en `partial=44.6min` — demasiado tarde para capturar ganancias en scalps de corta duración antes del rebote.
+
+**Solución (3 líneas, 4 archivos):** Bases de tiempo por régimen aplicadas *antes* del multiplicador, manteniendo `profile × regime × fng` intactos.
+
+**Nuevas bases RANGE_SCALP**
+| Campo | Antes (global) | Ahora (base RANGE_SCALP) | Efectivo A+F&G=20 | Efectivo B+F&G=20 |
+|---|---|---|---|---|
+| `profit_realization_spot_partial_minutes_range_scalp` | 60min | **35min** | 26min | 21min |
+| `profit_realization_spot_full_minutes_range_scalp` | 120min | **70min** | 52min | 42min |
+
+**Ciclo corregido:** `cycle_range_scalp=3min` (estaba en DB como 5 por override histórico — corregido vía `/config/apply`).
+
+**Archivos modificados:** `config.py` (+2 campos), `config_helpers.py` (+2 defaults), `profit_realization_supervisor.py` (+4 líneas en `evaluate()`).
+
+**Tests:** 369 passed, 0 failed. Commit: `9158133`
+
+---
 
 ### ✅ Sesión 70 — Rediseño Arquitectural de Parámetros (Parameter Isolation) — jul 08 2026
 
