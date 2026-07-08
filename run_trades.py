@@ -99,7 +99,7 @@ _SELECTOR_CONFIG_DEFAULTS = {
     "profile_min_hold_cycles": 3,
     "profile_min_score_delta": 0.05,
     "audit_every_cycle": True,
-    "profile_rank": {"A": 1000.0, "B": 200.0, "C": 100.0},
+    "profile_rank": {"A": 200.0, "B": 200.0, "C": 200.0},  # s73 B1: equal base — ranking emerges from metadata performance
 }
 
 
@@ -713,6 +713,8 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'entry_quality_vol_spike_min_range_scalp':    'entry_quality_vol_spike_min_range_scalp',
             # s72: FUTURES_SHORT PredExit hold floor
             'min_hold_for_prediction_exit_futures_short': 'min_hold_for_prediction_exit_futures_short',
+            # s73 C2: SSO-4 target contribution per regime
+            'sso_target_contribution_pct_range_scalp':    'sso_target_contribution_pct_range_scalp',
         }
 
         _applied = {}
@@ -3415,6 +3417,30 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         if _sso_s_action.should_close:
                             if _sso_s_action.close_pct >= 1.0:
                                 close_reason = f"{_sso_s_action.reason} ({pnl_pct*100:.2f}%)"
+                                # s73 E1: trazabilidad SSO full-close en trades_audit
+                                try:
+                                    if _db_client_ref:
+                                        _db_client_ref.execute_update(
+                                            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                                            "VALUES (%s, %s, %s, %s, %s)",
+                                            (
+                                                symbol, 'spot', 'sso_close',
+                                                __import__('json').dumps({
+                                                    'trigger': _sso_s_action.trigger,
+                                                    'reason': _sso_s_action.reason,
+                                                    'close_pct': 1.0,
+                                                    'pnl_pct': round(pnl_pct * 100, 4),
+                                                    'pnl_usdt': round(_sso_sym_pnl_usdt, 4),
+                                                    'diagnosis': (_sso_s_action.diagnosis or '')[:500],
+                                                    'regime': regime,
+                                                    'profile': str(getattr(settings, 'current_regime_profile_label', '') or '').upper(),
+                                                    'ts': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
+                                                }),
+                                                False,
+                                            )
+                                        )
+                                except Exception:
+                                    pass
                             else:
                                 # Partial close for SPOT
                                 try:
@@ -3452,6 +3478,32 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                         closed.append({"symbol": symbol, "reason": _sso_s_action.reason,
                                                        "price": current_price, "order": _sso_s_order,
                                                        "sso_trigger": _sso_s_action.trigger})
+                                        # s73 E1: trazabilidad SSO partial-close en trades_audit
+                                        try:
+                                            if _db_client_ref:
+                                                _db_client_ref.execute_update(
+                                                    "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                                                    "VALUES (%s, %s, %s, %s, %s)",
+                                                    (
+                                                        symbol, 'spot', 'sso_partial_close',
+                                                        __import__('json').dumps({
+                                                            'trigger': _sso_s_action.trigger,
+                                                            'reason': _sso_s_action.reason,
+                                                            'close_pct': round(_sso_s_action.close_pct, 4),
+                                                            'qty_sold': float(_sso_s_sell_qty),
+                                                            'qty_remaining': float(_sso_s_remaining),
+                                                            'pnl_pct': round(pnl_pct * 100, 4),
+                                                            'pnl_usdt': round(_sso_sym_pnl_usdt, 4),
+                                                            'diagnosis': (_sso_s_action.diagnosis or '')[:500],
+                                                            'regime': regime,
+                                                            'profile': str(getattr(settings, 'current_regime_profile_label', '') or '').upper(),
+                                                            'ts': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
+                                                        }),
+                                                        False,
+                                                    )
+                                                )
+                                        except Exception:
+                                            pass
                                         continue  # partial done, move to next position
                                 except Exception as _sso_s_err:
                                     print(f"[SSO/SPOT] {symbol} partial close error: {_sso_s_err}")
@@ -4930,7 +4982,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
 
             elif _regime_mode == "RANGE_SCALP":
                 # Only enter when RSI < range_scalp_max_rsi (oversold — near BB lower)
-                _rs_max_rsi = getattr(settings, 'range_scalp_max_rsi', 48.0)
+                _rs_max_rsi = getattr(settings, 'range_scalp_max_rsi', 60.0)  # s73 A2: fallback 48→60
                 _meta_rsi   = float(signal_meta.get(symbol, {}).get('rsi', 50))
                 if _meta_rsi > _rs_max_rsi:
                     print(f"Skipping buy {symbol}: RANGE_SCALP mode RSI={_meta_rsi:.1f} > {_rs_max_rsi} (not at BB lower)")
@@ -6436,7 +6488,7 @@ def execute_once(monitor_only: bool = False):
                             "sso_decay_min_hours_range_scalp": float(getattr(settings, 'sso_decay_min_hours_range_scalp', 1.7) or 1.7),
                             "range_scalp_sl_pct": float(getattr(settings, 'range_scalp_sl_pct', 0.8) or 0.8),
                             "range_scalp_tp_pct": float(getattr(settings, 'range_scalp_tp_pct', 1.8) or 1.8),
-                            "range_scalp_max_rsi": float(getattr(settings, 'range_scalp_max_rsi', 48.0) or 48.0),
+                            "range_scalp_max_rsi": float(getattr(settings, 'range_scalp_max_rsi', 60.0) or 60.0),  # s73 A3: fallback 48→60
                             "range_scalp_breakeven_pct": float(getattr(settings, 'range_scalp_breakeven_pct', 0.40) or 0.40),
                             "smart_tp_extend_enabled_range_scalp": bool(getattr(settings, 'smart_tp_extend_enabled_range_scalp', True)),
                             "entry_quality_max_failures_range_scalp": int(getattr(settings, 'entry_quality_max_failures_range_scalp', 1) or 1),

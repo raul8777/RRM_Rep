@@ -634,6 +634,7 @@ class Settings(BaseSettings):
     entry_quality_max_failures_preservation: int = Field(default=0)
     entry_quality_max_failures_futures_short: int = Field(default=0)
     entry_quality_vol_spike_min_range_scalp: float = Field(default=0.35)  # s72: lateral = low vol; 0.35x floor (vs 1.2x for others)
+    sso_target_contribution_pct_range_scalp: float = Field(default=0.05)  # s73 C2: 5% of half-target=$1.00 min — achievable at TP=1.8%
 
     # ── SmartTP EXTEND per regime (s70: replaces smart_tp_extend_disabled_regimes list) ──
     smart_tp_extend_enabled_spot_bull: bool = Field(default=True)

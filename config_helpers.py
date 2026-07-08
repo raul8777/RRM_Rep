@@ -85,6 +85,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'entry_quality_min_strength': 0.40,
     'entry_quality_max_failures': 0,  # concentrated: todos los gates deben pasar
     'entry_quality_vol_spike_min_range_scalp': 0.35,  # s72: lateral = low vol structural; lower floor
+    'sso_target_contribution_pct_range_scalp': 0.05,  # s73 C2: 5% of half-target — achievable at TP=1.8%
 
     # Exposure / regime
     'max_total_exposure_pct': 0.90,

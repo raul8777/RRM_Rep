@@ -60,6 +60,7 @@ _AUDIT_EXCLUDED = {
     'range_scalp_max_rsi', 'range_scalp_max_bb_position',
     'entry_quality_vol_spike_min_range_scalp',
     'min_hold_for_prediction_exit_futures_short',
+    'sso_target_contribution_pct_range_scalp',  # s73 C2: DB-governed per profile
 }
 
 import ast

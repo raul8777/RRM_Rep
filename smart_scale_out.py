@@ -655,7 +655,8 @@ class SmartScaleOut:
             else self.stagnant_min_hours
         )
         min_profit *= self._profile_scale(pos, aggressive=1.08, balanced=1.0, defensive=0.92)
-        _stagnant_min_hours *= self._profile_scale(pos, aggressive=1.08, balanced=1.0, defensive=0.92)
+        # s73 C1: _stagnant_min_hours already has profile multiplier from harmony (_apply_mode_profile_harmony).
+        # Do NOT apply _profile_scale again — that was double-multiplying (e.g. SPOT_BULL Profile A: 4.05h×1.08=4.37h).
         _1_reasons = []
         if pos.pnl_usdt < min_profit:
             _1_reasons.append(f"${pos.pnl_usdt:.1f}<${min_profit:.0f}")
@@ -785,7 +786,10 @@ class SmartScaleOut:
         _profile = str(pos.profile_label or '').strip().upper()
         if _regime == 'RANGE_SCALP':
             target = min(target, self.target_daily_usd * 0.5)
-            _target_contribution_pct *= 0.8
+            # s73 C2: per-regime contribution floor — RANGE_SCALP TP=1.8% can't hit 15% of $40 daily target
+            # Read configurable field (default 0.05 = 5%): $20 target × 0.05 = $1.00 min → achievable
+            _rs_contrib = self._cfg('sso_target_contribution_pct_range_scalp', 0.05)
+            _target_contribution_pct = _rs_contrib
             _target_min_hours *= 0.8
         elif _regime == 'PRESERVATION':
             target = min(target, self.target_daily_usd * 0.4)

@@ -247,11 +247,12 @@ def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
 
     if mode == "RANGE_SCALP":
         # s70: SL 1.2→0.8, TP 1.5→1.8 (R:R=2.25, EV>0 with WR>31%), max_rsi 55→48
+        # s73 A1: max_rsi 48→60 (aligns with config.py + DB profiles updated in s72; 48 was panic-dip only)
         sl_pct           = 0.8   # tighter SL — micro-bounce captured fast
         tp_pct           = 1.8   # TP at BB mid-upper; R:R = 2.25
         kelly_mult       = 0.7   # reduce size in range market
         min_rsi          = 0.0
-        max_rsi          = 48.0  # only collapsed RSI = real bounce (primary gate is bb_lower_touch)
+        max_rsi          = 60.0  # s73: lateral RSI normal 45-65; 48 was panic-dip only (20% of the time)
         require_bb_lower = True  # signal must come from BB lower band touch
 
     elif mode == "PRESERVATION":

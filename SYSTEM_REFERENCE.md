@@ -1,11 +1,82 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 08 2026 | Sesión 72: Auditoría estratégica completa — 6 bugs RANGE_SCALP + 2 fixes FUTURES_SHORT. 352 tests pasan. Commit: `3e5dc58`
+> Última actualización: jul 08 2026 | Sesión 73: Auditoría ciclo completo — 7 bugs corregidos (regresiones s72 + SSO timing + profile selector + trazabilidad). 369 tests pasan.
 
 ---
 
-## 🗺️ Estado del Sistema — jul 08 2026 (post-s72)
+## 🗺️ Estado del Sistema — jul 08 2026 (post-s73)
+
+### ✅ Sesión 73 — Auditoría Ciclo Completo: Todos los Modos + Sistemas de Salida — jul 08 2026
+
+**Objetivo:** Auditoría del ciclo completo (detección → perfil → parámetros → entradas → vida → salidas → comisiones → trazabilidad) para encontrar y corregir bugs sistémicos restantes post-s71/s72. 7 bugs corregidos + 2 falsos positivos descartados tras verificación de código.
+
+#### A1 — CRÍTICO: `market_regime._build_regime()` RANGE_SCALP `max_rsi=48→60` (`market_regime.py`)
+- **Raíz:** s72 actualizó `config.py` y DB profiles a `max_rsi=60` pero NO actualizó `_build_regime()`. El campo `MarketRegime.max_rsi_entry=48` quedó como regresión. Dashboards y cualquier código que lea `regime.max_rsi_entry` seguían viendo 48.
+- **Fix:** `max_rsi = 60.0` en `_build_regime()` con comentario `# s73 A1`.
+
+#### A2 — MEDIO: Fallback `range_scalp_max_rsi=48.0` en gate de entrada (`run_trades.py:4933`)
+- **Raíz:** `getattr(settings, 'range_scalp_max_rsi', 48.0)` — si `settings` no carga (restart + DB vacía), el entry gate vuelve a `48.0` bloqueando RSI=50-60.
+- **Fix:** Fallback `60.0`.
+
+#### A3 — BAJO: Fallback `range_scalp_max_rsi=48.0` en harmony snapshot (`run_trades.py:6439`)
+- **Raíz:** Snapshot de parámetros en DB mostraba `48.0` como valor de referencia para RANGE_SCALP aunque el live era `60.0`.
+- **Fix:** Fallback `60.0`.
+
+#### B1 — ALTO: `profile_rank = {A:1000, B:200, C:100}` → `{A:200, B:200, C:200}` (`run_trades.py`)
+- **Raíz:** Ratio 5:1 entre A y B hacía que el auto-selector siempre eligiera Profile A (`rank_base` dominaba sobre `meta_score`, `expected_return`, `sharpe`). El perfil óptimo nunca emergía de datos de rendimiento real.
+- **Fix:** `A=B=C=200.0` — el ranking emerge exclusivamente de metadata de rendimiento.
+
+#### C1 — ALTO: Doble multiplicación SSO-1 stagnant_min_hours (`smart_scale_out.py`)
+- **Raíz:** `_apply_mode_profile_harmony()` ya aplicaba el multiplicador de perfil a `sso_stagnant_min_hours_{regime}` (e.g. SPOT_BULL Profile A: `3.75h × 1.08 = 4.05h`). Luego `_check_sso1_stagnant()` aplicaba `_profile_scale()` otra vez: `4.05h × 1.08 = 4.37h` (8% más de lo diseñado). Para RANGE_SCALP Profile A: `1.395h × 1.08 = 1.507h` (diferencia pequeña pero inconsistente).
+- **Fix:** Eliminada la línea `_stagnant_min_hours *= self._profile_scale(...)` en `_check_sso1_stagnant`. `min_profit` conserva su `_profile_scale` (correcto — es sizing, no timing).
+
+#### C2 — MEDIO: SSO-4 target contribution nunca disparaba en RANGE_SCALP (`smart_scale_out.py`, `config.py`, `config_helpers.py`, `run_trades.py`)
+- **Raíz:** `target_contribution_pct=0.15` (15%) aplicado sobre `daily_target × 0.5 = $20` → min contribution = `$3.00`. Con TP=1.8% sobre $60 = max ganancia `$1.08`. SSO-4 era estructuralmente inalcanzable en RANGE_SCALP.
+- **Fix:** Nuevo campo `sso_target_contribution_pct_range_scalp=0.05` (5%): `$20 × 0.05 = $1.00` min → alcanzable con un winner normal. Campo en `config.py`, `config_helpers._PARAM_DEFAULTS`, `_scalar_map` → DB-governable por perfil.
+
+#### D1/D2 — NO ACTION (falsos positivos)
+- **D1 (BreakEven RANGE_SCALP):** Ya implementado en s70 — `trail_activate = min(trail_activate, range_scalp_breakeven_pct/100)` en `run_trades.py:2985-2989`.
+- **D2 (PRS FUTURES _trade_defaults):** Ya correcto — `evaluate()` lee `profit_realization_futures_*` de settings via `get_param()`; `_trade_defaults()` es solo el fallback dict.
+
+#### E1 — MEDIO: SSO decisions → INSERT en `trades_audit` (`run_trades.py`)
+- **Raíz:** SSO triggers 1-7 cerraban posiciones (full y partial) sin registro en `trades_audit`. Imposible auditar el historial de cierres SSO por trigger/regime/profile.
+- **Fix:** Añadidos dos INSERTs: `event='sso_close'` (full close, con `trigger`, `reason`, `diagnosis`, `pnl_pct`, `pnl_usdt`, `regime`, `profile`, `ts`) y `event='sso_partial_close'` (partial close, + `close_pct`, `qty_sold`, `qty_remaining`). Ambos wrapeados en `try/except` para no bloquear el close path.
+
+**Archivos modificados**
+- `market_regime.py` — A1
+- `run_trades.py` — A2, A3, B1, C2 (_scalar_map), E1 (dos puntos de inserción trades_audit)
+- `smart_scale_out.py` — C1 (elimina doble _profile_scale), C2 (sso_target_contribution_pct_range_scalp)
+- `config.py` — C2 (nuevo campo)
+- `config_helpers.py` — C2 (_PARAM_DEFAULTS)
+- `app.py` — C2 (_EXCLUDED drift checker)
+- `tmp_audit_config.py` — C2 (_AUDIT_EXCLUDED)
+
+**Garantías arquitecturales post-s73**
+- Globals NUNCA modificados (solo campos per-régimen)
+- profile_rank: rating neutro → performance emergente desde metadata
+- SSO timing: una sola aplicación de multiplicador de perfil (via harmony)
+- SSO-4 RANGE_SCALP: alcanzable estructuralmente (was: $3.00 min → unreachable)
+- Trazabilidad: todos los cierres SSO (full y partial) en `trades_audit`
+
+**Validación**
+- `pytest tests/ -q --tb=short`: **369 passed, 2 skipped, 0 failed** (161.70s)
+
+**Valores canónicos post-s73**
+
+| Parámetro | Valor |
+|-----------|-------|
+| `max_rsi` en `_build_regime()` RANGE_SCALP | 60.0 |
+| `range_scalp_max_rsi` fallback en entry gate | 60.0 |
+| `profile_rank` A/B/C | 200.0 / 200.0 / 200.0 |
+| SSO-1 stagnant_min_hours RANGE_SCALP Profile A | **1.395h** (harmony only, no doble-mult) |
+| SSO-1 stagnant_min_hours SPOT_BULL Profile A | **4.05h** (harmony only, no doble-mult) |
+| SSO-4 RANGE_SCALP min_contribution | `$20 × 0.05 = $1.00` (alcanzable) |
+| SSO audit trail | `trades_audit.event IN ('sso_close', 'sso_partial_close')` |
+
+---
+
+## 🗺️ Estado anterior — jul 08 2026 (post-s72)
 
 ### ✅ Sesión 72 — Auditoría Estratégica Completa: Todos los Modos + Perfiles — jul 08 2026
 
