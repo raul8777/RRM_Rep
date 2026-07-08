@@ -388,6 +388,13 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'allow_real_trading': False,
     'funding_rate_cache_minutes': 10,
     'backtest_safe_only': True,
+
+    # Rebalancing cap (s66: H6/H7 — was hardcoded 0.5 in getattr fallback)
+    'rebalance_max_abs_pnl_pct': 2.0,
+
+    # Peak protection SPOT_BULL (s66: H7 — ensure get_param() has correct fallback)
+    'peak_protection_spot_bull_pct': 0.60,
+    'peak_protection_spot_bull_profile_a_pct': 0.65,
 }
 
 

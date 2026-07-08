@@ -325,6 +325,7 @@ class Settings(BaseSettings):
     min_hold_minutes_spot_bull: int = Field(default=120)     # SPOT_BULL: 2h hold before replacement
     max_rebalance_per_cycle: int = Field(default=2)  # max sells per rebalance cycle
     rebalance_excluded_symbols: List[str] = Field(default=['USD1USDT', 'USDCUSDT', 'BUSDUSDT', 'TUSDUSDT', 'FDUSDUSDT'])  # F4: stablecoins never rebalanced
+    rebalance_max_abs_pnl_pct: float = Field(default=2.0)  # s66: H6 — skip rebalance if abs(PnL%) > this (let SL/TP/SSO manage active positions); was hardcoded 0.5
     max_total_exposure_pct: float = Field(default=0.65)  # max portfolio % in open spot positions
     # M1: ATR-Based dynamic SL â€” replaces fixed SL% with 1.5Ã—ATR for volatile tokens
     atr_sl_enabled: bool = Field(default=True)           # enable ATR-based SL calculation

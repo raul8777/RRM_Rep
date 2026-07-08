@@ -3636,18 +3636,40 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
 
                 # ── Breakeven SL (SPOT) ───────────────────────────────────
                 # Move SL to entry price once position reaches trailing_stop_activation_pct profit
+                # H1: use pnl_pct_net (net of commissions) for consistency with PRS/UG
                 # Prevents any trailing-active position from going negative
-                if close_reason is None and trailing_enabled and pnl_pct >= trail_activate:
+                if close_reason is None and trailing_enabled and pnl_pct_net >= trail_activate:
                     _cur_sl_val = float(pos.stop_loss or 0)
                     if _cur_sl_val < entry_price:
                         try:
                             position_manager.update_position_sl(pos.position_id, round(entry_price, 8))
-                            print(f"[Breakeven] {symbol}: SL → entry={entry_price:.6f} (PnL={pnl_pct*100:.2f}%)")
+                            print(f"[Breakeven] {symbol}: SL → entry={entry_price:.6f} (PnL net={pnl_pct_net*100:.2f}%)")
+                            # H3: trazabilidad en BD — registrar activación de breakeven
+                            try:
+                                if _db_client_ref:
+                                    import json as _json_be
+                                    _db_client_ref.execute_update(
+                                        "INSERT INTO trades_audit (event_data) VALUES (%s)",
+                                        (_json_be.dumps({
+                                            'event': 'breakeven_activated',
+                                            'symbol': symbol,
+                                            'position_id': pos.position_id,
+                                            'entry_price': entry_price,
+                                            'current_price': current_price,
+                                            'pnl_pct_net': round(pnl_pct_net * 100, 4),
+                                            'trail_activate_pct': round(trail_activate * 100, 4),
+                                            'regime': regime,
+                                            'ts': datetime.now(timezone.utc).isoformat(),
+                                        }),)
+                                    )
+                            except Exception:
+                                pass
                         except Exception:
                             pass
 
                 # ── Trailing Stop ──────────────────────────────────────────
-                if close_reason is None and trailing_enabled and pnl_pct >= trail_activate:
+                # H1: use pnl_pct_net for trailing activation (consistent with breakeven and PRS/UG)
+                if close_reason is None and trailing_enabled and pnl_pct_net >= trail_activate:
                     # ATR-scaled trail: respects per-symbol volatility to avoid wick stop-outs
                     trail_dist = _compute_spot_trail_distance(client, symbol, pnl_pct, settings)
                     # Peak is stored in position metadata; update if new high
@@ -4932,18 +4954,17 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         if symbol in narrative_set:
             from datetime import datetime as _dt2
             _last_buy = _NARRATIVE_BUY_COOLDOWN.get(symbol)
-            if not _last_buy:
-                _last_buy = _check_cooldown_db(symbol, 'narrative') and _NARRATIVE_BUY_COOLDOWN.get(symbol)
+            if not _last_buy and _check_cooldown_db(symbol, 'narrative'):
+                # H2: DB says cooldown active but RAM is empty (post-restart) — block directly
+                print(f"Skipping buy {symbol}: NARRATIVE cooldown active (from DB — post-restart)")
+                update_signal_decision(symbol, "rejected", "NARRATIVE_CD")
+                continue
             if _last_buy:
                 _h_since = (_dt2.now(timezone.utc) - _last_buy).total_seconds() / 3600
                 if _h_since < _NARRATIVE_BUY_COOLDOWN_HOURS:
                     print(f"Skipping buy {symbol}: NARRATIVE cooldown active ({_h_since:.1f}h < {_NARRATIVE_BUY_COOLDOWN_HOURS}h)")
                     update_signal_decision(symbol, "rejected", "NARRATIVE_CD")
                     continue
-            elif _check_cooldown_db(symbol, 'narrative'):
-                print(f"Skipping buy {symbol}: NARRATIVE cooldown active (from DB — post-restart)")
-                update_signal_decision(symbol, "rejected", "NARRATIVE_CD")
-                continue
 
         # ── Signal metadata ───────────────────────────────────────────────
         meta = signal_meta.get(symbol, {})

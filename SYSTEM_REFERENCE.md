@@ -1,7 +1,36 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 07 2026 | Sesión 65: Auditoría Exhaustiva II — 6 bugs corregidos (PRS peak protection, futures thresholds, NARRATIVE min_prob, entry quality, comisiones BNB).
+> Última actualización: jul 07 2026 | Sesión 66: Auditoría III — 5 bugs: NARRATIVE cooldown post-restart, Breakeven/Trailing NET, breakeven trazabilidad BD, rebalance cap configurable, defaults faltantes.
+
+---
+
+### ✅ Sesión 66 — Auditoría III: Breakeven NET + NARRATIVE Cooldown + Defaults — jul 07 2026
+
+**H2 — CRÍTICO: NARRATIVE cooldown post-restart siempre ignorado** (`run_trades.py:4935`)
+- `_last_buy = _check_cooldown_db(...) and _NARRATIVE_BUY_COOLDOWN.get(symbol)` → `and` retorna `None` si RAM vacía → cooldown ignorado tras restart
+- Fix: si DB dice cooldown activo y RAM vacía → bloquear directamente (mismo path que `elif` de abajo). Lógica reescrita en 3 líneas claras.
+
+**H1 — ALTA: Breakeven y Trailing SPOT activaban con PnL GROSS** (`run_trades.py:3640,3650`)
+- `pnl_pct >= trail_activate` usaba gross (sin comisiones) mientras PRS/UG usan `pnl_pct_net`
+- Fix: ambas condiciones ahora usan `pnl_pct_net` — consistente con supervisores. Con comisiones ~0.1-0.2%, breakeven se activa 0.2% más tarde (correcto semánticamente).
+
+**H3 — ALTA: Breakeven SPOT no dejaba registro en `trades_audit`** (`run_trades.py:3644`)
+- El evento de breakeven actualizaba SL via `position_manager` pero sin trazabilidad en BD
+- Fix: añadido INSERT en `trades_audit` con `event='breakeven_activated'`, symbol, position_id, entry/current price, pnl_pct_net, trail_activate_pct, regime, ts
+
+**H6 — MEDIA: `rebalance_max_abs_pnl_pct` no existía como field** (`config.py:328`)
+- `getattr(settings, 'rebalance_max_abs_pnl_pct', 0.5)` → siempre usaba fallback 0.5% hardcoded
+- Fix: añadido `rebalance_max_abs_pnl_pct: float = Field(default=2.0)` — ahora configurable. 2% permite que SL/TP/SSO gestionen posiciones activas.
+
+**H7 — BAJA: 3 defaults faltantes en `_PARAM_DEFAULTS`** (`config_helpers.py:392-397`)
+- `rebalance_max_abs_pnl_pct`, `peak_protection_spot_bull_pct`, `peak_protection_spot_bull_profile_a_pct` no estaban explícitos
+- Fix: añadidos con valores canónicos (2.0, 0.60, 0.65)
+
+**Archivos modificados (s66):**
+- `run_trades.py`: H2 (cooldown), H1 (pnl_pct_net breakeven+trailing), H3 (trades_audit breakeven)
+- `config.py`: H6 (rebalance_max_abs_pnl_pct field)
+- `config_helpers.py`: H7 (3 defaults)
 
 ---
 
