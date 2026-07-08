@@ -8479,6 +8479,8 @@ def _check_config_drift(settings) -> List[Dict]:
         'token_categories', 'category_thresholds', 'futures_category_thresholds',
         # Dynamic runtime state
         'current_regime_mode',
+        # Runtime label — populated from DB at startup; '' sentinel in code is intentional
+        'current_regime_profile_label',
         # Docker-compose operational overrides — intentionally tuned per deployment
         'max_per_trade_usdt', 'max_positions', 'max_positions_per_symbol',
         'max_total_exposure_pct', 'kelly_dynamic_base_pct',
@@ -8487,6 +8489,42 @@ def _check_config_drift(settings) -> List[Dict]:
         'min_hold_minutes', 'max_rebalance_per_cycle',
         'btc_dominance_altcoin_threshold', 'use_unified_portfolio_manager',
         'futures_overflow_min_strength',
+        # s71: Per-regime SSO/PRS/position fields modified by harmony Profile multipliers.
+        # These legitimately differ from canonical defaults when a profile is active.
+        'sso_stagnant_min_hours_spot_bull', 'sso_stagnant_min_hours_range_scalp',
+        'sso_stagnant_min_hours_preservation', 'sso_stagnant_min_hours_futures_short',
+        'sso_slow_min_hours_spot_bull', 'sso_slow_min_hours_range_scalp',
+        'sso_slow_min_hours_preservation', 'sso_slow_min_hours_futures_short',
+        'sso_decay_min_hours_spot_bull', 'sso_decay_min_hours_range_scalp',
+        'sso_decay_min_hours_preservation', 'sso_decay_min_hours_futures_short',
+        'sso_target_daily_usd', 'sso_slow_velocity_threshold',
+        # Per-regime limits modified by harmony
+        'max_positions_spot_bull', 'max_positions_range_scalp',
+        'max_positions_preservation', 'max_positions_futures_short',
+        'min_hold_minutes_spot_bull', 'min_hold_minutes_range_scalp',
+        'futures_long_sl_pct', 'futures_long_tp_pct', 'max_rebalance_per_cycle',
+        # Futures ATR trail fields — modified by harmony Profile multipliers
+        'futures_trailing_activation_pct', 'futures_trailing_distance_pct',
+        'futures_breakeven_activation_pct', 'futures_trail_floor_pct',
+        'futures_trail_ceiling_pct', 'futures_trail_atr_multiplier_low',
+        'futures_trail_atr_multiplier_mid', 'futures_trail_atr_multiplier_high',
+        'futures_trail_atr_multiplier_deep',
+        # Entry/prediction params modified by harmony or DB overrides
+        'prediction_add_min_strength', 'prediction_add_min_ev_ratio',
+        'range_scalp_sl_pct', 'range_scalp_tp_pct',
+        'spot_bounce_rescue_target_pnl', 'futures_bounce_rescue_target_pnl',
+        'kelly_conviction_max_pct',
+        # Cycle parameters governed by kelly_config_override in DB
+        'cycle_range_scalp', 'cycle_spot_bull', 'cycle_preservation',
+        # Kelly/signal fields governed by kelly_config_override in DB (not code defaults)
+        'kelly_base_usdt', 'kelly_max_usdt', 'kelly_max_pct_liquid', 'kelly_max_pct_cap',
+        'kelly_dynamic_base_pct',
+        'futures_kelly_base_usdt', 'futures_kelly_max_usdt', 'futures_kelly_max_pct_liquid',
+        'futures_kelly_cap_pct', 'futures_kelly_max_usdt',
+        'min_signal_strength', 'min_success_probability', 'vol_spike_min',
+        'futures_sl_pct', 'futures_tp_pct', 'futures_usdt_per_trade', 'futures_kelly_max_usdt',
+        'stop_loss_pct', 'take_profit_pct', 'slippage_pct',
+        'max_per_trade_usdt',
     }
     # Canonical default drift (SPOT+FUTURES parameters) — skip keys already covered by baseline
     for k, expected in _PARAM_DEFAULTS.items():

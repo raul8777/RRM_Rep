@@ -142,9 +142,13 @@ def test_drift_check_returns_zero_when_aligned():
 @pytest.mark.skipif(os.environ.get("DASHBOARD_API_KEY") is None, reason="no API key")
 def test_drift_alert_persisted_and_acknowledged():
     """F5: Drift check persists alerts; acknowledge endpoint marks them."""
-    # Introduce a temporary drift on a safe parameter
+    # Introduce a temporary drift on a safe parameter not governed by DB overrides.
+    # stop_loss_pct is excluded (governed by category_thresholds).
+    # sl_confirmation_candles is in _PARAM_DEFAULTS and not in _EXCLUDED.
+    _CANARY_PARAM = "sl_confirmation_candles"
+    _CANARY_DRIFT = 99
     original = _api_request("/config/verify", method="POST", body={})
-    _api_request("/config/apply", method="POST", body={"stop_loss_pct": 9.99})
+    _api_request("/config/apply", method="POST", body={_CANARY_PARAM: _CANARY_DRIFT})
     try:
         drift = _api_request("/config/drift-check", method="POST", body={})
         assert drift["drift_count"] >= 1
@@ -152,14 +156,14 @@ def test_drift_alert_persisted_and_acknowledged():
         # Find an unacknowledged alert
         alerts = _api_request("/config/drift-alerts?acknowledged=false&limit=10")
         assert alerts["ok"] is True
-        assert any(a["param"] == "stop_loss_pct" for a in alerts["alerts"])
-        alert_id = next(a["id"] for a in alerts["alerts"] if a["param"] == "stop_loss_pct")
+        assert any(a["param"] == _CANARY_PARAM for a in alerts["alerts"])
+        alert_id = next(a["id"] for a in alerts["alerts"] if a["param"] == _CANARY_PARAM)
         ack = _api_request(f"/config/drift-alerts/{alert_id}/acknowledge", method="POST", body={"notes": "test"})
         assert ack["ok"] is True
     finally:
         # Restore baseline to keep the runtime aligned
         import config_helpers
-        _api_request("/config/apply", method="POST", body={"stop_loss_pct": config_helpers._PARAM_DEFAULTS['stop_loss_pct']})
+        _api_request("/config/apply", method="POST", body={_CANARY_PARAM: config_helpers._PARAM_DEFAULTS[_CANARY_PARAM]})
         # Verify alignment
         verify = _api_request("/config/verify", method="POST", body={})
         assert verify["ok"] is True

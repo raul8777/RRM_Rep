@@ -16,6 +16,10 @@ CRITICAL_PARAMS = set(CANON.keys())
 _AUDIT_EXCLUDED = {
     # Dynamic runtime state — not a code bug
     'current_regime_mode',
+    # Runtime label — '' and None are intentional sentinels (populated at startup from DB)
+    'current_regime_profile_label',
+    # Regime cycle — controlled by kelly_config_override in DB, not code default
+    'cycle_range_scalp',
     # Safety/env flags — production code using False is intentionally conservative
     'dry_run', 'allow_real_trading',
     # Docker-compose operational overrides — not defaults in the code-bug sense

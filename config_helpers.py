@@ -88,7 +88,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     # Exposure / regime
     'max_total_exposure_pct': 0.90,
     'max_positions_spot_bull': 5,
-    'max_positions_range_scalp': 3,
+    'max_positions_range_scalp': 4,  # s71 BUG-8
     'max_positions_preservation': 1,
     'max_positions_futures_short': 5,
     'max_positions': 4,
@@ -194,6 +194,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'min_hold_minutes_range_scalp': 15,   # s70: 30→15
     'min_hold_minutes_spot_bull': 120,
     'min_hold_for_prediction_exit': 90,
+    'min_hold_for_prediction_exit_range_scalp': 20,  # s71 BUG-4: bounces 15-30min, no esperar 90min
 
     # Rebalance
     'max_rebalance_per_cycle': 2,
@@ -267,7 +268,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'smart_tp_extend_enabled_range_scalp': True,
     'smart_tp_extend_enabled_preservation': False,
     'smart_tp_extend_enabled_futures_short': True,
-    'smart_tp_score_threshold_range_scalp': 3,
+    'smart_tp_score_threshold_range_scalp': 2,  # s71 BUG-7: R:R 5.6:1 to extend, 2/4 sufficient
 
     # BB lower touch tolerance per mode (s70: replaces hardcode *1.005 in autonomous_signals.py)
     'bb_lower_touch_tolerance_pct': 0.5,
@@ -378,8 +379,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'profit_realization_spot_partial_close_pct': 0.60,
     'profit_realization_spot_max_extensions': 2,
     'profit_realization_spot_bull_min_partial_minutes': 90.0,  # jul07: 45→90 (wolf-hunter)
-    'profit_realization_spot_partial_minutes_range_scalp': 35.0,  # s70c: base before scale for RANGE_SCALP (TP=1.8%)
-    'profit_realization_spot_full_minutes_range_scalp': 70.0,     # s70c: base before scale for RANGE_SCALP
+    'profit_realization_spot_partial_minutes_range_scalp': 22.0,  # s71 BUG-6: 35→22 (bounces peak at 15-25min)
+    'profit_realization_spot_full_minutes_range_scalp': 45.0,    # s71 BUG-6: 70→45 (full exit within bounce window)
     'profit_realization_futures_enabled': True,
     'profit_realization_futures_min_profit_pct': 0.0030,
     'profit_realization_futures_partial_minutes': 30.0,

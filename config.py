@@ -261,8 +261,8 @@ class Settings(BaseSettings):
     profit_realization_spot_bull_min_partial_minutes: float = Field(default=90.0)  # jul07: 45→90 (wolf-hunter: SPOT_BULL necesita tiempo)
     # C2: PRS RANGE_SCALP regime-specific base times (overrides global before scale is applied)
     # Smaller bases account for short TP=1.8% target; profile×fng multipliers still apply on top
-    profit_realization_spot_partial_minutes_range_scalp: float = Field(default=35.0)  # s70c: 60→35 (scalp: capturar ganancia antes de rebote)
-    profit_realization_spot_full_minutes_range_scalp: float = Field(default=70.0)     # s70c: 120→70 (scalp: cierre completo dentro de ventana)
+    profit_realization_spot_partial_minutes_range_scalp: float = Field(default=22.0)  # s71 BUG-6: 35→22 (bounces peak at 15-25min; Profile A effective=16min)
+    profit_realization_spot_full_minutes_range_scalp: float = Field(default=45.0)    # s71 BUG-6: 70→45 (era 70min; full exit within bounce window)
     # A4: Entry quality score gate
     entry_quality_gate_enabled: bool = Field(default=True)
     entry_quality_min_vol_spike: float = Field(default=1.2)  # concentrated: volumen confirma dirección
@@ -350,7 +350,7 @@ class Settings(BaseSettings):
     rebalance_rsi_overbought: float = Field(default=60.0)  # RSI1h threshold â€” rebalance only if RSI > this OR EMA9 descending
     # Dynamic max positions by regime (replaces single MAX_POSITIONS when regime is known)
     max_positions_spot_bull: int = Field(default=5)    # concentrated: 4-5 posiciones en bull
-    max_positions_range_scalp: int = Field(default=3)  # concentrated: pocos setups en rango
+    max_positions_range_scalp: int = Field(default=4)                   # s71 BUG-8: lateral allows 4 simultaneous setups  # concentrated: pocos setups en rango
     max_positions_preservation: int = Field(default=1)  # concentrated: capital preservado en bear
     max_positions_futures_short: int = Field(default=5)  # concentrated: 3-5 shorts simultáneos
     # QUBO Portfolio Selection (combinatorial optimizer)
@@ -508,6 +508,7 @@ class Settings(BaseSettings):
     # C1: Re-evaluaciÃ³n predictiva en cada ciclo â€” cierra posiciones cuando EV deteriora
     prediction_exit_enabled: bool = Field(default=True)
     min_hold_for_prediction_exit: int = Field(default=90)  # minutos antes de evaluar cierre
+    min_hold_for_prediction_exit_range_scalp: int = Field(default=20)  # s71 BUG-4: bounces 15-30min, no esperar 90min
     # C2: Segunda entrada permitida si predicciÃ³n nueva es fuertemente mejor
     allow_prediction_based_add: bool = Field(default=True)
     prediction_add_min_ev_ratio: float = Field(default=1.5)  # nueva pred >= 1.5x la existente
@@ -637,7 +638,7 @@ class Settings(BaseSettings):
     smart_tp_extend_enabled_range_scalp: bool = Field(default=True)     # s70: enabled (was False via list)
     smart_tp_extend_enabled_preservation: bool = Field(default=False)
     smart_tp_extend_enabled_futures_short: bool = Field(default=True)
-    smart_tp_score_threshold_range_scalp: int = Field(default=3)        # more selective in lateral
+    smart_tp_score_threshold_range_scalp: int = Field(default=2)        # s71 BUG-7: R:R 5.6:1 to extend, 2/4 sufficient
 
     # ── BB lower touch tolerance per mode (s70: replaces hardcode *1.005 in autonomous_signals.py) ──
     bb_lower_touch_tolerance_pct: float = Field(default=0.5)            # default/SPOT_BULL tolerance %

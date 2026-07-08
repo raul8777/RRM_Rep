@@ -592,6 +592,7 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'max_rebalance_per_cycle': 'max_rebalance_per_cycle',
             'min_hold_minutes_spot_bull': 'min_hold_minutes_spot_bull',
             'min_hold_for_prediction_exit': 'min_hold_for_prediction_exit',
+            'min_hold_for_prediction_exit_range_scalp': 'min_hold_for_prediction_exit_range_scalp',  # s71 BUG-4
             'min_cycles_before_close_shorts': 'min_cycles_before_close_shorts',
             'futures_breakeven_activation_pct': 'futures_breakeven_activation_pct',
             'futures_trailing_activation_pct': 'futures_trailing_activation_pct',
@@ -1043,7 +1044,16 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str, profile_par
             'min_hold_minutes_spot_bull': 0.94,
             'min_hold_minutes_range_scalp': 0.90,
             'sso_target_daily_usd': 1.10,
-            'sso_stagnant_min_hours': 1.08,
+            # s71 BUG-2: removed 'sso_stagnant_min_hours' (global NEVER modified by harmony).
+            # Profile A multipliers applied to per-regime fields instead:
+            'sso_stagnant_min_hours_spot_bull': 1.08,       # Profile A: more patience in SPOT_BULL runner
+            'sso_stagnant_min_hours_range_scalp': 0.93,    # Profile A: faster rotation in lateral scalp
+            'sso_stagnant_min_hours_preservation': 1.05,   # Profile A: slightly more patience in PRESERVATION
+            'sso_stagnant_min_hours_futures_short': 1.05,  # Profile A: patience for SHORT runners
+            'sso_decay_min_hours_spot_bull': 1.08,
+            'sso_decay_min_hours_range_scalp': 0.92,
+            'sso_slow_min_hours_spot_bull': 1.08,
+            'sso_slow_min_hours_range_scalp': 0.92,
             'sso_slow_velocity_threshold': 0.92,
             'sso_reentry_min_strength_diff': 1.05,
             'spot_bounce_rescue_target_pnl': 1.05,
@@ -1073,7 +1083,14 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str, profile_par
             'min_hold_minutes_spot_bull': 1.08,
             'min_hold_minutes_range_scalp': 1.05,
             'sso_target_daily_usd': 0.90,
-            'sso_stagnant_min_hours': 0.92,
+            # s71 BUG-2: removed 'sso_stagnant_min_hours' (global NEVER modified by harmony).
+            # Profile C multipliers applied to per-regime fields instead:
+            'sso_stagnant_min_hours_spot_bull': 0.92,      # Profile C: less patience in SPOT_BULL
+            'sso_stagnant_min_hours_range_scalp': 1.05,   # Profile C: more patient in lateral (defensive)
+            'sso_stagnant_min_hours_preservation': 1.08,  # Profile C: more patience in PRESERVATION
+            'sso_stagnant_min_hours_futures_short': 0.95, # Profile C: slightly tighter in FUTURES_SHORT
+            'sso_decay_min_hours_range_scalp': 1.05,
+            'sso_slow_min_hours_range_scalp': 1.05,
             'sso_slow_velocity_threshold': 1.08,
             'sso_reentry_min_strength_diff': 0.90,
             'spot_bounce_rescue_target_pnl': 0.92,
@@ -1130,7 +1147,7 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str, profile_par
         ('preservation_sl_pct', (0.8, 4.0)),
         ('preservation_tp_pct', (1.0, 6.0)),
         ('max_positions_spot_bull', (5, 40)),
-        ('max_positions_range_scalp', (3, 20)),
+        ('max_positions_range_scalp', (4, 20)),  # s71 BUG-8: floor raised from 3→4
         ('max_positions_preservation', (1, 12)),
         ('max_positions_futures_short', (4, 24)),
         ('overflow_max_extra', (1, 8)),
@@ -3015,6 +3032,10 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 if getattr(settings, 'prediction_exit_enabled', True) and pnl_pct_net < 0:
                     try:
                         _min_hold_pred = int(getattr(settings, 'min_hold_for_prediction_exit', 90))
+                        # s71 BUG-4: per-regime override — RANGE_SCALP bounces peak at 15-30min
+                        _pred_regime = str(getattr(settings, 'current_regime_mode', '') or '').upper()
+                        if _pred_regime == 'RANGE_SCALP':
+                            _min_hold_pred = int(getattr(settings, 'min_hold_for_prediction_exit_range_scalp', 20))
                         _entry_ts = getattr(pos, 'entry_time', None)
                         _age_ok = False
                         if _entry_ts:
@@ -4900,7 +4921,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
 
             elif _regime_mode == "RANGE_SCALP":
                 # Only enter when RSI < range_scalp_max_rsi (oversold — near BB lower)
-                _rs_max_rsi = getattr(settings, 'range_scalp_max_rsi', 55.0)
+                _rs_max_rsi = getattr(settings, 'range_scalp_max_rsi', 48.0)
                 _meta_rsi   = float(signal_meta.get(symbol, {}).get('rsi', 50))
                 if _meta_rsi > _rs_max_rsi:
                     print(f"Skipping buy {symbol}: RANGE_SCALP mode RSI={_meta_rsi:.1f} > {_rs_max_rsi} (not at BB lower)")
@@ -5273,8 +5294,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         # Apply regime-specific SL/TP overrides (régimen sobreescribe categoría)
         if _regime and _regime.confirmed:
             if _regime_mode == "RANGE_SCALP":
-                sl_pct = getattr(settings, 'range_scalp_sl_pct', 1.2) / 100.0
-                tp_pct = getattr(settings, 'range_scalp_tp_pct', 1.5) / 100.0
+                sl_pct = getattr(settings, 'range_scalp_sl_pct', 0.8) / 100.0
+                tp_pct = getattr(settings, 'range_scalp_tp_pct', 1.8) / 100.0
                 print(f"[Regime] RANGE_SCALP: SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}%")
             elif _regime_mode == "PRESERVATION":
                 sl_pct = _get_param(settings, 'preservation_sl_pct') / 100.0
