@@ -6205,7 +6205,7 @@ def execute_once(monitor_only: bool = False):
                             "from_mode": _active_mode_before,
                             "to_mode": _regime_mode,
                             "from_profile": _active_profile_before,
-                            "to_profile": settings.current_regime_profile_label,
+                            "to_profile": getattr(settings, 'current_regime_profile_label', None),
                             "policy": _transition_policy,
                             "updated_positions": _updated_positions,
                             "updated_futures_positions": _updated_futures_positions,

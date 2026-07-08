@@ -1,7 +1,72 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 07 2026 | Sesión 63: Wolf Hunter — Kelly agresivo por perfil + Capital Rotator (SSO-7).
+> Última actualización: jul 07 2026 | Sesión 64: Auditoría Exhaustiva — Triple sobreescritura de configuración corregida.
+
+---
+
+### ✅ Sesión 64 — Auditoría Exhaustiva: Triple Override Bug + 12 Perfiles DB + MERGE Persist — jul 07 2026
+
+**Objetivo operativo (cumplido):**
+Identificar y corregir todos los bugs, gaps y hardcodeos que impedían la apertura de operaciones. El sistema tenía una cadena de triple sobreescritura que borraba todos los fixes manuales en cada cambio de régimen.
+
+**Bug raíz — Triple sobreescritura de configuración:**
+```
+config.py defaults → kelly_config_override (DB) → regime_profile_<MODO>_<PERFIL> (DB)
+                                                          ↑
+                              _apply_regime_params() hacía REPLACE TOTAL aquí
+                              borrando todos los fixes de s62/s63 en cada ciclo
+```
+
+**Bugs identificados (12 total) y corregidos:**
+
+| Bug | Severidad | Fix |
+|---|---|---|
+| `_apply_regime_params` REPLACE total de `kelly_config_override` | 🔴 CRÍTICO | Cambiado a MERGE — solo sobreescribe campos que el perfil define |
+| 12 regime_profiles en DB con valores stale del autotuner (jul 4) | 🔴 CRÍTICO | Actualizados con valores s62/s63 por modo |
+| `vol_spike_min=0.83` en RANGE_SCALP con mercado `vol=0.24x` | 🔴 CRÍTICO | RANGE_SCALP=0.55, SPOT_BULL/OTROS=0.91 |
+| `stop_loss_pct=1.236` del perfil stale afectaba tokens sin categoría | 🔴 CRÍTICO | Todos los perfiles: sl=3.36 |
+| Zombie OPGUSDT (qty=0, id=856) bloqueaba slot cada ciclo | 🔴 CRÍTICO | Eliminado + audit log |
+| SSO s62 nunca en `kelly_config_override` DB | 🟠 ALTO | Agregados 8 campos SSO al override |
+| `config.py` defaults stale no tomados por container (imagen vieja) | 🟠 ALTO | Rebuild `--no-cache` + verificado |
+| `sso_stagnant_velocity_window_min`, `sso_slow_tier4_hours` no en `config_helpers.py` | 🟡 MEDIO | Agregados |
+| JUPUSDT, OPUSDT, FILUSDT, UUSDT sin categoría en `token_categories` | 🟡 MEDIO | Agregados (NARRATIVE/MIDCAP_ALT) |
+| AttributeError `current_regime_profile_label` en primer ciclo post-restart | 🟡 MEDIO | `getattr` con fallback en L6208 |
+| `kelly_config_override` en PATCH endpoint hacía replace (s62 fix) | 🟡 MEDIO | Ya corregido sesión previa |
+| Autotuner también hacía replace de `kelly_config_override` | 🟡 MEDIO | Ya corregido sesión previa |
+
+**Valores canónicos confirmados en runtime (22/22 checks OK):**
+
+| Parámetro | Valor correcto | Modo |
+|---|---|---|
+| `vol_spike_min` | **0.55** | RANGE_SCALP activo |
+| `min_signal_strength` | **0.45** | Todos |
+| `min_success_probability` | **0.52** | Todos |
+| `kelly_base_usdt` | **$100** | Todos |
+| `kelly_max_usdt` | **$1,000** | Todos |
+| `kelly_max_pct_liquid` | **0.704** | Todos |
+| `stop_loss_pct` | **3.36%** | Todos |
+| `slippage_pct` | **0.00052** | Todos |
+| `sso_stagnant_min_hours` | **3.0h** | SSO-1a |
+| `sso_stagnant_velocity_window_min` | **60 min** | SSO-1a |
+| `sso_decay_min_hours` | **2.5h** | SSO-1b |
+| `sso_decay_threshold_pct` | **0.8%** | SSO-1b |
+| `sso_slow_tier2_hours` | **5h** | SSO-1c |
+| `sso_slow_tier3_hours` | **7h** | SSO-1c |
+| `sso_slow_tier4_hours` | **9h** | SSO-1c |
+| `btc_dominance_altcoin_threshold` | **64.0** | BTC.D filter |
+
+**Scripts de fix creados:**
+- `Dev/scripts/_fix_all_s64.py` — G0 completo (zombie + 12 perfiles + kelly_override)
+
+**Estado post-fix:**
+- Mercado en RANGE_SCALP lateral (vol=0.1x) — correcto no entrar con vol < 0.55
+- Sistema evaluando candidatos cada 5 min
+- Predictor rechazando correctamente: ZECUSDT(-$0.22), CHIPUSDT(-$5.75), SPELLUSDT(-$7.38)
+- El sistema ABRIRÁ operaciones cuando vol_spike ≥ 0.55 Y predictor apruebe
+
+**Regla de persistencia garantizada:**
+Desde esta sesión, cualquier cambio de modo/perfil **SOLO** sobreescribe los campos que el perfil define explícitamente. Los fixes manuales vía PATCH /config/kelly sobreviven reinicios y cambios de régimen.
 
 ---
 
