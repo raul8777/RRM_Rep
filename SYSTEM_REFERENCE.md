@@ -1,11 +1,80 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 08 2026 | Sesión 70c: PRS bases por régimen. RANGE_SCALP partial=35min full=70min. cycle_range_scalp=3. 369 tests pasan.
+> Última actualización: jul 08 2026 | Sesión 71: Auditoría exhaustiva — 4 bugs críticos corregidos + 4 mejoras de tuning. 370 tests pasan. Commit: `d612985`
 
 ---
 
-## 🗺️ Estado del Sistema — jul 08 2026 (post-s70c)
+## 🗺️ Estado del Sistema — jul 08 2026 (post-s71)
+
+### ✅ Sesión 71 — Auditoría Exhaustiva Cross-Modo: SSO/PRS/PredExit/Tuning — jul 08 2026
+
+**Objetivo:** Auditoría exhaustiva de todos los regímenes y perfiles (SPOT y FUTURES) para encontrar y corregir bugs sistémicos similares al SSO global override encontrado en RANGE_SCALP Profile A. Maximizar velocidad de capital en el menor tiempo posible.
+
+#### BUG-1 CRÍTICO: 12 profiles DB inyectaban globals SSO (todos los modos)
+- **Raíz:** Cada `regime_profile_*_A/B/C` tenía `sso_stagnant_min_hours=3.0`, `sso_decay_min_hours=2.5`, `sso_slow_velocity_threshold=0.00106`. El contrato s70 dice que los globals **NUNCA** se modifican — pero `_scalar_map` los incluía y los profiles los tenían.
+- **Impacto:** SSO fallback global corrompido a 3.0h (era 2.0h canónico). Con harmony Profile A `×1.08` encima (BUG-2): llegaba a **3.24h**.
+- **Fix:** `Dev/scripts/fix_profile_db_7e8828.py` — elimina 3 keys de 12 profiles. Audit record en DB key `s71_profile_db_fix_audit`.
+
+#### BUG-2 CRÍTICO: Harmony Profile A/C modificaba el global `sso_stagnant_min_hours`
+- **Raíz:** `run_trades.py` `_profile_mult` dict tenía `'sso_stagnant_min_hours': 1.08` (Profile A) y `0.92` (Profile C). El global NUNCA debe modificarse.
+- **Fix:** Eliminado el global del `_profile_mult`. Añadidos multiplicadores per-regime:
+  - Profile A: `sso_stagnant_min_hours_range_scalp ×0.93` → 1.5×0.93=**1.395h** (rotación más rápida)
+  - Profile A: `sso_stagnant_min_hours_spot_bull ×1.08` → 3.75×1.08=4.05h (más paciencia en runner)
+  - Profile C: `sso_stagnant_min_hours_range_scalp ×1.05` (defensivo)
+
+#### BUG-3 CRÍTICO: 12 profiles DB inyectaban `stop_loss_pct=3.36` / `take_profit_pct≈6.3`
+- **Raíz:** `_apply_regime_params()` asignaba estos globales desde el profile, corrompiendo el fallback del SL checker de software para posiciones abiertas.
+- **Fix:** Eliminado de los 12 profiles (mismo script BUG-1). Category thresholds y `range_scalp_sl_pct` gobiernan SL/TP.
+
+#### BUG-4 CRÍTICO: `min_hold_for_prediction_exit=90min` invalidaba PredExit en RANGE_SCALP
+- **Raíz:** Los bounces de BB-lower duran 15-30min; el predictor nunca podía actuar — la posición ya cerraba por SL o PRS antes.
+- **Fix:** Nuevo campo per-regime `min_hold_for_prediction_exit_range_scalp=20min`. Aplicado en `run_trades.py:3033-3037`, `config.py`, `config_helpers.py`, `_scalar_map`.
+
+#### BUG-5: Probability gates RANGE_SCALP demasiado estrictos
+- **Análisis:** Break-even WR=33.3% con SL=0.8%/TP=1.8%/comm=0.10%. `min_success_probability=0.52` rechazaba setups con WR~40% que tienen EV positivo.
+- **Fix** (vía script DB en profiles RANGE_SCALP):
+  - Profile A: `min_success_probability=0.44`, `min_signal_strength=0.42`
+  - Profile B: `0.46 / 0.43`
+  - Profile C: `0.48 / 0.44`
+
+#### BUG-6: PRS base times RANGE_SCALP — 35min demasiado lento para bounces de 15-25min
+- **Fix:** `profit_realization_spot_partial_minutes_range_scalp`: 35→**22min** | `full`: 70→**45min**
+- **Efectivos Profile A (×0.744):** partial=**16.3min**, full=**33.5min**
+
+#### BUG-7: SmartTP EXTEND threshold demasiado selectivo (R:R 5.6:1 a favor de extender)
+- **Fix:** `smart_tp_score_threshold_range_scalp`: 3→**2** (2/4 criterios suficientes)
+
+#### BUG-8: `max_positions_range_scalp=3` — insuficiente para lateral con 4+ setups simultáneos
+- **Fix:** 3→**4**. Harmony bound actualizado de `(3,20)` a `(4,20)`.
+
+#### Correcciones adicionales
+- Pre-existing `getattr` fallbacks corregidos: `range_scalp_max_rsi 55→48`, `sl_pct 1.2→0.8`, `tp_pct 1.5→1.8`
+- `_check_config_drift()` en `app.py`: `_EXCLUDED` ampliado con campos per-regime SSO, Kelly/signal DB-governed, ciclos, `current_regime_profile_label`
+- `tmp_audit_config.py`: `_AUDIT_EXCLUDED` ampliado con `current_regime_profile_label`, `cycle_range_scalp`
+- `test_config_governance.py`: canary cambiado de `stop_loss_pct` a `sl_confirmation_candles`
+
+#### Valores canónicos RANGE_SCALP Profile A (live post-s71)
+| Campo | Base | ×Harmony A | Efectivo |
+|---|---|---|---|
+| `sso_stagnant_min_hours_range_scalp` | 1.5h | ×0.93 | **1.395h** |
+| `sso_decay_min_hours_range_scalp` | 1.7h | ×0.92 | **1.564h** |
+| `sso_slow_min_hours_range_scalp` | 1.0h | ×0.92 | **0.92h** |
+| `prs_partial_minutes` | 22min | ×0.744 | **16.3min** |
+| `prs_full_minutes` | 45min | ×0.744 | **33.5min** |
+| `min_hold_for_prediction_exit` | — | per-regime | **20min** |
+| `min_success_probability` | — | DB profile | **0.44** |
+| `min_signal_strength` | — | DB profile | **0.42** |
+| `max_positions` | — | — | **4** |
+| `SmartTP threshold` | — | — | **2/4** |
+
+**Archivos modificados:** `run_trades.py`, `config.py`, `config_helpers.py`, `app.py`, `tmp_audit_config.py`, `tests/test_config_governance.py`
+**Archivos creados:** `Dev/scripts/fix_profile_db_7e8828.py`
+**Tests:** 370 passed, 0 failed. Commit: `d612985`
+
+---
+
+## 🗺️ Estado anterior — jul 08 2026 (post-s70c)
 
 ### ✅ Sesión 70c — PRS Regime-Aware Base Times (Wolf Hunter alignment) — jul 08 2026
 
