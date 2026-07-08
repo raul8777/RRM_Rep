@@ -653,6 +653,7 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'hybrid_optimizer_enabled': 'hybrid_optimizer_enabled',
             'auto_apply_backtest': 'auto_apply_backtest',
             'backtest_safe_only': 'backtest_safe_only',
+            'rebalance_max_abs_pnl_pct': 'rebalance_max_abs_pnl_pct',  # I3: s66 field — allow regime profiles to tune rebalance cap
         }
 
         _applied = {}
@@ -2729,21 +2730,24 @@ _spot_atr_cache: Dict[str, tuple] = {}  # symbol → (atr_pct, timestamp)
 _SPOT_ATR_CACHE_TTL = 300  # 5 minutes
 
 
-def _compute_spot_trail_distance(client: BinanceClient, symbol: str, pnl_pct: float, settings) -> float:
+def _compute_spot_trail_distance(client: BinanceClient, symbol: str, pnl_pct: float, settings, cat_trail_dist: float = 0.008) -> float:
     """Compute ATR-scaled trailing distance for SPOT positions.
     
     Returns trail distance as a decimal (e.g., 0.008 = 0.8%).
     Formula: trail_dist = max(floor, min(ceiling, ATR_5m * multiplier))
+    I1: cat_trail_dist is the category-configured distance (e.g. NARRATIVE=0.03);
+        used as floor so ATR never caps below what the config demands.
     """
     import time as _t
     _atr_enabled = getattr(settings, 'futures_trail_atr_enabled', True)
-    # SPOT uses slightly wider floor/ceiling than futures (no leverage = more room)
-    _floor = 0.005    # 0.5% absolute minimum for SPOT
-    _ceiling = 0.015  # 1.5% absolute maximum for SPOT
+    # I1: floor = max(0.5%, category trailing_distance_pct) — respects NARRATIVE=3% config
+    _floor = max(0.005, cat_trail_dist)
+    # I1: ceiling = max(1.5%, 2× category dist) — allows NARRATIVE to trail up to 6%
+    _ceiling = max(0.015, cat_trail_dist * 2.0)
 
     if not _atr_enabled:
-        # Fallback to category-based static distance
-        return 0.008  # 0.8% default
+        # Fallback to category-based static distance (not hardcoded 0.8%)
+        return cat_trail_dist
 
     # Select multiplier based on PnL level (SPOT is more patient = slightly wider)
     if pnl_pct >= 0.08:
@@ -3671,7 +3675,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 # H1: use pnl_pct_net for trailing activation (consistent with breakeven and PRS/UG)
                 if close_reason is None and trailing_enabled and pnl_pct_net >= trail_activate:
                     # ATR-scaled trail: respects per-symbol volatility to avoid wick stop-outs
-                    trail_dist = _compute_spot_trail_distance(client, symbol, pnl_pct, settings)
+                    # I1: pass category trail_dist as floor; I2: pass pnl_pct_net (not gross)
+                    trail_dist = _compute_spot_trail_distance(client, symbol, pnl_pct_net, settings, trail_dist)
                     # Peak is stored in position metadata; update if new high
                     metadata = getattr(pos, 'metadata', {}) or {}
                     peak_price = float(metadata.get('trailing_peak', entry_price))

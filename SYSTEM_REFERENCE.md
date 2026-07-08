@@ -1,7 +1,33 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 07 2026 | Sesión 66: Auditoría III — 5 bugs: NARRATIVE cooldown post-restart, Breakeven/Trailing NET, breakeven trazabilidad BD, rebalance cap configurable, defaults faltantes.
+> Última actualización: jul 07 2026 | Sesión 67: Auditoría IV — 3 bugs: NARRATIVE trailing capeado por hardcoded ceiling, trail distance con pnl gross, rebalance_max_abs_pnl_pct fuera de _scalar_map.
+
+---
+
+### ✅ Sesión 67 — Auditoría IV: NARRATIVE Trailing Floor/Ceiling + pnl_pct_net + scalar_map — jul 07 2026
+
+**I1 — ALTA: `_compute_spot_trail_distance` ignoraba `category_thresholds.trailing_distance_pct`** (`run_trades.py:2741-2745`)
+- `_floor=0.005` y `_ceiling=0.015` hardcodeados → NARRATIVE (trail_dist=3%) capado a 1.5% por ATR ceiling
+- Impacto: tokens NARRATIVE con breakouts +15-30% tenían trailing de máximo 1.5% en lugar de 3.0% → cierres prematuros
+- Fix: `_floor = max(0.005, cat_trail_dist)` y `_ceiling = max(0.015, cat_trail_dist * 2.0)`
+- Call site ahora pasa `trail_dist` (de categoría) como 5° argumento
+
+**I2 — MEDIA: call site de trail distance pasaba `pnl_pct` GROSS** (`run_trades.py:3678`)
+- El multiplicador ATR se seleccionaba con gross en vez de net → tier incorrecto cuando net difería por comisiones
+- Fix: `_compute_spot_trail_distance(client, symbol, pnl_pct_net, settings, trail_dist)`
+
+**I3 — MEDIA: `rebalance_max_abs_pnl_pct` ausente del `_scalar_map`** (`run_trades.py:656`)
+- Field añadido en s66 pero no registrado en `_apply_regime_params._scalar_map` → perfiles DB no podían configurarlo
+- Fix: añadida entrada `'rebalance_max_abs_pnl_pct': 'rebalance_max_abs_pnl_pct'`
+
+**Archivos modificados (s67):**
+- `run_trades.py`: I1+I2 (firma y call site de _compute_spot_trail_distance), I3 (_scalar_map)
+
+**Valores canónicos NARRATIVE trailing post-s67:**
+- trail_activate=5.0% (activación), trail_dist=3.0% (distancia desde pico)
+- ATR floor = max(0.5%, 3.0%) = 3.0%; ATR ceiling = max(1.5%, 6.0%) = 6.0%
+- El trailing de NARRATIVE ahora respeta la configuración completa del sistema
 
 ---
 
