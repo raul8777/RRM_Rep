@@ -219,7 +219,10 @@ class AutonomousSignalGenerator:
                 higher_trend = self._get_trend_from_higher_tf(symbol, '4h')
                 logger.info(f"Higher-TF (4h) trend for {symbol}: {higher_trend}")
 
-                if analysis['signal'] == 'BUY' and higher_trend == 'DOWN':
+                # s72 A4: In RANGE_SCALP, 4h DOWN is normal (price at low end of range) — skip penalty
+                _regime_ctx = getattr(self, '_regime_mode', None) or getattr(self, 'regime_mode', None)
+                _is_range_scalp = str(_regime_ctx or '').upper() == 'RANGE_SCALP'
+                if analysis['signal'] == 'BUY' and higher_trend == 'DOWN' and not _is_range_scalp:
                     analysis['strength'] = max(0.0, analysis['strength'] * 0.5)
                     analysis['reason'] += ' [4h trend DOWN — strength halved]'
                     if analysis['strength'] < 0.3:
@@ -293,6 +296,9 @@ class AutonomousSignalGenerator:
                         analysis['bb_bandwidth'] = round(_bw, 4)
                         analysis['bb_lower'] = _bbl[-1]
                         analysis['bb_upper'] = _bbu[-1]
+                        # s72 A5: bb_position = relative position in range (0=lower band, 1=upper band)
+                        _bb_range = _bbu[-1] - _bbl[-1]
+                        analysis['bb_position'] = round((_last_price - _bbl[-1]) / _bb_range, 4) if _bb_range > 0 else 0.5
                         # A4: BB squeeze breakout — prior compression + current vol spike
                         if len(_bbu) >= 5:
                             _prev_bw = [(_bbu[-i] - _bbl[-i]) / _bbm[-i] if _bbm[-i] > 0 else 0.05

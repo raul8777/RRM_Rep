@@ -56,6 +56,10 @@ _AUDIT_EXCLUDED = {
     'min_cycles_before_close_shorts',
     # Overflow / portfolio params tuned per deployment
     'futures_overflow_min_strength',
+    # s72: new per-regime fields — governed by DB profiles, not code defaults
+    'range_scalp_max_rsi', 'range_scalp_max_bb_position',
+    'entry_quality_vol_spike_min_range_scalp',
+    'min_hold_for_prediction_exit_futures_short',
 }
 
 import ast

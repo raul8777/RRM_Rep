@@ -606,10 +606,11 @@ class Settings(BaseSettings):
     range_scalp_sl_pct: float = Field(default=0.8)    # s70: 1.2→0.8 (R:R 2.25, EV>0 with WR>31%)
     range_scalp_tp_pct: float = Field(default=1.8)    # s70: 1.5→1.8
     range_scalp_kelly_mult: float = Field(default=0.7)
-    range_scalp_max_rsi: float = Field(default=48.0)  # s70: 55.0→48.0 (only collapsed RSI = real bounce)
+    range_scalp_max_rsi: float = Field(default=60.0)  # s72: 48→60 (lateral RSI normal = 45-65; old 48 was panic-dip only)
     range_scalp_min_rsi: float = Field(default=25.0)  # s70: new — avoid free-fall entries
     range_scalp_require_bb_lower: bool = Field(default=True)
     range_scalp_breakeven_pct: float = Field(default=0.40)  # s70: new — fast breakeven on micro-bounce
+    range_scalp_max_bb_position: float = Field(default=0.40)  # s72: max relative position in BB range (0=lower, 1=upper)
 
     # ── SSO timing per regime (s70: replaces hardcoded *0.8/*1.5 multipliers in smart_scale_out.py) ──
     # Values are absolute finals: base_global × former_multiplier, pre-computed.
@@ -632,6 +633,7 @@ class Settings(BaseSettings):
     entry_quality_max_failures_range_scalp: int = Field(default=1)      # vol low in lateral is structural
     entry_quality_max_failures_preservation: int = Field(default=0)
     entry_quality_max_failures_futures_short: int = Field(default=0)
+    entry_quality_vol_spike_min_range_scalp: float = Field(default=0.35)  # s72: lateral = low vol; 0.35x floor (vs 1.2x for others)
 
     # ── SmartTP EXTEND per regime (s70: replaces smart_tp_extend_disabled_regimes list) ──
     smart_tp_extend_enabled_spot_bull: bool = Field(default=True)
@@ -643,6 +645,9 @@ class Settings(BaseSettings):
     # ── BB lower touch tolerance per mode (s70: replaces hardcode *1.005 in autonomous_signals.py) ──
     bb_lower_touch_tolerance_pct: float = Field(default=0.5)            # default/SPOT_BULL tolerance %
     bb_lower_touch_tolerance_range_scalp_pct: float = Field(default=1.5)  # wider for lateral market
+
+    # ── PredExit hold floor per regime (s71 BUG-4 + s72 B1) ──
+    min_hold_for_prediction_exit_futures_short: int = Field(default=30)  # s72: shorts move fast; 90min global too slow
 
     # PRESERVATION mode parameters
     preservation_sl_pct: float = Field(default=1.5)

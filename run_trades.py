@@ -707,6 +707,12 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             # s70: RANGE_SCALP new fields
             'range_scalp_min_rsi':          'range_scalp_min_rsi',
             'range_scalp_breakeven_pct':    'range_scalp_breakeven_pct',
+            # s72: RANGE_SCALP entry gate new fields — fully DB-governable per profile
+            'range_scalp_max_rsi':                        'range_scalp_max_rsi',
+            'range_scalp_max_bb_position':                'range_scalp_max_bb_position',
+            'entry_quality_vol_spike_min_range_scalp':    'entry_quality_vol_spike_min_range_scalp',
+            # s72: FUTURES_SHORT PredExit hold floor
+            'min_hold_for_prediction_exit_futures_short': 'min_hold_for_prediction_exit_futures_short',
         }
 
         _applied = {}
@@ -2532,6 +2538,7 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                     print(f"[Screener] Added {len(_new)} dynamic pairs: {_new[:10]}")
 
             signal_generator = AutonomousSignalGenerator(client, symbols)  # reuse shared client
+            signal_generator._regime_mode = regime  # s72 A4: expose to analyze_symbol for per-regime 4h filter
             _sel_max = _get_max_positions_for_regime(settings, regime or 'SPOT_BULL')
             autonomous_signals = signal_generator.get_top_buy_signals(
                 interval='1h',
@@ -3032,10 +3039,12 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 if getattr(settings, 'prediction_exit_enabled', True) and pnl_pct_net < 0:
                     try:
                         _min_hold_pred = int(getattr(settings, 'min_hold_for_prediction_exit', 90))
-                        # s71 BUG-4: per-regime override — RANGE_SCALP bounces peak at 15-30min
+                        # s71 BUG-4 / s72 B1: per-regime override — each mode has its own hold floor
                         _pred_regime = str(getattr(settings, 'current_regime_mode', '') or '').upper()
                         if _pred_regime == 'RANGE_SCALP':
                             _min_hold_pred = int(getattr(settings, 'min_hold_for_prediction_exit_range_scalp', 20))
+                        elif _pred_regime == 'FUTURES_SHORT':
+                            _min_hold_pred = int(getattr(settings, 'min_hold_for_prediction_exit_futures_short', 30))
                         _entry_ts = getattr(pos, 'entry_time', None)
                         _age_ok = False
                         if _entry_ts:
@@ -4927,14 +4936,17 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     print(f"Skipping buy {symbol}: RANGE_SCALP mode RSI={_meta_rsi:.1f} > {_rs_max_rsi} (not at BB lower)")
                     update_signal_decision(symbol, "rejected", "RANGE_RSI")
                     continue
-                # B1: Check real BB lower band touch — s70: also accepts bb_near_lower (wider tolerance for lateral)
+                # B1: Check BB position — s70: accepts bb_near_lower; s72: also accepts bb_position <= range_scalp_max_bb_position (40%)
                 if getattr(settings, 'range_scalp_require_bb_lower', True):
                     _sym_meta = signal_meta.get(symbol, {})
                     _meta_bb_touch = _sym_meta.get('bb_lower_touch', None)
                     _meta_bb_near  = _sym_meta.get('bb_near_lower', None)
-                    _bb_ok = (_meta_bb_touch is not False) or bool(_meta_bb_near)
+                    _meta_bb_pos   = _sym_meta.get('bb_position', None)  # s72: (price-BBL)/(BBU-BBL)
+                    _rs_max_bb_pos = float(getattr(settings, 'range_scalp_max_bb_position', 0.40))
+                    _bb_pos_ok = (_meta_bb_pos is not None and float(_meta_bb_pos) <= _rs_max_bb_pos)
+                    _bb_ok = bool(_meta_bb_near) or (_meta_bb_touch is not False) or _bb_pos_ok
                     if not _bb_ok and _meta_bb_touch is False:
-                        print(f"Skipping buy {symbol}: RANGE_SCALP — price not near BB lower band")
+                        print(f"Skipping buy {symbol}: RANGE_SCALP — price not near BB lower band (bb_pos={_meta_bb_pos})")
                         update_signal_decision(symbol, "rejected", "RANGE_BB")
                         continue
                 # B2: s70 — minimum RSI floor to avoid free-fall entries
@@ -5259,9 +5271,16 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             _eq_vol       = float(signal_meta.get(symbol, {}).get('vol_spike', 1.0))
             _eq_strength  = float(signal_meta.get(symbol, {}).get('strength', strength))
             _eq_bad = 0
-            _eq_rsi_ok      = 35.0 <= _eq_rsi <= 65.0
-            # F2-B: vol threshold is regime-aware — RANGE_SCALP uses vol_spike_min (0.55), others use entry_quality_min_vol_spike (1.0)
-            _eq_vol_min = float(_get_param(settings, 'vol_spike_min')) if _regime_mode == 'RANGE_SCALP' else float(getattr(settings, 'entry_quality_min_vol_spike', 1.2))
+            # s72: RSI range is per-regime — RANGE_SCALP uses its own min/max (25-60), others use 35-65
+            if _regime_mode == 'RANGE_SCALP':
+                _eq_rsi_ok = float(getattr(settings, 'range_scalp_min_rsi', 25.0)) <= _eq_rsi <= float(getattr(settings, 'range_scalp_max_rsi', 60.0))
+            else:
+                _eq_rsi_ok = 35.0 <= _eq_rsi <= 65.0
+            # s72: vol threshold per-regime — RANGE_SCALP has dedicated lower floor (lateral = structurally low vol)
+            if _regime_mode == 'RANGE_SCALP':
+                _eq_vol_min = float(getattr(settings, 'entry_quality_vol_spike_min_range_scalp', 0.35))
+            else:
+                _eq_vol_min = float(getattr(settings, 'entry_quality_min_vol_spike', 1.2))
             _eq_vol_ok      = _eq_vol >= _eq_vol_min
             _eq_str_ok      = _eq_strength >= float(getattr(settings, 'entry_quality_min_strength', 0.40))
             if not _eq_rsi_ok:  _eq_bad += 1
@@ -5274,7 +5293,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 if (_eq_regime_field and hasattr(settings, _eq_regime_field))
                 else getattr(settings, 'entry_quality_max_failures', 0)
             )
-            if _eq_bad >= _eq_max_bad:
+            if _eq_bad > _eq_max_bad:  # s72 A1: was >= (bug: blocked with exactly max_failures, not above)
                 print(f"[A4/Quality] Skipping {symbol}: {_eq_bad} quality failures "
                       f"(RSI={_eq_rsi:.1f}{'✓' if _eq_rsi_ok else '✗'} "
                       f"vol={_eq_vol:.2f}x{'✓' if _eq_vol_ok else '✗'} "

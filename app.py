@@ -7184,6 +7184,10 @@ _KELLY_EDITABLE_FIELDS = {
     "slippage_pct",
     "use_bnb_for_commission",
     "hybrid_optimizer_enabled", "auto_apply_backtest", "backtest_safe_only",
+    # s72: new per-regime fields — DB-governed, expected to differ from code defaults
+    "range_scalp_max_rsi", "range_scalp_max_bb_position",
+    "entry_quality_vol_spike_min_range_scalp",
+    "min_hold_for_prediction_exit_futures_short",
 }
 
 _REGIME_MODES = {"SPOT_BULL", "RANGE_SCALP", "PRESERVATION", "FUTURES_SHORT"}

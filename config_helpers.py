@@ -84,11 +84,14 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'entry_quality_min_vol_spike': 1.2,  # concentrated: volumen confirma dirección
     'entry_quality_min_strength': 0.40,
     'entry_quality_max_failures': 0,  # concentrated: todos los gates deben pasar
+    'entry_quality_vol_spike_min_range_scalp': 0.35,  # s72: lateral = low vol structural; lower floor
 
     # Exposure / regime
     'max_total_exposure_pct': 0.90,
     'max_positions_spot_bull': 5,
-    'max_positions_range_scalp': 4,  # s71 BUG-8
+    'max_positions_range_scalp': 4,    # s71 BUG-8
+    'range_scalp_max_bb_position': 0.40,              # s72: 40% of BB range = lower zone
+    'range_scalp_max_rsi': 60.0,                      # s72: 48→60 (lateral RSI normal 45-65)
     'max_positions_preservation': 1,
     'max_positions_futures_short': 5,
     'max_positions': 4,
@@ -194,7 +197,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'min_hold_minutes_range_scalp': 15,   # s70: 30→15
     'min_hold_minutes_spot_bull': 120,
     'min_hold_for_prediction_exit': 90,
-    'min_hold_for_prediction_exit_range_scalp': 20,  # s71 BUG-4: bounces 15-30min, no esperar 90min
+    'min_hold_for_prediction_exit_range_scalp': 20,    # s71 BUG-4: bounces 15-30min, no esperar 90min
+    'min_hold_for_prediction_exit_futures_short': 30,  # s72 B1: shorts move fast; 90min global too slow
 
     # Rebalance
     'max_rebalance_per_cycle': 2,
@@ -210,7 +214,6 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'market_regime_enabled': True,
     'preservation_narrative_only': True,
     'preservation_max_rsi': 65.0,
-    'range_scalp_max_rsi': 48.0,       # s70: 55.0→48.0
     'range_scalp_sl_pct': 0.8,          # s70: 1.2→0.8 (R:R 2.25)
     'range_scalp_tp_pct': 1.8,          # s70: 1.5→1.8
     'range_scalp_min_rsi': 25.0,        # s70: new
