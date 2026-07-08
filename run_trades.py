@@ -707,17 +707,34 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
         if not _applied:
             return {"applied": {}, "skipped": True, "reason": "no_applicable_fields"}
 
-        # Persist complete scalar snapshot (replace, never merge) for restart safety.
-        _scalar_snapshot = {
+        # Persist scalar overrides as MERGE into existing kelly_config_override — never replace.
+        # This prevents stale regime_profile values from wiping manual hot-config overrides (BUG-1 s64).
+        _ov_rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
+        )
+        _existing_ov = {}
+        if _ov_rows and _ov_rows[0].get('value'):
+            _raw_ov = _ov_rows[0]['value']
+            if isinstance(_raw_ov, str):
+                try:
+                    _raw_ov = _json.loads(_raw_ov)
+                except Exception:
+                    pass
+            if isinstance(_raw_ov, dict):
+                _existing_ov = _raw_ov
+        # Only overlay the fields this profile explicitly defines — leave the rest untouched.
+        _profile_patch = {
             _dst: {"new": getattr(settings, _dst, None)}
             for _dst in _scalar_targets
         }
+        _existing_ov.update(_profile_patch)
+        _merged_snapshot = _existing_ov
         _persist_writes = [
             (
                 "INSERT INTO trading_runtime_state (key, value, updated_at) "
                 "VALUES ('kelly_config_override', %s, NOW()) "
-                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
-                (_json.dumps(_scalar_snapshot), _json.dumps(_scalar_snapshot)),
+                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                (_json.dumps(_merged_snapshot),),
             )
         ]
 

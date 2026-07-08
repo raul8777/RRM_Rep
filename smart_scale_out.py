@@ -10,6 +10,9 @@ Triggers:
   SSO-3: Multi-level ATR Scale (ATR-based increments)
   SSO-4: Target Contribution (absolute $ toward daily goal)
   SSO-5: Re-entry Upgrade (better opportunity available)
+  SSO-6: Bounce Rescue (close bounce-trapped entries near breakeven)
+  SSO-7: Stagnation Trailing + Opportunity Collapse (squeeze SL toward price when stagnant;
+          collapse SL to price when a better candidate is waiting)
 """
 
 from __future__ import annotations
@@ -70,6 +73,15 @@ class SSOPositionData:
     # Gate expiry tracking (injected from smart_meta / metadata)
     _gate_block_count: Optional[int] = None        # how many consecutive cycles this gate has blocked
     _gate_last_pnl_pct: Optional[float] = None     # pnl_pct when gate first blocked (for improvement check)
+    # For SSO-7: Stagnation Trailing + Opportunity Collapse
+    current_sl_price: Optional[float] = None       # current SL price in absolute terms
+    sso7_stagnation_cycles: int = 0                # consecutive cycles with no PnL advance (from metadata)
+    sso7_last_advance_pnl: Optional[float] = None  # pnl_usdt at last confirmed advance (from metadata)
+    best_candidate_strength: float = 0.0           # strength of best available candidate signal
+    best_candidate_prob: float = 0.0               # success_probability of best candidate
+    best_candidate_vol_spike: float = 0.0          # vol_spike of best candidate
+    best_candidate_pred_ev: float = 0.0            # expected_pnl (EV) of best candidate
+    current_pred_ev: float = 0.0                   # current EV of this position from predictor
 
 
 class SmartScaleOut:
@@ -171,6 +183,7 @@ class SmartScaleOut:
             ("SSO-3", self._check_sso3_multilevel),
             ("SSO-4", self._check_sso4_target_contribution),
             ("SSO-5", self._check_sso5_reentry_upgrade),
+            ("SSO-7", self._check_sso7_stagnation_exit),
         ]
         for label, check_fn in checks:
             action = check_fn(pos)
@@ -328,6 +341,199 @@ class SmartScaleOut:
             detail=(f"Bounce rescue: pnl=${pos.pnl_usdt:.2f}>=${_target_pnl:.2f} "
                     f"gate=clear (peak={pos.peak_pnl_pct*100:.2f}%, age={age_hours:.1f}h)"),
             trigger="SSO-6", priority=0,
+        )
+
+    # ── SSO-7: Stagnation Trailing + Opportunity Collapse ────────────────────────
+    def _check_sso7_stagnation_exit(self, pos: SSOPositionData) -> SSOAction:
+        """Squeeze the SL upward on stagnant positions; collapse it when a better
+        candidate is waiting.  Never issues a direct close — instead signals the
+        caller via detail='sso7_stagnation_trail:...' or 'sso7_opportunity_collapse:...'
+        so run_trades.py can call update_position_sl().
+
+        Guards (any fails → skip):
+          - sso7_enabled=False
+          - pnl_usdt < 0  (SL handles losses)
+          - pnl_usdt >= sso7_max_pnl_usdt  (position graduated — trailing handles it)
+          - age < sso7_min_age_hours  (anti-flip)
+          - vol_spike >= sso7_vol_spike_breakout_min  (active breakout — leave alone)
+
+        Stagnation detection:
+          - pnl_velocity_1h <= sso7_min_velocity → stagnation_cycles++
+          - else → reset cycles (position is advancing)
+
+        Opportunity Collapse (fires first if candidate passes all filters):
+          - stagnation_cycles >= sso7_opp_min_cycles_stagnant
+          - best_candidate_strength >= sso7_opp_min_strength
+          - best_candidate_vol_spike >= sso7_opp_min_vol_spike
+          - best_candidate_prob >= current_pred_ev_proxy + sso7_opp_prob_min_delta
+          - best_candidate_pred_ev >= effective_current_ev * sso7_opp_ev_min_ratio
+          → Sets SL to current_price × (1 - commission_margin)
+
+        Stagnation Trailing (fires when stagnation_cycles >= threshold):
+          - Computes trail_dist = base_dist × max(min_dist, 1 - squeeze_per_cycle×cycles)
+          - new_sl = max(current_sl, current_price × (1 - trail_dist))
+          - SL only moves up, never down, never below entry if breakeven done
+        """
+        if not self._cfg('sso7_enabled', True):
+            return SSOAction(diagnosis="SSO-7:disabled")
+
+        # ── Guard: losses → SL handles it ───────────────────────────────────────
+        if pos.pnl_usdt < 0:
+            return SSOAction(diagnosis=f"SSO-7:skip(pnl=${pos.pnl_usdt:.2f}<0 — SL handles)")
+
+        # ── Guard: graduated positions (significant profit → trailing manages) ───
+        _max_pnl = self._cfg('sso7_max_pnl_usdt', 3.0)
+        if pos.pnl_usdt >= _max_pnl:
+            return SSOAction(diagnosis=f"SSO-7:skip(pnl=${pos.pnl_usdt:.2f}>=${_max_pnl:.1f} — graduated)")
+
+        # ── Guard: anti-flip (minimum age) ──────────────────────────────────────
+        if not pos.opened_at:
+            return SSOAction(diagnosis="SSO-7:skip(no opened_at)")
+        age_hours = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
+        _min_age = self._cfg('sso7_min_age_hours', 1.0)
+        if age_hours < _min_age:
+            return SSOAction(diagnosis=f"SSO-7:skip(age={age_hours:.2f}h<{_min_age:.1f}h — anti-flip)")
+
+        # ── Guard: active breakout → leave alone ────────────────────────────────
+        _cur_vol = pos.vol_spike or 0.0
+        _breakout_min = self._cfg('sso7_vol_spike_breakout_min', 2.0)
+        if _cur_vol >= _breakout_min:
+            return SSOAction(diagnosis=f"SSO-7:skip(vol_spike={_cur_vol:.2f}x >= {_breakout_min:.1f}x — breakout activo)")
+
+        # ── Stagnation detection ─────────────────────────────────────────────────
+        _min_vel = self._cfg('sso7_min_velocity', 0.0003)  # ratio/h
+        _vel = pos.pnl_velocity_1h or 0.0
+        _is_advancing = _vel > _min_vel
+
+        # Retrieve stagnation state from position metadata (passed via sso7_stagnation_cycles)
+        _cycles = int(pos.sso7_stagnation_cycles or 0)
+        _last_adv_pnl = pos.sso7_last_advance_pnl  # None if never recorded
+
+        if _is_advancing:
+            # Position is growing — reset and signal caller to persist reset
+            return SSOAction(
+                should_close=False,
+                diagnosis=f"SSO-7:advancing(vel={_vel*100:.4f}%/h>min — reset cycles)",
+                detail="sso7_advance_reset",
+                reason="sso7_advance_reset",
+            )
+
+        # Position is stagnant this cycle
+        _new_cycles = _cycles + 1
+        _threshold = self._cfg('sso7_stagnation_cycles_threshold', 3)
+
+        if _new_cycles < _threshold:
+            return SSOAction(
+                should_close=False,
+                diagnosis=f"SSO-7:stagnant(cycles={_new_cycles}/{_threshold} — building)",
+                detail=f"sso7_stagnation_count:{_new_cycles}",
+                reason="sso7_stagnation_count",
+            )
+
+        # ── Stagnation confirmed (cycles >= threshold) ───────────────────────────
+
+        _cur_price = pos.current_price
+        _cur_sl = pos.current_sl_price or 0.0
+        _entry = pos.entry_price or 0.0
+        _commission_margin = 0.002  # 0.2% — 2× round-trip Binance spot commission
+
+        # ── Opportunity Collapse check ───────────────────────────────────────────
+        if self._cfg('sso7_opp_enabled', True):
+            _opp_min_cycles = self._cfg('sso7_opp_min_cycles_stagnant', 3)
+            if _new_cycles >= _opp_min_cycles:
+                _cand_str = pos.best_candidate_strength or 0.0
+                _cand_vol = pos.best_candidate_vol_spike or 0.0
+                _cand_prob = pos.best_candidate_prob or 0.0
+                _cand_ev = pos.best_candidate_pred_ev or 0.0
+                _self_ev = pos.current_pred_ev or 0.0
+
+                _min_str = self._cfg('sso7_opp_min_strength', 0.55)
+                _min_vol = self._cfg('sso7_opp_min_vol_spike', 1.2)
+                _prob_delta = self._cfg('sso7_opp_prob_min_delta', 0.06)
+                _ev_ratio = self._cfg('sso7_opp_ev_min_ratio', 1.35)
+
+                # Estimate current position's success probability from velocity proxy
+                # Use 0.50 baseline if no pred EV available
+                _self_prob_proxy = max(0.40, min(0.70, 0.50 + _vel * 10))
+
+                _opp_ok = (
+                    _cand_str >= _min_str
+                    and _cand_vol >= _min_vol
+                    and _cand_prob >= (_self_prob_proxy + _prob_delta)
+                    and (_self_ev <= 0 or _cand_ev >= _self_ev * _ev_ratio)
+                )
+
+                if _opp_ok:
+                    # Collapse SL to just below current price (≈ comisión de salida)
+                    _collapse_sl = round(_cur_price * (1.0 - _commission_margin), 8)
+                    # Never set SL below what it already is (only move up)
+                    _collapse_sl = max(_collapse_sl, _cur_sl)
+                    return SSOAction(
+                        should_close=False,
+                        reason="sso7_opportunity_collapse",
+                        detail=(
+                            f"sso7_opportunity_collapse:{_collapse_sl:.6f} "
+                            f"cand_str={_cand_str:.2f} cand_vol={_cand_vol:.1f}x "
+                            f"cand_prob={_cand_prob:.2f}(+{_cand_prob-_self_prob_proxy:.2f}) "
+                            f"cand_ev={_cand_ev:.2f} self_ev={_self_ev:.2f} "
+                            f"cycles={_new_cycles} pnl=${pos.pnl_usdt:.2f}"
+                        ),
+                        diagnosis=(
+                            f"SSO-7:opp_collapse(SL→{_collapse_sl:.4f} "
+                            f"cand_str={_cand_str:.2f}>={_min_str} "
+                            f"vol={_cand_vol:.1f}x>={_min_vol})"
+                        ),
+                        trigger="SSO-7", priority=1,
+                    )
+                else:
+                    # Log why collapse didn't fire
+                    _opp_diag = (
+                        f"SSO-7:opp_skip("
+                        f"str={_cand_str:.2f}<{_min_str} " if _cand_str < _min_str else ""
+                        f"vol={_cand_vol:.1f}x<{_min_vol} " if _cand_vol < _min_vol else ""
+                        f"prob_delta={_cand_prob-_self_prob_proxy:+.2f}<{_prob_delta} " if _cand_prob < _self_prob_proxy + _prob_delta else ""
+                        f"ev_ratio={(_cand_ev/_self_ev if _self_ev > 0 else 0):.2f}<{_ev_ratio}" if _self_ev > 0 and _cand_ev < _self_ev * _ev_ratio else ""
+                        f")"
+                    )
+                    # Fall through to stagnation trailing
+
+        # ── Stagnation Trailing ──────────────────────────────────────────────────
+        _base_dist = self._cfg('sso7_trail_base_dist', 0.010)       # 1.0%
+        _squeeze = self._cfg('sso7_trail_squeeze_per_cycle', 0.10)   # 10% tighter per cycle
+        _min_dist = self._cfg('sso7_trail_min_dist', 0.003)          # 0.3% floor
+
+        # Trail distance shrinks each stagnant cycle: 1.0% → 0.9% → 0.8% → ...
+        _squeeze_factor = max(_min_dist / _base_dist, 1.0 - _squeeze * (_new_cycles - _threshold))
+        _trail_dist = max(_min_dist, _base_dist * _squeeze_factor)
+
+        _new_sl = _cur_price * (1.0 - _trail_dist)
+
+        # SL only moves up, never below entry if breakeven already done
+        _floor = _entry if _cur_sl >= _entry else 0.0
+        _new_sl = max(_new_sl, _cur_sl, _floor)
+        _new_sl = round(_new_sl, 8)
+
+        if _new_sl <= _cur_sl:
+            return SSOAction(
+                should_close=False,
+                diagnosis=f"SSO-7:trail_nochange(sl={_cur_sl:.4f} already>={_new_sl:.4f} cycles={_new_cycles})",
+                detail=f"sso7_stagnation_count:{_new_cycles}",
+                reason="sso7_stagnation_count",
+            )
+
+        return SSOAction(
+            should_close=False,
+            reason="sso7_stagnation_trail",
+            detail=(
+                f"sso7_stagnation_trail:{_new_sl:.6f} "
+                f"dist={_trail_dist*100:.2f}% cycles={_new_cycles} "
+                f"pnl=${pos.pnl_usdt:.2f} vel={_vel*100:.4f}%/h"
+            ),
+            diagnosis=(
+                f"SSO-7:trail(SL {_cur_sl:.4f}→{_new_sl:.4f} "
+                f"dist={_trail_dist*100:.2f}% cycles={_new_cycles})"
+            ),
+            trigger="SSO-7", priority=1,
         )
 
     # ── SSO-1: Capital Velocity — decay / slow / stagnant ───────────────────────

@@ -75,9 +75,9 @@ def mark_profit_started(metadata: Dict[str, Any], pnl_pct: float, now: Optional[
 def _profile_scale(profile_label: Optional[str]) -> float:
     p = str(profile_label or "").strip().upper()
     if p == "A":
-        return 0.82   # Aggressive: shorter patience, exits profit sooner
+        return 1.25   # Wolf Hunter: max patience — let high-conviction runners reach full peak
     if p == "C":
-        return 1.20   # Defensive: more patient, lets winners run longer
+        return 0.85   # Defensive: take profit faster, protect smaller gains
     return 1.0        # B = neutral baseline
 
 

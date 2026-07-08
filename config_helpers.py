@@ -191,7 +191,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'market_regime_enabled': True,
     'preservation_narrative_only': True,
     'preservation_max_rsi': 65.0,
-    'range_scalp_max_rsi': 40.0,
+    'range_scalp_max_rsi': 55.0,
     'range_scalp_sl_pct': 1.2,
     'range_scalp_tp_pct': 1.5,
     'preservation_sl_pct': 1.5,
@@ -225,10 +225,12 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'sso_enabled': True,
     'sso_target_daily_usd': 40.0,
     'sso_stagnant_min_hours': 3.0,          # jul07: 2.0→3.0 (wolf-hunter)
+    'sso_stagnant_velocity_window_min': 60, # jul07: 30→60 (wolf-hunter: more stable window)
     'sso_decay_threshold_pct': 0.008,       # jul07: 0.004→0.008 (wolf-hunter)
     'sso_decay_min_hours': 2.5,             # jul07: 1.5→2.5 (wolf-hunter)
     'sso_slow_tier2_hours': 5.0,            # jul07: 4→5h (wolf-hunter)
     'sso_slow_tier3_hours': 7.0,            # jul07: 6→7h (wolf-hunter)
+    'sso_slow_tier4_hours': 9.0,            # jul07: 8→9h (wolf-hunter)
 
     # SSO-7: Stagnation Trailing + Opportunity Collapse (wolf-hunter s63 redesign)
     'sso7_enabled': True,

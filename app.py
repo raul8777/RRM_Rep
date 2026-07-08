@@ -1599,7 +1599,7 @@ _regime_cache: Dict = {"data": None, "ts": 0.0}
 _REGIME_CACHE_TTL_SECONDS = 60
 _MODE_DESC = {
     "SPOT_BULL": "Compras en breakout con Kelly dinamico. Trailing stop activo. Scale-out en TP.",
-    "RANGE_SCALP": "Compras en soporte BB inferior (RSI<40), venta en BB superior. TP ajustado 1.5%.",
+    "RANGE_SCALP": "Compras en soporte BB inferior (RSI<55), venta en BB superior. TP ajustado 1.5%.",
     "PRESERVATION": "Capital 80%+ en USDT. Solo NARRATIVE con VolSpike>=2x. Kelly x0.5.",
     "FUTURES_SHORT": "Shorts 2x en pares Tier A (BTCUSDT, ETHUSDT, SOLUSDT...). LONG en soporte. SL SHORT 3% / LONG 2.5% | TP 7%. Hedge mode activo.",
 }
@@ -7825,9 +7825,23 @@ async def patch_kelly_config(body: Dict, _auth=Depends(_require_api_key)) -> Dic
         if not applied:
             return {"ok": False, "error": "No valid fields applied", "rejected": rejected}
 
-        # Persist to trading_runtime_state (survives restart via DB load in app startup)
+        # Persist to trading_runtime_state — MERGE into existing override so all values survive restart
         import json as _json
-        _payload = _json.dumps(applied)
+        _existing_ov = {}
+        try:
+            _ex_rows = db_client.execute_query(
+                "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
+            )
+            if _ex_rows and _ex_rows[0].get('value'):
+                _ex_raw = _ex_rows[0]['value']
+                if isinstance(_ex_raw, str):
+                    _ex_raw = _json.loads(_ex_raw)
+                if isinstance(_ex_raw, dict):
+                    _existing_ov = _ex_raw
+        except Exception:
+            pass
+        _existing_ov.update(applied)
+        _payload = _json.dumps(_existing_ov)
         db_client.execute_update(
             "INSERT INTO trading_runtime_state (key, value, updated_at) "
             "VALUES ('kelly_config_override', %s, NOW()) "
@@ -9656,11 +9670,27 @@ async def post_config_apply_backtest(body: Dict, _auth=Depends(_require_api_key)
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
             (f"config_snapshot_{_snapshot_id}", json.dumps(_snapshot))
         )
-        # Persist the override
+        # Persist the override — MERGE into existing override to preserve manual s62/s63 values
+        _existing_override = {}
+        try:
+            _ex_rows = db_client.execute_query(
+                "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
+            )
+            if _ex_rows and _ex_rows[0].get('value'):
+                _ex_raw = _ex_rows[0]['value']
+                if isinstance(_ex_raw, str):
+                    import json as _jj; _ex_raw = _jj.loads(_ex_raw)
+                if isinstance(_ex_raw, dict):
+                    _existing_override = _ex_raw
+        except Exception:
+            pass
+        # Wrap new backtest values in {"new": v} format for consistency with restore logic
+        _backtest_wrapped = {k: {"new": v} for k, v in _mapped.items()}
+        _existing_override.update(_backtest_wrapped)
         db_client.execute_update(
             "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
-            ("kelly_config_override", json.dumps(_mapped))
+            ("kelly_config_override", json.dumps(_existing_override))
         )
         # Audit row
         db_client.execute_update(

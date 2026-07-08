@@ -1,7 +1,103 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 07 2026 | Sesión 61: Revisión de incidente por sobre-apertura y rollback de aislamiento legacy en gates de entrada.
+> Última actualización: jul 07 2026 | Sesión 63: Wolf Hunter — Kelly agresivo por perfil + Capital Rotator (SSO-7).
+
+---
+
+### ✅ Sesión 63 — Wolf Hunter: Kelly Agresivo + Capital Rotator — jul 07 2026
+
+**Objetivo operativo (cumplido):**
+Maximizar el tamaño de las pocas entradas de alta convicción del lobo, y liberar capital de posiciones estancadas sin progreso real usando sentido común (no velocidad puntual).
+
+**Filosofía:** "Pocas ops, muy grandes. El que entra debe ganar o irse — no ocupar el slot 6 horas sin moverse."
+
+**Cambios en `config.py` + `.env` — Kelly Wolf Hunter s63:**
+
+| Parámetro | Antes | Después |
+|---|---|---|
+| `kelly_base_usdt` | $73 | **$100** |
+| `kelly_max_usdt` | $747 | **$1,000** |
+| `kelly_dynamic_base_pct` | 15% | **18%** |
+| `kelly_conviction_vol2x` | ×1.5 | **×1.8** |
+| `kelly_conviction_vol3x` | ×2.0 | **×2.5** |
+| `kelly_conviction_max_pct` | 10% portafolio | **15%** |
+
+**Cambios en `run_trades.py` — multiplicador de contexto:**
+- Perfil A: ×1.12 → **×1.18**
+- Cap general: 1.20 → **1.35** solo para Perfil A + SPOT_BULL (mayor potencia en el régimen más favorable)
+- Resultado: trade FUERTE con $3,000 capital = **$1,000 por posición** (vs $747 antes)
+
+**Nuevo trigger `smart_scale_out.py` — SSO-7: Capital Rotator:**
+- Evalúa posiciones después de SSO-1 a SSO-5 (última línea de defensa)
+- Dispara si: edad ≥ 6h SPOT / 3h FUTUROS + progreso estimado en $USDT < $1.50 en 2h ventana + sin señal activa (vol_spike < 1.5x, strength < 0.45) + PnL ≥ 0
+- **Diferencia clave vs SSO-1c**: mide dólares absolutos de progreso neto, no velocidad relativa. Una posición que oscila entre $1-$2 por 6h falla este gate aunque tenga momentos de velocidad positiva.
+- Reason de cierre: `sso_capital_rotator`
+
+**Corrección de bug previa — PRS profile_scale (también esta sesión):**
+- Profile A: 0.82 → **1.25** (más paciente — deja correr runners de alta convicción)
+- Profile C: 1.20 → **0.85** (más rápido en tomar ganancia pequeña)
+
+**Validación:**
+- `Settings()` carga sin errores. `validate_config() ok=True, errors=0`.
+- 107 tests pasan, 0 fallos nuevos.
+
+**Regla de rollback:**
+Si Capital Rotator cierra ≥ 3 posiciones con PnL positivo significativo (>$5) en 48h → subir `capital_rotator_min_hours_spot` a 8h o desactivar con `capital_rotator_enabled=False`.
+
+---
+
+### ✅ Sesión 62 — Wolf Hunter: Tuning Agresivo/Selectivo — jul 07 2026
+
+**Objetivo operativo (cumplido):**
+Corregir la cadena de 5 defectos que causaban Stop Loss frecuentes y estrangulamiento de runners: entradas débiles, PRS prematura, SSO-1 gatillero, UG loss branch impaciente, y SL por categoría demasiado ajustado.
+
+**Filosofía aplicada:** "Pocas transacciones, muy bien escogidas. El sistema no debe estrangularlas — el SL es el último recurso."
+
+**Cambios en `config.py`:**
+
+1. **Paso 1 — Entradas más selectivas (Wolf Hunter activo):**
+   - `min_signal_strength`: 0.389 → **0.45**
+   - `min_success_probability`: 0.499 → **0.52**
+   - `entry_quality_min_vol_spike`: 0.8 → **1.0**
+   - `entry_quality_max_failures`: 2 → **1** (una dimensión falla = no entra)
+
+2. **Paso 2 — PRS más paciente con posiciones ganadoras:**
+   - `profit_realization_spot_partial_minutes`: 35 → **60** min
+   - `profit_realization_spot_full_minutes`: 70 → **120** min
+   - `profit_realization_spot_drawback_pct`: 0.004 → **0.008** (0.8% caída necesaria)
+   - `profit_realization_spot_bull_min_partial_minutes`: 45 → **90** min
+   - `peak_protection_spot_bull_pct`: 0.70 → **0.60** (más permisivo)
+   - `peak_protection_spot_bull_profile_a_pct`: 0.75 → **0.65**
+
+3. **Paso 3 — SSO-1 no estrangula runners:**
+   - `sso_stagnant_min_hours`: 2.0 → **3.0** h
+   - `sso_stagnant_velocity_window_min`: 30 → **60** min (menos ruido)
+   - `sso_decay_threshold_pct`: 0.004 → **0.008** (0.8% desde peak)
+   - `sso_decay_min_hours`: 1.5 → **2.5** h
+   - `sso_slow_tier2_hours`: 4 → **5** h
+   - `sso_slow_tier3_hours`: 6 → **7** h
+
+4. **Paso 4 — UG Loss Branch: SL lógico primero:**
+   - `unified_governance_loss_min_age_profile_a`: 30 → **90** min (SPOT)
+   - `unified_governance_loss_min_age_profile_b`: 60 → **120** min
+   - `unified_governance_loss_escalation_age_profile_a`: 120 → **240** min
+   - `unified_governance_loss_escalation_age_profile_b`: 90 → **180** min
+   - `unified_governance_futures_loss_min_age_profile_a`: 20 → **30** min
+   - `unified_governance_futures_loss_escalation_age_profile_a`: 90 → **120** min
+   - `unified_governance_loss_min_usdt`: 1.50 → **3.00** USD
+
+5. **Paso 5 — SL por categoría más amplio:**
+   - `category_thresholds LARGE_CAP`: stop_loss 2.5% → **3.5%**, trailing_act 2.0 → **2.5%**
+   - `category_thresholds MIDCAP_ALT`: stop_loss 2.5% → **3.5%**, trailing_act 2.0 → **2.5%**
+
+**Validación:**
+- `Settings()` carga sin errores.
+- 105 tests pasan, 2 fallos pre-existentes (`futures_trailing_activation_pct` y `futures_breakeven_activation_pct` con valores stale en test).
+- `test_config_governance.py` falla por cwd `/app` (Docker-only, pre-existente).
+
+**Regla de rollback:**
+Si win_rate cae < 35% o profit_factor < 0.90 en la nueva cohorte → revertir a valores anteriores documentados aquí.
 
 ---
 

@@ -459,6 +459,11 @@ class Settings(BaseSettings):
         "SUSHIUSDT":  {"market_behavior": "MIDCAP_ALT",  "origin": "DEFI"},           # SushiSwap DEX
         "ONDOUSDT":   {"market_behavior": "NARRATIVE",   "origin": "DEFI"},            # Ondo Finance RWA
         "TRXUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"}, # TRON
+        # G3 s64: tokens in analysis_symbols that were missing explicit classification
+        "JUPUSDT":    {"market_behavior": "NARRATIVE",   "origin": "DEFI"},            # Jupiter DEX aggregator
+        "OPUSDT":     {"market_behavior": "MIDCAP_ALT",  "origin": "L2"},             # Optimism L2
+        "UUSDT":      {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"}, # Upbit token (small cap)
+        "FILUSDT":    {"market_behavior": "MIDCAP_ALT",  "origin": "INFRASTRUCTURE"}, # Filecoin storage
     })
 
     # SÃ­mbolos explÃ­citamente excluidos del trading (oro tokenizado, stablecoins, delisted)
@@ -582,7 +587,7 @@ class Settings(BaseSettings):
     range_scalp_sl_pct: float = Field(default=1.2)
     range_scalp_tp_pct: float = Field(default=1.5)
     range_scalp_kelly_mult: float = Field(default=0.7)
-    range_scalp_max_rsi: float = Field(default=40.0)   # only enter RSI < 40
+    range_scalp_max_rsi: float = Field(default=55.0)   # only enter RSI < 55 (bb_lower_touch is primary gate)
     range_scalp_require_bb_lower: bool = Field(default=True)
     # PRESERVATION mode parameters
     preservation_sl_pct: float = Field(default=1.5)

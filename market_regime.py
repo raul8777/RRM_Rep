@@ -251,7 +251,7 @@ def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
         tp_pct           = 1.5   # small TP at BB upper
         kelly_mult       = 0.7   # reduce size in range market
         min_rsi          = 0.0
-        max_rsi          = 40.0  # only enter when RSI < 40 (near BB lower)
+        max_rsi          = 55.0  # only enter when RSI < 55 (bb_lower_touch is primary gate)
         require_bb_lower = True  # signal must come from BB lower band touch
 
     elif mode == "PRESERVATION":
