@@ -321,7 +321,7 @@ class Settings(BaseSettings):
     protect_profit_min_pct: float = Field(default=0.3)              # minimum PnL% to protect (v3: 0.8â†’0.3 â€” protect desde micro-ganancia)
     # Rebalancing controls (v2)
     min_hold_minutes: int = Field(default=120)         # min time before rebalancing out a position (v5: 240â†’120 â€” balance between hold and flexibility)
-    min_hold_minutes_range_scalp: int = Field(default=30)  # RANGE_SCALP: shorter hold (5min cycles Ã— 6 = 30min)
+    min_hold_minutes_range_scalp: int = Field(default=15)  # s70: 30→15 (micro-bounces last 15-30min)
     min_hold_minutes_spot_bull: int = Field(default=120)     # SPOT_BULL: 2h hold before replacement
     max_rebalance_per_cycle: int = Field(default=2)  # max sells per rebalance cycle
     rebalance_excluded_symbols: List[str] = Field(default=['USD1USDT', 'USDCUSDT', 'BUSDUSDT', 'TUSDUSDT', 'FDUSDUSDT'])  # F4: stablecoins never rebalanced
@@ -405,7 +405,7 @@ class Settings(BaseSettings):
 
     # Dynamic cycle by regime (v2)
     cycle_spot_bull: int = Field(default=10)            # jun17: 20â†’10 min (+47% throughput seÃ±ales)
-    cycle_range_scalp: int = Field(default=5)         # minutes per cycle in RANGE_SCALP
+    cycle_range_scalp: int = Field(default=3)          # s70: 5→3 min (detect bounce in time)
     cycle_preservation: int = Field(default=45)      # jun17: 30â†’45 min (menos ciclos en bajista = menos comisiones)
     cycle_futures_short: int = Field(default=4)     # H-FIX: 6â†’4 min (trailing mÃ¡s reactivo a movimientos rÃ¡pidos)
 
@@ -597,11 +597,47 @@ class Settings(BaseSettings):
     market_regime_enabled: bool = Field(default=True)
     current_regime_mode: str = Field(default="SPOT_BULL")
     # RANGE_SCALP mode parameters
-    range_scalp_sl_pct: float = Field(default=1.2)
-    range_scalp_tp_pct: float = Field(default=1.5)
+    range_scalp_sl_pct: float = Field(default=0.8)    # s70: 1.2→0.8 (R:R 2.25, EV>0 with WR>31%)
+    range_scalp_tp_pct: float = Field(default=1.8)    # s70: 1.5→1.8
     range_scalp_kelly_mult: float = Field(default=0.7)
-    range_scalp_max_rsi: float = Field(default=55.0)   # only enter RSI < 55 (bb_lower_touch is primary gate)
+    range_scalp_max_rsi: float = Field(default=48.0)  # s70: 55.0→48.0 (only collapsed RSI = real bounce)
+    range_scalp_min_rsi: float = Field(default=25.0)  # s70: new — avoid free-fall entries
     range_scalp_require_bb_lower: bool = Field(default=True)
+    range_scalp_breakeven_pct: float = Field(default=0.40)  # s70: new — fast breakeven on micro-bounce
+
+    # ── SSO timing per regime (s70: replaces hardcoded *0.8/*1.5 multipliers in smart_scale_out.py) ──
+    # Values are absolute finals: base_global × former_multiplier, pre-computed.
+    # Globals (sso_stagnant_min_hours etc.) are NEVER modified — these fields are the per-regime source of truth.
+    sso_stagnant_min_hours_spot_bull: float = Field(default=3.75)       # global(2.5)*1.5 + harmony*1.05
+    sso_stagnant_min_hours_range_scalp: float = Field(default=1.5)      # s70 optimised: global(2.5)*0.6
+    sso_stagnant_min_hours_preservation: float = Field(default=2.25)    # global(2.5)*0.90 harmony
+    sso_stagnant_min_hours_futures_short: float = Field(default=2.38)   # global(2.5)*0.95 harmony
+    sso_slow_min_hours_spot_bull: float = Field(default=2.8)            # global(2.0)*1.4
+    sso_slow_min_hours_range_scalp: float = Field(default=1.0)          # s70 optimised: global(2.0)*0.5
+    sso_slow_min_hours_preservation: float = Field(default=2.0)         # no multiplier
+    sso_slow_min_hours_futures_short: float = Field(default=1.4)        # global(2.0)*0.70
+    sso_decay_min_hours_spot_bull: float = Field(default=2.3)           # global(2.0)*1.15
+    sso_decay_min_hours_range_scalp: float = Field(default=1.7)         # global(2.0)*0.85
+    sso_decay_min_hours_preservation: float = Field(default=2.0)        # no multiplier
+    sso_decay_min_hours_futures_short: float = Field(default=2.0)       # no multiplier
+
+    # ── Entry quality gate per regime (s70: replaces global entry_quality_max_failures) ──
+    entry_quality_max_failures_spot_bull: int = Field(default=0)
+    entry_quality_max_failures_range_scalp: int = Field(default=1)      # vol low in lateral is structural
+    entry_quality_max_failures_preservation: int = Field(default=0)
+    entry_quality_max_failures_futures_short: int = Field(default=0)
+
+    # ── SmartTP EXTEND per regime (s70: replaces smart_tp_extend_disabled_regimes list) ──
+    smart_tp_extend_enabled_spot_bull: bool = Field(default=True)
+    smart_tp_extend_enabled_range_scalp: bool = Field(default=True)     # s70: enabled (was False via list)
+    smart_tp_extend_enabled_preservation: bool = Field(default=False)
+    smart_tp_extend_enabled_futures_short: bool = Field(default=True)
+    smart_tp_score_threshold_range_scalp: int = Field(default=3)        # more selective in lateral
+
+    # ── BB lower touch tolerance per mode (s70: replaces hardcode *1.005 in autonomous_signals.py) ──
+    bb_lower_touch_tolerance_pct: float = Field(default=0.5)            # default/SPOT_BULL tolerance %
+    bb_lower_touch_tolerance_range_scalp_pct: float = Field(default=1.5)  # wider for lateral market
+
     # PRESERVATION mode parameters
     preservation_sl_pct: float = Field(default=1.5)
     preservation_tp_pct: float = Field(default=3.0)

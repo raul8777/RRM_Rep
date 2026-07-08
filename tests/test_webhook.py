@@ -31,7 +31,10 @@ def test_webhook_suggest_mode():
     _headers = {"X-Webhook-Secret": "supersecret"}
     if _DASHBOARD_API_KEY:
         _headers["X-API-Key"] = _DASHBOARD_API_KEY
-    with patch.object(_app_module.settings, "tradingview_webhook_secret", "supersecret"):
+    _fake_signal = {"symbol": "BTCUSDT", "action": "BUY", "quantity": 0.001}
+    _fake_persist = {"ok": True, "persisted": "db", "record": _fake_signal}
+    with patch.object(_app_module.settings, "tradingview_webhook_secret", "supersecret"), \
+         patch("app.add_signal", return_value=_fake_persist):
         response = client.post(
             "/webhook",
             headers=_headers,

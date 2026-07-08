@@ -282,8 +282,14 @@ class AutonomousSignalGenerator:
                         _last_price = _bb_closes[-1]
                         _bw = (_bbu[-1] - _bbl[-1]) / _bbm[-1] if _bbm[-1] > 0 else 0.05
                         # B1: price touching or below lower band → good RANGE_SCALP entry
-                        _bb_lower_touch = _last_price <= _bbl[-1] * 1.005  # within 0.5% of lower band
+                        # s70: tolerance configurable from settings; default 0.5% for SPOT_BULL
+                        _s70_cfg = getattr(self, '_settings', None) or getattr(self, 'settings', None)
+                        _bb_tol_default = getattr(_s70_cfg, 'bb_lower_touch_tolerance_pct', 0.5) / 100.0 if _s70_cfg else 0.005
+                        _bb_lower_touch = _last_price <= _bbl[-1] * (1.0 + _bb_tol_default)
                         analysis['bb_lower_touch'] = _bb_lower_touch
+                        # s70: bb_near_lower — wider tolerance for RANGE_SCALP (1.5% default)
+                        _bb_tol_rs = getattr(_s70_cfg, 'bb_lower_touch_tolerance_range_scalp_pct', 1.5) / 100.0 if _s70_cfg else 0.015
+                        analysis['bb_near_lower'] = _last_price <= _bbl[-1] * (1.0 + _bb_tol_rs)
                         analysis['bb_bandwidth'] = round(_bw, 4)
                         analysis['bb_lower'] = _bbl[-1]
                         analysis['bb_upper'] = _bbu[-1]
@@ -499,9 +505,9 @@ class AutonomousSignalGenerator:
             buy_signals.sort(key=_short_score, reverse=True)
             logger.info(f"[Regime] FUTURES_SHORT ranking applied (RSI+SELL-weighted)")
         elif regime_mode == 'RANGE_SCALP':
-            # Rank by bb_lower_touch first, then by RSI ascending (most oversold)
+            # s70: rank by bb_lower_touch (strict) > bb_near_lower (wider tolerance), then RSI ascending
             def _scalp_score(s):
-                bb_touch = 1 if s.get('bb_lower_touch') else 0
+                bb_touch = 2 if s.get('bb_lower_touch') else (1 if s.get('bb_near_lower') else 0)
                 rsi = float(s.get('rsi', 50) or 50)
                 return bb_touch * 100 + (100 - rsi)
             buy_signals.sort(key=_scalp_score, reverse=True)

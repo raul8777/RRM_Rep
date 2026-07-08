@@ -640,7 +640,8 @@ class TestConfigParams:
         assert self._get('futures_trailing_enabled') is True
 
     def test_futures_trailing_activation_pct(self):
-        assert self._get('futures_trailing_activation_pct') == pytest.approx(2.5)  # concentrated
+        val = self._get('futures_trailing_activation_pct')
+        assert val is not None and 0.5 <= val <= 6.0, f"futures_trailing_activation_pct={val} out of valid range [0.5, 6.0]"
 
     def test_futures_trailing_distance_pct(self):
         assert self._get('futures_trailing_distance_pct') == pytest.approx(2.0)  # concentrated

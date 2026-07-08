@@ -676,6 +676,36 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'auto_apply_backtest': 'auto_apply_backtest',
             'backtest_safe_only': 'backtest_safe_only',
             'rebalance_max_abs_pnl_pct': 'rebalance_max_abs_pnl_pct',  # I3: s66 field — allow regime profiles to tune rebalance cap
+            # s70: SSO per-regime timing — absolute final values, globals NEVER modified
+            'sso_stagnant_min_hours_spot_bull':     'sso_stagnant_min_hours_spot_bull',
+            'sso_stagnant_min_hours_range_scalp':   'sso_stagnant_min_hours_range_scalp',
+            'sso_stagnant_min_hours_preservation':  'sso_stagnant_min_hours_preservation',
+            'sso_stagnant_min_hours_futures_short': 'sso_stagnant_min_hours_futures_short',
+            'sso_slow_min_hours_spot_bull':         'sso_slow_min_hours_spot_bull',
+            'sso_slow_min_hours_range_scalp':       'sso_slow_min_hours_range_scalp',
+            'sso_slow_min_hours_preservation':      'sso_slow_min_hours_preservation',
+            'sso_slow_min_hours_futures_short':     'sso_slow_min_hours_futures_short',
+            'sso_decay_min_hours_spot_bull':        'sso_decay_min_hours_spot_bull',
+            'sso_decay_min_hours_range_scalp':      'sso_decay_min_hours_range_scalp',
+            'sso_decay_min_hours_preservation':     'sso_decay_min_hours_preservation',
+            'sso_decay_min_hours_futures_short':    'sso_decay_min_hours_futures_short',
+            # s70: entry quality per regime
+            'entry_quality_max_failures_spot_bull':      'entry_quality_max_failures_spot_bull',
+            'entry_quality_max_failures_range_scalp':    'entry_quality_max_failures_range_scalp',
+            'entry_quality_max_failures_preservation':   'entry_quality_max_failures_preservation',
+            'entry_quality_max_failures_futures_short':  'entry_quality_max_failures_futures_short',
+            # s70: SmartTP EXTEND per regime
+            'smart_tp_extend_enabled_spot_bull':    'smart_tp_extend_enabled_spot_bull',
+            'smart_tp_extend_enabled_range_scalp':  'smart_tp_extend_enabled_range_scalp',
+            'smart_tp_extend_enabled_preservation': 'smart_tp_extend_enabled_preservation',
+            'smart_tp_extend_enabled_futures_short':'smart_tp_extend_enabled_futures_short',
+            'smart_tp_score_threshold_range_scalp': 'smart_tp_score_threshold_range_scalp',
+            # s70: BB touch tolerance per mode
+            'bb_lower_touch_tolerance_pct':                 'bb_lower_touch_tolerance_pct',
+            'bb_lower_touch_tolerance_range_scalp_pct':     'bb_lower_touch_tolerance_range_scalp_pct',
+            # s70: RANGE_SCALP new fields
+            'range_scalp_min_rsi':          'range_scalp_min_rsi',
+            'range_scalp_breakeven_pct':    'range_scalp_breakeven_pct',
         }
 
         _applied = {}
@@ -792,7 +822,7 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
         _last_applied_regime_mode = regime
         _last_applied_regime_profile = _profile_token
         print(f"[RegimeParams] Applied {len(_applied)} overrides for {regime}")
-        return {"applied": _applied, "rejected": _rejected, "skipped": False, "profile": _active_profile}
+        return {"applied": _applied, "rejected": _rejected, "skipped": False, "profile": _active_profile, "raw_params": _raw}
 
     except Exception as _re_err:
         print(f"[RegimeParams] Error applying regime params for {regime}: {_re_err}")
@@ -872,14 +902,21 @@ def _clamp_value(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
-def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str, Any]:
-    """Apply an idempotent mode/profile overlay on top of the base regime params."""
+def _apply_mode_profile_harmony(settings, regime: str, profile: str, profile_params: Optional[Dict] = None) -> Dict[str, Any]:
+    """Apply an idempotent mode/profile overlay on top of the base regime params.
+
+    s70: profile_params passed from _apply_regime_params payload so that the signature
+    includes a hash of the active profile content — ensures re-application when the profile
+    changes in DB even if regime/label stay the same, preventing stale multiplier skips.
+    """
     _regime = str(regime or '').strip().upper()
     _profile = str(profile or '').strip().upper() or 'B'
     if settings is None:
         return {"applied": {}, "regime": _regime, "profile": _profile}
 
-    _signature = f"{_regime}:{_profile}"
+    # s70: include profile payload hash so signature invalidates when profile content changes
+    _payload_hash = hash(str(sorted((profile_params or {}).items()))) if profile_params else 0
+    _signature = f"{_regime}:{_profile}:{_payload_hash}"
     _last_signature = str(getattr(settings, '_mode_profile_harmony_signature', '') or '')
     if _last_signature == _signature:
         return {"applied": {}, "regime": _regime, "profile": _profile, "signature": _signature, "skipped": True, "reason": "already_applied"}
@@ -903,7 +940,7 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
             'futures_long_sl_pct': 1.00,
             'futures_long_tp_pct': 1.02,
             'sso_target_daily_usd': 1.05,
-            'sso_stagnant_min_hours': 1.05,
+            # s70: sso_stagnant_min_hours removed — now governed by sso_stagnant_min_hours_spot_bull (per-regime field)
             'sso_slow_velocity_threshold': 0.95,
             'sso_reentry_min_strength_diff': 1.03,
             'spot_bounce_rescue_target_pnl': 1.00,
@@ -927,7 +964,7 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
             'futures_long_sl_pct': 0.95,
             'futures_long_tp_pct': 0.92,
             'sso_target_daily_usd': 0.90,
-            'sso_stagnant_min_hours': 0.92,
+            # s70: sso_stagnant_min_hours removed — now governed by sso_stagnant_min_hours_range_scalp (per-regime field)
             'sso_slow_velocity_threshold': 1.06,
             'sso_reentry_min_strength_diff': 0.98,
             'range_scalp_sl_pct': 0.95,
@@ -951,7 +988,7 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
             'futures_long_sl_pct': 0.94,
             'futures_long_tp_pct': 0.96,
             'sso_target_daily_usd': 0.85,
-            'sso_stagnant_min_hours': 0.90,
+            # s70: sso_stagnant_min_hours removed — now governed by sso_stagnant_min_hours_preservation (per-regime field)
             'sso_slow_velocity_threshold': 1.10,
             'sso_reentry_min_strength_diff': 0.95,
             'preservation_sl_pct': 0.94,
@@ -974,7 +1011,7 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
             'futures_long_sl_pct': 0.98,
             'futures_long_tp_pct': 1.00,
             'sso_target_daily_usd': 0.95,
-            'sso_stagnant_min_hours': 0.95,
+            # s70: sso_stagnant_min_hours removed — now governed by sso_stagnant_min_hours_futures_short (per-regime field)
             'sso_slow_velocity_threshold': 1.02,
             'sso_reentry_min_strength_diff': 1.00,
         },
@@ -1082,7 +1119,8 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
         ('futures_trail_atr_multiplier_high', (0.4, 2.5)),
         ('futures_trail_atr_multiplier_deep', (0.4, 2.5)),
         ('sso_target_daily_usd', (10.0, 250.0)),
-        ('sso_stagnant_min_hours', (0.5, 12.0)),
+        # s70: sso_stagnant_min_hours (global) removed — globals are NEVER modified by harmony.
+        # Per-regime SSO fields below receive profile-only multipliers (A/C).
         ('sso_slow_velocity_threshold', (0.0003, 0.01)),
         ('sso_reentry_min_strength_diff', (0.05, 1.0)),
         ('spot_bounce_rescue_target_pnl', (-2.0, -0.05)),
@@ -1107,6 +1145,19 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str) -> Dict[str
         ('kelly_conviction_max_pct', (0.05, 0.25)),
         ('prediction_add_min_strength', (0.30, 0.90)),
         ('prediction_add_min_ev_ratio', (0.80, 2.50)),
+        # s70: per-regime SSO timing — profile multiplier only (regime value already baked into field default)
+        ('sso_stagnant_min_hours_spot_bull',     (0.5, 12.0)),
+        ('sso_stagnant_min_hours_range_scalp',   (0.3, 6.0)),
+        ('sso_stagnant_min_hours_preservation',  (0.5, 12.0)),
+        ('sso_stagnant_min_hours_futures_short', (0.5, 12.0)),
+        ('sso_slow_min_hours_spot_bull',         (0.5, 8.0)),
+        ('sso_slow_min_hours_range_scalp',       (0.2, 4.0)),
+        ('sso_slow_min_hours_preservation',      (0.5, 8.0)),
+        ('sso_slow_min_hours_futures_short',     (0.3, 6.0)),
+        ('sso_decay_min_hours_spot_bull',        (0.5, 8.0)),
+        ('sso_decay_min_hours_range_scalp',      (0.3, 5.0)),
+        ('sso_decay_min_hours_preservation',     (0.5, 8.0)),
+        ('sso_decay_min_hours_futures_short',    (0.5, 8.0)),
     ):
         _apply_field(_f, minimum=_bounds[0], maximum=_bounds[1])
 
@@ -2905,6 +2956,11 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
         tp_pct = _cat_th.get('take_profit_pct', _global_tp_pct) / 100.0
         trail_activate = _cat_th.get('trailing_activation_pct', _global_trail_act) / 100.0
         trail_dist = _cat_th.get('trailing_distance_pct', _global_trail_dist) / 100.0
+        # s70: RANGE_SCALP fast breakeven — activate at range_scalp_breakeven_pct (0.40%) not full trail_activate
+        if regime == 'RANGE_SCALP' and hasattr(settings, 'range_scalp_breakeven_pct'):
+            _rs_be = float(getattr(settings, 'range_scalp_breakeven_pct', 0.40))
+            if _rs_be > 0:
+                trail_activate = min(trail_activate, _rs_be / 100.0)
         # M1: override sl_pct with ATR-based dynamic SL (prevents premature stops on volatile tokens)
         sl_pct = _calc_atr_sl_pct(client, symbol, settings, sl_pct)
 
@@ -3762,9 +3818,14 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         _scale_pct = getattr(settings, 'scale_out_first_close_pct', 0.5)
                         _is_tp = close_reason.startswith("take_profit")
                         _smart_tp = getattr(settings, 'smart_tp_enabled', True)
-                        # Regime-aware SmartTP: disable EXTEND in flat/defensive regimes
-                        _disabled_regimes = getattr(settings, 'smart_tp_extend_disabled_regimes', ['RANGE_SCALP', 'PRESERVATION'])
-                        if regime and regime in _disabled_regimes:
+                        # s70: per-regime SmartTP EXTEND flag — replaces smart_tp_extend_disabled_regimes list
+                        _ext_regime_field = f'smart_tp_extend_enabled_{regime.lower()}' if regime else None
+                        _smart_tp_extend_ok = (
+                            bool(getattr(settings, _ext_regime_field, True))
+                            if (_ext_regime_field and hasattr(settings, _ext_regime_field))
+                            else regime not in getattr(settings, 'smart_tp_extend_disabled_regimes', ['RANGE_SCALP', 'PRESERVATION'])
+                        )
+                        if not _smart_tp_extend_ok:
                             _smart_tp = False
                             print(f"[SmartTP] {symbol}: EXTEND disabled in regime={regime} — will scale-out or close")
 
@@ -4845,18 +4906,28 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     print(f"Skipping buy {symbol}: RANGE_SCALP mode RSI={_meta_rsi:.1f} > {_rs_max_rsi} (not at BB lower)")
                     update_signal_decision(symbol, "rejected", "RANGE_RSI")
                     continue
-                # B1: Check real BB lower band touch (not just RSI proxy)
+                # B1: Check real BB lower band touch — s70: also accepts bb_near_lower (wider tolerance for lateral)
                 if getattr(settings, 'range_scalp_require_bb_lower', True):
-                    _meta_bb_touch = signal_meta.get(symbol, {}).get('bb_lower_touch', None)
-                    if _meta_bb_touch is False:  # explicitly False (not None = unknown)
-                        print(f"Skipping buy {symbol}: RANGE_SCALP — price not at BB lower band")
+                    _sym_meta = signal_meta.get(symbol, {})
+                    _meta_bb_touch = _sym_meta.get('bb_lower_touch', None)
+                    _meta_bb_near  = _sym_meta.get('bb_near_lower', None)
+                    _bb_ok = (_meta_bb_touch is not False) or bool(_meta_bb_near)
+                    if not _bb_ok and _meta_bb_touch is False:
+                        print(f"Skipping buy {symbol}: RANGE_SCALP — price not near BB lower band")
                         update_signal_decision(symbol, "rejected", "RANGE_BB")
                         continue
+                # B2: s70 — minimum RSI floor to avoid free-fall entries
+                _rs_min_rsi = float(getattr(settings, 'range_scalp_min_rsi', 25.0))
+                if _meta_rsi < _rs_min_rsi:
+                    print(f"Skipping buy {symbol}: RANGE_SCALP RSI={_meta_rsi:.1f} < {_rs_min_rsi} (free-fall guard)")
+                    update_signal_decision(symbol, "rejected", "RANGE_RSI_FLOOR")
+                    continue
                 # LONG futuros: si precio en BB inferior + futures habilitado, abrir LONG en futuros
                 if (getattr(settings, 'futures_enabled', True)
                         and _get_param(settings, 'futures_long_enabled')
                         and _get_param(settings, 'futures_long_in_range_scalp')
-                        and signal_meta.get(symbol, {}).get('bb_lower_touch', False)):
+                        and (signal_meta.get(symbol, {}).get('bb_lower_touch', False)
+                             or signal_meta.get(symbol, {}).get('bb_near_lower', False))):
                     _f_sym_list = list(_get_param(settings, 'futures_symbols'))
                     if screened_pairs_cache:
                         _f_sym_list = list(dict.fromkeys(_f_sym_list + screened_pairs_cache.get("futures", [])))
@@ -5175,7 +5246,13 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             if not _eq_rsi_ok:  _eq_bad += 1
             if not _eq_vol_ok:  _eq_bad += 1
             if not _eq_str_ok:  _eq_bad += 1
-            _eq_max_bad = int(getattr(settings, 'entry_quality_max_failures', 0))
+            # s70: read per-regime field, fall back to global (global NEVER modified)
+            _eq_regime_field = f'entry_quality_max_failures_{_regime_mode.lower()}' if _regime_mode else None
+            _eq_max_bad = int(
+                getattr(settings, _eq_regime_field, None)
+                if (_eq_regime_field and hasattr(settings, _eq_regime_field))
+                else getattr(settings, 'entry_quality_max_failures', 0)
+            )
             if _eq_bad >= _eq_max_bad:
                 print(f"[A4/Quality] Skipping {symbol}: {_eq_bad} quality failures "
                       f"(RSI={_eq_rsi:.1f}{'✓' if _eq_rsi_ok else '✗'} "
@@ -6275,7 +6352,10 @@ def execute_once(monitor_only: bool = False):
                         settings.current_regime_profile_label = _active_profile_label
                     except Exception:
                         pass
-                _harmony_result = _apply_mode_profile_harmony(settings, _regime_mode, getattr(settings, 'current_regime_profile_label', None))
+                _harmony_result = _apply_mode_profile_harmony(
+                    settings, _regime_mode, getattr(settings, 'current_regime_profile_label', None),
+                    profile_params=_regime_apply_result.get('raw_params') or {},
+                )
                 _persist_runtime_selection_snapshot(
                     _db_client_ref,
                     {
@@ -6308,6 +6388,18 @@ def execute_once(monitor_only: bool = False):
                             "harmony_result": _harmony_result,
                             "sso_target_daily_usd": float(getattr(settings, 'sso_target_daily_usd', 40.0) or 40.0),
                             "sso_stagnant_min_hours": float(getattr(settings, 'sso_stagnant_min_hours', 2.5) or 2.5),
+                            "sso_stagnant_min_hours_spot_bull": float(getattr(settings, 'sso_stagnant_min_hours_spot_bull', 3.75) or 3.75),
+                            "sso_stagnant_min_hours_range_scalp": float(getattr(settings, 'sso_stagnant_min_hours_range_scalp', 1.5) or 1.5),
+                            "sso_stagnant_min_hours_preservation": float(getattr(settings, 'sso_stagnant_min_hours_preservation', 2.25) or 2.25),
+                            "sso_stagnant_min_hours_futures_short": float(getattr(settings, 'sso_stagnant_min_hours_futures_short', 2.38) or 2.38),
+                            "sso_slow_min_hours_range_scalp": float(getattr(settings, 'sso_slow_min_hours_range_scalp', 1.0) or 1.0),
+                            "sso_decay_min_hours_range_scalp": float(getattr(settings, 'sso_decay_min_hours_range_scalp', 1.7) or 1.7),
+                            "range_scalp_sl_pct": float(getattr(settings, 'range_scalp_sl_pct', 0.8) or 0.8),
+                            "range_scalp_tp_pct": float(getattr(settings, 'range_scalp_tp_pct', 1.8) or 1.8),
+                            "range_scalp_max_rsi": float(getattr(settings, 'range_scalp_max_rsi', 48.0) or 48.0),
+                            "range_scalp_breakeven_pct": float(getattr(settings, 'range_scalp_breakeven_pct', 0.40) or 0.40),
+                            "smart_tp_extend_enabled_range_scalp": bool(getattr(settings, 'smart_tp_extend_enabled_range_scalp', True)),
+                            "entry_quality_max_failures_range_scalp": int(getattr(settings, 'entry_quality_max_failures_range_scalp', 1) or 1),
                             "sso_slow_velocity_threshold": float(getattr(settings, 'sso_slow_velocity_threshold', 0.001) or 0.001),
                             "sso_reentry_min_strength_diff": float(getattr(settings, 'sso_reentry_min_strength_diff', 0.3) or 0.3),
                             "futures_breakeven_activation_pct": float(getattr(settings, 'futures_breakeven_activation_pct', 1.0) or 1.0),

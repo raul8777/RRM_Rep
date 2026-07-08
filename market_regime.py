@@ -246,12 +246,12 @@ def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
     narrative_only   = False
 
     if mode == "RANGE_SCALP":
-        # Tighter TP/SL for range trades; only enter at oversold levels
-        sl_pct           = 1.2   # tighter SL (range has defined support)
-        tp_pct           = 1.5   # small TP at BB upper
+        # s70: SL 1.2→0.8, TP 1.5→1.8 (R:R=2.25, EV>0 with WR>31%), max_rsi 55→48
+        sl_pct           = 0.8   # tighter SL — micro-bounce captured fast
+        tp_pct           = 1.8   # TP at BB mid-upper; R:R = 2.25
         kelly_mult       = 0.7   # reduce size in range market
         min_rsi          = 0.0
-        max_rsi          = 55.0  # only enter when RSI < 55 (bb_lower_touch is primary gate)
+        max_rsi          = 48.0  # only collapsed RSI = real bounce (primary gate is bb_lower_touch)
         require_bb_lower = True  # signal must come from BB lower band touch
 
     elif mode == "PRESERVATION":

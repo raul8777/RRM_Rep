@@ -191,7 +191,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
 
     # Min hold
     'min_hold_minutes': 120,
-    'min_hold_minutes_range_scalp': 30,
+    'min_hold_minutes_range_scalp': 15,   # s70: 30→15
     'min_hold_minutes_spot_bull': 120,
     'min_hold_for_prediction_exit': 90,
 
@@ -209,9 +209,11 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'market_regime_enabled': True,
     'preservation_narrative_only': True,
     'preservation_max_rsi': 65.0,
-    'range_scalp_max_rsi': 55.0,
-    'range_scalp_sl_pct': 1.2,
-    'range_scalp_tp_pct': 1.5,
+    'range_scalp_max_rsi': 48.0,       # s70: 55.0→48.0
+    'range_scalp_sl_pct': 0.8,          # s70: 1.2→0.8 (R:R 2.25)
+    'range_scalp_tp_pct': 1.8,          # s70: 1.5→1.8
+    'range_scalp_min_rsi': 25.0,        # s70: new
+    'range_scalp_breakeven_pct': 0.40,  # s70: new
     'preservation_sl_pct': 1.5,
     'preservation_tp_pct': 3.0,
     'spot_bull_pnl_boost_enabled': True,
@@ -223,7 +225,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
 
     # Cycle lengths
     'cycle_spot_bull': 10,
-    'cycle_range_scalp': 5,
+    'cycle_range_scalp': 3,            # s70: 5→3 min
     'cycle_preservation': 45,
     'cycle_futures_short': 4,
     'trade_cycle_minutes': 5,
@@ -238,6 +240,38 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     # Narrative tokens
     'narrative_tokens': [],
     'bear_market_volspike_min': 2.0,
+
+    # SSO per-regime timing (s70: replaces hardcoded multipliers in smart_scale_out.py)
+    # Globals below are NEVER modified at runtime — these per-regime fields are the source of truth.
+    'sso_stagnant_min_hours_spot_bull': 3.75,
+    'sso_stagnant_min_hours_range_scalp': 1.5,
+    'sso_stagnant_min_hours_preservation': 2.25,
+    'sso_stagnant_min_hours_futures_short': 2.38,
+    'sso_slow_min_hours_spot_bull': 2.8,
+    'sso_slow_min_hours_range_scalp': 1.0,
+    'sso_slow_min_hours_preservation': 2.0,
+    'sso_slow_min_hours_futures_short': 1.4,
+    'sso_decay_min_hours_spot_bull': 2.3,
+    'sso_decay_min_hours_range_scalp': 1.7,
+    'sso_decay_min_hours_preservation': 2.0,
+    'sso_decay_min_hours_futures_short': 2.0,
+
+    # Entry quality gate per regime (s70: replaces global entry_quality_max_failures)
+    'entry_quality_max_failures_spot_bull': 0,
+    'entry_quality_max_failures_range_scalp': 1,
+    'entry_quality_max_failures_preservation': 0,
+    'entry_quality_max_failures_futures_short': 0,
+
+    # SmartTP EXTEND per regime (s70: replaces smart_tp_extend_disabled_regimes list)
+    'smart_tp_extend_enabled_spot_bull': True,
+    'smart_tp_extend_enabled_range_scalp': True,
+    'smart_tp_extend_enabled_preservation': False,
+    'smart_tp_extend_enabled_futures_short': True,
+    'smart_tp_score_threshold_range_scalp': 3,
+
+    # BB lower touch tolerance per mode (s70: replaces hardcode *1.005 in autonomous_signals.py)
+    'bb_lower_touch_tolerance_pct': 0.5,
+    'bb_lower_touch_tolerance_range_scalp_pct': 1.5,
 
     # SSO
     'sso_enabled': True,

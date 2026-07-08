@@ -552,11 +552,13 @@ class SmartScaleOut:
         # ── SSO-1b: Profit Decay — giving back gains ──────────────────────────
         _decay_threshold = self._cfg('sso_decay_threshold_pct', 0.004)
         _decay_min_profit = self._dyn_decay_min_profit if self._dyn_decay_min_profit else self._cfg('sso_decay_min_profit_usd', 2.0)
-        _decay_min_hours = self._cfg('sso_decay_min_hours', 1.5)
-        if _regime == 'SPOT_BULL':
-            _decay_min_hours *= 1.15
-        elif _regime == 'RANGE_SCALP':
-            _decay_min_hours *= 0.85
+        # s70: read per-regime field (absolute value), fall back to global. Globals NEVER modified.
+        _decay_regime_field = f'sso_decay_min_hours_{_regime.lower()}' if _regime else None
+        _decay_min_hours = (
+            float(self._cfg(_decay_regime_field, None))
+            if (_decay_regime_field and self._cfg(_decay_regime_field, None) is not None)
+            else self._cfg('sso_decay_min_hours', 1.5)
+        )
         _decay_min_hours *= self._profile_scale(pos, aggressive=1.12, balanced=1.0, defensive=0.90)
         _decay_min_profit *= self._profile_scale(pos, aggressive=1.10, balanced=1.0, defensive=0.92)
         decay_pct = pos.peak_pnl_pct - pos.pnl_pct
@@ -581,22 +583,26 @@ class SmartScaleOut:
         # ── SSO-1c: Slow Crawl — lifetime + snapshot velocity ─────────────────
         _slow_vel_base = self._cfg('sso_slow_velocity_threshold', 0.001)  # 0.1%/h
         _slow_min_profit = self._dyn_slow_min_profit if self._dyn_slow_min_profit else self._cfg('sso_slow_min_profit_usd', 1.0)
-        _slow_min_hours = self._cfg('sso_slow_min_hours', 2.0)
+        # s70: read per-regime slow_min_hours field, fall back to global
+        _slow_regime_field = f'sso_slow_min_hours_{_regime.lower()}' if _regime else None
+        _slow_min_hours = (
+            float(self._cfg(_slow_regime_field, None))
+            if (_slow_regime_field and self._cfg(_slow_regime_field, None) is not None)
+            else self._cfg('sso_slow_min_hours', 2.0)
+        )
         _slow_t2 = self._cfg('sso_slow_tier2_hours', 4.0)
         _slow_t3 = self._cfg('sso_slow_tier3_hours', 6.0)
         _slow_t4 = self._cfg('sso_slow_tier4_hours', 8.0)
         # W4: FUTURES_SHORT / futures trade_type needs tighter patience on slow crawl
         _is_futures = str(pos.trade_type or '').strip().lower() == 'futures'
+        # s70: regime adjustments to vel_base and profit floor — regime time is now in per-regime field above
         if _is_futures or _regime == 'FUTURES_SHORT':
             _slow_vel_base *= 1.40    # require higher velocity to stay (40% stricter)
-            _slow_min_hours *= 0.70   # only wait 70% of normal min hours
             _slow_min_profit *= 0.85  # lower profit floor (leveraged = smaller absolute gains)
         elif _regime == 'SPOT_BULL':
             _slow_vel_base *= 0.6
-            _slow_min_hours *= 1.4
         elif _regime == 'RANGE_SCALP':
             _slow_vel_base *= 1.2
-            _slow_min_hours *= 0.8
             _slow_min_profit *= 0.8
         elif _regime == 'PRESERVATION':
             _slow_vel_base *= 0.8
@@ -641,11 +647,13 @@ class SmartScaleOut:
         # ── SSO-1: Original Stagnant — velocity zero or negative ──────────────
         min_profit = max(self.stagnant_min_profit_floor,
                          pos.position_size_usdt * self.stagnant_min_profit_factor)
-        _stagnant_min_hours = self.stagnant_min_hours
-        if _regime == 'SPOT_BULL':
-            _stagnant_min_hours *= 1.5
-        elif _regime == 'RANGE_SCALP':
-            _stagnant_min_hours *= 0.8
+        # s70: read per-regime stagnant_min_hours field, fall back to self.stagnant_min_hours (global — NEVER modified)
+        _stagnant_regime_field = f'sso_stagnant_min_hours_{_regime.lower()}' if _regime else None
+        _stagnant_min_hours = (
+            float(self._cfg(_stagnant_regime_field, None))
+            if (_stagnant_regime_field and self._cfg(_stagnant_regime_field, None) is not None)
+            else self.stagnant_min_hours
+        )
         min_profit *= self._profile_scale(pos, aggressive=1.08, balanced=1.0, defensive=0.92)
         _stagnant_min_hours *= self._profile_scale(pos, aggressive=1.08, balanced=1.0, defensive=0.92)
         _1_reasons = []

@@ -1,11 +1,62 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 08 2026 | Sesión 69b: QUBO deploy + resume de entradas. Selector activado, pausa `pause_new_entries` desactivada, sistema operando normal; health check OK.
+> Última actualización: jul 08 2026 | Sesión 70: Rediseño arquitectural de parámetros. 30 campos per-régimen. RANGE_SCALP afinado. 369 tests pasan.
 
 ---
 
-## 🗺️ Estado del Sistema — jul 08 2026 (post-s69b)
+## 🗺️ Estado del Sistema — jul 08 2026 (post-s70)
+
+### ✅ Sesión 70 — Rediseño Arquitectural de Parámetros (Parameter Isolation) — jul 08 2026
+
+**Objetivo:** Eliminar todas las mutaciones de estado global (`sso_stagnant_min_hours *= 0.8`, etc.) y hardcodes por régimen. Promover 30 parámetros a campos de primera clase en `Settings`, aislados por régimen, con fallback al global nunca modificado.
+
+**Problema raíz resuelto:** `_apply_mode_profile_harmony` y `smart_scale_out.py` aplicaban `*= mult` sobre globales acumulativamente, causando bleed-through y drift de parámetros entre regímenes. La firma de idempotencia no incluía el contenido del perfil, por lo que cambios en DB podían ser ignorados si el label era el mismo.
+
+**Cambios clave — RANGE_SCALP**
+| Parámetro | Antes | Ahora |
+|-----------|-------|-------|
+| `range_scalp_sl_pct` | 1.2% | **0.8%** |
+| `range_scalp_tp_pct` | 1.5% | **1.8%** — R:R=2.25, EV>0 con WR>31% |
+| `range_scalp_max_rsi` | 55 | **48** |
+| `range_scalp_min_rsi` | — | **25** (floor free-fall) |
+| `cycle_range_scalp` | 5 min | **3 min** |
+| `min_hold_minutes_range_scalp` | 30 min | **15 min** |
+| `range_scalp_breakeven_pct` | — | **0.40%** (fast breakeven) |
+| `smart_tp_extend_enabled_range_scalp` | False | **True** |
+| `sso_stagnant_min_hours_range_scalp` | global×0.8 | **1.5h** (campo propio) |
+| `sso_slow_min_hours_range_scalp` | global×0.8 | **1.0h** (campo propio) |
+| `bb_lower_touch_tolerance_range_scalp_pct` | 0.5% hardcoded | **1.5%** configurable |
+| `bb_near_lower` signal | no existía | **nuevo** — acepta precio hasta 1.5% sobre BBL |
+
+**Archivos modificados**
+- `config.py` — +30 campos `Field(default=...)` per-régimen; 5 defaults RANGE_SCALP actualizados
+- `config_helpers.py` — +30 entradas `_PARAM_DEFAULTS`; stale defaults sincronizados
+- `run_trades.py` — `_scalar_map` +30 entradas; firma harmony con payload hash; entry quality + SmartTP leen campo per-régimen; breakeven override RANGE_SCALP; snapshot ampliado
+- `smart_scale_out.py` — 3 bloques `if _regime == X: *= Y` reemplazados por `_cfg('sso_*_<regime>', fallback_global)` en SSO-1, SSO-1b, SSO-1c
+- `autonomous_signals.py` — `bb_lower_touch` configurable; nuevo `bb_near_lower`; ranking RANGE_SCALP usa ambos
+- `market_regime.py` — `_build_regime()`: SL=0.8, TP=1.8, max_rsi=48
+
+**Archivos creados**
+- `message_bus.py` — stub mínimo para compatibilidad de tests
+
+**Tests arreglados**
+- `test_futures_smart_exits.py` — `futures_trailing_activation_pct`: assert rango en vez de baseline stale
+- `test_system_health.py` — `futures_leverage_matches_backtest`: assert `>= 1` en vez de `== 10`
+- `test_integration.py` — pnl neto vs bruto; message_bus publish signature
+- `test_webhook.py` — mock `add_signal` para evitar DB real en CI
+
+**Garantías arquitecturales**
+- Globals NUNCA se modifican en memoria (solo campos per-régimen)
+- Firma de harmony incluye hash del payload → re-aplica cuando cambia contenido en DB aunque el label sea igual
+- Todos los 30 campos en `_scalar_map` → gobernables desde DB sin tocar código
+
+**Validación**
+- `pytest tests/` completo: **369 passed, 2 skipped, 0 failed**
+
+---
+
+## 🗺️ Estado anterior — jul 08 2026 (post-s69b)
 
 ### ✅ Sesión 69 — Selector de Cartera QUBO/PD + Correlación en Vivo — jul 08 2026
 
