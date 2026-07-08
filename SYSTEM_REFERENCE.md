@@ -1,11 +1,11 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 08 2026 | Sesión 69: Selector de Cartera QUBO/PD + Matriz de Correlación en Vivo. Implementado combinatorial optimizer para SPOT/FUTURES_SHORT; Docker rebuilt; validación 351 passed / 0 critical mismatches.
+> Última actualización: jul 08 2026 | Sesión 69b: QUBO deploy + resume de entradas. Selector activado, pausa `pause_new_entries` desactivada, sistema operando normal; health check OK.
 
 ---
 
-## 🗺️ Estado del Sistema — jul 08 2026 (post-s69)
+## 🗺️ Estado del Sistema — jul 08 2026 (post-s69b)
 
 ### ✅ Sesión 69 — Selector de Cartera QUBO/PD + Correlación en Vivo — jul 08 2026
 
@@ -38,6 +38,25 @@
 - `tmp_audit_config.py`: **0 critical mismatches**.
 - `tmp_verify_runtime_config.py`: **OK**.
 - Docker rebuilt y contenedores saludables.
+
+### ✅ Sesión 69b — Resume de entradas y puesta en marcha operativa — jul 08 2026
+
+**Diagnóstico operativo**
+- Dashboard mostraba solo 1 posición abierta (ETHUSDT BUY).
+- Health check: `overall=ok`, ciclos activos, sync con Binance OK, 0 errores consecutivos.
+- Causa raíz: `pause_new_entries=true` en `trading_runtime_state` con razón `"full config audit"`, puesto el 2026-07-08 01:51:13 UTC.
+- El sistema estaba técnicamente sano, pero en modo monitor-only (SL/TP), sin abrir nuevas posiciones.
+
+**Acciones tomadas**
+- Desactivado `pause_new_entries` en `trading_runtime_state` (value: `paused=false`).
+- Creado script reusable: `Dev/tools/resume_entries.py` — acepta `--reason` y usa DSN de variables de entorno; útil para futuros resumes operativos.
+- Último ciclo de trading confirmado inmediatamente después del resume (`last_trade_cycle_at` actualizado).
+
+**Estado post-resume**
+- Régimen: `SPOT_BULL`.
+- Max positions: 6 (5 base + 1 overflow).
+- Exposición: 11.3% ($573 / $5,092).
+- El selector QUBO ahora puede evaluar candidatos y abrir posiciones en cada ciclo de 5 minutos si pasan los filtros de calidad.
 
 ---
 
