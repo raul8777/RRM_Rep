@@ -203,6 +203,11 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
         min_profit_pct = float(get_param(settings, "profit_realization_spot_min_profit_pct", defaults["min_profit_pct"]))
         partial_minutes = float(get_param(settings, "profit_realization_spot_partial_minutes", defaults["partial_minutes"]))
         full_minutes = float(get_param(settings, "profit_realization_spot_full_minutes", defaults["full_minutes"]))
+        # C2: regime-specific base override — applied before scale so profile×fng still work on top
+        _regime_upper = str(context.regime_mode or "").strip().upper()
+        if _regime_upper == "RANGE_SCALP":
+            partial_minutes = float(get_param(settings, "profit_realization_spot_partial_minutes_range_scalp", 35.0))
+            full_minutes = float(get_param(settings, "profit_realization_spot_full_minutes_range_scalp", 70.0))
         drawback_pct = float(get_param(settings, "profit_realization_spot_drawback_pct", defaults["drawback_pct"]))
         partial_close_pct = float(get_param(settings, "profit_realization_spot_partial_close_pct", defaults["partial_close_pct"]))
         max_extensions = int(get_param(settings, "profit_realization_spot_max_extensions", defaults["max_extensions"]))

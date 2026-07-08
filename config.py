@@ -259,6 +259,10 @@ class Settings(BaseSettings):
     btc_correlation_max_new_entries: int = Field(default=2)
     # C1: PRS SPOT_BULL minimum partial close time when momentum is high
     profit_realization_spot_bull_min_partial_minutes: float = Field(default=90.0)  # jul07: 45→90 (wolf-hunter: SPOT_BULL necesita tiempo)
+    # C2: PRS RANGE_SCALP regime-specific base times (overrides global before scale is applied)
+    # Smaller bases account for short TP=1.8% target; profile×fng multipliers still apply on top
+    profit_realization_spot_partial_minutes_range_scalp: float = Field(default=35.0)  # s70c: 60→35 (scalp: capturar ganancia antes de rebote)
+    profit_realization_spot_full_minutes_range_scalp: float = Field(default=70.0)     # s70c: 120→70 (scalp: cierre completo dentro de ventana)
     # A4: Entry quality score gate
     entry_quality_gate_enabled: bool = Field(default=True)
     entry_quality_min_vol_spike: float = Field(default=1.2)  # concentrated: volumen confirma dirección

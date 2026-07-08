@@ -378,6 +378,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'profit_realization_spot_partial_close_pct': 0.60,
     'profit_realization_spot_max_extensions': 2,
     'profit_realization_spot_bull_min_partial_minutes': 90.0,  # jul07: 45→90 (wolf-hunter)
+    'profit_realization_spot_partial_minutes_range_scalp': 35.0,  # s70c: base before scale for RANGE_SCALP (TP=1.8%)
+    'profit_realization_spot_full_minutes_range_scalp': 70.0,     # s70c: base before scale for RANGE_SCALP
     'profit_realization_futures_enabled': True,
     'profit_realization_futures_min_profit_pct': 0.0030,
     'profit_realization_futures_partial_minutes': 30.0,
