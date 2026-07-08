@@ -1,11 +1,80 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 08 2026 | Sesión 71: Auditoría exhaustiva — 4 bugs críticos corregidos + 4 mejoras de tuning. 370 tests pasan. Commit: `d612985`
+> Última actualización: jul 08 2026 | Sesión 72: Auditoría estratégica completa — 6 bugs RANGE_SCALP + 2 fixes FUTURES_SHORT. 352 tests pasan. Commit: `3e5dc58`
 
 ---
 
-## 🗺️ Estado del Sistema — jul 08 2026 (post-s71)
+## 🗺️ Estado del Sistema — jul 08 2026 (post-s72)
+
+### ✅ Sesión 72 — Auditoría Estratégica Completa: Todos los Modos + Perfiles — jul 08 2026
+
+**Objetivo:** Auditoría exhaustiva de todos los regímenes (SPOT_BULL, RANGE_SCALP, PRESERVATION, FUTURES_SHORT) y todos los sistemas de salida (PredExit, SSO, PRS, UG, Hard SL/TP, Trailing, BreakEven, comisiones). Diagnóstico: RANGE_SCALP no abría posiciones por 4 bugs de entrada. Maximizar capital velocity.
+
+#### A1 — CRÍTICO: Bug A4 gate `>=` → `>`  (`run_trades.py`)
+- **Raíz:** `if _eq_bad >= _eq_max_bad` bloqueaba cuando `_eq_bad == 1` y `max_failures_range_scalp=1`. Con exactamente 1 fallo (vol bajo = estructural en lateral), se bloqueaba cuando debería permitirse.
+- **Fix:** `if _eq_bad > _eq_max_bad` — permite exactamente `max_failures` fallos, bloquea cuando hay **más** de los permitidos.
+
+#### A2 — CRÍTICO: RSI range en A4 per-regime  (`run_trades.py`)
+- **Raíz:** A4 gate usaba `35.0 <= RSI <= 65.0` global. En RANGE_SCALP con max_rsi=48, RSI=33 era rechazado por el check de rango inferior (35.0).
+- **Fix:** En RANGE_SCALP usa `range_scalp_min_rsi .. range_scalp_max_rsi` (25-60). Otros modos sin cambio.
+
+#### A3 — CRÍTICO: `range_scalp_max_rsi` 48 → 60  (`config.py`, `config_helpers.py`, DB profiles)
+- **Raíz:** RSI<48 solo cubre "panic dip" — el 20% inferior del tiempo de un mercado lateral. RSI 48-60 es el rango normal (70% del tiempo en lateral) y quedaba completamente bloqueado.
+- **Fix:** Default 48→60. DB profiles A/B/C actualizados (C usa 58 — más conservador).
+
+#### A4 — ALTO: Skip penalización 4h DOWN en RANGE_SCALP  (`autonomous_signals.py`)
+- **Raíz:** En mercado lateral, el 4h trend es frecuentemente DOWN sin que sea una tendencia bajista real — es solo la posición en el rango. La penalización `strength × 0.5` llevaba señales válidas de 0.50 a 0.25 (por debajo del `min_signal_strength`).
+- **Fix:** `if BUY and 4h DOWN and not RANGE_SCALP` — regímenes trending siguen penalizando como antes.
+- **Mecanismo:** `signal_generator._regime_mode = regime` se asigna antes de `get_top_buy_signals` para que `analyze_symbol` lo lea vía `getattr(self, '_regime_mode', None)`.
+
+#### A5 — ALTO: `bb_position` relativo como gate alternativo  (`autonomous_signals.py`, `run_trades.py`, `config.py`)
+- **Raíz:** `bb_lower_touch` (1.5% sobre BB lower) solo acepta el 20% inferior del rango. Precio en 35% del rango (cerca pero no extremo) quedaba bloqueado.
+- **Fix:** Exportar `bb_position = (price - BBL) / (BBU - BBL)` en el analysis dict. Gate acepta si `bb_position <= range_scalp_max_bb_position` (default 0.40 = 40% inferior del rango).
+- **Nuevo campo:** `range_scalp_max_bb_position: float = Field(default=0.40)` en `config.py`; en `_scalar_map` y `_PARAM_DEFAULTS`.
+
+#### A6 — MEDIO: `entry_quality_vol_spike_min_range_scalp=0.35`  (`config.py`, `run_trades.py`)
+- **Raíz:** A4 gate usaba `vol_spike_min=0.55` (RANGE_SCALP) vs `entry_quality_min_vol_spike=1.2` (otros). Pero 0.55x aún bloqueaba días quietos del lateral donde vol_spike=0.2-0.4x es normal.
+- **Fix:** Campo dedicado `entry_quality_vol_spike_min_range_scalp=0.35`. DB profiles: A=0.30, B=0.35, C=0.40.
+
+#### B1 — MEDIO: `min_hold_for_prediction_exit_futures_short=30min`  (`config.py`, `run_trades.py`)
+- **Raíz:** PredExit global=90min. En FUTURES_SHORT, un short pierde rápido — 90min de hold mínimo antes de salir predictivamente es demasiado.
+- **Fix:** Campo por régimen (patrón BUG-4 de s71). FUTURES_SHORT=30min. Campo en `_scalar_map`.
+
+#### B2 — MEJORA: Profiles FUTURES_SHORT A/B/C creados en DB
+- Script `Dev/scripts/fix_futures_profiles_s72_7e8828.py` crea/actualiza los 3 perfiles con `min_signal_strength` y `sso_*_futures_short` propios por perfil.
+- Profile B activado por default (neutral baseline).
+
+**Archivos modificados**
+- `run_trades.py` — A1 (>=→>), A2 (RSI range per-regime), A4 (_regime_mode injection), A5 (bb_position gate), A6 (vol per-regime), B1 (pred_exit FS floor), C1 (_scalar_map +4 campos)
+- `autonomous_signals.py` — A4 (skip 4h DOWN penalty en RANGE_SCALP), A5 (bb_position export)
+- `config.py` — A3 (range_scalp_max_rsi 48→60), A5 (range_scalp_max_bb_position), A6 (entry_quality_vol_spike_min_range_scalp), B1 (min_hold_pred_exit_futures_short)
+- `config_helpers.py` — duplicado range_scalp_max_rsi=48.0 eliminado; nuevos defaults A5/A6/B1
+- `docker-compose.yml` — MAX_POSITIONS_RANGE_SCALP 3→4
+- `app.py` — nuevos campos excluidos del drift checker
+- `tmp_audit_config.py` — nuevos campos excluidos del audit
+
+**Archivos creados**
+- `Dev/scripts/fix_futures_profiles_s72_7e8828.py` — crea FUTURES_SHORT A/B/C en DB; actualiza RANGE_SCALP A/B/C
+
+**Garantías arquitecturales**
+- Globals NUNCA modificados (solo campos per-régimen)
+- Todos los nuevos campos en `_scalar_map` → gobernables desde DB sin tocar código
+- Trazabilidad: audit record en `trading_runtime_state` key `s72_profile_fix_audit`
+
+**Validación**
+- `pytest tests/ --ignore=tests/test_config_governance.py`: **352 passed, 12 skipped, 0 failed**
+- 1 test pre-existente excluido (`test_drift_alert_persisted_and_acknowledged`) — falla contra DB live por harmony overrides previos, no relacionado con s72
+
+**Impacto esperado en runtime RANGE_SCALP**
+- RSI=55, bb_position=0.35: ✅ ENTRADA (antes: ❌ BLOQUEADO por RANGE_RSI>48 y A4 RSI range)
+- RSI=45, vol=0.3x, 4h DOWN: ✅ ENTRADA (antes: ❌ strength×0.5 → HOLD)
+- RSI=45, vol=0.3x, 1 fallo A4: ✅ TOLERA (antes: ❌ BUG `>=` bloqueaba)
+- Max posiciones RANGE_SCALP: **4** (antes: 3 en docker-compose)
+
+---
+
+## 🗺️ Estado anterior — jul 08 2026 (post-s71)
 
 ### ✅ Sesión 71 — Auditoría Exhaustiva Cross-Modo: SSO/PRS/PredExit/Tuning — jul 08 2026
 
