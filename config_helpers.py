@@ -311,6 +311,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
 
     # Market Regime
     'current_regime_mode': 'SPOT_BULL',
+    'current_regime_profile_label': 'B',
 
     # Futures mode
     'futures_hedge_mode_enabled': True,

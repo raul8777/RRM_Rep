@@ -596,6 +596,7 @@ class Settings(BaseSettings):
     # â”€â”€ Market Regime adaptive mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     market_regime_enabled: bool = Field(default=True)
     current_regime_mode: str = Field(default="SPOT_BULL")
+    current_regime_profile_label: str = Field(default="B")  # runtime: active profile (B/A/D); set each cycle
     # RANGE_SCALP mode parameters
     range_scalp_sl_pct: float = Field(default=0.8)    # s70: 1.2→0.8 (R:R 2.25, EV>0 with WR>31%)
     range_scalp_tp_pct: float = Field(default=1.8)    # s70: 1.5→1.8
