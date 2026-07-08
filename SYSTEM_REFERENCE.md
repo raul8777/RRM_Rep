@@ -1,7 +1,61 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 07 2026 | Sesión 67: Auditoría IV — 3 bugs: NARRATIVE trailing capeado por hardcoded ceiling, trail distance con pnl gross, rebalance_max_abs_pnl_pct fuera de _scalar_map.
+> Última actualización: jul 07 2026 | Sesión 67: Auditoría IV — 14 bugs corregidos acumulados (s65-s67). Sistema limpio. Próximo paso: `docker-compose up -d --build`.
+
+---
+
+## 🗺️ Estado del Sistema — jul 07 2026 (post-s67)
+
+### Valores Canónicos Activos
+
+| Parámetro | Valor | Sesión |
+|-----------|-------|--------|
+| `vol_spike_min` RANGE_SCALP | 0.55 | s64 |
+| `vol_spike_min` otros | 0.91 | s64 |
+| `min_signal_strength` | 0.45 | s64 |
+| `min_success_probability` | 0.52 | s64 |
+| `kelly_base_usdt` | $100 | s64 |
+| `kelly_max_usdt` | $1,000 | s64 |
+| `stop_loss_pct` global | 3.36% | s64 |
+| NARRATIVE `min_prob` | 0.42 | s65 |
+| NARRATIVE `trailing_distance_pct` | 3.0% | s65+s67 |
+| NARRATIVE ATR floor | 3.0% (dinámico) | s67 |
+| NARRATIVE ATR ceiling | 6.0% (dinámico) | s67 |
+| `rebalance_max_abs_pnl_pct` | 2.0% | s66 |
+| `peak_protection_spot_bull_pct` | 0.60 (B/C) / 0.65 (A) | s65 |
+| Breakeven/Trailing activación | `pnl_pct_net` (no gross) | s66-s67 |
+| Breakeven trazabilidad | `trades_audit` INSERT | s66 |
+| NARRATIVE cooldown post-restart | Correcto (check DB separado) | s66 |
+
+### Bugs Críticos Acumulados Corregidos (s65–s67)
+
+| ID | Severidad | Descripción | Archivo |
+|----|-----------|-------------|---------|
+| F1-A | 🔴 | `_peak_protection_pct` NameError silencioso en SPOT_BULL | `profit_realization_supervisor.py` |
+| F1-B | 🟠 | `futures_category_thresholds` MIDCAP→MIDCAP_ALT + MEME faltante | `config.py` |
+| F1-C | 🟠 | `get_config(settings,'kelly_base_usdt')` arg inválido en BNB buffer | `binance_commission.py` |
+| F2-A | 🟠 | NARRATIVE `min_prob=0.527` igual que LARGE_CAP (sin diferenciación) | `config.py` |
+| F2-B | 🟡 | `entry_quality_min_vol_spike` no era regime-aware en RANGE_SCALP | `run_trades.py` |
+| F3-A | 🟡 | NARRATIVE `trailing_distance_pct=2.0%` (sub-óptimo para breakouts) | `config.py` |
+| H2 | 🔴 | NARRATIVE cooldown post-restart ignorado (`and` → None) | `run_trades.py` |
+| H1 | 🟠 | Breakeven/Trailing activaban con `pnl_pct_gross` en vez de net | `run_trades.py` |
+| H3 | 🟠 | Breakeven SPOT sin trazabilidad en `trades_audit` | `run_trades.py` |
+| H6 | 🟡 | `rebalance_max_abs_pnl_pct` hardcoded 0.5% (no configurable) | `config.py` |
+| H7 | 🟢 | 3 defaults faltantes en `_PARAM_DEFAULTS` de config_helpers | `config_helpers.py` |
+| I1 | 🟠 | Trail SPOT floor/ceiling hardcoded ignoraban `category_thresholds` | `run_trades.py` |
+| I2 | 🟡 | Trail distance call site pasaba `pnl_pct` GROSS | `run_trades.py` |
+| I3 | 🟡 | `rebalance_max_abs_pnl_pct` ausente del `_scalar_map` | `run_trades.py` |
+
+### Commits
+- `dbdc494` — s65 (6 bugs)
+- `31a08f8` — s66 (5 bugs)
+- `0ac4304` — s67 (3 bugs)
+
+### ⚠️ Acción Requerida
+```
+docker-compose up -d --build
+```
 
 ---
 
