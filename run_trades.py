@@ -5115,7 +5115,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             _eq_strength  = float(signal_meta.get(symbol, {}).get('strength', strength))
             _eq_bad = 0
             _eq_rsi_ok      = 35.0 <= _eq_rsi <= 65.0
-            _eq_vol_ok      = _eq_vol >= float(getattr(settings, 'entry_quality_min_vol_spike', 0.8))
+            # F2-B: vol threshold is regime-aware — RANGE_SCALP uses vol_spike_min (0.55), others use entry_quality_min_vol_spike (1.0)
+            _eq_vol_min = float(_get_param(settings, 'vol_spike_min')) if regime == 'RANGE_SCALP' else float(getattr(settings, 'entry_quality_min_vol_spike', 0.8))
+            _eq_vol_ok      = _eq_vol >= _eq_vol_min
             _eq_str_ok      = _eq_strength >= float(getattr(settings, 'entry_quality_min_strength', 0.35))
             if not _eq_rsi_ok:  _eq_bad += 1
             if not _eq_vol_ok:  _eq_bad += 1

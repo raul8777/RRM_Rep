@@ -436,7 +436,7 @@ def estimate_bnb_buffer_needed(settings, trade_type: str = 'spot', days: int = 7
         cnt = int(row.get('cnt') or 0)
         if cnt == 0 or avg_comm == 0:
             # Fallback: estimate from daily trade count and default size
-            avg_size = float(get_config(settings, 'kelly_base_usdt'))
+            avg_size = float(_cfg_param(settings, 'kelly_base_usdt'))
             rate = get_config(settings).rate_for(trade_type)
             avg_comm = avg_size * rate * 2.0
             cnt = 5 * 7  # assume 5 trades/day

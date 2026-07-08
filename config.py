@@ -484,7 +484,7 @@ class Settings(BaseSettings):
     category_thresholds: Dict[str, Any] = Field(default={
         "LARGE_CAP":  {"min_prob": 0.527, "min_pnl": 0.10, "min_volspike": 1.2, "stop_loss_pct": 3.5, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 0.8, "tp_extension_pct": 1.5},  # jul07: sl 2.5→3.5, trail_act 2.0→2.5 (wolf-hunter: SL más amplio)
         "MIDCAP_ALT": {"min_prob": 0.527, "min_pnl": 0.00, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 3.5, "trailing_activation_pct": 2.5, "trailing_distance_pct": 0.8, "tp_extension_pct": 2.0},  # jul07: sl 2.5→3.5, trail_act 2.0→2.5 (wolf-hunter: SL más amplio)
-        "NARRATIVE":  {"min_prob": 0.527, "min_pnl": -1.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 2.0, "tp_extension_pct": 3.0},  # jun28: min_prob 0.45â†’0.527
+        "NARRATIVE":  {"min_prob": 0.42,  "min_pnl": -1.0, "min_volspike": 1.5, "stop_loss_pct": 3.5, "take_profit_pct": 7.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 3.0, "tp_extension_pct": 3.0},  # s65: min_prob 0.527->0.42 (asimetrico per diseno); trail_dist 2.0->3.0 (captura breakouts +15-30%)
         "MEME":       {"min_prob": 0.527, "min_pnl": 0.05, "min_volspike": 2.5, "stop_loss_pct": 2.5, "take_profit_pct": 4.5, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.0, "tp_extension_pct": 2.5},  # jun28: min_prob 0.52â†’0.527
     })
     
@@ -533,11 +533,12 @@ class Settings(BaseSettings):
     # Futures signal filtering: minimum probability and vol spike (backtest-optimizable)
     futures_min_prob: float = Field(default=0.499)  # jun29: 0.527â†’0.499 (run_0677)
     futures_vol_spike_min: float = Field(default=0.91)  # jun29: 0.83â†’0.91 (run_0677)
-    # Futures category thresholds (mirror category_thresholds for SPOT)
+    # Futures category thresholds — keys MUST match token_categories market_behavior values
     futures_category_thresholds: Dict[str, Any] = Field(default={
-        "LARGE_CAP":  {"min_prob": 0.499, "stop_loss_pct": 1.42, "take_profit_pct": 2.81, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},
-        "MIDCAP":     {"min_prob": 0.499, "stop_loss_pct": 1.42, "take_profit_pct": 2.81, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},
-        "NARRATIVE":  {"min_prob": 0.499, "stop_loss_pct": 1.42, "take_profit_pct": 2.81, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},
+        "LARGE_CAP":  {"min_prob": 0.499, "stop_loss_pct": 1.20, "take_profit_pct": 2.40, "trailing_activation_pct": 1.5, "trailing_distance_pct": 1.0},  # s65: diferenciado — SL más ajustado para large cap
+        "MIDCAP_ALT": {"min_prob": 0.499, "stop_loss_pct": 1.42, "take_profit_pct": 2.81, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},  # s65: MIDCAP→MIDCAP_ALT (align token_categories)
+        "NARRATIVE":  {"min_prob": 0.499, "stop_loss_pct": 1.80, "take_profit_pct": 3.60, "trailing_activation_pct": 2.5, "trailing_distance_pct": 2.0},  # s65: SL/TP más amplio para mayor volatilidad
+        "MEME":       {"min_prob": 0.499, "stop_loss_pct": 1.60, "take_profit_pct": 3.20, "trailing_activation_pct": 2.0, "trailing_distance_pct": 1.5},  # s65: añadido MEME (faltaba)
     })
     # Global vol spike minimum (used by both SPOT and FUTURES signal filtering)
     vol_spike_min: float = Field(default=0.91)  # jun29: 0.83â†’0.91 (run_0677)

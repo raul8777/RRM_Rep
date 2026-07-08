@@ -1,7 +1,49 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 07 2026 | Sesión 64: Auditoría Exhaustiva — Triple sobreescritura de configuración corregida.
+> Última actualización: jul 07 2026 | Sesión 65: Auditoría Exhaustiva II — 6 bugs corregidos (PRS peak protection, futures thresholds, NARRATIVE min_prob, entry quality, comisiones BNB).
+
+---
+
+### ✅ Sesión 65 — Auditoría Exhaustiva II: PRS Bug + Futures Thresholds + NARRATIVE Asimétrico — jul 07 2026
+
+**Bugs identificados y corregidos (6 total):**
+
+**F1-A — CRÍTICO: `_peak_protection_pct()` NameError silencioso en SPOT_BULL** (`profit_realization_supervisor.py`)
+- `settings` era variable libre (no en scope) → `NameError` capturado silenciosamente en todo ciclo con régimen SPOT_BULL
+- Fix: añadido `settings=None` como 3er parámetro y pasado desde `evaluate()` en línea 278
+- Defaults corregidos: `peak_protection_spot_bull_pct=0.60`, `profile_a=0.65` (alineados con `config.py`)
+
+**F1-B — ALTA: `futures_category_thresholds` key incorrecta + categoría faltante** (`config.py`)
+- Key `"MIDCAP"` no coincidía con `token_categories` que usa `"MIDCAP_ALT"` → lookup siempre fallaba silenciosamente
+- `"MEME"` ausente → tokens DOGE/PEPE/WIF en futuros usaban globales sin diferenciación
+- Fix: `"MIDCAP"` → `"MIDCAP_ALT"`, añadido `"MEME"`, y diferenciación real de SL/TP por categoría:
+  - LARGE_CAP: SL 1.20% / TP 2.40% (más ajustado)
+  - MIDCAP_ALT: SL 1.42% / TP 2.81% (sin cambio)
+  - NARRATIVE: SL 1.80% / TP 3.60% (más amplio para volatilidad)
+  - MEME: SL 1.60% / TP 3.20% (nuevo)
+
+**F1-C — ALTA: `binance_commission.estimate_bnb_buffer_needed()` argumento inválido** (`binance_commission.py:439`)
+- `get_config(settings, 'kelly_base_usdt')` — `get_config()` no acepta 2do parámetro → TypeError silencioso
+- Fix: `_cfg_param(settings, 'kelly_base_usdt')` (función correcta ya importada en scope)
+
+**F2-A — ALTA: `NARRATIVE min_prob=0.527` contradecía diseño asimétrico** (`config.py:487`)
+- NARRATIVE usaba mismo umbral que LARGE_CAP → eliminaba diferenciación de riesgo por categoría
+- Fix: `min_prob` NARRATIVE: `0.527 → 0.42` (per diseño validado — narratives aceptan mayor incertidumbre)
+
+**F2-B — MEDIA: `entry_quality_min_vol_spike=1.0` no era regime-aware** (`run_trades.py:5119`)
+- En RANGE_SCALP, `vol_spike_min=0.55` pero quality gate usaba `1.0` → doble penalización de entradas válidas
+- Fix: en RANGE_SCALP, `_eq_vol_min = vol_spike_min` (0.55); en otros regímenes sigue usando `entry_quality_min_vol_spike`
+
+**F3-A — MEDIA: `NARRATIVE trailing_distance_pct=2.0` sub-óptimo** (`config.py:487`)
+- Con activación a +5%, distancia 2% → máximo asegurado solo +3%. Para breakouts +15-30%, distancia 3% es correcta
+- Fix: `trailing_distance_pct` NARRATIVE: `2.0 → 3.0`
+
+**Archivos modificados (s65):**
+- `profit_realization_supervisor.py`: F1-A (firma + call de _peak_protection_pct)
+- `config.py`: F1-B (futures_category_thresholds), F2-A (NARRATIVE min_prob), F3-A (NARRATIVE trail_dist)
+- `binance_commission.py`: F1-C (_cfg_param fix)
+- `run_trades.py`: F2-B (entry_quality regime-aware)
 
 ---
 

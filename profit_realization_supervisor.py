@@ -94,7 +94,7 @@ def _regime_scale(regime_mode: Optional[str], trade_type: Optional[str]) -> floa
     return 1.0
 
 
-def _peak_protection_pct(regime_mode: Optional[str], trade_type: Optional[str]) -> float:
+def _peak_protection_pct(regime_mode: Optional[str], trade_type: Optional[str], settings=None) -> float:
     """Minimum fraction of peak_pnl_pct that must be preserved.
     If pnl_pct < peak * this value, trigger full close regardless of held time.
     F11: defends significant gains, prevents giving back peak to near-zero."""
@@ -109,8 +109,8 @@ def _peak_protection_pct(regime_mode: Optional[str], trade_type: Optional[str]) 
         # Fase 2.5: configurable via settings; default is more patient than the old 0.60
         _profile = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper()
         if _profile == 'A':
-            return float(getattr(settings, 'peak_protection_spot_bull_profile_a_pct', 0.75))
-        return float(getattr(settings, 'peak_protection_spot_bull_pct', 0.70))
+            return float(getattr(settings, 'peak_protection_spot_bull_profile_a_pct', 0.65))
+        return float(getattr(settings, 'peak_protection_spot_bull_pct', 0.60))
     return 0.65      # neutral default
 
 
@@ -275,7 +275,7 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
 
     # F11: Peak protection — close immediately if significant gains are being given back
     # W7: Minimum threshold is ATR-aware to avoid triggering on normal volatility noise
-    _peak_protect = _peak_protection_pct(context.regime_mode, trade_type)
+    _peak_protect = _peak_protection_pct(context.regime_mode, trade_type, settings)
     _atr_4h_pct = float(context.metadata.get("atr_4h_pct", 0.0) or 0.0)
     _atr_floor = _atr_4h_pct * 1.5 if _atr_4h_pct > 0 else 0.0
     _peak_protect_min = max(min_profit_pct * 3.0, _atr_floor)
