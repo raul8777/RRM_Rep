@@ -171,7 +171,9 @@ Nunca `getattr(settings, 'key', hardcode)` — el hardcode puede quedar stale y 
 
 **Hot-config:** `PATCH /config/kelly` → escribe en `trading_runtime_state`. Solo campos en `_KELLY_EDITABLE_FIELDS` (app.py). Operación es MERGE, nunca REPLACE.
 
-**Nuevo campo:** requiere actualización en 4 lugares: `config.py` (Field) + `config_helpers._PARAM_DEFAULTS` + `run_trades._scalar_map` + `app._KELLY_EDITABLE_FIELDS` (si gobernable por hot-config).
+**Nuevo campo:** requiere actualización en 4 lugares: `config.py` (Field) + `config_helpers._PARAM_DEFAULTS` + `run_trades._scalar_map` + `app._KELLY_EDITABLE_FIELDS` (si gobernable por hot-config). Además, si el campo está intencionalmente desviado del default: añadirlo a `_EXCLUDED` en `_check_config_drift` Y en `/config/verify._exclude` para no generar falsos positivos en drift-check y tests.
+
+**`/config/apply` también hace MERGE** (desde S75b): lee `kelly_config_override` existente, mergea solo los campos del body, escribe el resultado. Esto evita que tests o llamadas operativas a `/config/apply` destruyan overrides activos de `PATCH /config/kelly`.
 
 **Perfiles en DB:** `regime_profiles` — 12 filas. Cada fila = JSON de overrides aplicados via MERGE sobre el baseline del modo. El selector de perfiles usa metadata de rendimiento real (`expected_return`, `sharpe`, `win_rate`) — ranking base igualitario (no ponderado por letra).
 
@@ -189,8 +191,10 @@ Nunca `getattr(settings, 'key', hardcode)` — el hardcode puede quedar stale y 
 5. `docker exec app python /app/tmp_audit_config.py` → ¿`CRITICAL mismatch`? Si sí → fix antes de operar
 
 **"El sistema no abre posiciones"**
-→ Revisar en orden: `trading_runtime_state.pause_new_entries` → max_positions por régimen → `min_signal_strength`/`min_success_probability` → filtros BTC (dominance, momentum 4h/3h/1h) → `regime.confirmed` (necesita 2 ciclos) → `entry_quality_gate` → QUBO resultado vacío.
+→ Revisar en orden: `trading_runtime_state.pause_new_entries` → max_positions por régimen → **`category_max_positions_enabled` + límite por bucket** (gate R4: log `LÍM_CATEGORÍA MIDCAP_ALT 2/2` bloquea TODAS las señales si el bucket está lleno) → `min_signal_strength`/`min_success_probability` → filtros BTC (dominance, momentum 4h/3h/1h) → `regime.confirmed` (necesita 2 ciclos) → `entry_quality_gate` → QUBO resultado vacío.
 Logs: `[BuyTop]`, `[Screener]`, `[Kelly]`, `[QUBO]`.
+
+**Capital subinvertido (ej. $1k de $5k en posiciones):** verificar `screener_decisions` por rejections con razón `LIM_CATEGORIA` — indica `category_max_positions_enabled=True` y bucket lleno. Solución: `PATCH /config/kelly` con `{"category_max_positions_enabled": false, "max_positions_range_scalp": 6}`. El QUBO sigue minimizando correlación Pearson como diversificación real — no se pierde protección ante correlación.
 
 **"Un exit (SSO/PRS/trailing/BE) no disparó cuando debía"**
 → Verificar que el PnL pasado al supervisor sea neto (via `binance_commission.net_pnl()`), no bruto. Revisar si profile multiplier se aplicó dos veces (harmony + check interno). Ver `trades_audit` para confirmar si el advisory se generó pero UG lo bloqueó.
@@ -231,7 +235,7 @@ Fix: `auto_reconcile_spot()` / `auto_reconcile_futures()` o endpoint `/reconcile
 
 - **Fallback stale en `getattr`**: `getattr(settings, 'param', OLD_VALUE)` con un valor hardcodeado que difiere del canónico. `tmp_audit_config.py` los detecta como `CRITICAL`. La corrección es usar `get_param(settings, 'param')` que usa `_PARAM_DEFAULTS` como fallback.
 
-- **REPLACE en lugar de MERGE en DB**: cualquier operación que sobreescriba el JSON completo de `kelly_config_override` o `regime_profiles` destruye fixes manuales previos. Siempre hacer `json_merge_patch` o actualizar solo los campos afectados.
+- **REPLACE en lugar de MERGE en DB**: cualquier operación que sobreescriba el JSON completo de `kelly_config_override` o `regime_profiles` destruye fixes manuales previos. Siempre hacer `json_merge_patch` o actualizar solo los campos afectados. **Desde S75b `/config/apply` también hace MERGE** — patrón correcto implementado en los 3 endpoints que escriben `kelly_config_override`: `PATCH /config/kelly`, `_apply_regime_params` y `/config/apply`.
 
 - **Campo per-régimen sin equivalente global**: agregar `sso_stagnant_min_hours_range_scalp` sin agregar el fallback global correspondiente → `KeyError` o comportamiento indefinido en otros modos.
 
@@ -240,6 +244,8 @@ Fix: `auto_reconcile_spot()` / `auto_reconcile_futures()` o endpoint `/reconcile
 - **PnL bruto en decisión de exit**: pasar `unrealized_pnl` sin procesar por `binance_commission.net_pnl()` → breakeven o trailing se activa en nivel incorrecto. Todo valor de PnL que alimente SSO/PRS/UG/PredExit/BreakEven/Trailing debe ser neto.
 
 - **Perfil auto-selector sesgado por rank base**: si `profile_rank` no es igualitario entre A/B/C, el selector siempre elige el de mayor rank base ignorando el rendimiento real. El ranking debe emerger exclusivamente de metadata de rendimiento.
+
+- **`_check_config_drift` y `/config/verify` con `_exclude` desincronizados**: si se añade un campo gobernable por hot-config a `_KELLY_EDITABLE_FIELDS` pero no a `_EXCLUDED` en ambos bloques de drift-check, el campo generará false positives (`critical drift`) cuando esté intencionalmente desviado del default. Regla: cualquier campo en `_KELLY_EDITABLE_FIELDS` que pueda diferir del default en producción debe estar en `_EXCLUDED` de `_check_config_drift` Y en `_exclude` de `/config/verify`.
 
 - **Pesos de `indicator_weights` del régimen anterior servidos en el nuevo régimen**: antes de S75, la clave de `indicator_weights` era solo `(symbol)` — los pesos no se invalidaban al cambiar de régimen. Ahora la clave es `(symbol, regime)`. Si `_persist_weights` se llama sin pasar `regime`, guarda en `__any__` (backward-compatible). Aplicar migration `018_indicator_weights_regime.sql` antes de deploy en producción o el `ON CONFLICT(symbol, regime)` fallará.
 

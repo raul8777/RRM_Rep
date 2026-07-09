@@ -1,11 +1,49 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 09 2026 | Sesión 75: Signal Pipeline Alignment — BUG-2/5/6 + GAP-A/B/C/D — 382/382 tests pass.
+> Última actualización: jul 09 2026 | Sesión 75b: Portfolio Concentration + Category Limit Hot-Config Governance — 384/384 tests pass.
 
 ---
 
-## 🗺️ Estado del Sistema — jul 09 2026 (post-s75)
+## 🗺️ Estado del Sistema — jul 09 2026 (post-s75b)
+
+### ✅ Sesión 75b — Portfolio Concentration + Category Limit Hot-Config Governance — jul 09 2026
+
+**Objetivo:** Desbloquear capital inactivo ($4,000 de $5,000 sin invertir). Root cause: `category_max_positions_enabled=True` bloqueaba nuevas señales con MIDCAP_ALT 2/2 lleno. 5 cambios en 2 archivos + bug fix persistencia. 384/384 tests.
+
+#### S75b-1 — `category_max_positions_enabled` gobernable por hot-config
+- **Raíz:** El gate R4 (`_check_category_limit`) no era gobernable por DB — no estaba en `_scalar_map` ni en `_KELLY_EDITABLE_FIELDS`. Al tener 2/2 posiciones MIDCAP_ALT, toda señal nueva se rechazaba sin posibilidad de override en caliente.
+- **Fix `run_trades.py`:** Añadido `'category_max_positions_enabled': 'category_max_positions_enabled'` al `_scalar_map` (comentado `# s75b`).
+- **Fix `app.py`:** Añadido `"category_max_positions_enabled"` a `_KELLY_EDITABLE_FIELDS`.
+
+#### S75b-2 — Drift-check no reporta false positives para campos DB-governed
+- **Raíz:** `_check_config_drift._EXCLUDED` y `/config/verify._exclude` no incluían varios campos gobernados por `kelly_config_override` ni harmony, generando false positives en tests de alineación.
+- **Fix `app.py`:** Añadidos a `_EXCLUDED` en `_check_config_drift`: `category_max_positions_enabled`, `entry_quality_vol_spike_min_range_scalp`, `range_scalp_max_rsi`, `range_scalp_max_bb_position`, `sso_target_contribution_pct_range_scalp`.
+- **Fix `app.py`:** `/config/verify._exclude` alineado completamente con `_check_config_drift._EXCLUDED` — incluye todos los campos harmony+DB. Resuelve test F4/F5 que fallaban contra runtime productivo.
+
+#### S75b-3 — Bug fix: `/config/apply` reemplazaba `kelly_config_override` en lugar de mergear
+- **Raíz:** `/config/apply` construía `_persist_obj` solo con los campos nuevos y los escribía directamente — sobrescribiendo toda la fila. Cualquier llamada posterior a `/config/apply` (incluso por tests) borraba los valores seteados por `PATCH /config/kelly`.
+- **Fix `app.py`:** Antes de escribir, lee el override existente de DB, hace merge (`_existing_apply_ov.update(_persist_obj)`), escribe el resultado combinado. Mismo patrón que `PATCH /config/kelly`.
+
+**Archivos modificados (S75b)**
+- `run_trades.py` — `category_max_positions_enabled` en `_scalar_map`
+- `app.py` — `_KELLY_EDITABLE_FIELDS`, `_EXCLUDED` drift-check, `/config/verify` _exclude, `/config/apply` merge fix
+
+**Hot-config activo en producción (persistente en DB, sobrevive restart):**
+```
+category_max_positions_enabled: False   (era True — desbloqueado)
+max_positions_range_scalp: 6            (era 4)
+max_positions_spot_bull: 8              (era 5)
+kelly_dynamic_base_pct: 0.22            (era 0.18)
+kelly_max_usdt: 1200.0                  (era 1000.0)
+kelly_conviction_max_pct: 0.22          (era 0.15)
+```
+
+**Rollback:** `PATCH /config/kelly` con `category_max_positions_enabled: true`, `max_positions_range_scalp: 4`, `max_positions_spot_bull: 5`, `kelly_dynamic_base_pct: 0.18`, `kelly_max_usdt: 1000.0`, `kelly_conviction_max_pct: 0.15`.
+
+**Estado S75b:** 384/384 tests pass. Hot-config activo y persistente.
+
+---
 
 ### ✅ Sesión 75 — Signal Pipeline Alignment & Profit-Ranked Scoring — jul 09 2026
 

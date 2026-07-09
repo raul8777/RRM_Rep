@@ -744,6 +744,8 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'min_hold_for_prediction_exit_futures_short': 'min_hold_for_prediction_exit_futures_short',
             # s73 C2: SSO-4 target contribution per regime
             'sso_target_contribution_pct_range_scalp':    'sso_target_contribution_pct_range_scalp',
+            # s75: category limit hot-config governance
+            'category_max_positions_enabled': 'category_max_positions_enabled',
         }
 
         _applied = {}
