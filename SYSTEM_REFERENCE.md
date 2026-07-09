@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 08 2026 | Sesión 74: Rediseño de acoplamiento Portafolio↔Sizing (modo/perfil) — implementación inicial con gobernanza DB, trazabilidad y restart-safe.
+> Última actualización: jul 09 2026 | Sesión 74: Rediseño de acoplamiento Portafolio↔Sizing (modo/perfil) — implementación inicial con gobernanza DB, trazabilidad y restart-safe.
 
 ---
 
@@ -46,6 +46,11 @@
 - `pytest tests/test_system_health.py -k "KellySizing and concentration" -q` → **2 passed**.
 - `pytest tests/test_config_governance.py -q` → **5 passed, 2 skipped**.
 - `Dev/focused_validation_runner.py` → **overall PASS** (`Dev/validation_summary.json`).
+
+#### S74-6 — Ajuste de agresividad: headroom de slots
+- **Cambio:** `_compute_portfolio_concentration_multiplier()` ahora premia explícitamente slots libres (`headroom`) además de la presión de ocupación.
+- **Impacto esperado:** menos slots abiertos → tickets más altos de forma más directa, sin romper caps duros ni precedencia de salidas.
+- **Validación focal:** `pytest tests/test_system_health.py -k "KellySizing and concentration" -q` → **3 passed**.
 
 **Archivos modificados (S74)**
 - `run_trades.py` — helper de concentración, integración SPOT/FUTURES, trazabilidad en `kelly_sizing_log`, snapshot observabilidad

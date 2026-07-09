@@ -984,8 +984,12 @@ def _compute_portfolio_concentration_multiplier(
 
     _capacity_ratio = _baseline_slots / float(_eff_slots)
     _slot_pressure = min(2.0, _open_slots / float(_eff_slots))
+    # Reward unused capacity directly so fewer open positions can receive a larger ticket.
+    # Headroom is deliberately a stronger signal than pressure because the goal is faster capital deployment.
+    _headroom = max(0.0, 1.0 - _slot_pressure)
+    _underuse_mult = 1.0 + _headroom * _pressure_boost
     _pressure_mult = 1.0 + max(0.0, _slot_pressure - _pressure_start) * _pressure_boost
-    _raw_mult = (_capacity_ratio ** _alpha) * _pressure_mult
+    _raw_mult = (_capacity_ratio ** _alpha) * _underuse_mult * _pressure_mult
     _mult = _clamp_value(_raw_mult, _min_mult, _max_mult)
 
     _diag.update({
@@ -993,6 +997,8 @@ def _compute_portfolio_concentration_multiplier(
         'baseline_slots': _baseline_slots,
         'capacity_ratio': round(_capacity_ratio, 6),
         'slot_pressure': round(_slot_pressure, 6),
+        'headroom': round(_headroom, 6),
+        'underuse_mult': round(_underuse_mult, 6),
         'pressure_mult': round(_pressure_mult, 6),
         'alpha': round(_alpha, 6),
         'min_mult': round(_min_mult, 6),

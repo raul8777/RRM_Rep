@@ -693,6 +693,26 @@ class TestCat5_KellySizing:
         assert diag['enabled'] is True
         assert 0.80 <= mult <= 1.20
 
+    def test_concentration_multiplier_rewards_unused_slots(self):
+        """Multiplier should be higher when the regime has more unused slot capacity."""
+        from run_trades import _compute_portfolio_concentration_multiplier
+        s = make_settings(
+            portfolio_concentration_enabled=True,
+            portfolio_concentration_alpha=0.9,
+            portfolio_concentration_min_mult=0.75,
+            portfolio_concentration_max_mult=1.60,
+            portfolio_concentration_pressure_start=0.50,
+            portfolio_concentration_pressure_boost=0.40,
+            portfolio_concentration_baseline_spot_bull=5,
+        )
+        crowded, _ = _compute_portfolio_concentration_multiplier(
+            s, regime='SPOT_BULL', trade_type='spot', open_slots=5, effective_slots=5
+        )
+        open_room, _ = _compute_portfolio_concentration_multiplier(
+            s, regime='SPOT_BULL', trade_type='spot', open_slots=0, effective_slots=5
+        )
+        assert open_room > crowded
+
     def test_kelly_applies_concentration_multiplier(self):
         """Higher concentration multiplier should increase Kelly allocation before caps."""
         from run_trades import _kelly_position_size
