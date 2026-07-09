@@ -1,11 +1,61 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 08 2026 | Sesión 73: Auditoría ciclo completo — 7 bugs corregidos (regresiones s72 + SSO timing + profile selector + trazabilidad). 369 tests pasan.
+> Última actualización: jul 08 2026 | Sesión 74: Rediseño de acoplamiento Portafolio↔Sizing (modo/perfil) — implementación inicial con gobernanza DB, trazabilidad y restart-safe.
 
 ---
 
-## 🗺️ Estado del Sistema — jul 08 2026 (post-s73)
+## 🗺️ Estado del Sistema — jul 08 2026 (post-s74)
+
+### ✅ Sesión 74 — Portafolio-Sizing Coupling v1 (inicio implementación) — jul 08 2026
+
+**Objetivo:** Alinear explícitamente el manejo de portafolio con la estrategia por Modo y Perfil para que la capacidad efectiva de slots (menos/más posiciones) se refleje en sizing por posición, manteniendo caps de riesgo, comisiones netas y trazabilidad completa.
+
+#### S74-1 — Arquitectura: multiplicador de concentración gobernable por DB
+- **Cambio:** nuevo helper `_compute_portfolio_concentration_multiplier()` en `run_trades.py`.
+- **Modelo:** `mult = clamp((baseline_slots/effective_slots)^alpha * pressure_mult, min_mult, max_mult)`.
+- **Datos de entrada:** modo activo, trade_type, slots abiertos, slots efectivos por régimen.
+- **Guardrails:** clamping estricto + fallback seguro a `1.0` cuando feature está desactivado.
+
+#### S74-2 — Integración limpia en sizing SPOT y FUTURES
+- **SPOT:** aplicado antes de caps finales en `_kelly_position_size()` para `trade_allocation`.
+- **FUTURES_SHORT:** aplicado a `_f_usdt` usando `open_shorts/max_shorts`.
+- **FUTURES_LONG (SPOT_BULL oversold path):** aplicado a `_l_usdt` con slots efectivos del régimen.
+- **Regla de seguridad:** no altera precedencia de salidas (PredExit, SSO, PRS, UG, Hard SL/TP, BreakEven, Trailing).
+
+#### S74-3 — Gobernanza y persistencia restart-safe
+- **Nuevos campos en `config.py` y `_PARAM_DEFAULTS` (`config_helpers.py`):**
+  - `portfolio_concentration_enabled`
+  - `portfolio_concentration_alpha`
+  - `portfolio_concentration_min_mult`
+  - `portfolio_concentration_max_mult`
+  - `portfolio_concentration_pressure_start`
+  - `portfolio_concentration_pressure_boost`
+  - `portfolio_concentration_baseline_spot_bull`
+  - `portfolio_concentration_baseline_range_scalp`
+  - `portfolio_concentration_baseline_preservation`
+  - `portfolio_concentration_baseline_futures_short`
+- **DB-governable:** incluidos en `_scalar_map` (`run_trades.py`) y `_KELLY_EDITABLE_FIELDS` (`app.py`).
+- **Observabilidad:** parámetros del policy añadidos a `mode_profile_harmony_snapshot`.
+
+#### S74-4 — Trazabilidad BD
+- **Kelly log:** `_kelly_position_size()` ahora registra `concentration_multiplier` y diagnostico `portfolio_concentration` dentro de `multipliers` en `kelly_sizing_log`.
+- **Impacto:** cada decisión de sizing queda auditable por modo/perfil/capacidad/presión de slots.
+
+#### S74-5 — Validación y no-regresión
+- `pytest tests/test_system_health.py -k "KellySizing and concentration" -q` → **2 passed**.
+- `pytest tests/test_config_governance.py -q` → **5 passed, 2 skipped**.
+- `Dev/focused_validation_runner.py` → **overall PASS** (`Dev/validation_summary.json`).
+
+**Archivos modificados (S74)**
+- `run_trades.py` — helper de concentración, integración SPOT/FUTURES, trazabilidad en `kelly_sizing_log`, snapshot observabilidad
+- `config.py` — nuevos campos de policy de concentración
+- `config_helpers.py` — defaults canónicos de policy
+- `app.py` — whitelist `_KELLY_EDITABLE_FIELDS` para gobernanza runtime
+- `tests/test_system_health.py` — pruebas de clamp + efecto de concentración en Kelly
+- `SYSTEM_REFERENCE.md` — documentación de baseline y validación
+
+**Estado S74:** implementación aplicada y validada en suites focales + focused runner. Queda listo para ajuste fino de parámetros por modo/perfil en iteraciones de tuning.
 
 ### ✅ Sesión 73 — Auditoría Ciclo Completo: Todos los Modos + Sistemas de Salida — jul 08 2026
 

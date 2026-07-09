@@ -353,6 +353,18 @@ class Settings(BaseSettings):
     max_positions_range_scalp: int = Field(default=4)                   # s71 BUG-8: lateral allows 4 simultaneous setups  # concentrated: pocos setups en rango
     max_positions_preservation: int = Field(default=1)  # concentrated: capital preservado en bear
     max_positions_futures_short: int = Field(default=5)  # concentrated: 3-5 shorts simultáneos
+    # Portfolio concentration policy: explicitly couple slot capacity with per-position sizing.
+    # Objective: when a mode/profile runs fewer effective slots, increase ticket size in a controlled way.
+    portfolio_concentration_enabled: bool = Field(default=True)
+    portfolio_concentration_alpha: float = Field(default=0.90)
+    portfolio_concentration_min_mult: float = Field(default=0.75)
+    portfolio_concentration_max_mult: float = Field(default=1.35)
+    portfolio_concentration_pressure_start: float = Field(default=0.50)
+    portfolio_concentration_pressure_boost: float = Field(default=0.40)
+    portfolio_concentration_baseline_spot_bull: int = Field(default=5)
+    portfolio_concentration_baseline_range_scalp: int = Field(default=4)
+    portfolio_concentration_baseline_preservation: int = Field(default=1)
+    portfolio_concentration_baseline_futures_short: int = Field(default=5)
     # QUBO Portfolio Selection (combinatorial optimizer)
     qubo_enabled: bool = Field(default=True)
     qubo_lambda_corr: float = Field(default=1.0)       # penalty weight for pairwise correlation
@@ -509,6 +521,20 @@ class Settings(BaseSettings):
     prediction_exit_enabled: bool = Field(default=True)
     min_hold_for_prediction_exit: int = Field(default=90)  # minutos antes de evaluar cierre
     min_hold_for_prediction_exit_range_scalp: int = Field(default=20)  # s71 BUG-4: bounces 15-30min, no esperar 90min
+    min_hold_for_prediction_exit_futures_short: int = Field(default=30)  # s72 B1
+    # Wolf Hunter Peak Capture Engine (Profit PredExit in gains)
+    profit_predexit_enabled: bool = Field(default=True)
+    profit_predexit_capture_margin_A: float = Field(default=0.80)
+    profit_predexit_capture_margin_B: float = Field(default=1.00)
+    profit_predexit_capture_margin_C: float = Field(default=1.25)
+    profit_predexit_size_sensitivity: float = Field(default=1.5)
+    profit_predexit_conviction_sensitivity: float = Field(default=0.4)
+    profit_predexit_min_profit_pct: float = Field(default=0.005)
+    profit_predexit_absolute_min_usd: float = Field(default=1.50)
+    profit_predexit_horizon_minutes: int = Field(default=60)
+    profit_predexit_giveback_penalty_weight: float = Field(default=0.5)
+    peak_reconstruction_enabled: bool = Field(default=True)
+    peak_reconstruction_lookback_candles: int = Field(default=30)
     # C2: Segunda entrada permitida si predicciÃ³n nueva es fuertemente mejor
     allow_prediction_based_add: bool = Field(default=True)
     prediction_add_min_ev_ratio: float = Field(default=1.5)  # nueva pred >= 1.5x la existente
@@ -706,6 +732,11 @@ class Settings(BaseSettings):
 
 
 def _validate_settings(settings: Settings) -> None:
+    # Tests/import checks can boot the app without live secrets.
+    # Runtime remains strict unless explicitly opted out.
+    if os.environ.get("PYTEST_CURRENT_TEST") or str(os.environ.get("ALLOW_MISSING_SECRETS", "")).strip().lower() in {"1", "true", "yes"}:
+        return
+
     required_fields = {
         "BINANCE_API_KEY": settings.binance_api_key,
         "BINANCE_API_SECRET": settings.binance_api_secret,

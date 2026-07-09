@@ -18,6 +18,11 @@ from binance_commission import get_config as _get_commission_config
 import pnl_service
 import json
 import state_persistence
+from peak_capture_engine import (
+    PeakCaptureContext,
+    PeakCaptureEngine,
+    PeakCaptureDecision,
+)
 from config_helpers import get_param as _get_param
 from profit_realization_supervisor import (
     ProfitRealizationContext,
@@ -585,6 +590,16 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'max_positions_range_scalp': 'max_positions_range_scalp',
             'max_positions_preservation': 'max_positions_preservation',
             'max_positions_futures_short': 'max_positions_futures_short',
+            'portfolio_concentration_enabled': 'portfolio_concentration_enabled',
+            'portfolio_concentration_alpha': 'portfolio_concentration_alpha',
+            'portfolio_concentration_min_mult': 'portfolio_concentration_min_mult',
+            'portfolio_concentration_max_mult': 'portfolio_concentration_max_mult',
+            'portfolio_concentration_pressure_start': 'portfolio_concentration_pressure_start',
+            'portfolio_concentration_pressure_boost': 'portfolio_concentration_pressure_boost',
+            'portfolio_concentration_baseline_spot_bull': 'portfolio_concentration_baseline_spot_bull',
+            'portfolio_concentration_baseline_range_scalp': 'portfolio_concentration_baseline_range_scalp',
+            'portfolio_concentration_baseline_preservation': 'portfolio_concentration_baseline_preservation',
+            'portfolio_concentration_baseline_futures_short': 'portfolio_concentration_baseline_futures_short',
             'max_total_exposure_pct': 'max_total_exposure_pct',
             'max_total_exposure_spot_bull_fear': 'max_total_exposure_spot_bull_fear',
             'min_hold_minutes': 'min_hold_minutes',
@@ -593,6 +608,20 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'min_hold_minutes_spot_bull': 'min_hold_minutes_spot_bull',
             'min_hold_for_prediction_exit': 'min_hold_for_prediction_exit',
             'min_hold_for_prediction_exit_range_scalp': 'min_hold_for_prediction_exit_range_scalp',  # s71 BUG-4
+            'min_hold_for_prediction_exit_futures_short': 'min_hold_for_prediction_exit_futures_short',
+            # Wolf Hunter Peak Capture Engine
+            'profit_predexit_enabled': 'profit_predexit_enabled',
+            'profit_predexit_capture_margin_A': 'profit_predexit_capture_margin_A',
+            'profit_predexit_capture_margin_B': 'profit_predexit_capture_margin_B',
+            'profit_predexit_capture_margin_C': 'profit_predexit_capture_margin_C',
+            'profit_predexit_size_sensitivity': 'profit_predexit_size_sensitivity',
+            'profit_predexit_conviction_sensitivity': 'profit_predexit_conviction_sensitivity',
+            'profit_predexit_min_profit_pct': 'profit_predexit_min_profit_pct',
+            'profit_predexit_absolute_min_usd': 'profit_predexit_absolute_min_usd',
+            'profit_predexit_horizon_minutes': 'profit_predexit_horizon_minutes',
+            'profit_predexit_giveback_penalty_weight': 'profit_predexit_giveback_penalty_weight',
+            'peak_reconstruction_enabled': 'peak_reconstruction_enabled',
+            'peak_reconstruction_lookback_candles': 'peak_reconstruction_lookback_candles',
             'min_cycles_before_close_shorts': 'min_cycles_before_close_shorts',
             'futures_breakeven_activation_pct': 'futures_breakeven_activation_pct',
             'futures_trailing_activation_pct': 'futures_trailing_activation_pct',
@@ -909,6 +938,69 @@ def _get_kpi_context_multiplier(db_client) -> float:
 
 def _clamp_value(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
+
+
+def _compute_portfolio_concentration_multiplier(
+    settings,
+    regime: str,
+    trade_type: str,
+    open_slots: int,
+    effective_slots: int,
+) -> Tuple[float, Dict[str, Any]]:
+    """Return a bounded sizing multiplier from slot-capacity context.
+
+    The multiplier is intentionally conservative and only scales sizing before
+    existing Kelly caps; it never bypasses any hard risk limits.
+    """
+    _regime = str(regime or '').strip().upper()
+    _trade_type = str(trade_type or 'spot').strip().lower()
+    _eff_slots = max(1, int(effective_slots or 1))
+    _open_slots = max(0, int(open_slots or 0))
+
+    _diag: Dict[str, Any] = {
+        'enabled': False,
+        'trade_type': _trade_type,
+        'regime': _regime,
+        'open_slots': _open_slots,
+        'effective_slots': _eff_slots,
+    }
+
+    if not bool(_get_param(settings, 'portfolio_concentration_enabled')):
+        _diag['reason'] = 'feature_disabled'
+        return 1.0, _diag
+
+    _baseline_map = {
+        'SPOT_BULL': int(_get_param(settings, 'portfolio_concentration_baseline_spot_bull')),
+        'RANGE_SCALP': int(_get_param(settings, 'portfolio_concentration_baseline_range_scalp')),
+        'PRESERVATION': int(_get_param(settings, 'portfolio_concentration_baseline_preservation')),
+        'FUTURES_SHORT': int(_get_param(settings, 'portfolio_concentration_baseline_futures_short')),
+    }
+    _baseline_slots = max(1, int(_baseline_map.get(_regime, _eff_slots)))
+    _alpha = max(0.0, float(_get_param(settings, 'portfolio_concentration_alpha')))
+    _min_mult = max(0.10, float(_get_param(settings, 'portfolio_concentration_min_mult')))
+    _max_mult = max(_min_mult, float(_get_param(settings, 'portfolio_concentration_max_mult')))
+    _pressure_start = max(0.0, min(1.0, float(_get_param(settings, 'portfolio_concentration_pressure_start'))))
+    _pressure_boost = max(0.0, float(_get_param(settings, 'portfolio_concentration_pressure_boost')))
+
+    _capacity_ratio = _baseline_slots / float(_eff_slots)
+    _slot_pressure = min(2.0, _open_slots / float(_eff_slots))
+    _pressure_mult = 1.0 + max(0.0, _slot_pressure - _pressure_start) * _pressure_boost
+    _raw_mult = (_capacity_ratio ** _alpha) * _pressure_mult
+    _mult = _clamp_value(_raw_mult, _min_mult, _max_mult)
+
+    _diag.update({
+        'enabled': True,
+        'baseline_slots': _baseline_slots,
+        'capacity_ratio': round(_capacity_ratio, 6),
+        'slot_pressure': round(_slot_pressure, 6),
+        'pressure_mult': round(_pressure_mult, 6),
+        'alpha': round(_alpha, 6),
+        'min_mult': round(_min_mult, 6),
+        'max_mult': round(_max_mult, 6),
+        'raw_mult': round(_raw_mult, 6),
+        'multiplier': round(_mult, 6),
+    })
+    return _mult, _diag
 
 
 def _apply_mode_profile_harmony(settings, regime: str, profile: str, profile_params: Optional[Dict] = None) -> Dict[str, Any]:
@@ -2937,6 +3029,16 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
 
     _spot_sl_count_this_cycle = [0]  # B3: mutable counter for mass-SL detection
 
+    # Wolf Hunter Peak Capture Engine — evaluates whether to take profit or wait for larger peak
+    _peak_capture_engine = PeakCaptureEngine(settings)
+
+    # Portfolio total estimate for position-size-aware profit decisions
+    _spot_total = 0.0
+    try:
+        _spot_total = float(client.get_account_balance().get("USDT", 0))
+    except Exception:
+        pass
+
     _global_sl_pct = _get_param(settings, 'stop_loss_pct')
     _global_tp_pct = _get_param(settings, 'take_profit_pct')
     trailing_enabled = _get_param(settings, 'trailing_stop_enabled')
@@ -3001,6 +3103,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 pnl_pct_gross = (current_price - entry_price) / entry_price
                 _pnl_gross_usdt, pnl_usdt_net, pnl_pct_net = _spot_net_pnl(pos, current_price, settings)
                 pnl_pct = pnl_pct_gross  # keep gross for price triggers
+
                 close_reason = None
                 supervisor_decision = None
                 supervisor_close_pct = 1.0
@@ -3010,6 +3113,16 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 _ctx_signal_direction = None
                 _ctx_signal_timestamp = None
                 _ctx_pnl_velocity = None
+
+                # Wolf Hunter: reconstruct real peak PnL from metadata + 1m candles
+                _peak_pnl_pct_real = _peak_capture_engine.reconstruct_peak_pnl_pct(
+                    client, symbol, pos, current_price, metadata
+                )
+                if metadata.get('peak_pnl_pct_real') != _peak_pnl_pct_real:
+                    try:
+                        position_manager.update_position_metadata(pos.position_id, metadata)
+                    except Exception:
+                        pass
 
                 # Base signal/velocity context for supervisors (can be refined by SSO path below).
                 try:
@@ -3037,8 +3150,17 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         except Exception:
                             pass
 
-                # ── C1: Re-evaluación predictiva — predicción tiene prioridad absoluta ──
-                if getattr(settings, 'prediction_exit_enabled', True) and pnl_pct_net < 0:
+                # ── C1: Re-evaluación predictiva (loss branch + Wolf Hunter profit branch) ──
+                _peak_capture_advisory = None
+                _pc_fng_value = 50.0
+                try:
+                    if news_client:
+                        _pc_fng_data = news_client.get_fear_greed()
+                        _pc_fng_value = float(_pc_fng_data.get('value', 50)) if isinstance(_pc_fng_data, dict) else 50.0
+                except Exception:
+                    pass
+
+                if getattr(settings, 'prediction_exit_enabled', True):
                     try:
                         _min_hold_pred = int(getattr(settings, 'min_hold_for_prediction_exit', 90))
                         # s71 BUG-4 / s72 B1: per-regime override — each mode has its own hold floor
@@ -3068,31 +3190,123 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 _trend_exit = 'FLAT'
                                 if _ind_exit:
                                     _trend_exit = str(_ind_exit.get('trend_4h', 'FLAT'))
-                                # R2: FLAT allowed when EV is extreme (3x threshold) — catches stagnant bear positions
-                                # e.g. NARRATIVE min_pnl=-1.0 → FLAT triggers only if EV < -3.0
-                                _flat_extreme = (_trend_exit == 'FLAT'
-                                                 and _min_pnl_cat < 0
-                                                 and _ev < _min_pnl_cat * 3.0)
-                                _is_deteriorated = (_ev < _min_pnl_cat and _prob < _min_prob_cat
-                                                    and (_trend_exit == 'DOWN' or _flat_extreme))
-                                _meta_upd = getattr(pos, 'metadata', {}) or {}
-                                _meta_upd['last_pred_pnl'] = round(_ev, 4)
-                                _meta_upd['last_pred_prob'] = round(_prob, 4)
-                                _meta_upd['last_pred_time'] = datetime.now(timezone.utc).isoformat()
-                                _meta_upd['reevaluation_count'] = int(_meta_upd.get('reevaluation_count', 0)) + 1
-                                if _is_deteriorated:
-                                    _meta_upd['prediction_exit_triggered'] = True
+
+                                # Persist prediction snapshot in metadata
+                                metadata['last_pred_pnl'] = round(_ev, 4)
+                                metadata['last_pred_prob'] = round(_prob, 4)
+                                metadata['last_pred_time'] = datetime.now(timezone.utc).isoformat()
+                                metadata['reevaluation_count'] = int(metadata.get('reevaluation_count', 0)) + 1
+
+                                if pnl_pct_net < 0:
+                                    # R2: FLAT allowed when EV is extreme (3x threshold) — catches stagnant bear positions
+                                    _flat_extreme = (_trend_exit == 'FLAT'
+                                                     and _min_pnl_cat < 0
+                                                     and _ev < _min_pnl_cat * 3.0)
+                                    _is_deteriorated = (_ev < _min_pnl_cat and _prob < _min_prob_cat
+                                                        and (_trend_exit == 'DOWN' or _flat_extreme))
+                                    if _is_deteriorated:
+                                        metadata['prediction_exit_triggered'] = True
+                                    if _is_deteriorated:
+                                        print(f"[PredExit] {symbol}: EV={_ev:.2f} < min={_min_pnl_cat:.2f}, prob={_prob:.2f} < {_min_prob_cat:.2f}, trend={_trend_exit}, pnl_net={pnl_pct_net*100:.2f}% → CLOSING")
+                                        ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
+                                                     f"[PredExit] {symbol} prediction deteriorated: EV={_ev:.2f} trend={_trend_exit} pnl_net={pnl_pct_net*100:.2f}%")
+                                        close_reason = f"prediction_exit_deteriorated (EV={_ev:.2f}, prob={_prob:.2f}, trend={_trend_exit})"
+                                    else:
+                                        print(f"[PredEval] {symbol}: EV={_ev:.2f} prob={_prob:.2f} trend={_trend_exit} pnl_net={pnl_pct_net*100:.2f}% → holding")
+                                elif pnl_pct_net > 0 and getattr(settings, 'profit_predexit_enabled', True):
+                                    # Wolf Hunter: decide whether to take profit or wait for larger peak
+                                    _pc_indicators = _ind_exit or {}
+                                    _pc_signal_strength = _ctx_signal_strength or 0.0
+                                    _pc_signal_direction = _ctx_signal_direction or 'HOLD'
+
+                                    # Inline momentum exhaustion for context
+                                    _pc_momentum_exhausted = False
+                                    _pc_rsi_raw = _pc_indicators.get('rsi')
+                                    _pc_rsi = None
+                                    if isinstance(_pc_rsi_raw, dict):
+                                        _pc_rsi = _pc_rsi_raw.get('value')
+                                    elif _pc_rsi_raw is not None:
+                                        _pc_rsi = _pc_rsi_raw
+                                    _pc_vol_spike = _pc_indicators.get('vol_spike') or _pc_indicators.get('volume_ratio') or 1.0
+                                    if _pc_rsi is not None:
+                                        _pc_rsi = float(_pc_rsi)
+                                        if _pc_signal_direction == 'BUY' and _pc_rsi >= 70:
+                                            _pc_momentum_exhausted = True
+                                        elif _pc_signal_direction == 'SELL' and _pc_rsi <= 30:
+                                            _pc_momentum_exhausted = True
+
+                                    # Trend reversal detection
+                                    _pc_trend_reversal = (
+                                        _pc_signal_direction == 'BUY' and _trend_exit == 'DOWN'
+                                    ) or (
+                                        _pc_signal_direction == 'SELL' and _trend_exit == 'UP'
+                                    )
+
+                                    _pc_portfolio_total = max(
+                                        _spot_total + _pos_size,
+                                        _pos_size
+                                    )
+                                    _pc_ctx = PeakCaptureContext(
+                                        symbol=symbol,
+                                        trade_type='spot',
+                                        side='BUY',
+                                        position_size_usdt=_pos_size,
+                                        portfolio_total_usdt=_pc_portfolio_total,
+                                        current_price=current_price,
+                                        entry_price=entry_price,
+                                        current_pnl_usdt=pnl_usdt_net,
+                                        current_pnl_pct=pnl_pct_net,
+                                        peak_pnl_pct=_peak_pnl_pct_real,
+                                        regime_mode=regime,
+                                        profile_label=str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                        signal_strength=_pc_signal_strength,
+                                        signal_direction=_pc_signal_direction,
+                                        pnl_velocity_1h=_ctx_pnl_velocity,
+                                        indicators=_pc_indicators,
+                                        fear_greed_value=_pc_fng_value,
+                                        metadata=metadata,
+                                        leverage=1.0,
+                                        prediction_1h=_pred_exit,
+                                        prediction_4h=None,
+                                        momentum_exhausted=_pc_momentum_exhausted,
+                                        trend_reversal=_pc_trend_reversal,
+                                        current_sl_price=float(pos.stop_loss) if pos.stop_loss else None,
+                                        current_tp_price=float(pos.take_profit) if pos.take_profit else None,
+                                    )
+                                    _peak_capture_advisory = _peak_capture_engine.evaluate(_pc_ctx)
+
+                                    # Audit every profit PredExit evaluation
+                                    try:
+                                        position_manager._audit(symbol, 'profit_predexit_decision', {
+                                            'side': 'BUY',
+                                            'should_close': bool(_peak_capture_advisory.should_close),
+                                            'reason': _peak_capture_advisory.reason,
+                                            'detail': _peak_capture_advisory.detail,
+                                            'close_pct': float(_peak_capture_advisory.close_pct or 0.0),
+                                            'current_pnl_usdt': round(pnl_usdt_net, 4),
+                                            'expected_future_pnl': round(_peak_capture_advisory.expected_future_pnl, 4),
+                                            'prob_higher_peak': round(_peak_capture_advisory.prob_higher_peak, 4),
+                                            'capture_margin': round(_peak_capture_advisory.capture_margin, 4),
+                                            'peak_pnl_pct_real': round(_peak_pnl_pct_real, 6),
+                                            'pnl_velocity_1h': float(_ctx_pnl_velocity or 0.0),
+                                            'fear_greed_value': float(_pc_fng_value),
+                                            'regime_mode': regime,
+                                            'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                            'metrics': _peak_capture_advisory.metrics,
+                                        })
+                                    except Exception:
+                                        pass
+
+                                    if _peak_capture_advisory.should_close:
+                                        print(f"[PredExit/Profit] {symbol}: advisory={_peak_capture_advisory.reason} "
+                                              f"close_pct={_peak_capture_advisory.close_pct*100:.0f}% "
+                                              f"prob_higher={_peak_capture_advisory.prob_higher_peak:.2f}")
+                                        ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
+                                                     f"[PredExit/Profit] {symbol}: {_peak_capture_advisory.detail}")
                                 try:
-                                    position_manager.update_position_metadata(pos.position_id, _meta_upd)
+                                    position_manager.update_position_metadata(pos.position_id, metadata)
                                 except Exception:
                                     pass
-                                if _is_deteriorated:
-                                    print(f"[PredExit] {symbol}: EV={_ev:.2f} < min={_min_pnl_cat:.2f}, prob={_prob:.2f} < {_min_prob_cat:.2f}, trend={_trend_exit}, pnl_net={pnl_pct_net*100:.2f}% → CLOSING")
-                                    ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
-                                                 f"[PredExit] {symbol} prediction deteriorated: EV={_ev:.2f} trend={_trend_exit} pnl_net={pnl_pct_net*100:.2f}%")
-                                    close_reason = f"prediction_exit_deteriorated (EV={_ev:.2f}, prob={_prob:.2f}, trend={_trend_exit})"
-                                else:
-                                    print(f"[PredEval] {symbol}: EV={_ev:.2f} prob={_prob:.2f} trend={_trend_exit} pnl_net={pnl_pct_net*100:.2f}% → holding")
                     except Exception as _pe:
                         print(f"[PredEval] {symbol}: prediction check failed: {_pe}")
 
@@ -3229,9 +3443,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 _sso_s_opened = None
                         if _sso_s_opened and _sso_s_opened.tzinfo is None:
                             _sso_s_opened = _sso_s_opened.replace(tzinfo=timezone.utc)
-                        _sso_s_peak_pnl_pct = float(
-                            metadata.get('trailing_peak', entry_price) - entry_price
-                        ) / entry_price if entry_price > 0 else 0.0
+                        # Use Wolf Hunter reconstructed peak PnL for accurate SSO profit decay
+                        _sso_s_peak_pnl_pct = float(_peak_pnl_pct_real)
                         # SSO-7: extract stagnation state from metadata
                         _sso7_cycles = int(metadata.get('sso7_stagnation_cycles', 0) or 0)
                         _sso7_last_adv = metadata.get('sso7_last_advance_pnl')
@@ -3276,6 +3489,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             best_candidate_prob=_sso7_cand_prob,
                             best_candidate_vol_spike=_sso7_cand_vol,
                             best_candidate_pred_ev=_sso7_cand_ev,
+                            current_pred_ev=_sp_rescue_pred_ev,
                         )
                         _sso_s_action = _sso_spot.evaluate(_sso_s_pos)
                         # Full SSO visibility — always log evaluation result
@@ -3536,8 +3750,9 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 _prs_advisory = None
                 if pnl_pct_net > 0 and _spot_binance_validated:
                     _profit_started_at = _parse_profit_dt(metadata.get('profit_realization_started_at'))
-                    _trail_peak = float(metadata.get('trailing_peak', entry_price) or entry_price)
-                    _peak_gross_usdt, _peak_net_usdt, _peak_pnl_pct_net = _spot_net_pnl(pos, _trail_peak, settings)
+                    # Use Wolf Hunter reconstructed peak price
+                    _prs_peak_price = entry_price * (1.0 + _peak_pnl_pct_real)
+                    _peak_gross_usdt, _peak_net_usdt, _peak_pnl_pct_net = _spot_net_pnl(pos, _prs_peak_price, settings)
                     _tp_ext_count = int(metadata.get('tp_extensions_count', 0) or 0)
                     _supervisor_ctx = ProfitRealizationContext(
                         symbol=symbol,
@@ -3594,9 +3809,9 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         if current_price > 0 and _effective_sl_pre > 0:
                             _ug_distance_to_sl = ((current_price - _effective_sl_pre) / current_price) * 100.0
 
-                        # C0: net peak PnL for UG context
-                        _ug_trail_peak = float(metadata.get('trailing_peak', entry_price) or entry_price)
-                        _ug_peak_gross, _ug_peak_net, _ug_peak_pnl_pct_net = _spot_net_pnl(pos, _ug_trail_peak, settings)
+                        # C0: net peak PnL for UG context using Wolf Hunter reconstructed peak
+                        _ug_peak_price = entry_price * (1.0 + _peak_pnl_pct_real)
+                        _ug_peak_gross, _ug_peak_net, _ug_peak_pnl_pct_net = _spot_net_pnl(pos, _ug_peak_price, settings)
                         _ug_ctx = UnifiedGovernanceContext(
                             symbol=symbol,
                             trade_type='spot',
@@ -3629,6 +3844,12 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             prs_advisory_close_pct=float(_prs_advisory.close_pct if _prs_advisory and _prs_advisory.should_close else 0.0),
                             prs_advisory_reason=str(_prs_advisory.reason if _prs_advisory and _prs_advisory.should_close else ''),
                             prs_advisory_detail=str(_prs_advisory.detail if _prs_advisory and _prs_advisory.should_close else ''),
+                            peak_capture_should_close=bool(_peak_capture_advisory and _peak_capture_advisory.should_close),
+                            peak_capture_close_pct=float(_peak_capture_advisory.close_pct if _peak_capture_advisory and _peak_capture_advisory.should_close else 0.0),
+                            peak_capture_reason=str(_peak_capture_advisory.reason if _peak_capture_advisory and _peak_capture_advisory.should_close else ''),
+                            peak_capture_detail=str(_peak_capture_advisory.detail if _peak_capture_advisory and _peak_capture_advisory.should_close else ''),
+                            peak_capture_prob_higher_peak=float(_peak_capture_advisory.prob_higher_peak if _peak_capture_advisory else 0.0),
+                            peak_capture_expected_future_pnl=float(_peak_capture_advisory.expected_future_pnl if _peak_capture_advisory else 0.0),
                             fear_greed_value=_ug_fng_value,
                         )
                         _ug_decision = _evaluate_unified_governance(_ug_ctx, settings)
@@ -4217,6 +4438,7 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
                          base_override: float = None,
                          max_override: float = None,
                          cap_pct_override: float = None,
+                         concentration_multiplier: float = 1.0,
                          db_client=None, symbol: str = None,
                          trade_type: str = 'spot', regime: str = None,
                          action: str = 'open', extra_multipliers: dict = None) -> float:
@@ -4281,12 +4503,17 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
     if _context_mult != 1.0:
         sized *= _context_mult
 
+    _conc_mult = max(0.10, float(concentration_multiplier or 1.0))
+    if _conc_mult != 1.0:
+        sized *= _conc_mult
+
     # Hard cap: fraction of liquid USDT
     liquid_cap = usdt_liquid * cap_pct
     final = min(sized, liquid_cap, max_usdt)
 
     print(f"Kelly sizing: prob={prob:.2f}, strength={strength:.2f}, kelly_f={kelly_f:.3f} "
-          f"ctx={_context_mult:.3f} → tier={tier}, sized=${sized:.2f}, cap=${liquid_cap:.2f} → final=${final:.2f} USDT")
+          f"ctx={_context_mult:.3f}, conc={_conc_mult:.3f} → tier={tier}, "
+          f"sized=${sized:.2f}, cap=${liquid_cap:.2f} → final=${final:.2f} USDT")
 
     # C3: Persist kelly decision to kelly_sizing_log for 100% traceability
     if db_client and symbol:
@@ -4295,6 +4522,7 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
             _mults = dict(extra_multipliers or {})
             _mults.setdefault('context_multiplier', round(_context_mult, 4))
             _mults.setdefault('kpi_multiplier', round(_kpi_mult, 4))
+            _mults.setdefault('concentration_multiplier', round(_conc_mult, 4))
             _mults.setdefault('current_regime_mode', str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None)
             _mults.setdefault('current_regime_profile_label', str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None)
             db_client.execute_update(
@@ -4640,6 +4868,13 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         _f_kelly_liquid = usdt_liquid
                 else:
                     _f_kelly_liquid = usdt_liquid
+                _f_conc_mult, _f_conc_diag = _compute_portfolio_concentration_multiplier(
+                    settings,
+                    regime='FUTURES_SHORT',
+                    trade_type='futures',
+                    open_slots=_open_shorts,
+                    effective_slots=_max_shorts,
+                )
                 _f_usdt  = _kelly_position_size(
                     settings, strength=float(_f_sig_meta.get('strength', 0.5)),
                     prediction=_f_pred, usdt_liquid=_f_kelly_liquid,
@@ -4647,8 +4882,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     sl_pct=_f_sl / _f_lev / 100, tp_pct=_f_tp / _f_lev / 100,
                     base_override=_f_base_ov, max_override=_f_max_ov,
                     cap_pct_override=_f_cap_ov,
+                    concentration_multiplier=_f_conc_mult,
                     db_client=_db_client_ref, symbol=symbol,
-                    trade_type='futures', regime='FUTURES_SHORT')
+                    trade_type='futures', regime='FUTURES_SHORT',
+                    extra_multipliers={'portfolio_concentration': _f_conc_diag},
+                )
                 if _get_param(settings, 'kelly_conviction_enabled'):
                     _f_vs = float(_f_sig_meta.get('vol_spike', 0.0))
                     _f_conv3x = _get_param(settings, 'kelly_conviction_vol3x')
@@ -5089,13 +5327,30 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                             _l_kelly_liq = usdt_liquid
                     else:
                         _l_kelly_liq = usdt_liquid
+                    _l_open = len([
+                        _lp for _lp in _fc_sb._open_positions.values()
+                        if not _lp.closed and _lp.side == 'LONG'
+                    ])
+                    _l_eff_slots = _get_max_positions_for_regime(settings, _regime_mode)
+                    _l_conc_mult, _l_conc_diag = _compute_portfolio_concentration_multiplier(
+                        settings,
+                        regime=_regime_mode,
+                        trade_type='futures',
+                        open_slots=_l_open,
+                        effective_slots=_l_eff_slots,
+                    )
                     _l_usdt = _kelly_position_size(
                         settings, strength=float(signal_meta.get(symbol, {}).get('strength', 0.5)),
                         prediction=_l_pred_sb, usdt_liquid=_l_kelly_liq,
                         # Kelly reward/risk must reflect price movement (not leveraged margin), so divide by leverage
                         sl_pct=_l_sl / _l_lev / 100, tp_pct=_l_tp / _l_lev / 100,
                         base_override=_l_base_ov, max_override=_l_max_ov,
-                        cap_pct_override=_l_cap_ov)
+                        cap_pct_override=_l_cap_ov,
+                        concentration_multiplier=_l_conc_mult,
+                        db_client=_db_client_ref, symbol=symbol,
+                        trade_type='futures', regime=_regime_mode,
+                        extra_multipliers={'portfolio_concentration': _l_conc_diag},
+                    )
                     if _get_param(settings, 'kelly_conviction_enabled'):
                         _l_vs = float(signal_meta.get(symbol, {}).get('vol_spike', 0.0))
                         _l_conv3x = _get_param(settings, 'kelly_conviction_vol3x')
@@ -5375,10 +5630,26 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             else:
                 print(f"[Kelly] {symbol} ({_sym_cat_e}): SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}%")
 
+        _spot_open_slots = 0
+        if position_manager:
+            try:
+                _spot_open_slots = sum(len(v) for v in position_manager.get_all_positions().values())
+            except Exception:
+                _spot_open_slots = 0
+        _spot_conc_mult, _spot_conc_diag = _compute_portfolio_concentration_multiplier(
+            settings,
+            regime=_regime_mode,
+            trade_type='spot',
+            open_slots=_spot_open_slots,
+            effective_slots=_regime_max,
+        )
+
         trade_allocation = _kelly_position_size(
             settings, strength, prediction, usdt_liquid_now, sl_pct, tp_pct,
+            concentration_multiplier=_spot_conc_mult,
             db_client=_db_client_ref, symbol=symbol,
-            trade_type='spot', regime=_regime_mode
+            trade_type='spot', regime=_regime_mode,
+            extra_multipliers={'portfolio_concentration': _spot_conc_diag},
         )
         # C2: Kelly reducido para prediction_add (segunda entrada en mismo par)
         if position_manager and position_manager.get_positions_count(symbol) >= 1:
@@ -6507,6 +6778,12 @@ def execute_once(monitor_only: bool = False):
                             "max_positions_range_scalp": int(getattr(settings, 'max_positions_range_scalp', 10) or 10),
                             "max_positions_preservation": int(getattr(settings, 'max_positions_preservation', 5) or 5),
                             "max_positions_futures_short": int(getattr(settings, 'max_positions_futures_short', 12) or 12),
+                            "portfolio_concentration_enabled": bool(getattr(settings, 'portfolio_concentration_enabled', True)),
+                            "portfolio_concentration_alpha": float(getattr(settings, 'portfolio_concentration_alpha', 0.9) or 0.9),
+                            "portfolio_concentration_min_mult": float(getattr(settings, 'portfolio_concentration_min_mult', 0.75) or 0.75),
+                            "portfolio_concentration_max_mult": float(getattr(settings, 'portfolio_concentration_max_mult', 1.35) or 1.35),
+                            "portfolio_concentration_pressure_start": float(getattr(settings, 'portfolio_concentration_pressure_start', 0.5) or 0.5),
+                            "portfolio_concentration_pressure_boost": float(getattr(settings, 'portfolio_concentration_pressure_boost', 0.4) or 0.4),
                             "futures_max_new_per_cycle": int(getattr(settings, 'futures_max_new_per_cycle', 3) or 3),
                             "min_hold_minutes": int(getattr(settings, 'min_hold_minutes', 120) or 120),
                             "min_hold_minutes_spot_bull": int(getattr(settings, 'min_hold_minutes_spot_bull', 120) or 120),

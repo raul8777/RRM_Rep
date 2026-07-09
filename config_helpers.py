@@ -96,6 +96,17 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'max_positions_preservation': 1,
     'max_positions_futures_short': 5,
     'max_positions': 4,
+    # Portfolio concentration policy (slot capacity -> per-position ticket coupling)
+    'portfolio_concentration_enabled': True,
+    'portfolio_concentration_alpha': 0.90,
+    'portfolio_concentration_min_mult': 0.75,
+    'portfolio_concentration_max_mult': 1.35,
+    'portfolio_concentration_pressure_start': 0.50,
+    'portfolio_concentration_pressure_boost': 0.40,
+    'portfolio_concentration_baseline_spot_bull': 5,
+    'portfolio_concentration_baseline_range_scalp': 4,
+    'portfolio_concentration_baseline_preservation': 1,
+    'portfolio_concentration_baseline_futures_short': 5,
 
     # QUBO portfolio selection
     'qubo_enabled': True,
@@ -241,6 +252,20 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'prediction_add_min_strength': 0.70,
     'prediction_add_min_ev_ratio': 1.5,
     'prediction_add_kelly_factor': 0.6,
+
+    # Wolf Hunter Peak Capture Engine (Profit PredExit in gains)
+    'profit_predexit_enabled': True,
+    'profit_predexit_capture_margin_A': 0.80,
+    'profit_predexit_capture_margin_B': 1.00,
+    'profit_predexit_capture_margin_C': 1.25,
+    'profit_predexit_size_sensitivity': 1.5,
+    'profit_predexit_conviction_sensitivity': 0.4,
+    'profit_predexit_min_profit_pct': 0.005,
+    'profit_predexit_absolute_min_usd': 1.50,
+    'profit_predexit_horizon_minutes': 60,
+    'profit_predexit_giveback_penalty_weight': 0.5,
+    'peak_reconstruction_enabled': True,
+    'peak_reconstruction_lookback_candles': 30,
 
     # Narrative tokens
     'narrative_tokens': [],

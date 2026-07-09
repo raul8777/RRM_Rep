@@ -675,6 +675,47 @@ class TestCat5_KellySizing:
         cap = 1000.0 * getattr(make_settings(), 'kelly_max_pct_liquid')
         assert result <= cap
 
+    def test_concentration_multiplier_clamped(self):
+        """Portfolio concentration multiplier must remain inside configured bounds."""
+        from run_trades import _compute_portfolio_concentration_multiplier
+        s = make_settings(
+            portfolio_concentration_enabled=True,
+            portfolio_concentration_alpha=1.0,
+            portfolio_concentration_min_mult=0.80,
+            portfolio_concentration_max_mult=1.20,
+            portfolio_concentration_pressure_start=0.25,
+            portfolio_concentration_pressure_boost=2.0,
+            portfolio_concentration_baseline_spot_bull=5,
+        )
+        mult, diag = _compute_portfolio_concentration_multiplier(
+            s, regime='SPOT_BULL', trade_type='spot', open_slots=5, effective_slots=1
+        )
+        assert diag['enabled'] is True
+        assert 0.80 <= mult <= 1.20
+
+    def test_kelly_applies_concentration_multiplier(self):
+        """Higher concentration multiplier should increase Kelly allocation before caps."""
+        from run_trades import _kelly_position_size
+        s = make_settings(
+            kelly_max_pct_liquid=2.0,
+            kelly_max_pct_cap=0.50,
+            current_regime_profile_label='B',
+            current_regime_mode='SPOT_BULL',
+        )
+        base = _kelly_position_size(
+            s, 0.55, {"success_probability": 0.55}, 1000.0,
+            sl_pct=0.018, tp_pct=0.035,
+            concentration_multiplier=1.0,
+            trade_type='spot', regime='SPOT_BULL'
+        )
+        boosted = _kelly_position_size(
+            s, 0.55, {"success_probability": 0.55}, 1000.0,
+            sl_pct=0.018, tp_pct=0.035,
+            concentration_multiplier=1.20,
+            trade_type='spot', regime='SPOT_BULL'
+        )
+        assert boosted > base
+
 
 class TestCat5b_SmartTotalSelector:
     """SMART Total mode selector must persist decisions and respect hysteresis."""
@@ -884,7 +925,10 @@ class TestCat5e_PredExitNetGate:
 
         source = inspect.getsource(run_trades._check_sl_tp_positions)
 
-        assert "prediction_exit_enabled', True) and pnl_pct_net < 0" in source
+        # s74: PredExit now evaluates both loss and profit branches.
+        # The outer guard on pnl_pct_net has been removed; internal branches still gate on net PnL.
+        assert "if pnl_pct_net < 0:" in source
+        assert "elif pnl_pct_net > 0" in source
         assert "prediction_exit_enabled', True) and pnl_pct < 0" not in source
 
 
