@@ -502,6 +502,7 @@ class Settings(BaseSettings):
         "RLUSDUSDT",  # RLUSD â€” stablecoin sin upside
         "USD1USDT",   # USD1 â€” stablecoin sin upside
         "SPCXBUSDT",  # SPCXB â€” volumen artificial
+        "UUSDT",      # Upbit token â€” baja volatilidad, predicciones negativas, capital atascado
     ])
 
     # Win-rate thresholds per market_behavior category

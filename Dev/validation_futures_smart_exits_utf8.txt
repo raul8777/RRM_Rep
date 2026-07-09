@@ -1,9 +1,16 @@
 ============================= test session starts =============================
-platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0
+platform win32 -- Python 3.12.10, pytest-8.4.2, pluggy-1.6.0
 rootdir: S:\Tools\AI\crypto-agent
+plugins: anyio-4.14.1
 collected 98 items
 
 tests\test_futures_smart_exits.py ...................................... [ 38%]
 ............................................................             [100%]
 
-============================= 98 passed in 36.83s =============================
+============================== warnings summary ===============================
+tests/test_futures_smart_exits.py::TestBreakevenSL::test_breakeven_triggers_for_short_at_threshold
+  C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\site-packages\feedparser\encodings.py:29: DeprecationWarning: 'cgi' is deprecated and slated for removal in Python 3.13
+    import cgi
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 98 passed, 1 warning in 39.27s ========================

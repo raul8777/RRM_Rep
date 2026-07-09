@@ -1,0 +1,193 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: crypto-agent-db
+    environment:
+      POSTGRES_USER: ${DB_USER:-crypto_agent}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-crypto_agent_password}
+      POSTGRES_DB: ${DB_NAME:-crypto_agent}
+    # Port NOT exposed to host — only accessible within Docker network
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-crypto_agent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis (for future Message Bus extension)
+  redis:
+    image: redis:7-alpine
+    container_name: crypto-agent-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-changeme_redis_2024}
+    # Port NOT exposed to host — only accessible within Docker network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme_redis_2024}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Crypto Trading Agent
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crypto-agent-app
+    environment:
+      - BINANCE_API_KEY=${BINANCE_API_KEY}
+      - BINANCE_API_SECRET=${BINANCE_API_SECRET}
+      - BINANCE_USE_TESTNET=${BINANCE_USE_TESTNET:-true}
+      - DRY_RUN=${DRY_RUN:-true}
+      - ALLOW_REAL_TRADING=${ALLOW_REAL_TRADING:-false}
+      - AGENT_MODE=${AGENT_MODE:-suggest}
+      - DB_URL=postgresql://${DB_USER:-crypto_agent}:${DB_PASSWORD:-crypto_agent_password}@postgres:5432/${DB_NAME:-crypto_agent}
+      - DB_USER=${DB_USER:-crypto_agent}
+      - DB_PASSWORD=${DB_PASSWORD:-crypto_agent_password}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-crypto_agent}
+      - PORTFOLIO_ALLOCATION_PCT=${PORTFOLIO_ALLOCATION_PCT:-100.0}
+      - MIN_PAIR_CONFIDENCE_SCORE=${MIN_PAIR_CONFIDENCE_SCORE:-50.0}
+      - MAX_RISK_PER_PAIR_PCT=${MAX_RISK_PER_PAIR_PCT:-10.0}
+      - DIVERSIFICATION_FACTOR=${DIVERSIFICATION_FACTOR:-1.0}
+      - ENABLE_POSITION_CLOSURE=${ENABLE_POSITION_CLOSURE:-true}
+      - DASHBOARD_API_KEY=${DASHBOARD_API_KEY:-}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-changeme_redis_2024}
+      - CRYPTOCOMPARE_API_KEY=${CRYPTOCOMPARE_API_KEY:-}
+      - MAX_PER_TRADE_USDT=1500.0
+      - MAX_POSITIONS=4
+      - MAX_POSITIONS_PER_SYMBOL=1
+      - MAX_POSITIONS_SPOT_BULL=5
+      - MAX_POSITIONS_RANGE_SCALP=4
+      - OVERFLOW_MAX_EXTRA=1
+      # E1: Expansión activos 24→32 tokens (formato JSON array para pydantic)
+      - ANALYSIS_SYMBOLS=["DOGEUSDT","RENDERUSDT","BNBUSDT","SOLUSDT","TAOUSDT","FETUSDT","AVAXUSDT","ADAUSDT","XRPUSDT","DOTUSDT","SUIUSDT","PEPEUSDT","WIFUSDT","BTCUSDT","ETHUSDT","LINKUSDT","NEARUSDT","WLDUSDT","INJUSDT","AGIXUSDT","ONDOUSDT","JUPUSDT","OPUSDT","HBARUSDT","AAVEUSDT","ARBUSDT","MATICUSDT","ATOMUSDT","GRTUSDT","AIOZUSDT","SEIUSDT","SUSHIUSDT"]
+      # Futures SHORT — pares elegibles, SL/TP, límites (F2 expansión jun 18 2026: 8→19 pares)
+      - FUTURES_SYMBOLS=["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ADAUSDT","NEARUSDT","SUIUSDT","DOGEUSDT","AVAXUSDT","LINKUSDT","TAOUSDT","UNIUSDT","DOTUSDT","BCHUSDT","AAVEUSDT","FILUSDT","INJUSDT"]
+      - FUTURES_SL_PCT=2.0                # concentrated: mayor tolerancia al ruido
+      - FUTURES_TP_PCT=4.0                # concentrated: mejor R:R
+      - FUTURES_MAX_SHORTS=5
+      - FUTURES_MAX_LARGECAP_SHORTS=3
+      - FUTURES_LARGECAP_SYMBOLS=["BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","SOLUSDT"]
+      - FUTURES_OVERFLOW_MAX_EXTRA=1
+      - FUTURES_OVERFLOW_MIN_STRENGTH=0.65
+      - FUTURES_OVERFLOW_MIN_VOL_SPIKE=2.0
+      - FUTURES_OVERFLOW_MIN_DROP_24H=-3.0
+      - FUTURES_KELLY_CAP_PCT=0.30
+      - FUTURES_CAPITAL_BRIDGE_ENABLED=true
+      - FUTURES_CAPITAL_BRIDGE_MIN_TRANSFER=10.0
+      # Unified Portfolio Manager (jun 23 2026) — PortfolioManager as capital director
+      - USE_UNIFIED_PORTFOLIO_MANAGER=true
+      - FUTURES_KELLY_BASE_USDT=150.0        # concentrated: base igualada a SPOT
+      - FUTURES_KELLY_MAX_USDT=1500.0     # concentrated: cap por short elevado
+      - FUTURES_KELLY_MAX_PCT_LIQUID=0.85  # concentrated: consistente con SPOT
+      - FUTURES_LEVERAGE=10                 # K2: 2→10 — backtest run_0812 validated 10x
+      # K1: SPOT Kelly agresivo (era $40/$350/0.28 en .env)
+      - KELLY_BASE_USDT=150.0              # concentrated: base digna para $5,100
+      - KELLY_MAX_USDT=1500.0              # concentrated: cap por posición elevado
+      - KELLY_MAX_PCT_LIQUID=0.85        # concentrated: hasta 85% del líquido
+      # PB (Profit Boost) sesion 16 jun21 2026
+      - FUTURES_SL_COOLDOWN_HOURS=4.0
+      - MAX_POSITIONS_FUTURES_SHORT=5     # concentrated: 3-5 shorts simultáneos
+      - FUTURES_MAX_NEW_PER_CYCLE=2        # concentrated: menos entradas por ciclo
+      - FUTURES_MASS_SL_THRESHOLD=3
+      - FUTURES_MASS_SL_COOLDOWN_HOURS=4.0
+      - SPOT_MASS_SL_THRESHOLD=3            # B3: N SLs in one cycle triggers SPOT cooldown
+      - SPOT_MASS_SL_COOLDOWN_HOURS=2.0     # B3: duration of SPOT mass-SL cooldown
+      - SPOT_REQUIRE_CONFIRMED_REGIME=true  # A2: block SPOT entries when regime not confirmed
+      - BTC_CORRELATION_FILTER_ENABLED=true # A3: cap new entries when BTC drops >threshold
+      - BTC_CORRELATION_DROP_THRESHOLD_PCT=0.3  # A3: BTC 1h drop % that activates cap
+      - BTC_CORRELATION_MAX_NEW_ENTRIES=2   # A3: max new SPOT entries when BTC is dropping
+      - FUTURES_CONFIRM_RED_CANDLE=true
+      - FUTURES_NO_SHORT_BTC_3H_THRESHOLD=1.0
+      - FUTURES_USDT_PER_TRADE=150.0      # concentrated: floor de margen igualado a SPOT
+      # H-FIXES sesion 8 jun21 2026
+      - FUTURES_TRAILING_ACTIVATION_PCT=2.5
+      # SL-OPT sesion 19 jun22 2026 — wider SL + SSO adaptive exits
+      - STOP_LOSS_PCT=3.36                # jun29: 1.03→3.36 (backtest run_0677)
+      - TAKE_PROFIT_PCT=4.14              # jun29: 5.83→4.14 (backtest run_0677)
+      - ATR_SL_MIN_PCT=0.015              # canonical: alineado con config.py default
+      # SSO-1 Capital Velocity (jun 22 2026) — close decaying/slow positions faster
+      # RECALIBRADO jun 23 2026: gates USD escalados al nuevo tamaño de posición (~$330 margin post-transfer $1,390 SPOT->FUT)
+      # TODO FASE-FUTURA: hacer estos valores dinámicos en función de futures_wallet_total
+      #   lógica sugerida: SSO_DECAY_MIN_PROFIT_USD = futures_total * 0.002 (0.2% del wallet)
+      #   SSO_STAGNANT_MIN_PROFIT_FLOOR = futures_total * 0.003
+      #   SSO_SLOW_MIN_PROFIT_USD = futures_total * 0.001
+      #   SSO_TARGET_DAILY_USD = futures_total * 0.05  (5% del wallet como meta diaria)
+      #   Implementar en SmartScaleOut.__init__() leyendo get_unified_balance() si portfolio_manager disponible
+      - SSO_STAGNANT_VELOCITY_WINDOW_MIN=60
+      - SSO_DECAY_THRESHOLD_PCT=0.008
+      - SSO_DECAY_MIN_PROFIT_USD=2.0
+      - SSO_DECAY_MIN_HOURS=2.0
+      - SSO_SLOW_VELOCITY_THRESHOLD=0.001
+      - SSO_SLOW_MIN_PROFIT_USD=1.0
+      - SSO_SLOW_MIN_HOURS=2.0
+      - SSO_SLOW_TIER2_HOURS=5.0
+      - SSO_SLOW_TIER3_HOURS=7.0
+      - SSO_SLOW_TIER4_HOURS=9.0
+      - FUTURES_BREAKEVEN_ACTIVATION_PCT=1.0
+      - FUTURES_SMART_TP_EXTEND_SCORE_THRESHOLD=2
+      - FUTURES_PROTECT_PROFIT_USDT=-5.0
+      - MIN_CYCLES_BEFORE_CLOSE_SHORTS=5
+      - CYCLE_FUTURES_SHORT=4
+      - FUTURES_MIN_INJECT_STRENGTH=0.50
+      - MIN_SIGNAL_STRENGTH=0.60
+      - MIN_SUCCESS_PROBABILITY=0.60
+      - VOL_SPIKE_MIN=0.91
+      - FUTURES_MIN_PROB=0.499
+      - FUTURES_VOL_SPIKE_MIN=0.91
+      - SLIPPAGE_PCT=0.00052
+      - BINANCE_COMMISSION_RATE=0.001      # Binance-controlled spot taker default (live rate refreshed from API)
+      - FUTURES_COMMISSION_RATE=0.0004     # Binance-controlled futures taker default (live rate refreshed from API)
+      - BNB_SPOT_COMMISSION_RATE=0.0005
+      - BNB_FUTURES_COMMISSION_RATE=0.0002
+      - USE_BNB_FOR_COMMISSION=true
+      - AUTO_BNB_FOR_COMMISSION=true
+      - BNB_BUFFER_DAYS=7
+      - BNB_MIN_BALANCE_USD=5.0
+      - BNB_EXTRA_BUFFER_USD=10.0
+      - FUTURES_MAX_ESCALAMIENTOS=2
+      # PV (Profit Velocity) sesion 17 jun21 2026 — scale-out + momentum reversal
+      - FUTURES_SCALE_OUT_PCT=1.5
+      - FUTURES_SCALE_OUT_FRACTION=0.5
+      - FUTURES_MOMENTUM_REVERSAL_ENABLED=true
+      - FUTURES_MOMENTUM_REVERSAL_MIN_PEAK=2.0
+      - FUTURES_MOMENTUM_REVERSAL_DRAWBACK=0.8
+      # SSO (Smart Scale-Out) sesion 19 jun22 2026
+      - SSO_ENABLED=true
+      - SSO_STAGNANT_MIN_HOURS=2.5
+      - SSO_STAGNANT_MIN_PROFIT_FLOOR=3.0
+      - SSO_MOMENTUM_RSI_OVERBOUGHT=70
+      - SSO_MULTILEVEL_ENABLED=true
+      - SSO_MULTILEVEL_L1_ATR_MULT=1.0
+      - SSO_MULTILEVEL_L2_ATR_MULT=2.0
+      - SSO_MULTILEVEL_L3_ATR_MULT=3.5
+      - SSO_TARGET_DAILY_USD=40.0
+      - SSO_TARGET_CONTRIBUTION_PCT=0.15
+      # SSO-6: Bounce Rescue Mode — sesion jun26 2026
+      - FUTURES_BOUNCE_RESCUE_ENABLED=true
+      - FUTURES_BOUNCE_RESCUE_TARGET_PNL=-0.50
+      - SPOT_BOUNCE_RESCUE_ENABLED=true
+      # FIX-7: Throttle Binance algo verification (every N check_positions cycles)
+      - FUTURES_BINANCE_VERIFY_INTERVAL_CYCLES=3
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - ./frontend:/app/frontend
+    restart: unless-stopped
+    command: uvicorn app:app --host 0.0.0.0 --port 8000
+
+volumes:
+  postgres_data:

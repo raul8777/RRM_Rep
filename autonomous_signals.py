@@ -191,6 +191,30 @@ class AutonomousSignalGenerator:
             analysis = TechnicalIndicators.analyze_signal(closes, highs, lows, volumes)
             logger.info(f"Analysis result for {symbol}: {analysis['signal']} (strength: {analysis['strength']})")
 
+            # ── Load learned indicator weights (GAP-A) ────────────────────────
+            # Scale boosts/penalties proportionally to the empirical importance of
+            # each indicator for this symbol. Falls back to 1.0 (no change) on
+            # bootstrap or error — existing behavior is fully preserved.
+            _lw_scale = {
+                'rsi': 1.0, 'bb': 1.0, 'vol_spike': 1.0,
+                'trend_4h': 1.0, 'macd': 1.0, 'ema': 1.0,
+            }
+            try:
+                from learning_engine import get_learning_engine as _get_le
+                _regime_lw = getattr(self, '_regime_mode', None) or '__any__'
+                _lw = _get_le().get_weights(symbol, regime=_regime_lw)
+                _DEFAULT_LW = {
+                    'rsi': 0.12, 'bb': 0.08, 'vol_spike': 0.15,
+                    'trend_4h': 0.15, 'macd': 0.10, 'ema': 0.08,
+                }
+                _is_bootstrap = all(abs(_lw.get(k, v) - v) < 1e-6 for k, v in _DEFAULT_LW.items())
+                if not _is_bootstrap:
+                    for _k, _dv in _DEFAULT_LW.items():
+                        _lw_scale[_k] = _lw.get(_k, _dv) / _dv if _dv > 0 else 1.0
+                    logger.debug(f"[Weights] {symbol}/{_regime_lw}: {_lw_scale}")
+            except Exception:
+                pass
+
             # ── RSI divergence detection ──────────────────────────────────────
             try:
                 from technical_indicators import TechnicalIndicators as _TI
@@ -202,14 +226,16 @@ class AutonomousSignalGenerator:
                     _rsi_lo   = _rsi_vals[-1] < _rsi_vals[-5]  # RSI also moved lower
                     # Bearish divergence: price up but RSI down → weakening momentum
                     if _price_hi and not _rsi_hi and analysis['signal'] == 'BUY':
-                        analysis['strength'] = max(0.0, analysis['strength'] - 0.08)
+                        _rsi_pen = round(0.08 * _lw_scale.get('rsi', 1.0), 4)
+                        analysis['strength'] = max(0.0, analysis['strength'] - _rsi_pen)
                         analysis['reason'] += ' [-bearish RSI div]'
-                        logger.debug(f"Bearish RSI divergence {symbol}: price↑ RSI↓")
+                        logger.debug(f"Bearish RSI divergence {symbol}: price↑ RSI↓ (pen={_rsi_pen:.3f})")
                     # Bullish divergence: price down but RSI up → potential reversal
                     elif _price_lo and not _rsi_lo and analysis['signal'] == 'BUY':
-                        analysis['strength'] = min(1.0, analysis['strength'] + 0.05)
+                        _rsi_boost = round(0.05 * _lw_scale.get('rsi', 1.0), 4)
+                        analysis['strength'] = min(1.0, analysis['strength'] + _rsi_boost)
                         analysis['reason'] += ' [+bullish RSI div]'
-                        logger.debug(f"Bullish RSI divergence {symbol}: price↓ RSI↑")
+                        logger.debug(f"Bullish RSI divergence {symbol}: price↓ RSI↑ (boost={_rsi_boost:.3f})")
             except Exception:
                 pass
 
@@ -223,8 +249,9 @@ class AutonomousSignalGenerator:
                 _regime_ctx = getattr(self, '_regime_mode', None) or getattr(self, 'regime_mode', None)
                 _is_range_scalp = str(_regime_ctx or '').upper() == 'RANGE_SCALP'
                 if analysis['signal'] == 'BUY' and higher_trend == 'DOWN' and not _is_range_scalp:
-                    analysis['strength'] = max(0.0, analysis['strength'] * 0.5)
-                    analysis['reason'] += ' [4h trend DOWN — strength halved]'
+                    _4h_penalty = max(0.30, 1.0 - 0.50 * _lw_scale.get('trend_4h', 1.0))
+                    analysis['strength'] = max(0.0, analysis['strength'] * _4h_penalty)
+                    analysis['reason'] += f' [4h trend DOWN ×{_4h_penalty:.2f}]'
                     if analysis['strength'] < 0.3:
                         analysis['signal'] = 'HOLD'
                         analysis['reason'] += ' → downgraded to HOLD'
@@ -237,8 +264,9 @@ class AutonomousSignalGenerator:
             vol_spikes = TechnicalIndicators.volume_spike(volumes, period=20, threshold=1.5)
             volume_confirmed = bool(vol_spikes[-1]) if vol_spikes else False
             if volume_confirmed and analysis['signal'] == 'BUY':
-                analysis['strength'] = min(1.0, analysis['strength'] * 1.15)
-                analysis['reason'] += ' [+vol spike]'
+                _vs_boost = 1.0 + 0.15 * _lw_scale.get('vol_spike', 1.0)
+                analysis['strength'] = min(1.0, analysis['strength'] * _vs_boost)
+                analysis['reason'] += f' [+vol spike ×{_vs_boost:.2f}]'
 
             analysis['symbol']           = symbol
             analysis['interval']         = interval
@@ -307,9 +335,10 @@ class AutonomousSignalGenerator:
                             _vol_avg = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else None
                             _vol_spike_now = (volumes[-1] / _vol_avg) if _vol_avg and _vol_avg > 0 else 0
                             if _was_compressed and _vol_spike_now >= 1.5 and analysis['signal'] == 'BUY':
-                                analysis['strength'] = min(1.0, analysis['strength'] + 0.12)
-                                analysis['reason'] += f' [+BB_squeeze_breakout bw={_bw:.3f} vol={_vol_spike_now:.1f}x]'
-                                logger.info(f"BB Squeeze BREAKOUT {symbol}: bw={_bw:.3f}, vol={_vol_spike_now:.1f}x → +0.12 strength")
+                                _bb_sq_boost = round(0.12 * _lw_scale.get('bb', 1.0), 4)
+                                analysis['strength'] = min(1.0, analysis['strength'] + _bb_sq_boost)
+                                analysis['reason'] += f' [+BB_squeeze_breakout bw={_bw:.3f} vol={_vol_spike_now:.1f}x +{_bb_sq_boost:.3f}]'
+                                logger.info(f"BB Squeeze BREAKOUT {symbol}: bw={_bw:.3f}, vol={_vol_spike_now:.1f}x → +{_bb_sq_boost:.3f} strength")
             except Exception:
                 pass
 
@@ -338,11 +367,12 @@ class AutonomousSignalGenerator:
                     _last_vol_bo = volumes[-1] if volumes else 0
                     _vs_bo = (_last_vol_bo / _avg_vol_bo) if _avg_vol_bo and _avg_vol_bo > 0 else 0
                     if _cur_close > _max_12h and _vs_bo >= 2.0:
-                        analysis['strength'] = min(1.0, analysis['strength'] + 0.15)
-                        analysis['reason'] += f' [+breakout_12h max={_max_12h:.4f} vol={_vs_bo:.1f}x]'
+                        _bo_boost = round(0.15 * _lw_scale.get('vol_spike', 1.0), 4)
+                        analysis['strength'] = min(1.0, analysis['strength'] + _bo_boost)
+                        analysis['reason'] += f' [+breakout_12h max={_max_12h:.4f} vol={_vs_bo:.1f}x +{_bo_boost:.3f}]'
                         analysis['breakout_12h'] = True
                         analysis['vol_spike'] = round(_vs_bo, 2)
-                        logger.info(f"Breakout 12h DETECTED {symbol}: close={_cur_close:.4f} > max12h={_max_12h:.4f}, vol={_vs_bo:.1f}x → +0.15 strength")
+                        logger.info(f"Breakout 12h DETECTED {symbol}: close={_cur_close:.4f} > max12h={_max_12h:.4f}, vol={_vs_bo:.1f}x → +{_bo_boost:.3f} strength")
                     else:
                         analysis.setdefault('vol_spike', round(_vs_bo, 2))
                 except Exception:
@@ -454,25 +484,50 @@ class AutonomousSignalGenerator:
         signals.sort(key=signal_priority)
         return signals
 
-    def get_top_buy_signals(self, interval: str = '1h', min_strength: float = 0.6,
+    def get_top_buy_signals(self, interval: str = '1h', min_strength: float = None,
                             limit: int = 5, use_multi_timeframe: bool = True,
-                            news_client=None, regime_mode: str = 'SPOT_BULL') -> List[Dict]:
+                            news_client=None, regime_mode: str = 'SPOT_BULL',
+                            settings=None, profile_label: str = None) -> List[Dict]:
         """
         Get top BUY signals, filtered by min_strength.
 
         Args:
             interval: Primary kline interval
-            min_strength: Minimum signal strength to include
+            min_strength: Minimum signal strength to include. When None, reads from
+                settings.min_signal_strength (via get_param) or falls back to 0.6.
             limit: Maximum number of signals to return
             use_multi_timeframe: Apply 4h trend filter (recommended)
             regime_mode: Active market regime — adjusts ranking weights:
                 FUTURES_SHORT → rank by RSI (high = overbought = better short) + vol spike
                 RANGE_SCALP   → rank by bb_lower_touch + RSI low
                 default       → rank by strength (original behavior)
+            settings: Optional settings object — used to read min_signal_strength.
+            profile_label: Active profile A/B/C — adjusts effective min_strength:
+                A (aggressive) → -0.05 (more permissive)
+                C (defensive)  → +0.05 (more selective)
+                B or None      → no adjustment
 
         Returns:
             List of top BUY signal dicts
         """
+        # BUG-5: resolve min_strength from settings instead of using stale hardcode
+        if min_strength is None:
+            if settings is not None:
+                try:
+                    from config_helpers import get_param as _gp
+                    min_strength = float(_gp(settings, 'min_signal_strength'))
+                except Exception:
+                    min_strength = 0.6
+            else:
+                min_strength = 0.6
+
+        # GAP-D: profile-aware threshold adjustment
+        _profile = str(profile_label or '').upper().strip()
+        if _profile == 'A':
+            min_strength = max(0.40, min_strength - 0.05)
+        elif _profile == 'C':
+            min_strength = min(0.90, min_strength + 0.05)
+
         all_signals = self.generate_signals(interval, use_multi_timeframe=use_multi_timeframe, news_client=news_client)
         logger.info(f"Total signals generated: {len(all_signals)}")
         logger.info(

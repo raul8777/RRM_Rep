@@ -34,28 +34,31 @@ class PnLPredictor:
 
     def __init__(self):
         """Initialize PnL Predictor."""
-        self._weight_cache: Dict[str, Dict] = {}  # symbol -> weights
+        self._weight_cache: Dict[str, Dict] = {}  # (symbol, regime) -> weights
         logger.info("PnL Predictor initialized")
 
-    def load_learned_weights(self, symbol: str) -> Dict:
+    def load_learned_weights(self, symbol: str, regime: str = '__any__') -> Dict:
         """
-        Load indicator weights from LearningEngine for *symbol*.
-        Falls back to __global__ then defaults.  Results are in-process cached.
+        Load indicator weights from LearningEngine for *symbol* + *regime*.
+        Falls back to __global__ then defaults.  Results are in-process cached
+        using a (symbol, regime) key so weights are invalidated on regime change.
         """
-        if symbol in self._weight_cache:
-            return self._weight_cache[symbol]
+        _cache_key = (symbol, regime or '__any__')
+        if _cache_key in self._weight_cache:
+            return self._weight_cache[_cache_key]
         try:
             from learning_engine import get_learning_engine
-            weights = get_learning_engine().get_weights(symbol)
+            weights = get_learning_engine().get_weights(symbol, regime=regime)
         except Exception:
             weights = _DEFAULT_WEIGHTS.copy()
-        self._weight_cache[symbol] = weights
+        self._weight_cache[_cache_key] = weights
         return weights
 
-    def invalidate_cache(self, symbol: str = None) -> None:
+    def invalidate_cache(self, symbol: str = None, regime: str = None) -> None:
         """Clear weight cache so next predict_pnl loads fresh weights."""
         if symbol:
-            self._weight_cache.pop(symbol, None)
+            _key = (symbol, regime or '__any__')
+            self._weight_cache.pop(_key, None)
         else:
             self._weight_cache.clear()
     
@@ -85,7 +88,8 @@ class PnLPredictor:
             Dictionary with prediction results
         """
         try:
-            weights = self.load_learned_weights(symbol)
+            _regime_ctx = (settings and getattr(settings, 'current_regime_mode', '__any__')) or '__any__'
+            weights = self.load_learned_weights(symbol, regime=_regime_ctx)
             # Detect bootstrap: if all weights match defaults, no learning has happened
             _default_items = {k: v for k, v in _DEFAULT_WEIGHTS.items()}
             _weight_items  = {k: weights.get(k) for k in _DEFAULT_WEIGHTS}

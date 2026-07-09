@@ -1,7 +1,55 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 09 2026 | Sesión 74: Rediseño de acoplamiento Portafolio↔Sizing (modo/perfil) — implementación inicial con gobernanza DB, trazabilidad y restart-safe.
+> Última actualización: jul 09 2026 | Sesión 75: Signal Pipeline Alignment — BUG-2/5/6 + GAP-A/B/C/D — 382/382 tests pass.
+
+---
+
+## 🗺️ Estado del Sistema — jul 09 2026 (post-s75)
+
+### ✅ Sesión 75 — Signal Pipeline Alignment & Profit-Ranked Scoring — jul 09 2026
+
+**Objetivo:** Alinear completamente el pipeline de señales con el régimen y perfil activos. Integrar pesos aprendidos del `learning_engine` en el scoring de señales, ajustar dinámicamente umbrales por perfil, e introducir un `profit_score` compuesto pre-QUBO. 8 cambios en 5 archivos + 1 migration SQL. 382/382 tests.
+
+#### S75-1 — BUG-2: `run_with_synthetic` contaminaba reales con sintéticos de DB (`learning_engine.py`)
+- **Raíz:** `_load_closed_positions()` sin filtro `is_synthetic` al llamarse desde `run_with_synthetic` — los sintéticos ya persistidos en DB se sumaban de nuevo al dataset real.
+- **Fix:** Nuevo param `exclude_synthetic=True`. SQL: `AND (is_synthetic = FALSE OR is_synthetic IS NULL)`. También removido import zombie `from position_manager import PositionManager` en `run()`.
+
+#### S75-2 — BUG-5: `min_strength=0.6` hardcoded en `get_top_buy_signals` (`autonomous_signals.py`)
+- **Raíz:** El umbral de señal mínimo estaba hardcodeado — no respetaba `settings.min_signal_strength` ni hot-config.
+- **Fix:** Firma cambia a `min_strength: float = None`. Cuando `None`, resuelve via `get_param(settings, 'min_signal_strength')`, fallback `0.6`. El caller `run_trades` ya no pasa `min_strength` explícito.
+
+#### S75-3 — BUG-6: Pesos de `indicator_weights` no invalidados al cambiar régimen (`learning_engine.py` + `pnl_predictor.py`)
+- **Raíz:** La tabla `indicator_weights` usaba `(symbol)` como clave única — pesos aprendidos en SPOT_BULL se servían en RANGE_SCALP hasta expirar por TTL (7 días).
+- **Fix:**
+  - `learning_engine.get_weights(symbol, regime='__any__')` — cache key `(symbol, regime)`.
+  - `_load_weights_from_db(symbol, regime)` — query: `WHERE symbol=%s AND (regime=%s OR regime='__any__') ORDER BY CASE WHEN regime=%s THEN 0 ELSE 1 END`.
+  - `_persist_weights(adj, accuracy, regime)` — incluye columna `regime` en INSERT/ON CONFLICT.
+  - `pnl_predictor.load_learned_weights(symbol, regime)` — cache key `(symbol, regime)`. `predict_pnl` extrae `current_regime_mode` de `settings`.
+  - Migration: `migrations/018_indicator_weights_regime.sql` — `ADD COLUMN regime VARCHAR(32) DEFAULT '__any__'` + `UNIQUE INDEX idx_iw_symbol_regime(symbol, regime)`.
+
+#### S75-4 — GAP-A: `autonomous_signals` ignoraba pesos aprendidos del `learning_engine` (`autonomous_signals.py`)
+- **Raíz:** `analyze_symbol` aplicaba boosts/penalties con magnitudes fijas, sin escalar por la importancia empírica de cada indicador.
+- **Fix:** Tras `TechnicalIndicators.analyze_signal()`, carga `_lw_scale = {rsi, bb, vol_spike, trend_4h, macd, ema}` desde `get_learning_engine().get_weights(symbol, regime)`. Bootstrap detection: si todos los pesos son defaults → `_lw_scale` todo `1.0` (no-op). Boosts escalados: RSI div (±0.08/0.05 × lw_rsi), 4h trend penalty (×(1−0.5×lw_trend_4h), floor 0.30), vol spike (1+0.15×lw_vs), BB squeeze (0.12×lw_bb), breakout_12h (0.15×lw_vs).
+
+#### S75-5 — GAP-B: Candidatos pre-QUBO sin score de potencial de ganancia (`run_trades.py`)
+- **Raíz:** El ranking pre-QUBO era solo `strength` — no incorporaba EV predicho ni probabilidad.
+- **Fix:** Nueva función `_compute_profit_score(top_signals, predictions, regime_mode)`. Fórmula: `profit_score = ev_norm×0.40 + prob×0.30 + strength×0.20 + regime_bonus×0.10`. `regime_bonus` por régimen: SPOT_BULL=4h trend, RANGE_SCALP=bb_lower_touch+bb_position, FUTURES_SHORT=RSI>50, PRESERVATION=0.5. Señales re-ordenadas antes de QUBO. Log `[ProfitScore/{REGIME}]` top-5 con desglose.
+
+#### S75-6 — GAP-C: `_filter_by_quality` con `getattr`+hardcode (`run_trades.py`)
+- **Fix:** `max_volatility` y `min_price` vía `_get_param(settings, 'screener_quality_max_volatility')` y `_get_param(settings, 'screener_quality_min_price_usdt')`. Los campos ya estaban en `config.py` y `_PARAM_DEFAULTS`.
+
+#### S75-7 — GAP-D: Perfil A/B/C no modulaba `min_strength` en señales (`autonomous_signals.py` + `run_trades.py`)
+- **Fix:** `get_top_buy_signals` acepta `profile_label: str = None`. Profile A: `min_strength -= 0.05` (floor 0.40). Profile C: `min_strength += 0.05` (cap 0.90). `run_trades` pasa `_active_profile_label`.
+
+**Archivos modificados (S75)**
+- `learning_engine.py` — BUG-2 (exclude_synthetic), BUG-6 (regime-aware weights), zombie import
+- `autonomous_signals.py` — BUG-5 (min_strength from settings), GAP-A (learned weight scaling), GAP-D (profile delta)
+- `pnl_predictor.py` — BUG-6 (regime cache key en load/invalidate)
+- `run_trades.py` — GAP-B (_compute_profit_score pre-QUBO), GAP-C (get_param in _filter_by_quality), caller actualizado
+- `migrations/018_indicator_weights_regime.sql` — ADD COLUMN regime + UNIQUE INDEX
+
+**Estado S75:** 382/382 tests pass. Migration `018_indicator_weights_regime.sql` pendiente de aplicar en producción antes del próximo deploy.
 
 ---
 

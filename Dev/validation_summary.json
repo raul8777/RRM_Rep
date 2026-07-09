@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-08T01:27:28.692084+00:00",
+  "generated_at": "2026-07-08T19:51:24.802640+00:00",
   "python_executable": "C:\\Users\\raul8\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
   "overall": "PASS",
   "results": [
@@ -7,61 +7,70 @@
       "suite": "tests/test_system_health.py",
       "exit_code": 0,
       "status": "PASS",
-      "started_at": "2026-07-08T01:26:35.017511+00:00",
-      "ended_at": "2026-07-08T01:26:50.989703+00:00",
+      "started_at": "2026-07-08T19:50:28.148177+00:00",
+      "ended_at": "2026-07-08T19:50:44.314332+00:00",
       "output_file": "Dev/validation_system_health_utf8.txt",
       "tail": [
         "============================= test session starts =============================",
-        "platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0",
+        "platform win32 -- Python 3.12.10, pytest-8.4.2, pluggy-1.6.0",
         "rootdir: S:\\Tools\\AI\\crypto-agent",
-        "collected 125 items / 12 deselected / 113 selected",
+        "plugins: anyio-4.14.1",
+        "collected 127 items / 12 deselected / 115 selected",
         "",
         "tests\\test_system_health.py ............................................ [ 38%]",
-        ".....................................................................    [100%]",
+        ".......................................................................  [100%]",
         "",
         "============================== warnings summary ===============================",
-        "tests/test_system_health.py: 36 warnings",
-        "  S:\\Tools\\AI\\crypto-agent\\tests\\test_system_health.py:44: PydanticDeprecatedSince211: Accessing the 'model_fields' attribute on the instance is deprecated. Instead, you should access this attribute from the model class. Deprecated in Pydantic V2.11 to be removed in V3.0.",
-        "    f: getattr(base, f) for f in base.model_fields",
+        "tests/test_system_health.py::TestCat3_FuturesClientCore::test_sl_hit_closes_short",
+        "  C:\\Users\\raul8\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\feedparser\\encodings.py:29: DeprecationWarning: 'cgi' is deprecated and slated for removal in Python 3.13",
+        "    import cgi",
         "",
         "tests/test_system_health.py::TestCat6_PositionManager::test_position_summary_values",
         "  S:\\Tools\\AI\\crypto-agent\\tests\\..\\position_manager.py:966: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).",
         "    \"timestamp\": datetime.utcnow().isoformat()",
         "",
         "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
-        "============== 113 passed, 12 deselected, 37 warnings in 15.65s ==============="
+        "=============== 115 passed, 12 deselected, 2 warnings in 15.68s ==============="
       ]
     },
     {
       "suite": "tests/test_futures_smart_exits.py",
       "exit_code": 0,
       "status": "PASS",
-      "started_at": "2026-07-08T01:26:50.990704+00:00",
-      "ended_at": "2026-07-08T01:27:28.112976+00:00",
+      "started_at": "2026-07-08T19:50:44.315336+00:00",
+      "ended_at": "2026-07-08T19:51:24.144675+00:00",
       "output_file": "Dev/validation_futures_smart_exits_utf8.txt",
       "tail": [
         "============================= test session starts =============================",
-        "platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0",
+        "platform win32 -- Python 3.12.10, pytest-8.4.2, pluggy-1.6.0",
         "rootdir: S:\\Tools\\AI\\crypto-agent",
+        "plugins: anyio-4.14.1",
         "collected 98 items",
         "",
         "tests\\test_futures_smart_exits.py ...................................... [ 38%]",
         "............................................................             [100%]",
         "",
-        "============================= 98 passed in 36.83s ============================="
+        "============================== warnings summary ===============================",
+        "tests/test_futures_smart_exits.py::TestBreakevenSL::test_breakeven_triggers_for_short_at_threshold",
+        "  C:\\Users\\raul8\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\feedparser\\encodings.py:29: DeprecationWarning: 'cgi' is deprecated and slated for removal in Python 3.13",
+        "    import cgi",
+        "",
+        "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
+        "======================= 98 passed, 1 warning in 39.27s ========================"
       ]
     },
     {
       "suite": "tests/test_portfolio_manager.py",
       "exit_code": 0,
       "status": "PASS",
-      "started_at": "2026-07-08T01:27:28.113977+00:00",
-      "ended_at": "2026-07-08T01:27:28.692084+00:00",
+      "started_at": "2026-07-08T19:51:24.145675+00:00",
+      "ended_at": "2026-07-08T19:51:24.801642+00:00",
       "output_file": "Dev/validation_portfolio_manager_utf8.txt",
       "tail": [
         "============================= test session starts =============================",
-        "platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0",
+        "platform win32 -- Python 3.12.10, pytest-8.4.2, pluggy-1.6.0",
         "rootdir: S:\\Tools\\AI\\crypto-agent",
+        "plugins: anyio-4.14.1",
         "collected 10 items",
         "",
         "tests\\test_portfolio_manager.py ..........                               [100%]",
@@ -72,7 +81,7 @@
         "    \"timestamp\": datetime.utcnow().isoformat()",
         "",
         "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
-        "======================== 10 passed, 1 warning in 0.27s ========================"
+        "======================== 10 passed, 1 warning in 0.25s ========================"
       ]
     }
   ]

@@ -2474,8 +2474,8 @@ def _filter_by_quality(symbols: List[str], client, settings, target_count: int =
     Filters by: volatility, price minimum.
     """
     filtered = []
-    max_volatility = getattr(settings, 'screener_quality_max_volatility', 0.50)
-    min_price = getattr(settings, 'screener_quality_min_price_usdt', 0.0001)
+    max_volatility = _get_param(settings, 'screener_quality_max_volatility')
+    min_price = _get_param(settings, 'screener_quality_min_price_usdt')
     
     for symbol in symbols:
         try:
@@ -2510,7 +2510,7 @@ def _filter_by_quality(symbols: List[str], client, settings, target_count: int =
         return filtered
 
     relaxed = list(filtered)
-    relaxed_volatility = min(0.90, max_volatility + 0.25)
+    relaxed_volatility = min(0.90, float(max_volatility) + 0.25)
     for symbol in symbols:
         if symbol in relaxed:
             continue
@@ -2642,10 +2642,11 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
             _sel_max = _get_max_positions_for_regime(settings, regime or 'SPOT_BULL')
             autonomous_signals = signal_generator.get_top_buy_signals(
                 interval='1h',
-                min_strength=_get_param(settings, 'min_signal_strength'),
                 limit=_sel_max + 5,  # +5 buffer: candidates for replacement/overflow evaluation
                 news_client=news_client,
                 regime_mode=regime,
+                settings=settings,
+                profile_label=_active_profile_label,
             )
             
             # Convert autonomous signals to expected format and add to signal store
@@ -5865,6 +5866,97 @@ def _select_symbols(settings, news_client: NewsClient, client: BinanceClient, po
     return top_signals
 
 
+def _compute_profit_score(
+    top_signals: List[Dict],
+    predictions: Dict[str, Dict],
+    regime_mode: str,
+) -> List[Dict]:
+    """
+    GAP-B: Enrich each signal dict with a composite profit_score before QUBO.
+
+    profit_score = EV_norm×0.40 + prob×0.30 + strength×0.20 + regime_bonus×0.10
+
+    - EV_norm  : expected_pnl normalised to [0,1] within this batch (rank-safe).
+    - prob     : success_probability [0,1].
+    - strength : technical signal strength [0,1].
+    - regime_bonus: regime-specific alignment score [0,1]:
+        SPOT_BULL     → trend_4h_score  (momentum alignment)
+        RANGE_SCALP   → bb_lower_touch + (1 − bb_position)  (near support)
+        FUTURES_SHORT → RSI overbought proximity (higher RSI = better short)
+        PRESERVATION  → 0.5 (neutral)
+
+    Signals are re-sorted by profit_score (descending) after scoring.
+    The function is a pure transformation — never drops candidates.
+    """
+    if not top_signals:
+        return top_signals
+
+    _regime = str(regime_mode or 'SPOT_BULL').upper()
+
+    ev_values = []
+    for sig in top_signals:
+        pred = predictions.get(sig.get('symbol', ''), {})
+        ev_values.append(float((pred or {}).get('expected_pnl', 0.0) or 0.0))
+
+    _ev_min = min(ev_values) if ev_values else 0.0
+    _ev_max = max(ev_values) if ev_values else 1.0
+    _ev_range = (_ev_max - _ev_min) if (_ev_max - _ev_min) > 1e-9 else 1.0
+
+    scored = []
+    for sig in top_signals:
+        sym = sig.get('symbol', '')
+        pred = predictions.get(sym, {}) or {}
+        ev_raw  = float(pred.get('expected_pnl', 0.0) or 0.0)
+        prob    = float(pred.get('success_probability', sig.get('strength', 0.5)) or 0.5)
+        strength = float(sig.get('strength', 0.5))
+
+        ev_norm = (ev_raw - _ev_min) / _ev_range
+
+        if _regime == 'SPOT_BULL':
+            _tf = sig.get('higher_tf_trend', 'FLAT')
+            regime_bonus = 1.0 if _tf == 'UP' else (0.5 if _tf == 'FLAT' else 0.1)
+        elif _regime == 'RANGE_SCALP':
+            _bb_touch = 1.0 if sig.get('bb_lower_touch') or sig.get('bb_near_lower') else 0.0
+            _bb_pos   = float(sig.get('bb_position', 0.5) or 0.5)
+            regime_bonus = min(1.0, _bb_touch * 0.6 + (1.0 - _bb_pos) * 0.4)
+        elif _regime == 'FUTURES_SHORT':
+            _rsi = float(sig.get('rsi', sig.get('indicators', {}).get('rsi', 50.0)) or 50.0)
+            regime_bonus = min(1.0, max(0.0, (_rsi - 50.0) / 30.0))
+        else:
+            regime_bonus = 0.5
+
+        profit_score = round(
+            ev_norm  * 0.40
+            + prob   * 0.30
+            + strength * 0.20
+            + regime_bonus * 0.10,
+            4,
+        )
+        sig = dict(sig)
+        sig['profit_score'] = profit_score
+        sig['profit_score_components'] = {
+            'ev_norm': round(ev_norm, 4), 'prob': round(prob, 4),
+            'strength': round(strength, 4), 'regime_bonus': round(regime_bonus, 4),
+        }
+        scored.append(sig)
+
+    scored.sort(key=lambda s: s.get('profit_score', 0.0), reverse=True)
+
+    _top5 = scored[:5]
+    print(
+        f"[ProfitScore/{_regime}] top-5: "
+        + " | ".join(
+            f"{s['symbol']} ps={s['profit_score']:.3f}"
+            f"(ev={s['profit_score_components']['ev_norm']:.2f}"
+            f" p={s['profit_score_components']['prob']:.2f}"
+            f" s={s['profit_score_components']['strength']:.2f}"
+            f" r={s['profit_score_components']['regime_bonus']:.2f})"
+            for s in _top5
+        )
+    )
+    return scored
+
+
 def _apply_qubo_selector(
     settings,
     client: BinanceClient,
@@ -7337,6 +7429,12 @@ def execute_once(monitor_only: bool = False):
     _step2_signal_meta = {s['symbol']: s for s in top_signals if isinstance(s, dict)}
     _prediction_trade_type = 'futures' if _regime_mode == 'FUTURES_SHORT' else 'spot'
     predictions = _build_predictions(top_symbols, client, settings, portfolio_manager, signal_meta=_step2_signal_meta, trade_type=_prediction_trade_type)
+
+    # ── GAP-B: Profit-potential scoring — rank by EV+prob+strength+regime ───────
+    try:
+        top_signals = _compute_profit_score(top_signals, predictions, _regime_mode)
+    except Exception as _ps_err:
+        print(f"[ProfitScore] scoring failed (keeping original order): {_ps_err}")
 
     # ── QUBO: combinatorial portfolio selection ─────────────────────────────
     # Replaces simple EV-sort with an explicit K-best orthogonal selector.

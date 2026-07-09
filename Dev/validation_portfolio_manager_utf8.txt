@@ -1,6 +1,7 @@
 ============================= test session starts =============================
-platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0
+platform win32 -- Python 3.12.10, pytest-8.4.2, pluggy-1.6.0
 rootdir: S:\Tools\AI\crypto-agent
+plugins: anyio-4.14.1
 collected 10 items
 
 tests\test_portfolio_manager.py ..........                               [100%]
@@ -11,4 +12,4 @@ tests/test_portfolio_manager.py::TestPortfolioManager::test_get_total_balance_re
     "timestamp": datetime.utcnow().isoformat()
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-======================== 10 passed, 1 warning in 0.27s ========================
+======================== 10 passed, 1 warning in 0.25s ========================

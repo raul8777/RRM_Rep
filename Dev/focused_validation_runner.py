@@ -31,7 +31,7 @@ SUITE_ARGS = {
 # Validation baseline values expected by focused suites.
 # This isolates test assertions from local runtime drift in .env.
 BASELINE_ENV = {
-    "KELLY_MAX_PCT_LIQUID": "0.704",
+    "KELLY_MAX_PCT_LIQUID": "0.85",
     "FUTURES_LEVERAGE": "10",
     "FUTURES_TRAILING_ACTIVATION_PCT": "2.0",
     "FUTURES_BREAKEVEN_ACTIVATION_PCT": "1.0",

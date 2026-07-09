@@ -66,7 +66,6 @@ class LearningEngine:
         Returns:
             Summary dict with accuracy, adjustments, and recommendations.
         """
-        from position_manager import PositionManager
         if self.db is None:
             try:
                 from init_components import get_components
@@ -178,8 +177,8 @@ class LearningEngine:
             except Exception:
                 pass
 
-        # Load real v2 trades to combine
-        real_trades = self._load_closed_positions(lookback_days=30)
+        # Load real v2 trades to combine — explicitly exclude synthetics from DB
+        real_trades = self._load_closed_positions(lookback_days=30, exclude_synthetic=True)
         combined = synthetic_trades + real_trades
 
         if len(combined) < min_trades:
@@ -230,19 +229,21 @@ class LearningEngine:
         )
         return result
 
-    def get_weights(self, symbol: str) -> Dict[str, float]:
+    def get_weights(self, symbol: str, regime: str = '__any__') -> Dict[str, float]:
         """
-        Return learned weights for *symbol* (falls back to __global__ then defaults).
-        Uses in-memory cache with 5-min TTL.
+        Return learned weights for *symbol* + *regime* (falls back to symbol/__any__,
+        then __global__/__any__, then hard defaults).
+        Uses in-memory cache with 5-min TTL keyed by (symbol, regime).
         """
         now = time.monotonic()
-        if symbol in self._cache:
-            data, ts = self._cache[symbol]
+        _cache_key = (symbol, regime or '__any__')
+        if _cache_key in self._cache:
+            data, ts = self._cache[_cache_key]
             if now - ts < self._CACHE_TTL:
                 return data
 
-        weights = self._load_weights_from_db(symbol)
-        self._cache[symbol] = (weights, now)
+        weights = self._load_weights_from_db(symbol, regime=regime)
+        self._cache[_cache_key] = (weights, now)
         return weights
 
     def get_status(self) -> Dict[str, Any]:
@@ -260,7 +261,8 @@ class LearningEngine:
         'prediction_reallocation', 'prediction_realloc',
     })
 
-    def _load_closed_positions(self, lookback_days: int, min_version: str = 'v2.0_current') -> List[Any]:
+    def _load_closed_positions(self, lookback_days: int, min_version: str = 'v2.0_current',
+                               exclude_synthetic: bool = False) -> List[Any]:
         """
         Load only learning-eligible positions from recent system versions.
         Excludes: corrupted trades, synthetic bootstrap data, pre-v2 trades.
@@ -268,6 +270,10 @@ class LearningEngine:
         Args:
             lookback_days: How many days back to look
             min_version: Minimum data version to include (default 'v2.0_current')
+            exclude_synthetic: When True, explicitly filters out is_synthetic=TRUE rows.
+                Use this when loading the "real trades" side of run_with_synthetic to
+                prevent synthetic trades already persisted in DB from contaminating the
+                combined dataset (BUG-2 fix).
         """
         try:
             from init_components import get_components
@@ -277,7 +283,8 @@ class LearningEngine:
             # Try DB query with new versioning columns first
             if self.db:
                 try:
-                    query = """
+                    _synthetic_clause = "AND (is_synthetic = FALSE OR is_synthetic IS NULL)" if exclude_synthetic else ""
+                    query = f"""
                         SELECT
                             symbol, side, quantity, entry_price, exit_price,
                             entry_time, exit_time, pnl, pnl_percentage, close_reason,
@@ -288,6 +295,7 @@ class LearningEngine:
                         WHERE learning_eligible = TRUE
                           AND data_version >= %s
                           AND exit_time >= NOW() - INTERVAL '%s days'
+                          {_synthetic_clause}
                         ORDER BY exit_time DESC
                         LIMIT 500
                     """
@@ -552,16 +560,20 @@ class LearningEngine:
 
     # ── DB persistence ────────────────────────────────────────────────────────
 
-    def _persist_weights(self, adj: WeightAdjustment, accuracy: Dict) -> None:
+    def _persist_weights(self, adj: WeightAdjustment, accuracy: Dict,
+                          regime: str = '__any__') -> None:
         if self.db is None:
             return
         w = adj.weights
         meta = {**adj.metadata, "accuracy": accuracy}
         # Ensure extended weight columns exist (idempotent — safe to run every time)
-        for col in ("vol_spike_weight", "atr_pct_weight", "trend_4h_weight", "weekly_range_weight"):
+        for col in ("vol_spike_weight", "atr_pct_weight", "trend_4h_weight",
+                    "weekly_range_weight", "regime"):
             try:
+                _col_def = ("VARCHAR(32) DEFAULT '__any__'" if col == "regime"
+                            else "FLOAT DEFAULT 0.08")
                 self.db.execute_update(
-                    f"ALTER TABLE indicator_weights ADD COLUMN IF NOT EXISTS {col} FLOAT DEFAULT 0.08",
+                    f"ALTER TABLE indicator_weights ADD COLUMN IF NOT EXISTS {col} {_col_def}",
                     ()
                 )
             except Exception:
@@ -569,12 +581,12 @@ class LearningEngine:
 
         sql = """
         INSERT INTO indicator_weights
-            (symbol, rsi_weight, macd_weight, bb_weight, ema_weight, volume_weight,
+            (symbol, regime, rsi_weight, macd_weight, bb_weight, ema_weight, volume_weight,
              vol_spike_weight, atr_pct_weight, trend_4h_weight, weekly_range_weight,
              bias_correction, trades_analyzed, win_rate, prediction_accuracy,
              avg_prediction_error, signal_quality_score, source, metadata)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'learning_engine', %s)
-        ON CONFLICT (symbol) DO UPDATE SET
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'learning_engine', %s)
+        ON CONFLICT (symbol, regime) DO UPDATE SET
             rsi_weight           = EXCLUDED.rsi_weight,
             macd_weight          = EXCLUDED.macd_weight,
             bb_weight            = EXCLUDED.bb_weight,
@@ -595,7 +607,7 @@ class LearningEngine:
             updated_at           = NOW()
         """
         params = (
-            adj.symbol,
+            adj.symbol, regime or '__any__',
             w.get("rsi", 0.12), w.get("macd", 0.10),
             w.get("bb", 0.08), w.get("ema", 0.08), w.get("volume", 0.04),
             w.get("vol_spike", 0.15), w.get("atr_pct", 0.08),
@@ -610,7 +622,7 @@ class LearningEngine:
         )
         self.db.execute_update(sql, params)
 
-    def _load_weights_from_db(self, symbol: str) -> Dict[str, float]:
+    def _load_weights_from_db(self, symbol: str, regime: str = '__any__') -> Dict[str, float]:
         defaults = {
             "rsi": 0.12, "macd": 0.10, "bb": 0.08, "ema": 0.08, "volume": 0.04,
             "vol_spike": 0.15, "atr_pct": 0.08, "trend_4h": 0.15, "weekly_range": 0.08,
@@ -618,19 +630,21 @@ class LearningEngine:
         }
         if self.db is None:
             return defaults
+        _regime = regime or '__any__'
         try:
             sql = """
             SELECT rsi_weight, macd_weight, bb_weight, ema_weight, volume_weight,
                    vol_spike_weight, atr_pct_weight, trend_4h_weight, weekly_range_weight,
                    bias_correction, updated_at
             FROM indicator_weights
-            WHERE symbol = %s
+            WHERE symbol = %s AND (regime = %s OR regime = '__any__')
+            ORDER BY CASE WHEN regime = %s THEN 0 ELSE 1 END
             LIMIT 1
             """
-            rows = self.db.execute_query(sql, (symbol,))
+            rows = self.db.execute_query(sql, (symbol, _regime, _regime))
             if not rows:
                 if symbol != "__global__":
-                    return self._load_weights_from_db("__global__")
+                    return self._load_weights_from_db("__global__", regime=_regime)
                 return defaults
             row = rows[0]
             # Expire if older than TTL
@@ -640,7 +654,7 @@ class LearningEngine:
                     updated_at = datetime.fromisoformat(updated_at)
                 age = (datetime.utcnow() - updated_at.replace(tzinfo=None)).days
                 if age > _WEIGHT_TTL_DAYS:
-                    logger.info(f"Weights for {symbol} expired ({age}d old) — using defaults")
+                    logger.info(f"Weights for {symbol}/{_regime} expired ({age}d old) — using defaults")
                     return defaults
             return {
                 "rsi":          row["rsi_weight"],
@@ -655,7 +669,7 @@ class LearningEngine:
                 "bias_correction": row["bias_correction"],
             }
         except Exception as e:
-            logger.warning(f"Could not load weights for {symbol}: {e}")
+            logger.warning(f"Could not load weights for {symbol}/{_regime}: {e}")
             return defaults
 
 

@@ -50,6 +50,13 @@ class UnifiedGovernanceContext:
     prs_advisory_close_pct: float = 0.0
     prs_advisory_reason: str = ""
     prs_advisory_detail: str = ""
+    # Peak Capture Engine advisory (Wolf Hunter Profit PredExit)
+    peak_capture_should_close: bool = False
+    peak_capture_close_pct: float = 0.0
+    peak_capture_reason: str = ""
+    peak_capture_detail: str = ""
+    peak_capture_prob_higher_peak: float = 0.0
+    peak_capture_expected_future_pnl: float = 0.0
     # Fear & Greed index value (0-100) for exit modifier
     fear_greed_value: Optional[float] = None
 
@@ -161,6 +168,10 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
         _sso_confirms_close = context.sso_advisory_should_close and context.sso_advisory_close_pct >= 1.0
         _sso_confirms_partial = context.sso_advisory_should_close and context.sso_advisory_close_pct < 1.0
 
+        # ── F8: Wolf Hunter Peak Capture advisory ─────────────────────────────
+        _peak_capture_close = context.peak_capture_should_close
+        _peak_capture_pct = float(context.peak_capture_close_pct or 1.0)
+
         # ── PRS evaluation with F&G-modified metadata ────────────────────────
         _prs_meta = dict(meta)
         _prs_meta["ug_fng_exit_modifier"] = round(_fng_exit_modifier, 4)
@@ -256,6 +267,46 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
                 f"(PRS hold) | F&G={_fng:.0f}"
             )
             _priority = 75
+        elif _peak_capture_close and _sso_confirms_close:
+            # Peak Capture + SSO agree → highest confidence exit
+            _should_close = True
+            _close_pct = 1.0
+            _reason = context.peak_capture_reason or context.sso_advisory_reason
+            _detail = (
+                f"PeakCapture({context.peak_capture_reason}) + SSO {context.sso_advisory_trigger} "
+                f"prob_higher={context.peak_capture_prob_higher_peak:.2f} | F&G={_fng:.0f}"
+            )
+            _priority = 93
+        elif _peak_capture_close and _prs_close:
+            # Peak Capture + PRS agree → escalate to full exit
+            _should_close = True
+            _close_pct = 1.0
+            _reason = context.peak_capture_reason or _prs_reason
+            _detail = (
+                f"PeakCapture({context.peak_capture_reason}) + PRS agree "
+                f"prob_higher={context.peak_capture_prob_higher_peak:.2f} | F&G={_fng:.0f}"
+            )
+            _priority = 87
+        elif _peak_capture_close and _peak_capture_pct >= 1.0:
+            _should_close = True
+            _close_pct = 1.0
+            _reason = context.peak_capture_reason
+            _detail = (
+                f"PeakCapture full exit: {context.peak_capture_detail} "
+                f"prob_higher={context.peak_capture_prob_higher_peak:.2f} | F&G={_fng:.0f}"
+            )
+            _priority = 85
+        elif _peak_capture_close:
+            # Peak Capture partial → take profit dynamically
+            _should_close = True
+            _close_pct = _peak_capture_pct
+            _reason = context.peak_capture_reason
+            _detail = (
+                f"PeakCapture partial({context.peak_capture_close_pct*100:.0f}%): "
+                f"{context.peak_capture_detail} "
+                f"prob_higher={context.peak_capture_prob_higher_peak:.2f} | F&G={_fng:.0f}"
+            )
+            _priority = 83
         elif _prs_close and _fng < 30:
             _should_close = True
             _close_pct = _prs_close_pct
