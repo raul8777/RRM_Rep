@@ -10321,3 +10321,18 @@ async def mimic_report():
         "queue_summary": selector.get_summary(),
         "universes": selector.get_queue(),
     }
+
+
+@app.get("/mimic/sweep-report", dependencies=[Depends(_require_api_key)])
+async def mimic_sweep_report():
+    """Return the latest MIMIC parameter sweep report if available."""
+    import json
+    report_path = os.path.join(os.path.dirname(__file__), "Dev", "benchmarks", "mimic_sweep_report.json")
+    if not os.path.exists(report_path):
+        return {"ok": True, "report": None}
+    try:
+        with open(report_path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+        return {"ok": True, "report": report}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "report": None}

@@ -115,6 +115,7 @@ class MimicScheduler:
 
     def get_state(self) -> Dict[str, Any]:
         self._load_state()
+        self._update_progress_pct()
         return self._state
 
     def set_phase(self, phase: Phase, status: str = "running", progress_pct: Optional[float] = None) -> None:
@@ -180,8 +181,19 @@ class MimicScheduler:
         if universe_id not in completed:
             completed.append(universe_id)
         self._update_metrics(result)
+        self._update_progress_pct()
         self._state["current_micro_universe_id"] = None
         self._save_state()
+
+    def _update_progress_pct(self) -> None:
+        try:
+            summary = self.selector.get_summary()
+            total = summary.get("total", 0)
+            completed = len(self._state.get("completed_micro_universes", []))
+            if total > 0:
+                self._state["progress_pct"] = round((completed / total) * 100, 1)
+        except Exception:
+            pass
 
     def fail_micro_universe(self, universe_id: str, error: str) -> None:
         self.selector.mark_status(universe_id, "failed", {"error": error})

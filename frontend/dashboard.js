@@ -6242,6 +6242,7 @@ async function updateMimicStatus() {
         renderMimicStatus(data);
         renderMimicCoverage(data.state);
         renderMimicResults(data.state);
+        await updateMimicRecommendations();
     } catch (e) {
         console.error('MIMIC status error:', e);
         const panel = document.getElementById('mimicStatusPanel');
@@ -6269,6 +6270,7 @@ function renderMimicStatus(data) {
             <div><strong>Fase:</strong> ${state.phase || '—'}</div>
             <div><strong>Estado:</strong> <span style="color:${statusColor}">${state.status || '—'}</span></div>
             <div><strong>Progreso:</strong> ${(state.progress_pct || 0).toFixed(1)}%</div>
+            <div><strong>Avance:</strong> ${(_mimicUniverses && _mimicUniverses.summary) ? `${_mimicUniverses.summary.completed} / ${_mimicUniverses.summary.total} micro universos` : '—'}</div>
             <div><strong>Micro universo:</strong> ${state.current_micro_universe_id || '—'}</div>
             <div><strong>Puede correr:</strong> ${canRun.can_run ? 'Sí' : 'No'}</div>
             <div><strong>Razón:</strong> ${canRun.reason || '—'}</div>
@@ -6397,7 +6399,8 @@ async function updateMimicRecommendations() {
     try {
         // Load sweep report if available
         try {
-            _mimicSweepReport = await mimicApi('/report');
+            const sweepData = await mimicApi('/sweep-report');
+            _mimicSweepReport = (sweepData && sweepData.report) ? sweepData.report : null;
         } catch (e) {
             _mimicSweepReport = null;
         }
@@ -6409,7 +6412,7 @@ async function updateMimicRecommendations() {
         } catch (e) {
             _mimicCurrentConfig = null;
         }
-        renderMimicRecommendations(_mimicState, _mimicSweepReport, _mimicCurrentConfig);
+        renderMimicRecommendations(_mimicState ? _mimicState.state : null, _mimicSweepReport, _mimicCurrentConfig);
     } catch (e) {
         console.error('MIMIC recommendations error:', e);
     }
