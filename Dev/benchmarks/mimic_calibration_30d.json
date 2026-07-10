@@ -1,0 +1,95 @@
+{
+  "generated_at": "2026-07-10T03:42:15.609890+00:00",
+  "reports": [
+    {
+      "label": "canonical",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.52,
+        "stop_loss_pct": 3.36,
+        "kelly_max_usdt": 1000.0
+      },
+      "start": "2026-03-04T12:00:00+00:00",
+      "end": "2026-03-31T00:00:00+00:00",
+      "cycles": 20,
+      "final_balance": {
+        "USDT": 2590.1700295400015,
+        "BNB": 0.48700000000000015
+      },
+      "total_value": 2906.91,
+      "pnl_usdt": -3.09,
+      "pnl_pct": -0.1062,
+      "buy_count": 0,
+      "sell_count": 0,
+      "sl_tp_count": 0
+    },
+    {
+      "label": "strict",
+      "params": {
+        "min_signal_strength": 0.55,
+        "min_success_probability": 0.55,
+        "stop_loss_pct": 3.36,
+        "kelly_max_usdt": 1000.0
+      },
+      "start": "2026-03-04T12:00:00+00:00",
+      "end": "2026-03-31T00:00:00+00:00",
+      "cycles": 20,
+      "final_balance": {
+        "USDT": 2590.1700295400015,
+        "BNB": 0.48700000000000015
+      },
+      "total_value": 2906.91,
+      "pnl_usdt": -3.09,
+      "pnl_pct": -0.1062,
+      "buy_count": 0,
+      "sell_count": 0,
+      "sl_tp_count": 0
+    },
+    {
+      "label": "relaxed_more_capital",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "stop_loss_pct": 3.36,
+        "kelly_max_usdt": 1200.0
+      },
+      "start": "2026-03-04T12:00:00+00:00",
+      "end": "2026-03-31T00:00:00+00:00",
+      "cycles": 20,
+      "final_balance": {
+        "USDT": 2590.1700295400015,
+        "BNB": 0.48700000000000015
+      },
+      "total_value": 2906.91,
+      "pnl_usdt": -3.09,
+      "pnl_pct": -0.1062,
+      "buy_count": 0,
+      "sell_count": 0,
+      "sl_tp_count": 0
+    },
+    {
+      "label": "relaxed",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "stop_loss_pct": 3.36,
+        "kelly_max_usdt": 1000.0
+      },
+      "start": "2026-03-04T12:00:00+00:00",
+      "end": "2026-03-31T00:00:00+00:00",
+      "cycles": 20,
+      "final_balance": {
+        "USDT": 1483.9135918159002,
+        "BNB": 0.48700000000000015,
+        "ADA": 2322.686,
+        "ETH": 0.215
+      },
+      "total_value": 2885.46,
+      "pnl_usdt": -24.54,
+      "pnl_pct": -0.8435,
+      "buy_count": 1,
+      "sell_count": 2,
+      "sl_tp_count": 0
+    }
+  ]
+}

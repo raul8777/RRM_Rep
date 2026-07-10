@@ -15,15 +15,15 @@ from simulation.mimic_runner import SimulationRunner
 
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT", "SOLUSDT", "XLMUSDT", "UNIUSDT", "BCHUSDT", "NEARUSDT"]
-START = datetime(2026, 3, 4, 12, tzinfo=timezone.utc)
-END = datetime(2026, 3, 5, 12, tzinfo=timezone.utc)
+START = datetime(2026, 3, 1, tzinfo=timezone.utc)
+END = datetime(2026, 3, 31, tzinfo=timezone.utc)
 
 
 PARAM_GRID = {
-    "min_signal_strength": [0.45, 0.65],
-    "min_success_probability": [0.50, 0.60],
+    "min_signal_strength": [0.45, 0.55],
+    "min_success_probability": [0.50, 0.55],
     "stop_loss_pct": [3.36],
-    "kelly_max_usdt": [1000.0],
+    "kelly_max_usdt": [1000.0, 1200.0],
 }
 
 

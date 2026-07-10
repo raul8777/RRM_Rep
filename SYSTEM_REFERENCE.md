@@ -35,6 +35,9 @@
 - Smoke test: 25 ciclos en ventana 2026-03-04 12:00 → 2026-03-05 12:00, balance final con ETH/BNB, top symbols generados, sin errores de `SMART-Total/Mode`.
 - Sweep: 4 combinaciones iniciales, reporte en `Dev/benchmarks/mimic_sweep_report.json`.
 - Regresión: `pytest tests/test_mimic_regression.py -v` → 1 passed.
+- Calibración inicial (marzo 2026, 20 ciclos, 4 configs): la configuración más relajada (`min_signal_strength=0.45`, `min_success_probability=0.50`) generó 1 compra y 2 ventas con PnL -0.84%; las configuraciones más estrictas no generaron trades y perdieron solo comisiones BNB (~-0.11%). Reporte en `Dev/benchmarks/mimic_calibration_30d.json`.
+
+**Recomendación actual:** No aplicar relajación de umbrales. El simulador muestra que en la ventana analizada el predictor + quality gate filtran correctamente señales sin edge; relajar los filtros introduce trades perdedores. Mantener configuración canónica (`min_signal_strength=0.50`, `min_success_probability=0.52` o más estricta) hasta encontrar una ventana con edge positivo reproducible.
 
 **Comandos:**
 ```powershell

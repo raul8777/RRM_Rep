@@ -356,7 +356,10 @@ Cada rol tiene dos niveles: **Principios** (dominio general, siempre válido, pe
 # Smoke test
 $env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_WEBHOOK_SECRET="dummy"; $env:PYTHONIOENCODING="utf-8"; python Dev/scripts/mimic_smoke_test.py
 
-# Sweep
+# Calibración de 4 configs sobre 20 ciclos
+$env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_WEBHOOK_SECRET="dummy"; $env:PYTHONIOENCODING="utf-8"; python Dev/scripts/mimic_calibration_run.py
+
+# Sweep (puede ser lento; reducir grid/ventana si es necesario)
 $env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_WEBHOOK_SECRET="dummy"; $env:PYTHONIOENCODING="utf-8"; python Dev/scripts/mimic_parameter_sweep.py
 
 # Regresión
