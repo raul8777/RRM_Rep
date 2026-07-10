@@ -10143,6 +10143,8 @@ async def get_hybrid_recommend(
 # ── MIMIC endpoints ───────────────────────────────────────────────────────────
 
 _mimic_scheduler: Optional[Any] = None
+_mimic_worker_task: Optional[Any] = None
+_mimic_worker_running: bool = False
 
 
 def _get_mimic_scheduler() -> Any:
@@ -10153,10 +10155,41 @@ def _get_mimic_scheduler() -> Any:
     return _mimic_scheduler
 
 
+async def _mimic_autorun_loop() -> None:
+    """Background loop that runs MIMIC micro-universe cycles when the schedule allows."""
+    global _mimic_worker_running
+    _mimic_worker_running = True
+    while _mimic_worker_running:
+        try:
+            scheduler = _get_mimic_scheduler()
+            state = scheduler.get_state()
+            if state.get("status") not in ("running", "paused"):
+                can_run = scheduler.can_run_now()
+                if can_run.get("can_run"):
+                    print(f"[MIMIC AutoRun] starting cycle — reason={can_run.get('reason')}")
+                    result = await asyncio.to_thread(scheduler.run_once)
+                    print(f"[MIMIC AutoRun] cycle finished: ok={result.get('ok')} phase={result.get('phase')} error={result.get('error')}")
+        except Exception as exc:
+            print(f"[MIMIC AutoRun] ERROR: {exc}")
+        await asyncio.sleep(300)  # 5 minutes
+
+
+@app.on_event("startup")
+async def _start_mimic_autorun() -> None:
+    global _mimic_worker_task
+    if _mimic_worker_task is None:
+        _mimic_worker_task = asyncio.create_task(_mimic_autorun_loop())
+
+
 @app.get("/mimic/status", dependencies=[Depends(_require_api_key)])
 async def mimic_status():
     scheduler = _get_mimic_scheduler()
-    return scheduler.get_summary()
+    summary = scheduler.get_summary()
+    summary["autorun_worker"] = {
+        "active": _mimic_worker_running,
+        "task_created": _mimic_worker_task is not None,
+    }
+    return summary
 
 
 @app.get("/mimic/universes", dependencies=[Depends(_require_api_key)])

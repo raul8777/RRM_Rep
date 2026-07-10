@@ -6256,6 +6256,8 @@ function renderMimicStatus(data) {
             <div><strong>Razón:</strong> ${canRun.reason || '—'}</div>
             <div><strong>Próxima ventana:</strong> ${canRun.next_window ? new Date(canRun.next_window).toLocaleString() : '—'}</div>
             <div><strong>Actualizado:</strong> ${state.updated_at ? new Date(state.updated_at).toLocaleTimeString() : '—'}</div>
+            <div><strong>Auto-run worker:</strong> ${data.autorun_worker && data.autorun_worker.active ? 'Activo' : 'Inactivo'}</div>
+            <div></div>
         </div>
     `;
 }

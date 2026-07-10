@@ -82,7 +82,15 @@ class MimicWindowController:
         weekday = now.weekday()
         minutes = now.hour * 60 + now.minute
         for w in self._schedule.get("windows", []):
-            if weekday in w.get("days", []):
+            raw_days = w.get("days", [])
+            if isinstance(raw_days, str):
+                try:
+                    days = [int(d) for d in raw_days.split()]
+                except ValueError:
+                    days = []
+            else:
+                days = [int(d) for d in raw_days]
+            if weekday in days:
                 start = self._parse_time(w["start"])
                 end = self._parse_time(w["end"])
                 if end < start:  # crosses midnight
@@ -128,6 +136,7 @@ class MimicWindowController:
         return {"suggest_run": suggest, "reason": ", ".join(reasons) or "no strong condition"}
 
     def can_run(self, now: Optional[datetime] = None, market_condition: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self._load()  # reload schedule from disk to honor dashboard updates
         now = now or self._now_local()
         in_window = self.is_within_window(now)
         market_suggestion = self.check_market_condition(market_condition)
