@@ -165,13 +165,13 @@ class MicroUniverseSelector:
         }
 
     def compute_scores(self, opportunity_data: Optional[Dict[str, float]] = None) -> None:
-        """Recompute priority scores for all pending micro universos."""
+        """Recompute priority scores for all pending and in_progress micro universos."""
         progress = self._load_progress()
         regime_days = progress.get("regimes", {})
         symbol_days = progress.get("symbols", {})
 
         for u in self._queue:
-            if u.status != "pending":
+            if u.status not in ("pending", "in_progress"):
                 continue
 
             # 1. Coverage score: lower if symbols/window already covered
@@ -200,13 +200,25 @@ class MicroUniverseSelector:
         self._save()
 
     def select_next(self) -> Optional[MicroUniverse]:
-        """Select the next pending micro universe with highest score or forced id."""
+        """Select the next micro universe to process.
+
+        Priority:
+        1. Forced id (if set).
+        2. Oldest in_progress universe (resume abandoned work after restarts).
+        3. Pending universe with highest score.
+        """
         if self._forced_id:
             for u in self._queue:
                 if u.id == self._forced_id:
                     self._forced_id = None
                     self._save()
                     return u
+
+        # Resume any abandoned in_progress universes first
+        in_progress = [u for u in self._queue if u.status == "in_progress"]
+        if in_progress:
+            in_progress.sort(key=lambda x: x.created_at)
+            return in_progress[0]
 
         pending = [u for u in self._queue if u.status == "pending"]
         if not pending:
