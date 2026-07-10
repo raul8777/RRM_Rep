@@ -63,6 +63,16 @@ class MimicWindowController:
         return self._schedule
 
     def set_schedule(self, schedule: Dict[str, Any]) -> None:
+        # Normalize days to integers to keep frontend/backend contract consistent
+        for w in schedule.get("windows", []):
+            raw_days = w.get("days", [])
+            if isinstance(raw_days, str):
+                try:
+                    w["days"] = [int(d) for d in raw_days.split()]
+                except ValueError:
+                    w["days"] = []
+            else:
+                w["days"] = [int(d) for d in raw_days]
         self._schedule = schedule
         self._save()
 

@@ -6339,9 +6339,18 @@ async function updateMimicSchedule() {
     }
 }
 
+function _normalizeDays(days) {
+    if (Array.isArray(days)) return days;
+    if (typeof days === 'string') return days.split(/[,\s]+/).filter(Boolean);
+    return [];
+}
+
 function renderMimicSchedule(data) {
     const panel = document.getElementById('mimicSchedulePanel');
-    const windows = (data.windows || []).map(w => `${w.days.join(',')} ${w.start}-${w.end}`).join('<br>');
+    const windows = (data.windows || []).map(w => {
+        const days = _normalizeDays(w.days).join(',');
+        return `${days} ${w.start}-${w.end}`;
+    }).join('<br>');
     panel.innerHTML = `
         <div style="font-size:13px">
             <div><strong>Modo:</strong> ${data.mode}</div>
