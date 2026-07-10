@@ -368,6 +368,45 @@ $env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_
 
 ---
 
+## 7. MIMIC AUTÓNOMO — EJECUCIÓN CONTINUA POR MICRO UNIVERSOS
+
+**Propósito:** Ejecutar MIMIC de forma autónoma, acumulando micro universos en el dataset global y mejorando la cobertura de regímenes/símbolos sin intervención manual.
+
+**Componentes:**
+- `simulation/mimic_scheduler.py` — máquina de estados con fases: `SELECT_UNIVERSE → AUDIT → DOWNLOAD → VALIDATE → MAP_REGIMES → CALIBRATE → CONSOLIDATE → CROSS_VALIDATE → APPLY → MONITOR`.
+- `simulation/mimic_universe_selector.py` — cola priorizada de micro universos (symbol window × regime).
+- `simulation/mimic_window_controller.py` — ventanas de ejecución programables y condiciones de mercado.
+- `simulation/mimic_orchestrator.py` — CLI para operación manual/programada.
+- `Dev/scripts/mimic_data_audit.py` — audita datos históricos y genera cola.
+- `Dev/scripts/download_historical_data.py` — descarga klines para micro universos.
+
+**Persistencia:**
+- `Dev/benchmarks/mimic_state.json` — estado del scheduler.
+- `Dev/benchmarks/mimic_universe_queue.json` — cola de micro universos.
+- `Dev/benchmarks/mimic_dataset_progress.json` — log de resultados acumulados.
+- `Dev/benchmarks/mimic_schedule.json` — configuración de ventanas.
+- `trading_runtime_state` (DB) — estado restart-safe.
+
+**API endpoints** (`app.py`): `/mimic/status`, `/mimic/universes`, `/mimic/select-universe`, `/mimic/start`, `/mimic/run`, `/mimic/pause`, `/mimic/resume`, `/mimic/retry`, `/mimic/reset`, `/mimic/schedule`, `/mimic/report`.
+
+**Dashboard:** Tab "MIMIC" en `frontend/index.html` + `frontend/dashboard.js` con estado, cola, programador de ventanas, cobertura acumulada y acciones.
+
+**Reglas duras:**
+1. Cada micro universo es idempotente: reiniciar reintenta desde la fase actual sin duplicar resultados.
+2. Cross-validation (`pytest tests/test_mimic_regression.py`) se dispara solo cuando hay datos suficientes acumulados.
+3. El operador puede forzar/pausar/reiniciar desde dashboard u orchestrator; la ejecución automática respeta la ventana programada.
+4. Descargas deben cubrir la ventana del micro universo, no solo los últimos días.
+
+**Comandos:**
+```powershell
+# Generar cola y ejecutar un ciclo completo
+$env:PYTHONIOENCODING="utf-8"; python -m simulation.mimic_orchestrator reset
+$env:PYTHONIOENCODING="utf-8"; python -m simulation.mimic_orchestrator run-phase --phase audit --window-days 1
+$env:PYTHONIOENCODING="utf-8"; python -m simulation.mimic_orchestrator run --force
+```
+
+---
+
 ## 8. WOLF HUNTER — PEAK CAPTURE ENGINE
 
 **Filosofía:** No vender en el primer TP fijo — capturar el pico real de ganancia antes de que revierta (optimal stopping aplicado a exits). Motor activo por defecto (`profit_predexit_enabled=True`). Implementado en `peak_capture_engine.py`.

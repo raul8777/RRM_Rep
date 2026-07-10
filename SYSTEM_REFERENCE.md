@@ -1,7 +1,72 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 10 2026 | MIMIC: simulador E2E completo Fases 1-7.
+> Última actualización: jul 10 2026 | MIMIC autónomo: scheduler + API + dashboard operativos.
+
+---
+
+## 🗺️ Estado del Sistema — jul 10 2026 (MIMIC autónomo)
+
+### ✅ MIMIC — Ejecución autónoma por micro universos
+
+**Objetivo:** Ejecutar MIMIC de forma continua y autónoma, procesando micro universos incrementalmente, acumulando cobertura de regímenes y símbolos, y exponiendo control/visibilidad al operador vía dashboard y API.
+
+**Entregables nuevos:**
+- `simulation/mimic_scheduler.py` — máquina de estados con fases del ciclo de vida de un micro universo.
+- `simulation/mimic_universe_selector.py` — cola priorizada de micro universos por cobertura, régimen faltante y oportunidad.
+- `simulation/mimic_window_controller.py` — ventanas de ejecución programables (días/horas) y evaluación de condiciones de mercado.
+- `simulation/mimic_orchestrator.py` — CLI para reset, audit, run-phase, run, pause, resume, retry, schedule.
+- `Dev/scripts/mimic_data_audit.py` — script de auditoría de datos históricos y generación de cola.
+- `Dev/scripts/download_historical_data.py` — descarga incremental de klines para micro universos.
+- API endpoints MIMIC en `app.py` — status, universes, select-universe, start, run, pause, resume, retry, reset, schedule, report.
+- Tab MIMIC en `frontend/index.html` + `frontend/dashboard.js` — estado, cola, programador, cobertura, acciones.
+
+**Persistencia:**
+- `Dev/benchmarks/mimic_state.json` — estado del scheduler.
+- `Dev/benchmarks/mimic_universe_queue.json` — cola de micro universos.
+- `Dev/benchmarks/mimic_dataset_progress.json` — log de resultados acumulados.
+- `Dev/benchmarks/mimic_schedule.json` — ventanas de ejecución.
+- `trading_runtime_state` (DB) — estado restart-safe.
+
+**Fases del scheduler:**
+```
+SELECT_UNIVERSE → AUDIT → DOWNLOAD → VALIDATE → MAP_REGIMES → CALIBRATE → CONSOLIDATE → CROSS_VALIDATE → APPLY → MONITOR
+```
+
+**Fixes aplicados:**
+- `mimic_scheduler.py` usa `get_settings()` en lugar de `settings` importado.
+- `download_historical_data.py` usa `BinanceClient` en lugar de `SpotBinanceClient`.
+- `run_mimic_simulation()` acepta `start`, `end` y `data_dir` para ventanas históricas arbitrarias.
+- `_parse_date` en scheduler devuelve `datetime` aware UTC.
+- `_phase_download` descarga suficientes días para cubrir la ventana del micro universo.
+- `_load_progress` en selector soporta formato lista y dict.
+- `SimulationFuturesClient.smart_rebalance_capital` devuelve contrato completo (`direction`, `amount`, `reason`, `success`, `error`) para evitar `KeyError` en `run_trades.py`.
+- `SimulationFuturesClient.get_open_positions_summary` stub para compatibilidad con dashboard.
+- `.gitignore` actualizado para ignorar archivos de estado/datos MIMIC pero versionar `mimic_baseline.json`.
+
+**Resultados validados:**
+- Smoke test: ✅
+- Regresión: `pytest tests/test_mimic_regression.py -q` → 1 passed.
+- CLI `run --force` completó 5 micro universos consecutivos (`SPOT_BULL`, `RANGE_SCALP`, `PRESERVATION`) sin error de CapBridge.
+- API `POST /mimic/run` completó micro universos y acumuló métricas correctamente.
+
+**Recomendación actual:** El simulador sigue rechazando la mayoría de señales con umbrales canónicos. El objetivo ahora es acumular micro universos para mejorar el dataset global; no relajar umbrales para forzar trades.
+
+**Comandos:**
+```powershell
+# Generar cola y ejecutar ciclos
+$env:PYTHONIOENCODING="utf-8"; python -m simulation.mimic_orchestrator reset
+$env:PYTHONIOENCODING="utf-8"; python -m simulation.mimic_orchestrator run-phase --phase audit --window-days 1
+$env:PYTHONIOENCODING="utf-8"; python -m simulation.mimic_orchestrator run --force
+
+# Ver estado
+$env:PYTHONIOENCODING="utf-8"; python -m simulation.mimic_orchestrator status
+```
+
+**Notas operativas:**
+- Docker puerto 8000 no fue reiniciado en esta sesión; las pruebas API se corrieron en `127.0.0.1:8001`. Para producción, reconstruir/reiniciar el contenedor o montar `app.py` actualizado.
+- Ventana por defecto: 00:00–07:00 todos los días. `--force` ignora la ventana para pruebas.
+- Los micro universos de 1 día son útiles para validación rápida; el default de producción es 7 días.
 
 ---
 
