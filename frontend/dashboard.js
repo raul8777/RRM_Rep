@@ -6294,13 +6294,16 @@ async function updateMimicUniverses() {
 
 function renderMimicUniverses(data) {
     const panel = document.getElementById('mimicUniversesPanel');
-    const universes = (data.universes || []).slice(0, 20);
+    const allUniverses = data.universes || [];
     const forcedId = (data.summary || {}).forced_id;
-    if (!universes.length) {
+    if (!allUniverses.length) {
         panel.innerHTML = '<p>No hay micro universos en cola. Ejecuta la auditoría.</p>';
         return;
     }
-    let html = '<table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr>' +
+    const total = allUniverses.length;
+    let html = `<p style="font-size:12px;margin:0 0 6px 0;color:#aaa">Mostrando ${total} / ${total} micro universos</p>` +
+        '<div style="max-height:420px;overflow-y:auto;border:1px solid #333;border-radius:4px">' +
+        '<table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr>' +
         '<th style="text-align:left">ID</th>' +
         '<th style="text-align:left">Régimen</th>' +
         '<th style="text-align:left">Ventana</th>' +
@@ -6308,7 +6311,7 @@ function renderMimicUniverses(data) {
         '<th style="text-align:left">Estado</th>' +
         '<th style="text-align:left">Acción</th>' +
         '</tr></thead><tbody>';
-    universes.forEach(u => {
+    allUniverses.forEach(u => {
         const isForced = u.id === forcedId;
         const rowStyle = isForced ? 'background:rgba(33,150,243,0.15)' : '';
         const score = (u.score || 0).toFixed(3);
@@ -6321,7 +6324,7 @@ function renderMimicUniverses(data) {
             <td><button class="btn btn-xs" onclick="forceMimicUniverse('${u.id}')">Forzar</button></td>
         </tr>`;
     });
-    html += '</tbody></table>';
+    html += '</tbody></table></div>';
     panel.innerHTML = html;
 }
 
