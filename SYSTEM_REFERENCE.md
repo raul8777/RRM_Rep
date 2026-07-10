@@ -1,7 +1,57 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 09 2026 | Sesión 75b: Portfolio Concentration + Category Limit Hot-Config Governance — 384/384 tests pass.
+> Última actualización: jul 10 2026 | MIMIC: simulador E2E completo Fases 1-7.
+
+---
+
+## 🗺️ Estado del Sistema — jul 10 2026 (MIMIC completo)
+
+### ✅ MIMIC — Simulador E2E (source of truth) — jul 10 2026
+
+**Objetivo:** Tener un simulador determinista que ejecute la lógica de producción `run_trades.execute_once()` contra datos históricos reales, como fuente de verdad para validar cambios y calibrar parámetros.
+
+**Entregables:**
+- `simulation/mimic_protocols.py` — `SimulationClock` (tiempo determinista).
+- `simulation/mimic_clients.py` — `SimulationBinanceClient`, `SimulationFuturesClient` (mock de APIs spot/futures sobre feed histórico).
+- `simulation/mimic_feed.py` — `HistoricalDataFeed` (carga parquet de `historical_data/`).
+- `simulation/mimic_news_client.py` — `SimulationNewsClient` (F&G y noticias deterministas).
+- `simulation/mimic_db.py` — `SimulationDatabaseClient` (estado en memoria + overrides).
+- `simulation/mimic_runner.py` — `SimulationRunner` (orquesta ciclos con DI).
+- `Dev/scripts/mimic_smoke_test.py` — validación de ciclo completo.
+- `Dev/scripts/mimic_parameter_sweep.py` — sweep de parámetros con reporte JSON.
+- `tests/test_mimic_regression.py` + `Dev/benchmarks/mimic_baseline.json` — test de regresión pytest.
+
+**Fixes aplicados al simulador:**
+- `SimulationDatabaseClient.execute_transaction` soporta listas de statements `(sql, params)` como el DB client real.
+- `SimulationBinanceClient` añade `get_symbol_filters`, `get_ticker`, `get_client`, `get_symbol_info` para soportar screener y ejecución de compras.
+- `SimulationNewsClient` añade `get_recent_news` e `is_social_trending`.
+- `universe_selector.select_analysis_universe` respeta `settings.screener_enabled=False` en simulación.
+- `SimulationRunner` invalida el caché de señales autónomas en cada ciclo.
+- `run_trades.py` refactorizado a `execute_once(monitor_only=False, components=None)` para inyección de dependencias.
+- `init_components.py` añade `build_components()` con DI de clientes, news, DB y futures.
+
+**Resultados validados:**
+- Smoke test: 25 ciclos en ventana 2026-03-04 12:00 → 2026-03-05 12:00, balance final con ETH/BNB, top symbols generados, sin errores de `SMART-Total/Mode`.
+- Sweep: 4 combinaciones iniciales, reporte en `Dev/benchmarks/mimic_sweep_report.json`.
+- Regresión: `pytest tests/test_mimic_regression.py -v` → 1 passed.
+
+**Comandos:**
+```powershell
+# Smoke test
+$env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_WEBHOOK_SECRET="dummy"; $env:PYTHONIOENCODING="utf-8"; python Dev/scripts/mimic_smoke_test.py
+
+# Sweep
+$env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_WEBHOOK_SECRET="dummy"; $env:PYTHONIOENCODING="utf-8"; python Dev/scripts/mimic_parameter_sweep.py
+
+# Regresión
+$env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_WEBHOOK_SECRET="dummy"; $env:PYTHONIOENCODING="utf-8"; pytest tests/test_mimic_regression.py -v
+```
+
+**Notas operativas:**
+- Para simulación se deshabilita `screener_enabled` porque `pair_screener` consume la API pública de Binance; el simulador usa `analysis_symbols` estáticos.
+- El predictor PnL en simulación refleja el comportamiento de producción: con `min_success_probability >= 0.6` rechaza la mayoría de señales (probabilidades simuladas ~0.47-0.59).
+- Warnings de `SpotTruth` y BNB futures son ruido esperado en modo spot-only.
 
 ---
 

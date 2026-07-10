@@ -324,6 +324,47 @@ Cada rol tiene dos niveles: **Principios** (dominio general, siempre válido, pe
 
 ---
 
+## 6. MIMIC — SIMULADOR E2E (SOURCE OF TRUTH)
+
+**Propósito:** Simulador determinista que ejecuta la lógica de producción `run_trades.execute_once()` contra datos históricos reales, sin tocar Binance ni PostgreSQL. Sirve para validar cambios, calibrar parámetros y detectar regresiones antes de deploy.
+
+**Componentes:**
+- `simulation/mimic_protocols.py` — `SimulationClock` (tiempo controlado).
+- `simulation/mimic_clients.py` — mocks de SPOT/FUTURES sobre feed histórico.
+- `simulation/mimic_feed.py` — carga parquet de `historical_data/`.
+- `simulation/mimic_news_client.py` — F&G y noticias deterministas.
+- `simulation/mimic_db.py` — DB en memoria; soporta transacciones múltiples como el DB client real.
+- `simulation/mimic_runner.py` — orquesta ciclos con inyección de dependencias.
+- `Dev/scripts/mimic_smoke_test.py` — validación de ciclo completo.
+- `Dev/scripts/mimic_parameter_sweep.py` — sweep de parámetros con reporte JSON.
+- `tests/test_mimic_regression.py` — test de regresión pytest contra baseline.
+
+**🔴 Reglas duras del simulador:**
+1. Nunca duplicar lógica de trading en el simulador — reusar `run_trades.py` con DI.
+2. Nunca hardcodear comportamiento del mercado en mocks — derivar de datos históricos.
+3. Siempre invalidar cachés globales (señales autónomas, etc.) al inicio de cada ciclo simulado para evitar contaminación entre pasos.
+4. Si se agrega un método usado por producción en `BinanceClient`/`FuturesClient`/`NewsClient`, el mock correspondiente debe implementarlo.
+
+**Guías de uso:**
+- En simulación deshabilitar `screener_enabled` y usar `analysis_symbols` estáticos; el screener real consume API pública de Binance.
+- El predictor PnL en simulación reproduce el comportamiento de producción: con umbrales altos rechaza la mayoría de señales.
+- Antes de cambiar parámetros de producción: correr sweep y verificar que no haya regresión (`pytest tests/test_mimic_regression.py`).
+- Para actualizar baseline: `pytest tests/test_mimic_regression.py --mimic-update-baseline`.
+
+**Comandos:**
+```powershell
+# Smoke test
+$env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_WEBHOOK_SECRET="dummy"; $env:PYTHONIOENCODING="utf-8"; python Dev/scripts/mimic_smoke_test.py
+
+# Sweep
+$env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_WEBHOOK_SECRET="dummy"; $env:PYTHONIOENCODING="utf-8"; python Dev/scripts/mimic_parameter_sweep.py
+
+# Regresión
+$env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_WEBHOOK_SECRET="dummy"; $env:PYTHONIOENCODING="utf-8"; pytest tests/test_mimic_regression.py -v
+```
+
+---
+
 ## 8. WOLF HUNTER — PEAK CAPTURE ENGINE
 
 **Filosofía:** No vender en el primer TP fijo — capturar el pico real de ganancia antes de que revierta (optimal stopping aplicado a exits). Motor activo por defecto (`profit_predexit_enabled=True`). Implementado en `peak_capture_engine.py`.
