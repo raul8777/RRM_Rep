@@ -1,3 +1,4 @@
+console.log('[dashboard.js] loaded, API_BASE:', window.location.origin);
 const API_BASE = window.location.origin;
 
 // API key loaded dynamically from backend at startup — never hardcoded in source
@@ -6213,12 +6214,13 @@ async function mimicApi(path, method = 'GET', body = null) {
 }
 
 async function initMimicTab() {
+    console.log('[MIMIC] initializing tab');
     await updateMimicStatus();
     await updateMimicUniverses();
     await updateMimicSchedule();
-    setInterval(updateMimicStatus, 30000);
-    setInterval(updateMimicUniverses, 60000);
-    setInterval(updateMimicSchedule, 60000);
+    setInterval(updateMimicStatus, 10000);   // every 10s for live progress
+    setInterval(updateMimicUniverses, 30000);
+    setInterval(updateMimicSchedule, 30000);
 }
 
 async function updateMimicStatus() {
@@ -6230,6 +6232,10 @@ async function updateMimicStatus() {
         renderMimicResults(data.state);
     } catch (e) {
         console.error('MIMIC status error:', e);
+        const panel = document.getElementById('mimicStatusPanel');
+        if (panel) {
+            panel.innerHTML = `<p style="color:#f44;font-size:13px">Error cargando estado: ${e.message}</p>`;
+        }
     }
 }
 
