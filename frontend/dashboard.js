@@ -6210,6 +6210,16 @@ async function mimicApi(path, method = 'GET', body = null) {
     const opts = { method, headers: _authHeaders() };
     if (body) opts.body = JSON.stringify(body);
     const res = await fetch(`${API_BASE}/mimic${path}`, opts);
+    if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+            const err = await res.json();
+            detail = err.detail || JSON.stringify(err);
+        } catch (e) {
+            // ignore
+        }
+        throw new Error(`${detail} (${res.url})`);
+    }
     return res.json();
 }
 
@@ -6275,6 +6285,10 @@ async function updateMimicUniverses() {
         renderMimicUniverses(data);
     } catch (e) {
         console.error('MIMIC universes error:', e);
+        const panel = document.getElementById('mimicUniversesPanel');
+        if (panel) {
+            panel.innerHTML = `<p style="color:#f44;font-size:13px">Error cargando universos: ${e.message}</p>`;
+        }
     }
 }
 
@@ -6318,6 +6332,10 @@ async function updateMimicSchedule() {
         renderMimicSchedule(data);
     } catch (e) {
         console.error('MIMIC schedule error:', e);
+        const panel = document.getElementById('mimicSchedulePanel');
+        if (panel) {
+            panel.innerHTML = `<p style="color:#f44;font-size:13px">Error cargando horario: ${e.message}</p>`;
+        }
     }
 }
 
