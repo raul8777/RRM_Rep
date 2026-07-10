@@ -6228,9 +6228,11 @@ async function initMimicTab() {
     await updateMimicStatus();
     await updateMimicUniverses();
     await updateMimicSchedule();
+    await updateMimicRecommendations();
     setInterval(updateMimicStatus, 10000);   // every 10s for live progress
     setInterval(updateMimicUniverses, 30000);
     setInterval(updateMimicSchedule, 30000);
+    setInterval(updateMimicRecommendations, 60000);
 }
 
 async function updateMimicStatus() {
@@ -6302,7 +6304,7 @@ function renderMimicUniverses(data) {
     }
     const total = allUniverses.length;
     let html = `<p style="font-size:12px;margin:0 0 6px 0;color:#aaa">Mostrando ${total} / ${total} micro universos</p>` +
-        '<div style="max-height:420px;overflow-y:auto;border:1px solid #333;border-radius:4px">' +
+        '<div style="max-height:320px;overflow-y:auto;border:1px solid #333;border-radius:4px">' +
         '<table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr>' +
         '<th style="text-align:left">ID</th>' +
         '<th style="text-align:left">Régimen</th>' +
@@ -6386,6 +6388,114 @@ function renderMimicCoverage(state) {
     });
     html += '</div>';
     panel.innerHTML = html;
+}
+
+let _mimicSweepReport = null;
+let _mimicCurrentConfig = null;
+
+async function updateMimicRecommendations() {
+    try {
+        // Load sweep report if available
+        try {
+            _mimicSweepReport = await mimicApi('/report');
+        } catch (e) {
+            _mimicSweepReport = null;
+        }
+        // Load current production config for comparison
+        try {
+            _mimicCurrentConfig = await fetch('/config/kelly', {
+                headers: { 'X-API-Key': _apiKey }
+            }).then(r => r.json());
+        } catch (e) {
+            _mimicCurrentConfig = null;
+        }
+        renderMimicRecommendations(_mimicState, _mimicSweepReport, _mimicCurrentConfig);
+    } catch (e) {
+        console.error('MIMIC recommendations error:', e);
+    }
+}
+
+function renderMimicRecommendations(state, sweep, currentConfig) {
+    const panel = document.getElementById('mimicRecommendationsPanel');
+    if (!state || !state.metrics) {
+        panel.innerHTML = '<p>Sin datos suficientes para recomendar.</p>';
+        return;
+    }
+    const total = state.metrics.total_days || 0;
+    const target = 90;
+    const ready = total >= target;
+    const statusColor = ready ? '#4caf50' : (total >= target * 0.7 ? '#ff9800' : '#f44336');
+
+    let html = `<div style="font-size:13px;margin-bottom:10px">
+        <strong>Cobertura MIMIC:</strong> <span style="color:${statusColor}">${total} / ${target} días</span>
+        ${ready ? '<span style="color:#4caf50">✅ Listo para cross-validation</span>' : '<span style="color:#ff9800">⏳ Acumulando datos</span>'}
+    </div>`;
+
+    if (sweep && sweep.summary) {
+        const s = sweep.summary;
+        html += '<div style="background:rgba(255,255,255,0.03);border:1px solid #333;border-radius:6px;padding:10px;margin-bottom:10px">';
+        html += '<div style="font-size:13px;font-weight:700;margin-bottom:6px">📊 Último sweep de parámetros</div>';
+        html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;color:#ccc">
+            <div>Combinaciones: ${s.total_combinations || '-'}</div>
+            <div>Exitosas: ${s.successful_runs || '-'}</div>
+            <div>Mejor PnL%: <span style="color:#4caf50">${((s.best_pnl_pct || 0) * 100).toFixed(2)}%</span></div>
+            <div>Peor PnL%: <span style="color:#f44336">${((s.worst_pnl_pct || 0) * 100).toFixed(2)}%</span></div>
+            <div>Promedio PnL%: ${((s.avg_pnl_pct || 0) * 100).toFixed(2)}%</div>
+            <div>Mejor PnL USDT: $${(s.best_pnl_usdt || 0).toFixed(2)}</div>
+        </div>`;
+
+        const best = s.best_config;
+        if (best) {
+            html += '<div style="margin-top:8px;font-size:12px"><strong>Configuración recomendada:</strong></div>';
+            html += '<pre style="background:#111;padding:8px;border-radius:4px;font-size:11px;overflow:auto;margin:4px 0">' +
+                JSON.stringify(best, null, 2) + '</pre>';
+
+            const current = (currentConfig && currentConfig.override) ? currentConfig.override : {};
+            let diffHtml = '';
+            Object.entries(best).forEach(([k, v]) => {
+                const cur = current[k];
+                if (cur === undefined || Math.abs(parseFloat(cur) - parseFloat(v)) > 1e-6) {
+                    diffHtml += `<div style="font-size:11px;color:#ff9800">• ${k}: ${cur !== undefined ? cur : 'no definido'} → ${v}</div>`;
+                }
+            });
+            if (diffHtml) {
+                html += '<div style="margin-top:6px"><strong style="font-size:12px">Diferencias vs producción:</strong>' + diffHtml + '</div>';
+                html += `<button class="btn btn-primary btn-xs" onclick="applyMimicRecommendation()" style="margin-top:8px">🚀 Aplicar config recomendada</button>`;
+            } else {
+                html += '<div style="font-size:12px;color:#4caf50;margin-top:6px">La configuración recomendada ya está activa.</div>';
+            }
+        }
+        html += '</div>';
+    } else {
+        html += '<p style="font-size:12px;color:#888">No hay sweep report disponible. Cuando MIMIC acumule ≥90 días, corré un sweep desde el servidor.</p>';
+    }
+
+    panel.innerHTML = html;
+}
+
+async function applyMimicRecommendation() {
+    if (!_mimicSweepReport || !_mimicSweepReport.summary || !_mimicSweepReport.summary.best_config) {
+        alert('No hay configuración recomendada para aplicar.');
+        return;
+    }
+    if (!confirm('¿Aplicar la configuración recomendada por MIMIC a producción?')) return;
+    try {
+        const body = _mimicSweepReport.summary.best_config;
+        const res = await fetch('/config/apply', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-API-Key': _apiKey },
+            body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (data.ok) {
+            alert('Configuración aplicada correctamente.');
+            await updateMimicRecommendations();
+        } else {
+            alert('Error aplicando configuración: ' + JSON.stringify(data));
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
 }
 
 function renderMimicResults(state) {
