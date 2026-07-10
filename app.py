@@ -7186,6 +7186,12 @@ _KELLY_EDITABLE_FIELDS = {
     "sso_stagnant_min_hours", "sso_decay_min_hours",
     "sso_decay_threshold_pct",
     "sso_momentum_min_pnl_pct_spot", "sso_momentum_min_pnl_pct_futures",
+    # SSO-1d: Flat Stagnation Timeout
+    "sso_flat_stagnation_timeout_enabled",
+    "sso_flat_stagnation_timeout_hours",
+    "sso_flat_stagnation_timeout_hours_range_scalp",
+    "sso_flat_stagnation_timeout_pnl_pct",
+    "sso_flat_stagnation_timeout_pnl_pct_range_scalp",
     "slippage_pct",
     "use_bnb_for_commission",
     "hybrid_optimizer_enabled", "auto_apply_backtest", "backtest_safe_only",
@@ -8542,6 +8548,12 @@ def _check_config_drift(settings) -> List[Dict]:
         'entry_quality_vol_spike_min_range_scalp',
         'range_scalp_max_rsi', 'range_scalp_max_bb_position',
         'sso_target_contribution_pct_range_scalp',
+        # SSO-1d: Flat Stagnation Timeout — DB-governed
+        'sso_flat_stagnation_timeout_enabled',
+        'sso_flat_stagnation_timeout_hours',
+        'sso_flat_stagnation_timeout_hours_range_scalp',
+        'sso_flat_stagnation_timeout_pnl_pct',
+        'sso_flat_stagnation_timeout_pnl_pct_range_scalp',
     }
     # Canonical default drift (SPOT+FUTURES parameters) — skip keys already covered by baseline
     for k, expected in _PARAM_DEFAULTS.items():
@@ -9838,6 +9850,12 @@ async def post_config_verify(body: Dict = None, _auth=Depends(_require_api_key))
             'entry_quality_vol_spike_min_range_scalp',
             'range_scalp_max_rsi', 'range_scalp_max_bb_position',
             'sso_target_contribution_pct_range_scalp',
+            # SSO-1d: Flat Stagnation Timeout — DB-governed
+            'sso_flat_stagnation_timeout_enabled',
+            'sso_flat_stagnation_timeout_hours',
+            'sso_flat_stagnation_timeout_hours_range_scalp',
+            'sso_flat_stagnation_timeout_pnl_pct',
+            'sso_flat_stagnation_timeout_pnl_pct_range_scalp',
         }
         if body and isinstance(body, dict):
             _exclude.update(body.get('exclude', []))

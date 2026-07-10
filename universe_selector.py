@@ -78,20 +78,24 @@ def select_analysis_universe(
     screened: Dict[str, Any] = {"spot": [], "futures": [], "all": [], "_meta": {}}
     source = "static"
     reason = "fallback_static"
+    screener_enabled = bool(getattr(settings, 'screener_enabled', True))
 
-    try:
-        from pair_screener import get_screened_pairs
+    if screener_enabled:
+        try:
+            from pair_screener import get_screened_pairs
 
-        screened = get_screened_pairs(
-            settings=settings,
-            regime_mode=regime,
-            profile_label=profile,
-            db_client=db_client,
-        )
-        source = "screener"
-        reason = "screener_ok"
-    except Exception as exc:
-        reason = f"screener_error:{exc}"
+            screened = get_screened_pairs(
+                settings=settings,
+                regime_mode=regime,
+                profile_label=profile,
+                db_client=db_client,
+            )
+            source = "screener"
+            reason = "screener_ok"
+        except Exception as exc:
+            reason = f"screener_error:{exc}"
+    else:
+        reason = "screener_disabled"
 
     screened_spot = _normalize_list((screened or {}).get("spot", []))
     screened_futures = _normalize_list((screened or {}).get("futures", []))

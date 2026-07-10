@@ -200,9 +200,24 @@ def _audit_screener_selection(db_client, regime_mode: str, screened: dict, profi
         print(f"[Audit/Screener] Failed to persist screener_selection: {_ae}")
 
 
-def _get_futures_client(settings, db_client=None) -> FuturesClient:
-    """Lazy singleton for FuturesClient. Reuses instance across cycles."""
+def _get_futures_client(settings, db_client=None, injected_client=None) -> FuturesClient:
+    """Lazy singleton for FuturesClient. Reuses instance across cycles.
+
+    `injected_client` is used by MIMIC to pass a simulation mock. When provided,
+    it overrides the singleton and is configured with the current settings/db.
+    """
     global _futures_client
+    if injected_client is not None:
+        fc = injected_client
+        fc._cached_settings = settings
+        fc._active_leverage = min(getattr(settings, 'futures_leverage', 10), 10)
+        fc.max_shorts = min(getattr(settings, 'futures_max_shorts', 5), 12)
+        fc.max_longs = getattr(settings, 'futures_max_longs', 2)
+        fc.max_largecap_shorts = getattr(settings, 'futures_max_largecap_shorts', 3)
+        fc.largecap_symbols = set(getattr(settings, 'futures_largecap_symbols', ['BTCUSDT','ETHUSDT','BNBUSDT','XRPUSDT','SOLUSDT']))
+        if db_client and not fc.db_client:
+            fc.db_client = db_client
+        return fc
     # FIX-G2: Auto-resolve db_client from components if not provided
     if db_client is None:
         try:
@@ -700,6 +715,12 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'sso_decay_threshold_pct': 'sso_decay_threshold_pct',
             'sso_momentum_min_pnl_pct_spot': 'sso_momentum_min_pnl_pct_spot',
             'sso_momentum_min_pnl_pct_futures': 'sso_momentum_min_pnl_pct_futures',
+            # SSO-1d: Flat Stagnation Timeout
+            'sso_flat_stagnation_timeout_enabled': 'sso_flat_stagnation_timeout_enabled',
+            'sso_flat_stagnation_timeout_hours': 'sso_flat_stagnation_timeout_hours',
+            'sso_flat_stagnation_timeout_hours_range_scalp': 'sso_flat_stagnation_timeout_hours_range_scalp',
+            'sso_flat_stagnation_timeout_pnl_pct': 'sso_flat_stagnation_timeout_pnl_pct',
+            'sso_flat_stagnation_timeout_pnl_pct_range_scalp': 'sso_flat_stagnation_timeout_pnl_pct_range_scalp',
             'slippage_pct': 'slippage_pct',
             'use_bnb_for_commission': 'use_bnb_for_commission',
             'hybrid_optimizer_enabled': 'hybrid_optimizer_enabled',
@@ -6496,11 +6517,14 @@ def _persist_safepoint(db_client, settings, position_manager) -> None:
         print(f"[Safepoint] failed to persist: {e}")
 
 
-def execute_once(monitor_only: bool = False):
+def execute_once(monitor_only: bool = False, components=None):
     global _db_client_ref, _FUTURES_MASS_SL_COOLDOWN_UNTIL, _VOLSPIKE_POSITIONS, _OVERRIDE_DAILY_COUNT
     global _consecutive_failures, _circuit_breaker_until, _SSO7_BEST_CANDIDATE_CACHE
-    from init_components import get_components
-    comp = get_components()
+    if components is None:
+        from init_components import get_components
+        comp = get_components()
+    else:
+        comp = components
     settings = comp.settings
     client = comp.binance_client
     news_client = comp.news_client
@@ -6585,7 +6609,7 @@ def execute_once(monitor_only: bool = False):
     _binance_truth_status = {"ok": True, "severity": "unknown", "mismatch_count": 0}
     try:
         if getattr(settings, 'futures_enabled', True):
-            _fc_truth = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None))
+            _fc_truth = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None), injected_client=getattr(comp, 'futures_client', None))
             _wire_futures_client(_fc_truth, client, settings)
             _binance_truth_status = evaluate_futures_parity(_fc_truth)
             persist_truth_status(_db_client_ref, _binance_truth_status, source='execute_once_pretrade')
@@ -6631,7 +6655,7 @@ def execute_once(monitor_only: bool = False):
                 sso7_candidate_cache=_SSO7_BEST_CANDIDATE_CACHE,
             )
             try:
-                _fc_mon = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None))
+                _fc_mon = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None), injected_client=getattr(comp, 'futures_client', None))
                 _wire_futures_client(_fc_mon, client, settings)
                 _fut_mon_closes = _fc_mon.check_positions(settings=settings, monitor_only=True)
                 if _fut_mon_closes:
@@ -6911,7 +6935,7 @@ def execute_once(monitor_only: bool = False):
                     )
                     _updated_futures_positions = 0
                     try:
-                        _fc_reval = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None))
+                        _fc_reval = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None), injected_client=getattr(comp, 'futures_client', None))
                         _updated_futures_positions = _fc_reval.reevaluate_open_positions(
                             settings,
                             _regime_mode,
@@ -7030,7 +7054,7 @@ def execute_once(monitor_only: bool = False):
     _fc = None
     if getattr(settings, 'futures_enabled', True):
         try:
-            _fc = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None))
+            _fc = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None), injected_client=getattr(comp, 'futures_client', None))
 
             # CapBridge: bidirectional autonomous spot↔futures capital rebalancing
             if getattr(settings, 'futures_capital_bridge_enabled', True):

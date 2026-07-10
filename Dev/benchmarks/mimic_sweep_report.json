@@ -1,0 +1,112 @@
+{
+  "generated_at": "2026-07-10T03:07:05.741337+00:00",
+  "start": "2026-03-04T12:00:00+00:00",
+  "end": "2026-03-05T12:00:00+00:00",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "ADAUSDT",
+    "SOLUSDT",
+    "XLMUSDT",
+    "UNIUSDT",
+    "BCHUSDT",
+    "NEARUSDT"
+  ],
+  "combinations": 4,
+  "summary": {
+    "total_combinations": 4,
+    "successful_runs": 4,
+    "failed_runs": 0,
+    "best_pnl_pct": 0.0588,
+    "worst_pnl_pct": -0.0095,
+    "avg_pnl_pct": 0.0417,
+    "best_config": {
+      "min_signal_strength": 0.45,
+      "min_success_probability": 0.6,
+      "stop_loss_pct": 3.36,
+      "kelly_max_usdt": 1000.0
+    },
+    "best_pnl_usdt": 1.71
+  },
+  "results": [
+    {
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.6,
+        "stop_loss_pct": 3.36,
+        "kelly_max_usdt": 1000.0
+      },
+      "cycles": 25,
+      "final_balance": {
+        "USDT": 2514.385220440002,
+        "BNB": 0.6020000000000002
+      },
+      "total_value": 2911.71,
+      "pnl_usdt": 1.71,
+      "pnl_pct": 0.0588,
+      "buy_count": 0,
+      "sell_count": 0,
+      "sl_tp_count": 0
+    },
+    {
+      "params": {
+        "min_signal_strength": 0.65,
+        "min_success_probability": 0.5,
+        "stop_loss_pct": 3.36,
+        "kelly_max_usdt": 1000.0
+      },
+      "cycles": 25,
+      "final_balance": {
+        "USDT": 2514.385220440002,
+        "BNB": 0.6020000000000002
+      },
+      "total_value": 2911.71,
+      "pnl_usdt": 1.71,
+      "pnl_pct": 0.0588,
+      "buy_count": 0,
+      "sell_count": 0,
+      "sl_tp_count": 0
+    },
+    {
+      "params": {
+        "min_signal_strength": 0.65,
+        "min_success_probability": 0.6,
+        "stop_loss_pct": 3.36,
+        "kelly_max_usdt": 1000.0
+      },
+      "cycles": 25,
+      "final_balance": {
+        "USDT": 2514.385220440002,
+        "BNB": 0.6020000000000002
+      },
+      "total_value": 2911.71,
+      "pnl_usdt": 1.71,
+      "pnl_pct": 0.0588,
+      "buy_count": 0,
+      "sell_count": 0,
+      "sl_tp_count": 0
+    },
+    {
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "stop_loss_pct": 3.36,
+        "kelly_max_usdt": 1000.0
+      },
+      "cycles": 25,
+      "final_balance": {
+        "USDT": 1408.1287827159,
+        "BNB": 0.6020000000000002,
+        "ADA": 2322.686,
+        "ETH": 0.215
+      },
+      "total_value": 2909.72,
+      "pnl_usdt": -0.28,
+      "pnl_pct": -0.0095,
+      "buy_count": 1,
+      "sell_count": 2,
+      "sl_tp_count": 0
+    }
+  ]
+}

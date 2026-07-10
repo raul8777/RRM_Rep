@@ -193,6 +193,12 @@ class Settings(BaseSettings):
     spot_bounce_rescue_max_peak_pct: float = Field(default=0.8)         # SPOT: wider peak threshold (no leverage)
     spot_bounce_rescue_min_hours: float = Field(default=6.0)               # concentrated: liberar capital estancado más rápido
     spot_bounce_rescue_target_pnl: float = Field(default=-0.50)           # concentrated: corte más amplio, evita micro-pérdidas
+    # SSO-1d: Flat Stagnation Timeout — recycle capital stuck flat in SPOT RANGE_SCALP
+    sso_flat_stagnation_timeout_enabled: bool = Field(default=True)
+    sso_flat_stagnation_timeout_hours: float = Field(default=3.0)
+    sso_flat_stagnation_timeout_hours_range_scalp: float = Field(default=3.0)
+    sso_flat_stagnation_timeout_pnl_pct: float = Field(default=0.003)
+    sso_flat_stagnation_timeout_pnl_pct_range_scalp: float = Field(default=0.003)
     # SSO-6: Bounce Rescue Smart Gate â€” block rescue when position is already recovering
     # AND-partial logic: G1_strong alone OR COUNT(G2,G3,G4) >= rescue_gate_min_concurrent
     rescue_smart_gate_enabled: bool = Field(default=True)

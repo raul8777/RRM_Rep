@@ -167,6 +167,13 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'spot_bounce_rescue_min_hours': 6.0,
     'spot_bounce_rescue_target_pnl': -0.50,
 
+    # SSO-1d: Flat Stagnation Timeout
+    'sso_flat_stagnation_timeout_enabled': True,
+    'sso_flat_stagnation_timeout_hours': 3.0,
+    'sso_flat_stagnation_timeout_hours_range_scalp': 3.0,
+    'sso_flat_stagnation_timeout_pnl_pct': 0.003,
+    'sso_flat_stagnation_timeout_pnl_pct_range_scalp': 0.003,
+
     # VolSpike override
     'volspike_override_enabled': True,
     'volspike_override_narrative_only': True,

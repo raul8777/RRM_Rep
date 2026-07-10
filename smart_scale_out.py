@@ -676,8 +676,37 @@ class SmartScaleOut:
             )
         _1_diag = f"1:no({','.join(_1_reasons)})"
 
+        # ── SSO-1d: Flat Stagnation Timeout ──────────────────────────────────
+        # Closes SPOT positions in RANGE_SCALP that have remained flat for too long,
+        # independent of the wallet-percentage profit floors that block small positions.
+        _1d_diag = "1d:no"
+        _flat_enabled = self._cfg('sso_flat_stagnation_timeout_enabled', True)
+        if _flat_enabled and pos.trade_type == 'spot' and _regime == 'RANGE_SCALP':
+            _flat_hours_field = f'sso_flat_stagnation_timeout_hours_{_regime.lower()}' if _regime else None
+            _flat_hours = (
+                float(self._cfg(_flat_hours_field, None))
+                if (_flat_hours_field and self._cfg(_flat_hours_field, None) is not None)
+                else self._cfg('sso_flat_stagnation_timeout_hours', 3.0)
+            )
+            _flat_pnl_field = f'sso_flat_stagnation_timeout_pnl_pct_{_regime.lower()}' if _regime else None
+            _flat_pnl_pct = (
+                float(self._cfg(_flat_pnl_field, None))
+                if (_flat_pnl_field and self._cfg(_flat_pnl_field, None) is not None)
+                else self._cfg('sso_flat_stagnation_timeout_pnl_pct', 0.003)
+            )
+            _flat_pnl_pct = abs(_flat_pnl_pct)
+            if age_hours >= _flat_hours and abs(pos.pnl_pct) < _flat_pnl_pct:
+                return SSOAction(
+                    should_close=True, close_pct=1.0,
+                    reason="sso_flat_stagnation_timeout",
+                    detail=(f"Flat stagnation timeout: |pnl|={abs(pos.pnl_pct)*100:.2f}% "
+                            f"<{_flat_pnl_pct*100:.2f}%, age={age_hours:.1f}h >= {_flat_hours:.1f}h"),
+                    trigger="SSO-1", priority=1,
+                )
+            _1d_diag = f"1d:no(age={age_hours:.1f}h<{_flat_hours:.1f}h or |pnl|>={_flat_pnl_pct*100:.2f}%)"
+
         return SSOAction(
-            diagnosis=f"SSO-1:[{_1b_diag} {_1c_diag} {_1_diag}] "
+            diagnosis=f"SSO-1:[{_1b_diag} {_1c_diag} {_1_diag} {_1d_diag}] "
                       f"pk={pos.peak_pnl_pct*100:.2f}% cur={pos.pnl_pct*100:.2f}% "
                       f"life={_lifetime_vel*100:.3f}%/h snap={(_snap_vel or 0)*100:.3f}%/h "
                       f"${pos.pnl_usdt:.2f} {age_hours:.1f}h"
