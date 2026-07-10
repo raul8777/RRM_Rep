@@ -10164,7 +10164,17 @@ async def _mimic_autorun_loop() -> None:
         try:
             scheduler = _get_mimic_scheduler()
             state = scheduler.get_state()
-            if state.get("status") not in ("running", "paused"):
+            if state.get("status") == "paused":
+                pass
+            elif state.get("status") == "running":
+                # A persisted 'running' state without an active thread means the container
+                # was restarted mid-cycle; resume it immediately.
+                print(f"[MIMIC AutoRun] resuming stuck running state — phase={state.get('phase')}")
+                ran_cycle = True
+                result = await asyncio.to_thread(scheduler.run_once)
+                print(f"[MIMIC AutoRun] cycle finished: ok={result.get('ok')} phase={result.get('phase')} error={result.get('error')}")
+                continue
+            else:
                 can_run = scheduler.can_run_now()
                 if can_run.get("can_run"):
                     ran_cycle = True
