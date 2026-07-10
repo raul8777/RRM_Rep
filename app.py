@@ -10160,18 +10160,25 @@ async def _mimic_autorun_loop() -> None:
     global _mimic_worker_running
     _mimic_worker_running = True
     while _mimic_worker_running:
+        ran_cycle = False
         try:
             scheduler = _get_mimic_scheduler()
             state = scheduler.get_state()
             if state.get("status") not in ("running", "paused"):
                 can_run = scheduler.can_run_now()
                 if can_run.get("can_run"):
+                    ran_cycle = True
                     print(f"[MIMIC AutoRun] starting cycle — reason={can_run.get('reason')}")
                     result = await asyncio.to_thread(scheduler.run_once)
                     print(f"[MIMIC AutoRun] cycle finished: ok={result.get('ok')} phase={result.get('phase')} error={result.get('error')}")
+                    # If still able to run, loop immediately without sleeping to maximize window usage
+                    continue
         except Exception as exc:
             print(f"[MIMIC AutoRun] ERROR: {exc}")
-        await asyncio.sleep(300)  # 5 minutes
+        if not ran_cycle:
+            await asyncio.sleep(60)  # 1 minute when idle/waiting
+        else:
+            await asyncio.sleep(5)  # brief pause between consecutive cycles
 
 
 @app.on_event("startup")
