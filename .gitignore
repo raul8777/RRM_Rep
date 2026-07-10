@@ -4,6 +4,7 @@ __pycache__/
 .env.*
 secrets*.json
 historical_data/*.parquet
+historical_data/*.parquet.bak.*
 Dev/benchmarks/mimic_dataset_progress.json
 Dev/benchmarks/mimic_state.json
 Dev/benchmarks/mimic_schedule.json
