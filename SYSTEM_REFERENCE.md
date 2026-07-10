@@ -43,12 +43,16 @@ SELECT_UNIVERSE → AUDIT → DOWNLOAD → VALIDATE → MAP_REGIMES → CALIBRAT
 - `SimulationFuturesClient.smart_rebalance_capital` devuelve contrato completo (`direction`, `amount`, `reason`, `success`, `error`) para evitar `KeyError` en `run_trades.py`.
 - `SimulationFuturesClient.get_open_positions_summary` stub para compatibilidad con dashboard.
 - `.gitignore` actualizado para ignorar archivos de estado/datos MIMIC pero versionar `mimic_baseline.json`.
+- `app.py`: auto-run worker en background que cada 5 minutos verifica `can_run_now()` y ejecuta `scheduler.run_once()` si se cumplen las condiciones.
+- `mimic_window_controller.py`: `can_run()` recarga el schedule desde disco para aplicar cambios del dashboard en caliente; normalización de `days` para soportar formato string.
+- `frontend/dashboard.js`: indicador **Auto-run worker** en el panel de estado.
 
 **Resultados validados:**
 - Smoke test: ✅
 - Regresión: `pytest tests/test_mimic_regression.py -q` → 1 passed.
 - CLI `run --force` completó 5 micro universos consecutivos (`SPOT_BULL`, `RANGE_SCALP`, `PRESERVATION`) sin error de CapBridge.
 - API `POST /mimic/run` completó micro universos y acumuló métricas correctamente.
+- Auto-run worker ejecutó `mu_0006_spot_bull` automáticamente al estar dentro de la ventana programada.
 
 **Recomendación actual:** El simulador sigue rechazando la mayoría de señales con umbrales canónicos. El objetivo ahora es acumular micro universos para mejorar el dataset global; no relajar umbrales para forzar trades.
 

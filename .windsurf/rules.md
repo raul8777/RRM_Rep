@@ -396,6 +396,7 @@ $env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_
 2. Cross-validation (`pytest tests/test_mimic_regression.py`) se dispara solo cuando hay datos suficientes acumulados.
 3. El operador puede forzar/pausar/reiniciar desde dashboard u orchestrator; la ejecución automática respeta la ventana programada.
 4. Descargas deben cubrir la ventana del micro universo, no solo los últimos días.
+5. El auto-run worker del backend revisa el horario cada 5 minutos; si se cambia el horario en el dashboard, el worker lo recarga desde disco en la siguiente verificación.
 
 **Comandos:**
 ```powershell
