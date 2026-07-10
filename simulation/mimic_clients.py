@@ -415,7 +415,14 @@ class SimulationFuturesClient:
         return 0
 
     def smart_rebalance_capital(self, **kwargs: Any) -> Dict[str, Any]:
-        return {"error": "capital bridge disabled in simulation"}
+        """Capital bridge stub matching FuturesClient return contract."""
+        return {
+            "direction": "none",
+            "amount": 0.0,
+            "reason": "capital bridge disabled in simulation",
+            "success": True,
+            "error": None,
+        }
 
     def get_open_positions_summary(self) -> List[Dict[str, Any]]:
         """Stub for dashboard compatibility."""
