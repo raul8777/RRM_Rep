@@ -56,11 +56,13 @@ class MicroUniverseSelector:
         os.makedirs(os.path.dirname(self.queue_path), exist_ok=True)
         self._queue: List[MicroUniverse] = []
         self._forced_id: Optional[str] = None
+        self._mtime: Optional[float] = None
         self._load()
 
     def _load(self) -> None:
         if os.path.exists(self.queue_path):
             try:
+                self._mtime = os.path.getmtime(self.queue_path)
                 with open(self.queue_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 self._queue = [MicroUniverse.from_dict(u) for u in data.get("universes", [])]
@@ -70,6 +72,16 @@ class MicroUniverseSelector:
                 self._queue = []
         else:
             self._queue = []
+
+    def _reload_if_changed(self) -> None:
+        if not os.path.exists(self.queue_path):
+            return
+        try:
+            mtime = os.path.getmtime(self.queue_path)
+            if self._mtime is None or mtime > self._mtime:
+                self._load()
+        except Exception:
+            pass
 
     def _save(self) -> None:
         with open(self.queue_path, "w", encoding="utf-8") as f:
@@ -166,6 +178,7 @@ class MicroUniverseSelector:
 
     def compute_scores(self, opportunity_data: Optional[Dict[str, float]] = None) -> None:
         """Recompute priority scores for all pending and in_progress micro universos."""
+        self._reload_if_changed()
         progress = self._load_progress()
         regime_days = progress.get("regimes", {})
         symbol_days = progress.get("symbols", {})
@@ -207,6 +220,7 @@ class MicroUniverseSelector:
         2. Oldest in_progress universe (resume abandoned work after restarts).
         3. Pending universe with highest score.
         """
+        self._reload_if_changed()
         if self._forced_id:
             for u in self._queue:
                 if u.id == self._forced_id:
@@ -227,6 +241,7 @@ class MicroUniverseSelector:
         return pending[0]
 
     def mark_status(self, universe_id: str, status: str, result: Optional[Dict[str, Any]] = None) -> None:
+        self._reload_if_changed()
         for u in self._queue:
             if u.id == universe_id:
                 u.status = status
@@ -237,6 +252,7 @@ class MicroUniverseSelector:
         self._save()
 
     def force_next(self, universe_id: str) -> bool:
+        self._reload_if_changed()
         for u in self._queue:
             if u.id == universe_id:
                 self._forced_id = universe_id
@@ -245,13 +261,16 @@ class MicroUniverseSelector:
         return False
 
     def set_weights(self, weights: Dict[str, float]) -> None:
+        self._reload_if_changed()
         self.weights = {k: float(v) for k, v in weights.items()}
         self._save()
 
     def get_queue(self) -> List[Dict[str, Any]]:
+        self._reload_if_changed()
         return [u.to_dict() for u in self._queue]
 
     def get_summary(self) -> Dict[str, Any]:
+        self._reload_if_changed()
         by_status: Dict[str, int] = {}
         for u in self._queue:
             by_status[u.status] = by_status.get(u.status, 0) + 1
