@@ -134,6 +134,9 @@
     <button class="tab-btn"        data-tab="tab-control" onclick="switchTab('tab-control')">
         <span class="tab-icon">🧭</span> Acciones
     </button>
+    <button class="tab-btn"        data-tab="tab-mimic" onclick="switchTab('tab-mimic')">
+        <span class="tab-icon">🔬</span> MIMIC
+    </button>
 </nav>
 
 <!-- Modal: confirmación reforzada para acciones sensibles -->
@@ -658,6 +661,92 @@
             <div class="bt-progress-bar" id="btProgressBar"></div>
         </div>
         <div class="bt-progress-meta" id="btProgressMeta">Esperando primer estado...</div>
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- TAB 6 — MIMIC                                                             -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-mimic">
+    <div class="mimic-layout" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px">
+
+        <!-- LEFT COLUMN -->
+        <div class="mimic-left" style="display:flex;flex-direction:column;gap:16px">
+            <!-- Estado actual -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>🔬 MIMIC — Estado</h2>
+                    <div class="card-actions">
+                        <span id="mimicStatusBadge" class="mode-pill-dot" style="background:#888"></span>
+                    </div>
+                </div>
+                <div id="mimicStatusPanel" style="padding:12px">
+                    <p class="loading">Cargando estado...</p>
+                </div>
+                <div class="card-actions" style="padding:12px;border-top:1px solid #333">
+                    <button class="btn btn-primary btn-xs" onclick="mimicAction('start')">▶ Start</button>
+                    <button class="btn btn-success btn-xs" onclick="mimicRun()">⏵ Run cycle</button>
+                    <button class="btn btn-warning btn-xs" onclick="mimicAction('pause')">⏸ Pause</button>
+                    <button class="btn btn-primary btn-xs" onclick="mimicAction('resume')">⏵ Resume</button>
+                    <button class="btn btn-danger btn-xs" onclick="mimicAction('retry')">🔄 Retry</button>
+                    <button class="btn btn-xs" onclick="mimicAction('reset')">⏹ Reset</button>
+                </div>
+            </div>
+
+            <!-- Programador de ventanas -->
+            <div class="card">
+                <div class="card-header"><h2>⏰ Ventanas de ejecución</h2></div>
+                <div id="mimicSchedulePanel" style="padding:12px">
+                    <p class="loading">Cargando horario...</p>
+                </div>
+                <div style="padding:12px;border-top:1px solid #333">
+                    <label>Modo
+                        <select id="mimicScheduleMode" style="background:#222;color:#eee;border:1px solid #444;padding:4px">
+                            <option value="auto">Auto</option>
+                            <option value="manual">Manual</option>
+                            <option value="suggest-only">Suggest-only</option>
+                        </select>
+                    </label>
+                    <label style="margin-left:12px">Días (0=Lun)
+                        <input id="mimicScheduleDays" type="text" value="0,1,2,3,4,5,6" style="width:120px;background:#222;color:#eee;border:1px solid #444;padding:4px" />
+                    </label>
+                    <label style="margin-left:12px">Inicio
+                        <input id="mimicScheduleStart" type="time" value="00:00" style="background:#222;color:#eee;border:1px solid #444;padding:4px" />
+                    </label>
+                    <label style="margin-left:12px">Fin
+                        <input id="mimicScheduleEnd" type="time" value="07:00" style="background:#222;color:#eee;border:1px solid #444;padding:4px" />
+                    </label>
+                    <button class="btn btn-primary btn-xs" style="margin-left:12px" onclick="saveMimicSchedule()">Guardar</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- RIGHT COLUMN -->
+        <div class="mimic-right" style="display:flex;flex-direction:column;gap:16px">
+            <!-- Cola de micro universos -->
+            <div class="card">
+                <div class="card-header"><h2>🌌 Micro universos</h2></div>
+                <div id="mimicUniversesPanel" style="padding:12px;max-height:400px;overflow:auto">
+                    <p class="loading">Cargando cola...</p>
+                </div>
+            </div>
+
+            <!-- Progreso de cobertura -->
+            <div class="card">
+                <div class="card-header"><h2>📊 Cobertura acumulada</h2></div>
+                <div id="mimicCoveragePanel" style="padding:12px">
+                    <p class="loading">Cargando cobertura...</p>
+                </div>
+            </div>
+
+            <!-- Resultados recientes -->
+            <div class="card">
+                <div class="card-header"><h2>📈 Resultados recientes</h2></div>
+                <div id="mimicResultsPanel" style="padding:12px">
+                    <p class="loading">Cargando resultados...</p>
+                </div>
+            </div>
+        </div>
     </div>
 </div>
 

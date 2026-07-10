@@ -3,3 +3,10 @@ __pycache__/
 *.pyc
 .env.*
 secrets*.json
+historical_data/*.parquet
+Dev/benchmarks/mimic_dataset_progress.json
+Dev/benchmarks/mimic_state.json
+Dev/benchmarks/mimic_schedule.json
+Dev/benchmarks/mimic_universe_queue.json
+Dev/benchmarks/mimic_data_audit.json
+Dev/benchmarks/mimic_download_report.json

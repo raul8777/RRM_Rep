@@ -116,12 +116,17 @@ def run_mimic_simulation(
     symbols: List[str],
     interval: str = "1h",
     days: int = 7,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
     initial_usdt: float = 2910.0,
     fear_greed_value: float = 50.0,
+    data_dir: str = "historical_data",
 ) -> Dict[str, Any]:
     """Convenience entry point for a single MIMIC simulation."""
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=days)
+    if end is None:
+        end = datetime.now(timezone.utc)
+    if start is None:
+        start = end - timedelta(days=days)
     runner = SimulationRunner(
         settings=settings,
         symbols=symbols,
@@ -130,5 +135,6 @@ def run_mimic_simulation(
         end=end,
         initial_usdt=initial_usdt,
         fear_greed_value=fear_greed_value,
+        data_dir=data_dir,
     )
     return runner.run()

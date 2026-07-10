@@ -10138,3 +10138,136 @@ async def get_hybrid_recommend(
         return _rec
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ── MIMIC endpoints ───────────────────────────────────────────────────────────
+
+_mimic_scheduler: Optional[Any] = None
+
+
+def _get_mimic_scheduler() -> Any:
+    global _mimic_scheduler
+    if _mimic_scheduler is None:
+        from simulation.mimic_scheduler import get_scheduler
+        _mimic_scheduler = get_scheduler(db_client=db_client)
+    return _mimic_scheduler
+
+
+@app.get("/mimic/status", dependencies=[Depends(_require_api_key)])
+async def mimic_status():
+    scheduler = _get_mimic_scheduler()
+    return scheduler.get_summary()
+
+
+@app.get("/mimic/universes", dependencies=[Depends(_require_api_key)])
+async def mimic_universes():
+    from simulation.mimic_universe_selector import get_selector
+    selector = get_selector()
+    return {
+        "summary": selector.get_summary(),
+        "universes": selector.get_queue(),
+    }
+
+
+@app.post("/mimic/select-universe", dependencies=[Depends(_require_api_key)])
+async def mimic_select_universe(request: Request):
+    body = await request.json()
+    universe_id = body.get("micro_universe_id")
+    if not universe_id:
+        raise HTTPException(status_code=400, detail="micro_universe_id required")
+    from simulation.mimic_universe_selector import get_selector
+    selector = get_selector()
+    if not selector.force_next(universe_id):
+        raise HTTPException(status_code=404, detail="micro universe not found")
+    return {"ok": True, "forced_id": universe_id}
+
+
+@app.post("/mimic/start", dependencies=[Depends(_require_api_key)])
+async def mimic_start(request: Request):
+    body = await request.json() if await request.body() else {}
+    force = body.get("force", False)
+    scheduler = _get_mimic_scheduler()
+    can_run = scheduler.can_run_now()
+    if not can_run.get("can_run") and not force:
+        return {"ok": False, "can_run": can_run}
+    scheduler.start()
+    return {"ok": True, "state": scheduler.get_state()}
+
+
+@app.post("/mimic/run", dependencies=[Depends(_require_api_key)])
+async def mimic_run(request: Request):
+    body = await request.json() if await request.body() else {}
+    force = body.get("force", False)
+    scheduler = _get_mimic_scheduler()
+    can_run = scheduler.can_run_now()
+    if not can_run.get("can_run") and not force:
+        return {"ok": False, "can_run": can_run}
+    result = scheduler.run_once()
+    return {"ok": result.get("ok", False), "result": result, "state": scheduler.get_state()}
+
+
+@app.post("/mimic/pause", dependencies=[Depends(_require_api_key)])
+async def mimic_pause():
+    scheduler = _get_mimic_scheduler()
+    scheduler.pause()
+    return {"ok": True, "state": scheduler.get_state()}
+
+
+@app.post("/mimic/resume", dependencies=[Depends(_require_api_key)])
+async def mimic_resume():
+    scheduler = _get_mimic_scheduler()
+    scheduler.resume()
+    return {"ok": True, "state": scheduler.get_state()}
+
+
+@app.post("/mimic/retry", dependencies=[Depends(_require_api_key)])
+async def mimic_retry(request: Request):
+    body = await request.json() if await request.body() else {}
+    universe_id = body.get("micro_universe_id")
+    scheduler = _get_mimic_scheduler()
+    if universe_id:
+        scheduler.selector.mark_status(universe_id, "pending")
+        scheduler._state["current_micro_universe_id"] = universe_id
+        scheduler._save_state()
+    else:
+        scheduler.resume()
+    return {"ok": True, "state": scheduler.get_state()}
+
+
+@app.post("/mimic/reset", dependencies=[Depends(_require_api_key)])
+async def mimic_reset(request: Request):
+    body = await request.json() if await request.body() else {}
+    confirm = body.get("confirm", False)
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required")
+    scheduler = _get_mimic_scheduler()
+    scheduler.reset()
+    return {"ok": True, "state": scheduler.get_state()}
+
+
+@app.get("/mimic/schedule", dependencies=[Depends(_require_api_key)])
+async def mimic_schedule_get():
+    from simulation.mimic_window_controller import get_window_controller
+    controller = get_window_controller()
+    return controller.get_schedule()
+
+
+@app.post("/mimic/schedule", dependencies=[Depends(_require_api_key)])
+async def mimic_schedule_post(request: Request):
+    body = await request.json()
+    from simulation.mimic_window_controller import get_window_controller
+    controller = get_window_controller()
+    controller.set_schedule(body)
+    return {"ok": True, "schedule": controller.get_schedule()}
+
+
+@app.get("/mimic/report", dependencies=[Depends(_require_api_key)])
+async def mimic_report():
+    from simulation.mimic_universe_selector import get_selector
+    selector = get_selector()
+    scheduler = _get_mimic_scheduler()
+    return {
+        "state": scheduler.get_state(),
+        "queue_summary": selector.get_summary(),
+        "universes": selector.get_queue(),
+    }

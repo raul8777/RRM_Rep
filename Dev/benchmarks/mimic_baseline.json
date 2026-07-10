@@ -1,8 +1,8 @@
 {
-  "total_value": 2157.11,
-  "holdings_qty": 0.761,
+  "total_value": 2576.86,
+  "pnl_usdt": 0.0,
   "buy_count": 2,
   "sell_count": 3,
   "sl_tp_count": 0,
-  "cycles": 25
+  "generated_at": "2026-07-10T05:16:46.548628+00:00"
 }

@@ -416,3 +416,7 @@ class SimulationFuturesClient:
 
     def smart_rebalance_capital(self, **kwargs: Any) -> Dict[str, Any]:
         return {"error": "capital bridge disabled in simulation"}
+
+    def get_open_positions_summary(self) -> List[Dict[str, Any]]:
+        """Stub for dashboard compatibility."""
+        return []
