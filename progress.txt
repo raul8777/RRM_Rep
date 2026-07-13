@@ -513,3 +513,23 @@ Archivos: lifecycle/adapter_spot.py, lifecycle/adapter_futures.py, SYSTEM_REFERE
   con diagrama ASCII, tabla de módulos, decisiones de diseño confirmadas y estado de tests.
 - Tests nuevos: `tests/test_lifecycle_adapters.py` 5/5 pasan.
 - lifecycle + super_mimic tests: 65 passed.
+
+2026-07-13 (evaluación baseline) - MIMIC baseline sintético para lifecycle kernel
+================================================================================
+Archivos: lifecycle/mimic_baseline_eval.py, lifecycle/mimic_baseline_report.py,
+          tests/test_lifecycle_baseline_eval.py,
+          Dev/benchmarks/lifecycle_baseline_report.json/md.
+
+- Mapeada la mejor config SPOT_BULL-A del sweep (`Dev/sweep_analysis_SPOT_BULL_20260713.md`)
+  a un `LifecycleConfig` declarativo.
+- Creada ventana sintética de 6 pasos con 3 activos (BTC, SOL, FET).
+- Ejecutado `LifecycleRunner` end-to-end: entradas en BTC/SOL, rechazo de FET por
+  liquidez/diversificación, partial takes por TP1/TP2, 0 SL tocados.
+- Métricas baseline: 7 trades, peak_capture_ratio=0.78.
+- Reportes: `Dev/benchmarks/lifecycle_baseline_report.md` + `.json`.
+- Tests: `tests/test_lifecycle_baseline_eval.py` 2/2 pasan.
+- lifecycle + super_mimic tests: 67 passed.
+
+Pendiente:
+- Integrar `LifecycleRunner` en `simulation/mimic_runner.py` para sweep histórico real.
+- Calcular métricas reales: PnL/día, drawdown, win_rate, CDR.
