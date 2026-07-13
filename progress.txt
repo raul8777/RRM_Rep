@@ -583,6 +583,36 @@ Comandos:
 - Full con lifecycle y 20 workers:
     python Dev/scripts/mimic_mode_profile_sweep.py --lifecycle --max-workers 20 --strategy full
 
-Pendiente:
-- Ejecutar sweep lifecycle real con datos históricos.
-- Comparar métricas contra sweep baseline heredado.
+2026-07-13 (sweep ejecutado) - Resultados del lifecycle sweep MIMIC
+==================================================================
+Archivos: Dev/benchmarks/lifecycle_sweep/*, Dev/benchmarks/lifecycle_sweep_report.md,
+          progress.txt.
+
+Ejecución:
+- Comando: python Dev/scripts/mimic_lifecycle_sweep.py --max-workers 20 --max-cycles 100
+- 1,296 jobs completados sin errores en ~10 min 30 s
+- Ventanas: win_20260415_20260430, win_20260515_20260531
+- Strategy: lifecycle-quick
+
+Resultados:
+- best_pnl_usdt = 21.64 (SPOT_BULL-A, win_20260415_20260430)
+- best_sharpe = 3.39
+- best_drawdown_pct = 2.32
+- best_trades = 3
+- avg_pnl_pct = -0.42
+
+Mejor config SPOT_BULL-A:
+- min_signal_strength=0.5, min_success_probability=0.5, stop_loss_pct=2.5
+- kelly_max_usdt=1200, kelly_dynamic_base_pct=0.18, max_positions_spot_bull=5
+
+Comparación baseline heredado:
+- Baseline full: best_pnl=41.20, 206 trades, DD 0.12%, Sharpe 53.00
+- Lifecycle: best_pnl=21.64, 3 trades, DD 2.32%, Sharpe 3.39
+- El lifecycle genera PnL positivo y drawdown controlado, pero muy pocos trades.
+
+Hallazgos y próximos pasos:
+1. El conteo de sells/win_rate/profit_factor en modo lifecycle sigue siendo aproximado;
+   se necesita conteo real de SL/TP/partial closes por salida.
+2. El análisis sintético del adapter es muy restrictivo o los cierres no se disparan.
+3. Régimen SPOT_BULL estático limita la comparación en ventanas defensivas.
+4. Recomendación: fortalecer el adapter de simulación antes de reemplazar run_trades.py.
