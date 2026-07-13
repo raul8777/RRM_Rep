@@ -551,6 +551,38 @@ Comando para sweep completo con lifecycle y 10 workers:
 Limitación actual: el modo lifecycle usa régimen `SPOT_BULL` estático. La detección dinámica
 por ventana se puede agregar mapeando el régimen dominante de cada ventana a un `LifecycleConfig`.
 
+2026-07-13 (optimización sweep) - Reducción de tiempo de sweep lifecycle
+============================================================================
+Archivos: Dev/scripts/mimic_mode_profile_sweep.py, Dev/scripts/mimic_lifecycle_sweep.py,
+          progress.txt.
+
+Problema: sweep full 15,552 jobs con 10 workers podría tomar >10h si se usa 1 worker,
+o si el modo lifecycle es más lento por job.
+
+Ajustes aplicados:
+- Nuevo strategy `lifecycle-quick`: grid reducido alrededor de los mejores params SPOT_BULL-A
+  (3×3×2×3×2×2 = 216 combos vs 1,458 del full).
+- Nuevo wrapper `Dev/scripts/mimic_lifecycle_sweep.py` con defaults:
+    - 20 workers (usa los 20 cores lógicos disponibles)
+    - 2 ventanas representativas (mejor A + peor A/B-C rescue)
+    - strategy `lifecycle-quick`
+    - output aislado en `Dev/benchmarks/lifecycle_sweep`
+- Fix bug: `_logger` era None en workers hijos de ProcessPoolExecutor; ahora se reconfigura
+  en `_run_single_config` si es necesario.
+
+Estimaciones actualizadas (lifecycle-quick, 2 ventanas, 20 workers):
+- Jobs totales: 216 combos × 3 perfiles × 2 ventanas = 1,296 jobs
+- Ideal: ~2 min
+- Realista con overhead y carga inicial: 5–15 min
+
+Para sweep más amplio (full 15,552 jobs, 20 workers): ~45–90 min estimados.
+
+Comandos:
+- Rápido (recomendado para baseline):
+    python Dev/scripts/mimic_lifecycle_sweep.py
+- Full con lifecycle y 20 workers:
+    python Dev/scripts/mimic_mode_profile_sweep.py --lifecycle --max-workers 20 --strategy full
+
 Pendiente:
-- Correr sweep lifecycle real con datos históricos y 10 workers (~1.5–2 horas estimadas).
+- Ejecutar sweep lifecycle real con datos históricos.
 - Comparar métricas contra sweep baseline heredado.
