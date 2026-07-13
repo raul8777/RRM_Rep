@@ -28,6 +28,7 @@ from lifecycle.regime import RegimeState, RegimeKernel, get_regime_v2
 from lifecycle.signal import SignalPipeline, analysis_to_signal
 from lifecycle.entry import EntryGate, count_positions_by_category
 from lifecycle.sizing import PositionSizer, size_entry
+from lifecycle.exit import ExitEngine, update_peak_pnl
 
 __all__ = [
     "LifecycleConfig",
@@ -51,4 +52,6 @@ __all__ = [
     "count_positions_by_category",
     "PositionSizer",
     "size_entry",
+    "ExitEngine",
+    "update_peak_pnl",
 ]
