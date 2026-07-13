@@ -1,3 +1,119 @@
+2026-07-11 (noche) - Fix TRXUSDT ghost_balance_mismatch + Continúa Fase 2 Auditoría Cerradas
+==========================================================================================================
+Archivos: position_manager.py, tests/test_restart_reconciliation.py, progress.txt, SYSTEM_REFERENCE.md
+
+TRXUSDT ghost_balance_mismatch:
+- Root cause: `TRX` estaba en `EXCLUDED_ASSETS` de `position_manager.py`, por lo que no se importaba,
+  pero el bucle de reconciliación sí cerraba posiciones existentes cuando `balance_binance / qty_db < 0.001`.
+  Si el balance spot es cero/dust o reside en Funding/Earn, se cerraba la posición como fantasma.
+- Fix 1: Removido `"TRX"` de `EXCLUDED_ASSETS` para que se importe y reconcilie normalmente.
+- Fix 2: El cierre por `ghost_balance_mismatch` ahora requiere evidencia de un SELL reciente en
+  Binance (`get_my_trades`) dentro de las últimas 24h (configurable via
+  `spot_ghost_sell_confirmation_hours`). Sin SELL reciente se emite audit
+  `ghost_balance_mismatch_deferred` y la posición permanece abierta.
+- Tests agregados:
+  - `test_ghost_balance_mismatch_deferred_without_recent_sell`
+  - `test_trx_imported_from_balance_after_removing_exclusion`
+  - Actualizado `test_spot_sync_closes_ghost_when_balance_ratio_below_threshold` para incluir SELL reciente.
+- Resultado: 6/6 tests en `test_restart_reconciliation.py` pasan; 20/20 en
+  `test_position_reconciliation.py` + `test_position_manager.py` pasan.
+
+FASE 2 - Auditoría de posiciones cerradas (en progreso):
+- Agregada función `evaluate_closed_positions_parity` en `binance_truth_guard.py`.
+- Cruza `trades_closed` vs Binance SPOT `myTrades` y FUTURES `userTrades`.
+- Detecta: DB_CLOSED_MISSING_IN_BINANCE, BINANCE_CLOSED_MISSING_IN_DB, CLOSED_QTY_MISMATCH,
+  CLOSED_PNL_MISMATCH (futures), CLOSED_COMMISSION_MISMATCH (spot), CLOSED_PRICE_MISMATCH (spot).
+- Pendiente: ejecutar auditoría real, revisar discrepancias y documentar hallazgos.
+
+2026-07-11 (tarde) - RANGE_SCALP Perfiles A/B/C + Selector Automático Reparado
+====================================================================================
+Archivos: trading_runtime_state (DB), rules.md, SYSTEM_REFERENCE.md
+
+SWEEP FULL RANGE_SCALP (5,184 jobs, max_cycles=5, 6 workers):
+- Ventanas: win_20250525_20250608 (99.9% RS, buy-ratio=0.78) y win_20250718_20250807 (87% RS, buy-ratio=0.62)
+- Señales: Kelly 1200 > 1000 > 800 linealmente; SS=0.55 óptimo; SL=2.5% domina en lateral
+- Limitación: 5 ciclos insuficientes para SL/TP reales (PnL flotante). Sweep max_cycles=50 pendiente.
+
+PERFILES RANGE_SCALP A/B/C (aplicados via POST /regime/profiles — NO /config/kelly):
+- A (activo): SS=0.55, SP=0.48, K=1200, SL=2.5%, pos=5 — lateral puro, atractor permanente
+- B: SS=0.60, SP=0.45, K=1000, SL=2.5%, vol_min=0.60 — lateral mixto (87% RS, ruido régimen)
+- C: SS=0.55, SP=0.50, K=1200, kd=0.14, pos=4, vol_min=0.50, BB=0.35 — lateral degradado
+- Origen B: win_20250718 bottom-25% dominado por kelly=800 (98.4% del bottom), buy-ratio=0.56
+- Origen C: bottom-25% de B en zona SS>=0.55 — mismo patrón kelly=800
+
+BUG SELECTOR AUTOMÁTICO REPARADO:
+- Root cause: profile_rank en DB = {A:1000, B:200, C:100} de sesión anterior
+  B necesitaba 800 pts de ventaja → imposible. 2,713 ciclos sin cambiar.
+  Meta-fields (win_rate_pct, sharpe, expected_return_pct) vacíos en los 3 perfiles.
+- Fix 1: POST /regime/profiles/selector-config → {A:250, B:200, C:150} + hold_cycles=4
+- Fix 2: meta-fields cargados con datos del sweep:
+    A: expected_return=0.226, win_rate=78.0, sharpe=1.8
+    B: expected_return=0.186, win_rate=62.0, sharpe=1.2
+    C: expected_return=0.150, win_rate=56.0, sharpe=0.8
+- Score post-fix: A=330.5 | B=259.1 | C=196.6 | Delta A→B=71.4 pts
+- B solo activa si win_rate real A cae >15% ó sharpe >1.1 en producción
+
+DOCUMENTACIÓN:
+- rules.md §10 agregado: mecánica del selector, fórmula de scoring, config activa, diagnóstico
+- SYSTEM_REFERENCE.md: nueva sección jul 11 tarde con todos los cambios
+- Perfiles y selector persistidos en trading_runtime_state (audit en trades_audit)
+
+PENDIENTE: sweep overnight max_cycles=50 → actualizar meta-fields con datos reales.
+
+---
+
+2026-07-10 - MIMIC Realistic Simulation Implementation (dynamic regimes + profile sweep + dashboard)
+==========================================================================================================
+Archivos: simulation/mimic_db.py, simulation/mimic_regime_detector.py, simulation/mimic_runner.py,
+          simulation/mimic_historical_screener.py, simulation/mimic_feed.py (reviewed),
+          Dev/scripts/mimic_download_external.py, Dev/scripts/mimic_single_simulation.py,
+          Dev/scripts/mimic_build_window.py, Dev/scripts/mimic_mode_profile_sweep.py,
+          Dev/scripts/mimic_resample_btc.py, app.py, frontend/index.html, frontend/dashboard.js.
+
+Cambios:
+- simulation/mimic_db.py: SimulationDatabaseClient inicializa trading_runtime_state con regime_profile_active_*,
+  regime_profile_selector_config, smart_total_active_mode e inyecta profile overrides para sweeps.
+- simulation/mimic_regime_detector.py: detector histórico de régimen desde BTC OHLCV (1h/4h/1d) replicando
+  market_regime._detect_raw, devolviendo mode/confidence/reason.
+- Dev/scripts/mimic_download_external.py: descarga funding rates, ticker 24h, BTC dominance, Fear & Greed
+  con manifest y reporte.
+- simulation/mimic_runner.py: SimulationRunner reescrito para cargar BTC histórico, forzar perfiles,
+  usar ciclos dinámicos desde execute_once, invalidar caches y trackear transiciones de régimen.
+- simulation/mimic_historical_screener.py: screen histórico basado en snapshots 24h.
+- Dev/scripts/mimic_single_simulation.py: CLI para simulación individual; limita futures_symbols y
+  narrative_tokens al universo solicitado, desactiva screener, pasa max_cycles.
+- Dev/scripts/mimic_build_window.py: construye ventanas coherentes con validación de datos, external checks,
+  timeline de régimen y screener histórico; guarda manifest con trazabilidad.
+- Dev/scripts/mimic_resample_btc.py: resample de BTC 1h a 4h/1d para el detector, manejando unidades
+  datetime64 (us, ms, ns).
+- Dev/scripts/mimic_mode_profile_sweep.py: sweep continuo sobre ventanas, perfiles A/B/C forzados,
+  grid expandido (min_signal_strength, min_success_probability, stop_loss_pct, kelly_max_usdt,
+  kelly_dynamic_base_pct, max_positions_spot_bull), estrategias quick/coarse/full/exhaustive,
+  ciclos dinámicos por perfil, resultados incrementales en results.jsonl y reporte por perfil,
+  ejecución paralela vía ProcessPoolExecutor (--max-workers) para acelerar 1000+ simulaciones.
+- app.py: endpoints POST /mimic/external/download, POST /mimic/window/build, POST /mimic/sweep con
+  windows/strategy/max_cycles/max_workers/clear_results, GET /mimic/sweep-status, /mimic/sweep-report,
+  y POST /mimic/apply-recommendation para aplicar parámetros escalares + profile_overrides a producción.
+- frontend/index.html + dashboard.js: panel MIMIC con controles de descarga, construcción de ventanas,
+  sweep configurado y recomendaciones por perfil con apply de configuración + profile_overrides.
+
+Verificación:
+- mimic_build_window.py: ventana win_20260628_20260630 generada (régimen SPOT_BULL dominante, 4 símbolos).
+- mimic_single_simulation.py: 2 ciclos, FUTURES_SHORT, resumen JSON con PnL, balance, transitions.
+- mimic_mode_profile_sweep.py (quick): 3 runs en 3 perfiles, status completed, reporte con recommendations.
+- mimic_mode_profile_sweep.py (quick, max-workers=2): 3 runs completados en paralelo, status OK.
+- app.py: py_compile OK.
+- frontend/dashboard.js: sin node disponible; revisión visual de sintaxis OK.
+
+Pendientes:
+- Integración más profunda de datos externos (funding, dominance, F&G) en el detector y gating.
+- Métricas de costo de transición y análisis de sensibilidad.
+- Ajustar ventanas para cubrir múltiples regímenes (bull, range, bear, preservation) en backtests amplios.
+- Optimizar tiempo por simulación para reducir la duración total de 1000+ runs.
+- Evaluar implementación de búsqueda local/híbrida sobre los mejores resultados del grid.
+
+---
+
 2026-07-06 - Robustness, Commissions, Reconciliation Tests & Docs (Fases 2.5-2.8)
 ==================================================================================
 Archivos: config.py, unified_governance_supervisor.py, profit_realization_supervisor.py,
@@ -348,3 +464,38 @@ Backtest 1000-Run Re-optimization + Application run_0677 (2026-06-29 02:42 UTC):
 - 2026-06-29 13:20 UTC-6: session closed; all changes saved and committed. Temporary audit/debug files left untracked.
 - 2026-06-29 16:20 UTC-6: diagnosed why no new futures were opening — `_buy_top_symbols()` in `run_trades.py` returned early due to spot exposure cap (100%) even in FUTURES_SHORT. Applied fix to bypass the spot exposure block when regime is FUTURES_SHORT. Tests 107 passed. Container restart required to activate.
 - 2026-06-30 18:20 UTC-6: diagnosed and fixed stalled trade cycle. `orchestrator.py` was hiding cycle errors; added traceback logging. Traceback revealed `NameError: name 'sig' is not defined` at `run_trades.py:2982` in the spot-buy path of `_buy_top_symbols()`. Fixed by using `signal_meta.get(symbol, {}).get('signal_id')`. Additional fixes found during recovery: `volspike_override` UnboundLocalError (init to False at loop start), `trades_audit_trade_type_check` violation for reason 'EJECUTADO' (added to spot set), fallback to 'system' for unknown trade_type, and `UnboundLocalError: get_symbol_filters` in `_check_sl_tp_positions` caused by a local import shadowing the module-level import (removed local import). Container restarted multiple times. Post-fix `/health/status`: overall=ok, errors=0, warnings=0, open_shorts=0 (previous shorts closed by SL/TP). SYSTEM_REFERENCE.md and progress.txt updated.
+
+2026-07-13 - Trade Lifecycle Redesign Implementation (Fases 1-7 completadas)
+============================================================================
+Objetivo: implementar el kernel unificado del ciclo de vida de trades SPOT/FUTURES/MIMIC
+según el plan de rediseño aprobado, con contratos declarativos, detección de régimen
+probabilística, pipeline de señales, gate de entrada, sizing Kelly, engine de salida y
+integración con Super MIMIC.
+
+Commits en rama `redesign-lifecycle-20260713`:
+- Fase 0: baseline de tests (4b207bc)
+- Fase 1: lifecycle/base.py contratos + RegimeKernel probabilístico + tests (cdc9ab6)
+- Fase 2: lifecycle/signal.py SignalPipeline con diversificación por categoría (8c7cadb)
+- Fase 3: lifecycle/entry.py EntryGate unificado con volspike override (f99c5ce)
+- Fase 4: lifecycle/sizing.py PositionSizer + CapitalBudget con Kelly/F&G (9a84d48)
+- Fase 5: lifecycle/exit.py ExitEngine unificado SL/TP/trailing/breakeven/partial/momentum/stagnation (2a72d1c)
+- Fase 6: lifecycle/adapter.py + LifecycleRunner + MimicExecutionAdapter (1e8e3e9)
+- Fase 7: lifecycle/super_mimic_integration.py + deploy gate peak_capture_ratio/CDR (33e9278)
+
+Nuevos archivos:
+- lifecycle/__init__.py, base.py, regime.py, signal.py, entry.py, sizing.py, exit.py,
+  adapter.py, runner.py, adapter_mimic.py, super_mimic_integration.py
+- tests/test_lifecycle_base.py, test_lifecycle_signal.py, test_lifecycle_entry.py,
+  test_lifecycle_sizing.py, test_lifecycle_exit.py, test_lifecycle_runner.py,
+  test_lifecycle_super_mimic.py
+
+Resultados de tests:
+- lifecycle + super_mimic: 60 passed
+- suite completa: 455 passed, 1 failed pre-existente (test_mimic_regression, falla por conexión PostgreSQL localhost:5432 no disponible en este entorno)
+
+Pendiente Fase 8:
+- Ejecutar MIMIC sweep baseline con datos reales y documentar métricas.
+- Dry-run / paper trading del LifecycleRunner con datos históricos MIMIC.
+- Crear adapters concretos SPOT (binance_client) y FUTURES (futures_client).
+- Reemplazar gradualmente los bucles actuales de run_trades.py por el LifecycleRunner.
+- Documentar en SYSTEM_REFERENCE.md la arquitectura del lifecycle kernel.
