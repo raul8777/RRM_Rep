@@ -616,3 +616,76 @@ Hallazgos y próximos pasos:
 2. El análisis sintético del adapter es muy restrictivo o los cierres no se disparan.
 3. Régimen SPOT_BULL estático limita la comparación en ventanas defensivas.
 4. Recomendación: fortalecer el adapter de simulación antes de reemplazar run_trades.py.
+
+---
+
+2026-07-13 - Lifecycle Kernel MIMIC Validation Continued
+==========================================================
+Archivos: simulation/mimic_lifecycle_adapter.py, tmp_check_full_cycle.py,
+          tmp_debug_exit.py, Dev/lifecycle_kernel_validation_20260713.md
+
+Bug encontrado y corregido:
+- `SimulationLifecycleAdapter.get_positions()` usaba `entry_price = current_price` cada ciclo,
+  borrando el cost basis. El exit engine veía siempre `pnl_pct ≈ 0` y nunca disparaba SL/TP/partial.
+- Fix: `_avg_entry_price()` reconstruye el cost basis desde los fills BUY de `spot_client._orders`.
+
+Validación post-fix (win_20260415_20260430, 361 ciclos, dry-run):
+- Entradas: 4 (3 iniciales + 1 re-entrada BTC)
+- Salidas: 1 partial TP en BTC ciclo 200 (CLOSE_PCT 25% a $77,858.35)
+- Valor final: ~2,932 USDT vs 2,910 iniciales (+0.76%)
+- Drawdown pequeño (<1%)
+- Antes del fix: 0 salidas en toda la ventana.
+
+Tests:
+- `pytest tests/test_lifecycle_adapters.py tests/test_lifecycle_exit.py tests/test_lifecycle_runner.py -q`
+- Resultado: 17 passed in 0.27s
+
+Documentación:
+- Creado `Dev/lifecycle_kernel_validation_20260713.md` con detalle del fix, run de validación,
+  métricas y próximos pasos.
+
+Multi-window validation post-fix (100 ciclos, SPOT_BULL-A, dry-run):
+- Ventanas: win_20260415_20260430, win_20260515_20260531, win_20260317_20260331
+- Símbolos con datos: 17/47, 17/44, 17/45 respectivamente
+- Primer paso (momentum-only): 16/93, 61/66, 88/85 entries/exits; PnL +0.74%, -2.35%, -2.70%; DD 0.51%, 2.83%, 2.81%
+- Segundo paso (confluencia de indicadores): 3/26, 7/14, 18/17 entries/exits; PnL +0.23%, -0.17%, -1.78%; DD 0.28%, 0.76%, 1.80%
+- Promedio final: -0.57% PnL, 0.95% DD, 28 entries, 57 exits
+- El kernel ejecuta entradas, salidas parciales/totales y trackea PnL correctamente en ventanas distintas.
+- La señales mejoradas son mucho más selectivas y reducen drásticamente el drawdown.
+- Guardado en Dev/benchmarks/lifecycle_multi_window_20260713.json
+
+Mejora de fidelidad del generador de señales (simulation/mimic_lifecycle_adapter.py):
+- Reemplazado el generador momentum-only por uno basado en:
+  * posición dentro del rango semanal (soporte 20-40% ideal)
+  * volumen relativo vs promedio 24h
+  * RSI 4h
+  * PnL predicho a 4h (heurística simple)
+- BUY solo cuando la confluencia supera umbral y se evitan explícitamente techo de rango / sobrecompra.
+- Los tests del lifecycle siguen pasando (17 passed).
+
+Implementación de perfiles SPOT_BULL A/B/C y reporting mejorado (2026-07-13):
+- Archivos modificados: simulation/mimic_lifecycle_adapter.py, lifecycle/runner.py, tmp_lifecycle_multi_window.py
+- Creadas funciones _spot_bull_config_a/b/c() con parámetros óptimos del sweep SPOT_BULL:
+  * A: min_signal_strength=0.55, min_success_probability=0.55, hard_sl_atr_mult=4.5, max_positions=5, kelly_max=1000
+  * B: min_signal_strength=0.50, min_success_probability=0.45, hard_sl_atr_mult=3.36, max_positions=8, kelly_max=1200, kelly_base=0.22
+  * C: min_signal_strength=0.45, min_success_probability=0.55, hard_sl_atr_mult=3.36, max_positions=5, kelly_max=1000
+- run_lifecycle_simulation ahora selecciona la config según forced_profile (A/B/C).
+- execute_exit() calcula realized_pnl_usdt y commission_usdt desde los fills del sim client.
+- LifecycleRunner.run_cycle() ahora reporta: exit_reasons, realized_pnl_usdt, win_count, loss_count, profit_factor.
+- tmp_lifecycle_multi_window.py acepta --profile A/B/C/all y guarda resultados por perfil.
+
+Resultados multi-window con perfiles A/B/C (100 ciclos, dry-run):
+- Profile A: avg PnL -0.38%, 8 entries, 37 exits, realized -27.59 USDT, 34 wins, 3 losses, DD 0.85%
+- Profile B: avg PnL -0.37%, 11 entries, 40 exits, realized -66.34 USDT, 34 wins, 6 losses, DD 0.85%
+- Profile C: avg PnL -0.37%, 11 entries, 40 exits, realized -66.34 USDT, 34 wins, 6 losses, DD 0.85%
+- B y C son idénticos en estas 3 ventanas porque el generador sintético es tan selectivo que no se
+  alcanzan los límites adicionales de B ni el filtro más estricto de C. El cuello de botella es
+  fidelidad de señales, no tuning de parámetros.
+- Guardado en Dev/benchmarks/lifecycle_multi_window_profile_{A,B,C}_20260713.json
+- Tests lifecycle: 17 passed.
+
+Pendiente:
+1. Conectar el pipeline real de análisis (analysis_cycle / pnl_service) para predicciones fidedignas.
+2. Full lifecycle sweep sobre las 12 ventanas (~1,458 runs, varias horas). Requiere confirmación
+   del usuario antes de lanzar.
+3. Usar régimen/perfil detectado por ventana en lugar de SPOT_BULL estático.

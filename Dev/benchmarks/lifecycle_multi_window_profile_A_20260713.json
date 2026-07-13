@@ -1,0 +1,56 @@
+[
+  {
+    "window": "win_20260415_20260430",
+    "pnl_usdt": 6.620779643295464,
+    "pnl_pct": 0.2275182008005314,
+    "entries": 2,
+    "exits": 25,
+    "exit_reasons": {
+      "partial tp1": 24,
+      "hard TP": 1
+    },
+    "realized_pnl_usdt": 17.5533,
+    "win_count": 25,
+    "loss_count": 0,
+    "profit_factor": "inf",
+    "max_drawdown_pct": 0.27533738263351293,
+    "final_value": 2916.6207796432955,
+    "cycles": 100
+  },
+  {
+    "window": "win_20260515_20260531",
+    "pnl_usdt": 2.8642706042346617,
+    "pnl_pct": 0.09842854310084749,
+    "entries": 3,
+    "exits": 10,
+    "exit_reasons": {
+      "hard SL": 1,
+      "partial tp1": 8,
+      "hard TP": 1
+    },
+    "realized_pnl_usdt": 4.7043,
+    "win_count": 9,
+    "loss_count": 1,
+    "profit_factor": 1.226909168432437,
+    "max_drawdown_pct": 0.7864103484721787,
+    "final_value": 2912.8642706042347,
+    "cycles": 100
+  },
+  {
+    "window": "win_20260317_20260331",
+    "pnl_usdt": -42.93751472990289,
+    "pnl_pct": -1.4755159700997555,
+    "entries": 3,
+    "exits": 2,
+    "exit_reasons": {
+      "hard SL": 2
+    },
+    "realized_pnl_usdt": -49.8453,
+    "win_count": 0,
+    "loss_count": 2,
+    "profit_factor": 0.0,
+    "max_drawdown_pct": 1.4934761781309087,
+    "final_value": 2867.062485270097,
+    "cycles": 100
+  }
+]

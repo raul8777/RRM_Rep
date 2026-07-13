@@ -253,6 +253,10 @@ Fix: `auto_reconcile_spot()` / `auto_reconcile_futures()` o endpoint `/reconcile
 
 - **Escalado de boosts con `_lw_scale` aplicado dos veces**: si otro módulo también carga pesos del learning_engine y los aplica sobre una señal que ya pasó por `analyze_symbol`, los boosts se duplican. `_lw_scale` solo se aplica dentro de `analyze_symbol` — no debe re-aplicarse externamente.
 
+- **🔴 Comisión de fill no convertida a USDT (posición PEPE jul-2026)**: `verify_and_fetch_fills()` en `binance_client.py` debe convertir `commission` a USDT antes de retornar. Si `commissionAsset` es el base asset del par (ej. PEPE) y no es USDT/BNB, multiplicar `commission × fill_price`. De lo contrario la `entry_commission` persiste en unidades del asset (268K PEPE ≠ $0.71) → el `unrealized_pnl` calculado sobre la qty de DB resulta ficticio.
+
+- **🔴 Posición fantasma (ghost) por divergencia balance/qty > 1000×**: si `binance_balance / db_qty < 0.001`, la posición es candidata a ghost — el SL/TP se bloqueará para siempre porque el clamp deja `qty=0`. Detectar en dos puntos: (1) `position_manager.py` durante `sync_with_exchange_balance` → loguear CRITICAL; (2) `run_trades.py` en SL/TP clamp → auto-close del registro DB con `close_reason='ghost_balance_mismatch'`. Sin esta detección, el ciclo imprime `cannot sell` silenciosamente durante horas y el UG queda bloqueado con `watchdog_level` creciente.
+
 ---
 
 ## 7. SKILLS — ROLES ACTIVOS POR ÁREA
@@ -324,11 +328,66 @@ Cada rol tiene dos niveles: **Principios** (dominio general, siempre válido, pe
 
 ---
 
-## 6. MIMIC — SIMULADOR E2E (SOURCE OF TRUTH)
+## 6. MIMIC — CONCEPTOS, ARQUITECTURA Y SIMULADOR E2E
+
+### Concepto
+
+**MIMIC** (*Market-Informed Meta-Intelligence Calibration*) es el banco de pruebas histórico del sistema: ejecuta la lógica real de trading (`run_trades.execute_once()`) contra datos históricos locales (parquet), usando dinero virtual, los mismos detectores de régimen y los mismos módulos de salida que producción. En una frase, es **producción ejecutada contra el pasado**.
+
+### Objetivo
+
+- Validar configuraciones y fixes antes de que afecten capital real.
+- Calibrar perfiles A/B/C por régimen y mantener actualizados sus meta-fields (`sharpe`, `win_rate_pct`, `max_drawdown_pct`, `expected_return_pct`).
+- Descubrir qué parámetros dominan en cada tipo de mercado mediante barridos sistemáticos.
+- Generar líneas base (`baseline`) y detectar regresiones (`pytest tests/test_mimic_regression.py`).
+
+### Flujo de trabajo (fases del scheduler)
+
+El trabajo de simulación se organiza en micro-universos (ventanas de fechas + símbolos + régimen objetivo) y progresa por fases:
+
+1. **SELECT_UNIVERSE** — elige el siguiente micro-universo de la cola priorizada.
+2. **AUDIT** — verifica disponibilidad de parquet para cada símbolo.
+3. **DOWNLOAD** — ingesta datos externos (funding, F&G, dominancia BTC) si faltan.
+4. **VALIDATE** — sanity-check de calidad de datos.
+5. **MAP_REGIMES** — etiqueta cada punto histórico con el régimen detectado por BTC.
+6. **CALIBRATE** — ejecuta simulaciones forzando perfiles A/B/C y variando parámetros.
+7. **CONSOLIDATE** — agrega métricas (PnL, Sharpe, drawdown, win rate).
+8. **CROSS_VALIDATE** — valida en ventanas no vistas.
+9. **APPLY** — propone/escribe perfiles óptimos en `regime_profiles`.
+10. **MONITOR** — observa comportamiento en producción real.
+
+### Componentes principales
+
+| Componente | Archivo | Responsabilidad |
+|---|---|---|
+| **Orchestrator CLI** | `simulation/mimic_orchestrator.py` | Punto de entrada por consola: `start`, `run`, `run-phase`, `pause`, `reset`, `status`. |
+| **Scheduler** | `simulation/mimic_scheduler.py` | Máquina de estados con fases y persistencia en `mimic_state.json` + `trading_runtime_state`. |
+| **Window controller** | `simulation/mimic_window_controller.py` | Decide cuándo MIMIC puede ejecutarse según horario y condiciones de mercado. |
+| **Micro-universe selector** | `simulation/mimic_universe_selector.py` | Cola priorizada de micro-universos; prioriza cobertura, régimen faltante y oportunidad. |
+| **Simulation runner** | `simulation/mimic_runner.py` | Ejecuta ciclo a ciclo la lógica real contra datos históricos, avanzando el reloj simulado. |
+| **Historical data feed** | `simulation/mimic_feed.py` | Carga parquet de `historical_data/` y sirve velas 1h/4h/1d; re-muestrea a 5m/15m. |
+| **Regime detector histórico** | `simulation/mimic_regime_detector.py` | Replica `market_regime.py` usando velas históricas de BTC. |
+| **Simulation clients** | `simulation/mimic_clients.py` | Mocks de SPOT/FUTURES con balance virtual, comisiones, slippage y órdenes en memoria. |
+| **Simulation DB** | `simulation/mimic_db.py` | DB en memoria que inyecta `regime_profile_*`, `regime_profile_active_*` e `indicator_weights`. |
+| **Paper trader** | `simulation/mimic_paper_trader.py` | Ejecuta el ciclo contra precios live sin enviar órdenes reales; acumula PnL ficticio. |
+| **Mode × Profile sweep** | `Dev/scripts/mimic_mode_profile_sweep.py` | Barre cuadrícula de parámetros sobre ventanas históricas, forzando perfil A/B/C. |
+| **Window builder** | `Dev/scripts/mimic_build_window.py` | Construye manifests de ventanas continuas con metadata de régimen predominante. |
+
+### Relación con perfiles A/B/C
+
+MIMIC es el motor que alimenta al selector automático de perfiles:
+
+- Cada modo tiene 3 perfiles: `A` (agresivo), `B` (balanceado), `C` (conservativo/defensivo).
+- El sweep fuerza un perfil y mide su rendimiento en una ventana histórica pura de un régimen.
+- Los resultados actualizan los meta-fields de `regime_profile_{REGIME}_{A/B/C}`.
+- El selector de producción suma `profile_rank` + métricas reales + confianza del régimen y elige el perfil activo.
+- `profile_rank` debe mantenerse asimétrico pero razonable (ej. `A=250, B=200, C=150`) para que A sea atractor sin bloquear rotación a B/C cuando el mercado lo requiera.
+
+### Source of truth — simulador determinista
 
 **Propósito:** Simulador determinista que ejecuta la lógica de producción `run_trades.execute_once()` contra datos históricos reales, sin tocar Binance ni PostgreSQL. Sirve para validar cambios, calibrar parámetros y detectar regresiones antes de deploy.
 
-**Componentes:**
+**Componentes técnicos:**
 - `simulation/mimic_protocols.py` — `SimulationClock` (tiempo controlado).
 - `simulation/mimic_clients.py` — mocks de SPOT/FUTURES sobre feed histórico.
 - `simulation/mimic_feed.py` — carga parquet de `historical_data/`.
@@ -365,6 +424,42 @@ $env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_
 # Regresión
 $env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_WEBHOOK_SECRET="dummy"; $env:PYTHONIOENCODING="utf-8"; pytest tests/test_mimic_regression.py -v
 ```
+
+### Lifecycle Kernel MIMIC
+
+**Propósito:** Validar el kernel declarativo de ciclo de vida (`lifecycle/`) dentro del simulador MIMIC, independiente de la lógica legacy de `run_trades.py`.
+
+**Componentes:**
+- `lifecycle/base.py` — contratos (`Signal`, `EntryDecision`, `ExitDecision`, `Position`, policies)
+- `lifecycle/signal.py` — `SignalPipeline`
+- `lifecycle/entry.py` — `EntryGate`
+- `lifecycle/sizing.py` — `PositionSizer`
+- `lifecycle/exit.py` — `ExitEngine` (hard SL/TP, trailing, breakeven, partial, momentum, stagnation)
+- `lifecycle/runner.py` — `LifecycleRunner`
+- `simulation/mimic_lifecycle_adapter.py` — `ExecutionAdapter` que conecta el kernel a `SimulationRunner`
+
+**Reglas duras:**
+1. El adapter nunca debe duplicar lógica de negocio — solo traduce entre el kernel y los mocks de simulación.
+2. El cost basis debe reconstruirse de los fills del sim client (`_avg_entry_price`), no del precio actual.
+3. Los perfiles A/B/C del lifecycle deben provenir de resultados de sweep, no de valores arbitrarios.
+4. `execute_exit` debe reportar `realized_pnl_usdt` para poder medir win/loss y profit factor.
+5. El runner debe reportar `exit_reasons` para poder comparar qué mecanismos de salida están activos.
+
+**Anti-patrón detectado (jul 2026):**
+- Si dos perfiles distintos (p. ej. B y C) producen métricas idénticas en validación, el cuello de botella no es el tuning de parámetros sino la **fidelidad/cantidad de señales generadas**. No seguir tuneando parámetros; mejorar el signal pipeline primero.
+
+**Comandos:**
+```powershell
+# Validación multi-window, multi-perfil
+$env:BINANCE_API_KEY="dummy"; $env:BINANCE_API_SECRET="dummy"; $env:TRADINGVIEW_WEBHOOK_SECRET="dummy"; python tmp_lifecycle_multi_window.py --profile all
+
+# Tests del lifecycle
+python -m pytest tests/test_lifecycle_adapters.py tests/test_lifecycle_exit.py tests/test_lifecycle_runner.py -q
+```
+
+**Artifacts:**
+- `Dev/benchmarks/lifecycle_multi_window_profile_{A,B,C}_20260713.json`
+- `Dev/lifecycle_kernel_validation_20260713.md`
 
 ---
 
@@ -455,4 +550,208 @@ Ambas ramas requieren que la posición supere el hold mínimo por régimen antes
 - Si no dispara en posiciones en ganancia → verificar `profit_predexit_enabled`, hold mínimo por régimen, y si `pnl_usdt_net` supera `profit_predexit_absolute_min_usd`
 - Si captura demasiado pronto → revisar `capture_margin` del perfil activo y `profit_predexit_conviction_sensitivity`
 - Si captura demasiado tarde → revisar `giveback_penalty_weight` y si `peak_pnl_pct_real` se está reconstruyendo correctamente desde velas 1m
+
+---
+
+## 9. MIMIC — VENTANAS DE SIMULACIÓN DISPONIBLES
+
+Directorio: `/app/Dev/benchmarks/windows/`
+Parquets 4h y 1d de BTC **deben existir** — generados desde `BTCUSDT_1h.parquet` con timestamps en ms (bug fix jul 2026, ver snippet abajo).
+
+### Inventario (12 ventanas — jul 2026)
+
+| ID | Período | Dominant | RS% | SB% | Símbolos | Uso recomendado |
+|----|---------|----------|-----|-----|----------|-----------------|
+| `win_20250116_20250131` | 16–31 ene 2025 | SPOT_BULL | 46% | 54% | 27 | Mixta — transiciones RS↔SB |
+| `win_20250525_20250608` | 25 may – 8 jun 2025 | **RANGE_SCALP** | **95%** | 5% | 28 | **Sweep RANGE_SCALP puro** |
+| `win_20250718_20250807` | 18 jul – 7 ago 2025 | **RANGE_SCALP** | **90%** | 10% | 29 | **Sweep RANGE_SCALP puro** |
+| `win_20260303_20260317` | 3–17 mar 2026 | SPOT_BULL | 0% | 100% | 44 | Sweep SPOT_BULL |
+| `win_20260317_20260331` | 17–31 mar 2026 | SPOT_BULL | 0% | 100% | 45 | Sweep SPOT_BULL |
+| `win_20260401_20260415` | 1–15 abr 2026 | SPOT_BULL | 0% | 100% | 45 | Sweep SPOT_BULL |
+| `win_20260415_20260430` | 15–30 abr 2026 | SPOT_BULL | 0% | 100% | 47 | Sweep SPOT_BULL |
+| `win_20260501_20260515` | 1–15 may 2026 | SPOT_BULL | 0% | 100% | 44 | Sweep SPOT_BULL |
+| `win_20260515_20260531` | 15–31 may 2026 | SPOT_BULL | 0% | 100% | 44 | Sweep SPOT_BULL |
+| `win_20260601_20260620` | 1–20 jun 2026 | SPOT_BULL | 8% | 92% | 44 | Sweep SPOT_BULL reciente |
+| `win_20260620_20260705` | 20 jun – 5 jul 2026 | SPOT_BULL | 16% | 84% | 43 | Más reciente — RS emergente |
+| `win_20260628_20260630` | 28–30 jun 2026 | SPOT_BULL | 0% | 100% | 4 | Micro-ventana / pruebas |
+
+> **Pendientes:** ventanas PRESERVATION y FUTURES_SHORT (datos nov-2025 / abr-2025 disponibles para construirlas).
+
+### Bug fix — parquets BTC 4h/1d (jul 2026)
+
+`mimic_feed.py` espera `open_time` en **ms** enteros. Reconstruir si se pierden:
+
+```python
+import pandas as pd, os
+df = pd.read_parquet('historical_data/BTCUSDT_1h.parquet')
+df = df.sort_values('open_time').drop_duplicates('open_time').set_index('open_time')
+for iv, rule in [('4h', '4h'), ('1d', 'D')]:
+    rs = df.resample(rule).agg({'open':'first','high':'max','low':'min','close':'last','volume':'sum'}).dropna().reset_index()
+    rs['open_time'] = rs['open_time'].apply(lambda x: int(x.timestamp() * 1000))
+    rs[['open_time','open','high','low','close','volume']].to_parquet(
+        f'historical_data/BTCUSDT_{iv}.parquet', index=False)
+```
+
+### Construir nuevas ventanas
+
+```bash
+# Paso 1: verificar qué símbolos tienen cobertura para el período deseado
+docker exec crypto-agent-app python -c "
+import os, pandas as pd
+data_dir = '/app/historical_data'
+target = pd.Timestamp('YYYY-MM-DD', tz='UTC')
+ok = sorted(f.replace('_1h.parquet','') for f in os.listdir(data_dir)
+            if f.endswith('_1h.parquet') and
+            pd.read_parquet(os.path.join(data_dir,f))['open_time'].min() <= target)
+print(','.join(ok))
+"
+
+# Paso 2: construir la ventana con esos símbolos
+docker exec crypto-agent-app python /app/Dev/scripts/mimic_build_window.py \
+    --start YYYY-MM-DD --end YYYY-MM-DD \
+    --symbols SYM1,SYM2,...
+```
+
+### Workers óptimos para sweep (i9-12900H / 20 lógicos / 15 GB RAM)
+
+`mimic_mode_profile_sweep.py` usa `ThreadPoolExecutor` — workers son threads, GIL se libera en pandas/numpy.
+
+| `max_workers` | ETA sweep full 5 184 jobs (max_cycles=10) | Notas |
+|---------------|------------------------------------------|-------|
+| 2 | ~2.4 h | default conservador |
+| 4 | ~1.2 h | — |
+| **6** | **~50 min** | **recomendado** — P-cores sin saturar |
+| 8 | ~37 min | sistema host puede volverse lento |
+
+Llamada recomendada para sweep full baseline RANGE_SCALP:
+
+```json
+POST /mimic/sweep
+{
+  "windows": ["win_20250525_20250608", "win_20250718_20250807"],
+  "strategy": "full",
+  "max_cycles": 10,
+  "max_workers": 6,
+  "clear_results": true
+}
+```
+
+---
+
+## 10. SELECTOR AUTOMÁTICO DE PERFIL — MECÁNICA Y CONFIGURACIÓN
+
+### Función y flujo
+
+El selector (`_run_regime_profile_auto_selector` en `run_trades.py`) corre **cada ciclo** cuando el régimen está `confirmed=True`. Lee todos los perfiles del régimen activo desde DB, los puntúa, aplica hysteresis y activa el mejor si supera el umbral.
+
+**Flujo por ciclo:**
+```
+1. Leer perfiles regime_profile_{REGIME}_{A/B/C} desde trading_runtime_state
+2. Puntuar cada uno con _score_profile_candidate()
+3. Comparar mejor candidato vs perfil activo
+4. Si delta > min_score_delta Y ciclos >= min_hold_cycles → switch
+5. Escribir decisión en trades_audit (event: regime_profile_selector_decision)
+6. Si switch → _apply_regime_params() aplica los parámetros del nuevo perfil
+```
+
+### Fórmula de scoring
+
+```python
+score = rank_base                          # desde profile_rank en selector-config
+      + meta.score * 1.0                   # override directo (raramente usado)
+      + meta.expected_return_pct * 1.50    # retorno esperado
+      + meta.expected_pnl_usd * 0.01       # PnL absoluto (peso bajo)
+      + meta.win_rate_pct * 0.40           # tasa de éxito
+      + meta.sharpe * 25.0                 # calidad risk-adjusted
+      - abs(meta.max_drawdown_pct) * 0.80  # penalización por drawdown
+      + regime.confidence * 5.0            # boost por confianza del régimen
+```
+
+**Si los meta-fields están vacíos (0), el score es solo `rank_base + confidence_boost`.**  
+→ Mantener meta-fields actualizados con datos del último sweep.
+
+### Configuración activa (jul 11 2026)
+
+```
+GET/POST /regime/profiles/selector-config
+profile_rank:             {A: 250, B: 200, C: 150}   ← A es el atractor
+profile_min_hold_cycles:  4                            ← ~3h mínimo antes de cambiar
+profile_min_score_delta:  0.05                         ← filtro anti-ruido
+profile_selector_enabled: true
+audit_every_cycle:        true
+```
+
+### Diseño: A como atractor permanente (estado de mínima energía)
+
+El ranking **asimétrico** 250/200/150 garantiza que A siempre tenga ventaja estructural:
+
+| Perfil | Score base (sin meta) | Con meta sweep jul11 |
+|--------|----------------------|----------------------|
+| A | 254.0 | **330.5** |
+| B | 204.0 | 259.1 |
+| C | 154.0 | 196.6 |
+
+**Delta A→B = 71.4 pts** → B solo gana si win_rate real de A cae >15% ó sharpe cae >1.1  
+**Retorno a A:** automático tras 4 ciclos de hold mínimo en cuanto el delta desaparece
+
+**Por qué NO usar ranking igualitario (200/200/200):** sin gravedad, B/C pueden quedarse indefinidamente aunque el mercado mejore. El sistema debe siempre tender a A.
+
+**Por qué NO usar A=1000 (estado anterior corrupto):** B/C nunca activarían aunque el mercado los requiera → perfiles inútiles.
+
+### Meta-fields — cómo actualizar tras sweep
+
+Después de cada sweep con suficientes ciclos (`max_cycles≥50`):
+
+```json
+POST /regime/profiles
+{
+  "regime": "RANGE_SCALP",
+  "profile": "A",
+  "params": { ... (mantener params actuales) ... },
+  "meta": {
+    "expected_return_pct": <pnl_pct promedio top-25%>,
+    "win_rate_pct": <buy_ratio * 100>,
+    "sharpe": <pnl_avg / pnl_std>,
+    "max_drawdown_pct": <max DD promedio>,
+    "source": "sweep_<fecha>"
+  }
+}
+```
+
+### Diagnóstico del selector
+
+```
+GET /regime/profiles/selector-decisions   ← últimas N decisiones con scores y razones
+GET /regime/profiles/selector-config      ← config activa + estado por régimen
+GET /regime/profiles?regime=RANGE_SCALP   ← perfiles + meta-fields actuales
+```
+
+**"Selector lleva muchos ciclos sin cambiar"** → verificar:
+1. `profile_rank` en selector-config — si A tiene ventaja muy alta (>500), B/C nunca ganarán
+2. `meta-fields` de perfiles — si están vacíos, el score es solo rank_base
+3. `cycles_since_switch` en selector state — si es miles, el selector está bloqueado
+
+**"Selector cambió a B/C pero el mercado mejoró"** → verificar:
+1. `profile_min_hold_cycles` — después de esos ciclos el retorno a A es automático si score A > score B+delta
+2. Forzar retorno manual: `POST /regime/profiles/activate {"regime":"RANGE_SCALP","profile":"A","apply_now":true}`
+
+### Semántica A/B/C para RANGE_SCALP (resumen)
+
+| Perfil | Escenario | Activación automática |
+|--------|-----------|----------------------|
+| A | Lateral puro (99%+ RS, rebotes claros) | Estado base — atractor |
+| B | Lateral mixto (~87% RS, ruido de régimen) | Solo si win_rate A cae >15% |
+| C | Lateral degradado/sucio (~80% RS, bajo vol) | Solo si win_rate B cae adicionalmente |
+
+### s76: Kelly uniforme para RANGE_SCALP (jul 12 2026)
+
+**Principio**: Los perfiles diferencian riesgo via entry gates y exit timers, NO via Kelly sizing.
+- A: prob≥0.44, strength≥0.37 (más permisivo)
+- B: prob≥0.46, strength≥0.43 (neutral)
+- C: prob≥0.48, strength≥0.49 (más estricto)
+
+Si un perfil aprobó un trade, ese trade ya pasó sus filtros — merece el mismo capital.
+Kelly uniforme: $2500 max, KD=0.26, max_pct_liquid=0.90, conviction_max=0.30, MP=5.
+
+**Post-sweep analysis**: Usar `/post_sweep_analysis` workflow después de cada sweep completo.
 

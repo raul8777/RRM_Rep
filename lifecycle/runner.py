@@ -97,6 +97,10 @@ class LifecycleRunner:
         exits = self.exit_engine.evaluate(positions, ctx, config.exit_policy, now=ctx.timestamp)
 
         executed_exits: List[Dict] = []
+        exit_reasons: Dict[str, int] = {}
+        realized_pnl_usdt = 0.0
+        win_count = 0
+        loss_count = 0
         for decision in exits:
             if decision.action.value == "HOLD":
                 continue
@@ -105,13 +109,35 @@ class LifecycleRunner:
                 continue
             result = self.adapter.execute_exit(decision, pos, config)
             self.adapter.audit(decision, result, config)
-            executed_exits.append({
+            exit_record = {
                 "symbol": decision.symbol,
                 "action": decision.action.value,
                 "pct": decision.pct,
                 "reason": decision.reason,
                 "result": result,
-            })
+                "realized_pnl_usdt": result.get("realized_pnl_usdt", 0.0),
+            }
+            executed_exits.append(exit_record)
+
+            # Aggregate exit analytics.
+            reason = decision.reason or "unknown"
+            exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
+            pnl = result.get("realized_pnl_usdt", 0.0)
+            realized_pnl_usdt += pnl
+            if pnl > 0:
+                win_count += 1
+            elif pnl < 0:
+                loss_count += 1
+
+        total_exit_events = win_count + loss_count
+        profit_factor: Optional[float] = None
+        if total_exit_events > 0:
+            total_wins = sum(e.get("realized_pnl_usdt", 0.0) for e in executed_exits if e.get("realized_pnl_usdt", 0.0) > 0)
+            total_losses = abs(sum(e.get("realized_pnl_usdt", 0.0) for e in executed_exits if e.get("realized_pnl_usdt", 0.0) < 0))
+            if total_losses > 0:
+                profit_factor = round(total_wins / total_losses, 4)
+            elif total_wins > 0:
+                profit_factor = float("inf")
 
         return {
             "regime": ctx.regime,
@@ -119,4 +145,9 @@ class LifecycleRunner:
             "signals": len(signals),
             "entries": executed_entries,
             "exits": executed_exits,
+            "exit_reasons": exit_reasons,
+            "realized_pnl_usdt": round(realized_pnl_usdt, 6),
+            "win_count": win_count,
+            "loss_count": loss_count,
+            "profit_factor": profit_factor,
         }
