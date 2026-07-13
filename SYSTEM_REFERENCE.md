@@ -1,7 +1,546 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 10 2026 | MIMIC autónomo: scheduler + API + dashboard operativos.
+> Última actualización: jul 13 2026 (mañana) | Trade Lifecycle Kernel Redesign Fases 1-7 completadas; adapters SPOT/FUTURES + arquitectura documentada.
+
+---
+
+## 🔄 Trade Lifecycle Kernel — jul 13 2026
+
+### Objetivo
+Reemplazar la lógica fragmentada de señales, entrada, sizing y salida con un **kernel unificado y declarativo** para SPOT, FUTURES y MIMIC. Cada fase del ciclo de vida es gobernada por políticas inmutables (`LifecycleConfig`) y auditada.
+
+### Arquitectura
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  LifecycleConfig (regime + profile + policies)                            │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+┌──────────────┐  ┌──────────────┐  │  ┌──────────────┐  ┌──────────────┐
+│ RegimeKernel │──│SignalPipeline│──┼──│  EntryGate   │──│PositionSizer │
+│  (regime.py) │  │ (signal.py)  │  │  │  (entry.py)  │  │ (sizing.py)  │
+└──────────────┘  └──────────────┘  │  └──────────────┘  └──────────────┘
+                                    │                           │
+                                    │              ┌────────────┴────────────┐
+                                    │              │    ExecutionAdapter     │
+                                    │              │  SPOT / FUTURES / MIMIC │
+                                    │              │   adapter_*.py          │
+                                    │              └────────────┬────────────┘
+                                    │                           │
+┌──────────────┐  ┌──────────────┐  │              ┌────────────▼────────────┐
+│   Position   │──│  ExitEngine  │──┘              │    Binance / MIMIC      │
+│  (base.py)   │  │  (exit.py)   │                 │      execution          │
+└──────────────┘  └──────────────┘                  └─────────────────────────┘
+```
+
+### Fases implementadas
+
+| Módulo | Responsabilidad | Archivo |
+|---|---|---|
+| `base` | Contratos y data classes (`MarketContext`, `LifecycleConfig`, señales, decisiones, posiciones) | `lifecycle/base.py` |
+| `regime` | `RegimeKernel` con distribución de confianza probabilística sobre regímenes incluyendo `FUTURES_SHORT` | `lifecycle/regime.py` |
+| `signal` | `SignalPipeline`: filtra, diversifica por categoría y rankea señales | `lifecycle/signal.py` |
+| `entry` | `EntryGate`: umbral de score/EV/prob, límites de posición, funding, volspike override | `lifecycle/entry.py` |
+| `sizing` | `PositionSizer` + `CapitalBudget`: Kelly, F&G multiplier, caps por categoría | `lifecycle/sizing.py` |
+| `exit` | `ExitEngine`: SL/TP duros, trailing, breakeven, partial takes, momentum, stagnation | `lifecycle/exit.py` |
+| `runner` | `LifecycleRunner`: orquesta un ciclo completo (context → signal → entry → size → exec → exit) | `lifecycle/runner.py` |
+| `adapter_*` | Adaptadores concretos: `BinanceSpotAdapter`, `BinanceFuturesAdapter`, `MimicExecutionAdapter` | `lifecycle/adapter_*.py` |
+| `super_mimic_integration` | Puente a Super MIMIC: fingerprint, experiment design, MIMIC backtest | `lifecycle/super_mimic_integration.py` |
+
+### Design decisions
+- **QUBO reemplazado** por diversificación por categoría en `SignalPipeline` (determinista, interpretable y rápido).
+- **Perfiles A/B/C** de `FUTURES_SHORT` y `RANGE_SCALP` se mantienen en DB vía perfiles de régimen existentes.
+- **Predictor actual**: regresión logística; XGBoost diferido a fase posterior.
+- **ExitEngine reemplaza** SSO/PRS/PeakCapture fragmentados; reglas con prioridad y merge de partials.
+- **Super MIMIC** ahora evalúa `peak_capture_ratio >= 0.60` y `capital_deployment_ratio >= 0.30` en el deploy gate.
+
+### Tests
+- `tests/test_lifecycle_*.py`: 41 tests pasan.
+- `tests/test_super_mimic_*.py`: 19 tests pasan.
+- Suite completa: 455 passed, 1 failed pre-existente (`test_mimic_regression` por PostgreSQL localhost:5432 no disponible).
+
+### Pendiente
+- Adapters SPOT/FUTURES aún son esqueletos funcionales; requieren integración real con `run_trades.py`.
+- Ejecutar MIMIC sweep baseline con el lifecycle kernel y documentar métricas.
+- Reemplazar gradualmente bucles heredados por `LifecycleRunner`.
+
+---
+
+## 🗺️ Estado del Sistema — jul 13 2026 (noche) — Super MIMIC Week 4: Deploy Gate
+
+### Objetivo
+Cerrar el pilar de **Backtest / Monte Carlo / Deploy Gate**: validar configs recomendadas con reglas duras, asesor ML, y aplicar el despliegue real con trazabilidad y rollback.
+
+### Componentes implementados
+
+**`super_mimic/deploy_gate.py`**:
+- `DeployGateResult`: resultado serializable del gate (passed, score, reasons, warnings, hard_rules, ml_advisor).
+- `DeployGate.evaluate(artifact)`: reglas duras PnL/día > 0, drawdown < 15%, trades >= 3, attractors >= 1.
+- Asesor ML via `recommend_warm_start` de `meta_learner`: score 0-1 basado en distancia de fingerprint a configs históricas ganadoras.
+- `apply_recommended_config(...)`: merge en `kelly_config_override` con registro de auditoría (`record_deployment`).
+
+**`super_mimic/engines.py`**:
+- `run_backtest_experiment(design)`: adaptador backtest que reutiliza la infraestructura MIMIC sweep (v1).
+- `run_monte_carlo_experiment(design)`: bootstrap 1000 muestras sobre resultados del sweep para intervalos de confianza de sharpe, pnl/día, drawdown, win_rate.
+
+**Pipeline** (`super_mimic/runner.py`):
+- El runner ahora soporta motores `mimic_sweep`, `backtest` y `monte_carlo`.
+- Tras completar el engine, evalúa el deploy gate y lo guarda en `artifact.deploy_gate`.
+
+**API** (`super_mimic/api.py`):
+- `POST /super-mimic/experiment/{id}/deploy` ahora:
+  - Reevalúa el deploy gate.
+  - Si pasa, aplica la config recomendada **reutilizando el helper interno de `PATCH /config/kelly`** (`_apply_kelly_config_patch` en `app.py`), con whitelist, persistencia en `trading_runtime_state` y audit en `trades_audit`.
+  - Registra el deployment en `super_mimic_deployments` con payload de rollback.
+  - Retorna `{ok, gate, kelly, recorded}`.
+  - Si falla, retorna `{ok: false, error, gate}`.
+- `POST /super-mimic/experiment/{id}/rollback`: restaura el último `rollback_payload` guardado y registra audit de rollback.
+
+**Frontend** (`frontend/index.html`, `frontend/super_mimic.js`):
+- Panel de validación muestra el estado del gate devuelto por el backend (score, reasons, warnings).
+- Botón de despliegue queda habilitado solo si `gate.passed == true` y hay config recomendada.
+- `superMimicDeploy()` confirma y llama al endpoint real; muestra campos aplicados o error con warnings.
+- Botón de rollback inyectado dinámicamente; `superMimicRollback()` revierte el último deployment.
+
+### Tests
+- `tests/test_super_mimic_deploy_gate.py`: 7/7 pasan.
+- Verificaciones: gate pasa con datos sanos, bloquea PnL negativo, drawdown alto, trades bajos, sin atractores, serialización, registro de deployment.
+- Smoke test: `super_mimic/smoke_test.py` — gate pasa, landscape 8x8, 13 atractores.
+
+### Despliegue
+- El endpoint de deploy usa el mismo helper que `PATCH /config/kelly`: la config es activa inmediatamente y sobrevive restart.
+- El payload anterior se guarda en `super_mimic_deployments` para poder revertir via rollback.
+- Requiere migración `019_super_mimic_tables.sql`.
+
+### Nota post-sweep (13 jul 2026)
+- El generador de recomendaciones del sweep (`Dev/scripts/mimic_mode_profile_sweep.py`) fue corregido para rankear por **PnL total (`pnl_usdt`)** en vez de `pnl_per_day_usdt`, con filtro de `trades >= 3` y saneamiento de Sharpe anómalo.
+- Resultado: perfil A ahora recomienda 206 trades / $41.20 PnL total (antes 4 trades / $29.70/día).
+- Perfiles A, B y C pasan el deploy gate de Super MIMIC.
+
+---
+
+## 📊 Post-Sweep Analysis — SPOT_BULL — jul 13 2026
+
+- Archivo de análisis: `Dev/sweep_analysis_SPOT_BULL_20260713.md`
+- Sweep analizado: 15,552 jobs SPOT_BULL-A/B/C finalizados el 13 jul 2026.
+- Hallazgos principales:
+  - **Attractor por PnL total**: perfil B ($71.55, 89 trades, DD 0.06%).
+  - **Attractor por Sharpe**: perfil C (Sharpe 88.47, 93 trades).
+  - **Mejor A**: 206 trades / $41.20 PnL total / DD 0.12% (window `win_20260415_20260430`).
+  - **SL/TP**: 0 exits en todo el sweep → SL actúa como red de seguridad, no estrangula.
+  - **Kelly**: promedio negativo en todos los niveles; no hay evidencia de que más Kelly mejore retornos en este régimen sin ajustar otros parámetros.
+  - **Cascade A→B→C**: en la peor ventana de A (`win_20260515_20260531`), B rescata con $20.44 y C con $16.48.
+- Configs propuestas en Step 9 del reporte; pendiente confirmación para aplicar a producción.
+
+---
+
+## 🔍 Diagnóstico de Cuello de Botella — jul 13 2026
+
+Análisis exhaustivo por modo (SPOT_BULL, RANGE_SCALP, PRESERVATION, FUTURES_SHORT) + combinado, con capital live $5,058 y target $120/día.
+
+### Hallazgos críticos
+
+- **Target $120/día (~2.37% diario) NO es alcanzable** con la estrategia long actual en el mercado de julio 2026.
+- **Mercado actual**: BTC 30d = -18.5% (bear estructural). El sistema reporta RANGE_SCALP 99% del tiempo, no FUTURES_SHORT.
+- **Oportunidades reales long (últimos 7d)**: solo 26 de 710 señales (3.7%), con PnL teórico +$10.65 usando Kelly $20.
+- **PnL promedio por trade negativo**: SPOT_BULL -$0.046, RANGE_SCALP -$0.159 → la estrategia long no tiene edge consistente.
+- **Capital deployment bajo**: CDR SPOT_BULL 18.5%, RANGE_SCALP 47%.
+- **Mejor SPOT_BULL**: perfil B, $71.55 en 15d ($124 escalado a $5,058), gap de ~$60/día respecto al target.
+- **FUTURES_SHORT no evaluado**: sweep SPOT_BULL generó 265 jobs FUTURES_SHORT-dominantes pero 0 trades.
+
+### Cuellos de botella principales
+
+1. `learning_engine.py` / predictor en bootstrap — no discrimina bien, expected_pnl negativo bloquea oportunidades.
+2. `autonomous_signals.py` / `pair_screener.py` — señales no generan edge positivo consistente.
+3. `portfolio_selector.py` / category limits — capital inactivo, pero aumentarlo sin edge mejora pérdidas.
+4. `smart_scale_out.py` / `unified_governance_supervisor.py` — salidas protegen capital pero sacrifican runners.
+5. `market_regime.py` — posible delay confirmando FUTURES_SHORT en bear estructural.
+
+### Archivos de análisis
+
+- `Dev/bottleneck_diagnostic_SPOT_BULL_20260713.md`
+- `Dev/bottleneck_diagnostic_RANGE_SCALP_20260713.md`
+- `Dev/bottleneck_diagnostic_PRESERVATION_20260713.md`
+- `Dev/bottleneck_diagnostic_FUTURES_SHORT_20260713.md`
+- `Dev/bottleneck_diagnostic_COMBINED_20260713.md`
+- `Dev/missed_ops_analysis_20260713.txt`
+- `Dev/scripts/_tmp_bottleneck_multimode_analysis.py`
+
+### Recomendaciones priorizadas
+
+1. **No forzar $120/día en bear** — mantener FUTURES_SHORT defensivo.
+2. **Ejecutar sweep FUTURES_SHORT dedicado** para evaluar si el alpha short puede acercarse al target.
+3. **Mejorar predictor** con más trades reales antes de subir CDR/sizing.
+4. **En SPOT_BULL futuro**, aplicar config B del sweep y optimizar captura de runners.
+
+---
+
+## 🗺️ Estado del Sistema — jul 13 2026 (madrugada) — Super MIMIC Week 3: Física Cuántica
+
+### Objetivo
+Cerrar el pilar de **Física Cuántica / Sistemas Complejos**: tratar el espacio de configs como un paisaje de energía, detectar atractores robustos y mostrar un phase map en el dashboard.
+
+### Componentes implementados
+
+**`super_mimic/quantum_landscape.py`**:
+- `QuantumLandscapeAnalyzer`: consume resultados crudos de un sweep y produce:
+  - `build_landscape(param_x, param_y, metric, grid_size)` — grilla 2D lista para heatmap.
+  - `detect_attractors(...)` — configs donde vecinos tienen alto rendimiento medio, baja desviación y drawdown controlado.
+  - `_compute_phase_map(...)` — clasifica celdas en peak, valley, plateau, unstable.
+- `ParameterLandscape` y `Attractor` dataclasses serializables.
+
+**Integración en pipeline** (`super_mimic/runner.py`):
+- Al completar un experimento, se construye landscape sobre `min_signal_strength` vs `stop_loss_pct` y se detectan atractores.
+- Resultado almacenado en `artifact.landscape` y persistido en DB (columna `landscape JSONB`).
+- `deploy_gate.attractors_count` disponible para el gate de despliegue.
+
+**Migración DB** (`migrations/019_super_mimic_tables.sql`):
+- Columna `landscape JSONB` en `super_mimic_experiments`.
+
+**Endpoints** (`super_mimic/api.py`):
+- `GET /super-mimic/experiment/{id}/landscape`
+- `GET /super-mimic/experiment/{id}/attractors`
+- `POST /super-mimic/analyze-landscape` (análisis on-the-fly de resultados raw)
+
+**Frontend** (`frontend/index.html`, `frontend/super_mimic.js`):
+- Nuevo panel **⚛️ Quantum Landscape** con heatmap generado en CSS grid (rojo→negro→verde) y conteo de fases.
+- Botón **🧲 Atractores** lista configs robustas detectadas.
+
+### Tests
+- `tests/test_super_mimic_quantum_landscape.py`: 4/4 pasan.
+- Verificaciones: construcción de grid, detección de atractores, landscape vacío, conteo de fases.
+
+### Smoke test
+- 4 resultados sintéticos → heatmap 8×8, 2 atractores detectados, phase map con 4 celdas unstable.
+
+### Notas de diseño
+- El heatmap es client-side puro; no requiere librería externa.
+- Atractor detection usa distancia normalizada en el espacio de parámetros, no en el heatmap, por lo que funciona incluso con parámetros de escalas muy diferentes.
+- Afecta solo experimentos futuros; no altera trading live actual.
+
+---
+
+## 🗺️ Estado del Sistema — jul 13 2026 (madrugada) — Super MIMIC Week 2: ML Pilar
+
+### Objetivo
+Cerrar el pilar de **Machine Learning** de Super MIMIC: que cada experimento parta de un fingerprint de régimen actual y pueda reutilizar configs que históricamente funcionaron en condiciones similares.
+
+### Componentes implementados
+
+**`super_mimic/meta_learner.py`**:
+- `RegimeFingerprint`: vector continuo de 8 features (BTC trend 1d/4h/1h, RSI 4h, dominancia, F&G, vol spike, win rate 7d).
+- `SuperMimicMetaLearner.capture_fingerprint()`: extrae datos desde Binance (live) o archivos parquet (fallback offline); normaliza a rangos comparables.
+- `recommend_warm_start()`: busca experimentos completados del mismo modo/perfil, filtra por mínimo de trades y devuelve top-k configs ordenadas por score = PnL/día − distancia×10.
+- `retrain_predictor()`: puente a `learning_engine.run()` para recalibrar `indicator_weights` antes de experimentos `full`.
+- `record_experiment_result()`: persiste fingerprint + métricas extraídas en `super_mimic_experiments`.
+
+**Integración en pipeline** (`super_mimic/runner.py`):
+- Worker captura fingerprint al inicio y lo guarda en el artifact.
+- Si `strategy == "full"`, ejecuta `retrain_predictor()` antes del sweep.
+- Al finalizar, registra fingerprint + métricas en DB vía `meta.record_experiment_result()`.
+
+**Migración DB** (`migrations/019_super_mimic_tables.sql`):
+- Columna `fingerprint JSONB` e índice GIN en `super_mimic_experiments`.
+
+**Endpoints** (`super_mimic/api.py`):
+- `GET /super-mimic/meta/fingerprint`
+- `GET /super-mimic/meta/warm-start?mode=&profile=&top_k=`
+- `POST /super-mimic/meta/retrain`
+- `GET /super-mimic/meta/summary?lookback_days=`
+
+**Frontend** (`frontend/index.html`, `frontend/super_mimic.js`):
+- Nuevo panel **🧠 Meta-Learner** con: fingerprint actual, botón warm-start, botón retrain predictor.
+- Fingerprint se captura automáticamente al cargar la pestaña.
+
+### Tests
+- `tests/test_super_mimic_meta_learner.py`: 5/5 pasan.
+- Verificaciones: distancia, filtrado por trades mínimos, persistencia de fingerprint, extracción de métricas, normalización.
+
+### Smoke test
+- `DesignSpec` → `Experiment` → artifact escrito OK.
+- `capture_fingerprint()` offline produce 8 features normalizados.
+
+### Despliegue
+- **No afecta trading live directamente**. Es infraestructura para futuros experimentos.
+- La migración `019_super_mimic_tables.sql` debe aplicarse antes de usar el tab.
+- El retrain predictor requiere DB con trades cerrados recientes; si no hay suficientes, `learning_engine` lo skipped.
+
+---
+
+## 🗺️ Estado del Sistema — jul 12 2026 (noche) — s77: Fix simulación MIMIC SPOT_BULL
+
+### Problema detectado
+- Sweep SPOT_BULL lanzado a las 2026-07-12 19:52 UTC con 6 ventanas puras, `max_cycles=50`, `max_workers=10`.
+- Progreso visible en dashboard era lento: ~1,550 jobs en ~5.5 h (~4.7 jobs/min).
+- Log mostró llamadas reales a Binance desde la simulación:
+  - `futures_bnb_balance: HTTP 418 I'm a teapot` (rate-limit IP banned)
+  - `SimulationFuturesClient object has no attribute 'get_total_wallet_usdt'`
+  - `universal_transfer` missing en `SimulationBinanceClient._Client`
+
+### Causa raíz
+- `_get_futures_client(settings)` en `run_trades.py` se llamaba sin `injected_client` en varios puntos de `execute_once()` y `_buy_top_symbols()`, por lo que `auto_manage_bnb_discount()` y `portfolio_manager.get_unified_balance()` usaban un `FuturesClient` real en lugar del `SimulationFuturesClient` inyectado.
+- `SimulationFuturesClient` no implementaba `get_total_wallet_usdt()` ni `get_account_info()`.
+- `SimulationBinanceClient._Client` no implementaba `universal_transfer()`.
+
+### Fix aplicado
+1. `simulation/mimic_clients.py`:
+   - `SimulationFuturesClient.get_total_wallet_usdt()` — retorna wallet simulado.
+   - `SimulationFuturesClient.get_account_info()` — snapshot simulado sin BNB.
+   - `SimulationBinanceClient._Client.universal_transfer()` — no-op simulado.
+2. `run_trades.py`:
+   - `_buy_top_symbols(..., futures_client=None)` y todos los `_get_futures_client(settings)` internos ahora pasan `injected_client=futures_client`.
+   - El llamado desde `execute_once()` pasa `comp.futures_client`.
+   - `auto_manage_bnb_discount()` ahora recibe el `futures_client` simulado inyectado.
+
+### Resultado
+- Sweep reiniciado limpio a las 2026-07-13 01:47 UTC.
+- Progreso post-fix: ~90 jobs en 4 min (~22 jobs/min), 5x más rápido.
+- 0 errores HTTP 418 / Invalid API-key en log.
+- Simulación ahora es completamente offline respecto a Binance futures.
+
+---
+
+## 🗺️ Estado del Sistema — jul 12 2026 (mañana) — s76: Aggressive Kelly RANGE_SCALP
+
+### Quantum Cascade Analysis (post-sweep)
+- Sweep: 5,184 jobs, max_cycles=50, 2 ventanas, 0 fallas.
+- Profile A domina: avg_pnl=$35.23, Sharpe=63.28, DD=21.93%, 98.5% positivo.
+- SL exits: **0 en 122K+ trades** — SL es red de seguridad, no estrangula.
+- Kelly scaling lineal: +$1.80 PnL por cada +$100 Kelly, Sharpe estable.
+- CDR observado: 45-55% → objetivo 85-90%.
+
+### Cambios aplicados (solo RANGE_SCALP)
+
+**run_trades.py (código):**
+1. `_get_kelly_context_multiplier`: RANGE_SCALP 0.95→**1.05** (CDR underutilized)
+2. `_get_kelly_context_multiplier`: cap 1.35 extendido a Profile A + RANGE_SCALP
+3. `_apply_mode_profile_harmony`: clamp `kelly_conviction_max_pct` 0.25→**0.35**
+
+**DB profiles (uniforme A=B=C):**
+| Param | Anterior | Nuevo (uniforme) |
+|-------|----------|------------------|
+| `kelly_max_usdt` | 1000-1200 | **2500** |
+| `kelly_dynamic_base_pct` | 0.14-0.22 | **0.26** |
+| `kelly_base_usdt` | 150 | **200** |
+| `kelly_max_pct_liquid` | 0.85 | **0.90** |
+| `kelly_max_pct_cap` | 0.30 | **0.35** |
+| `kelly_conviction_max_pct` | 0.15-0.22 | **0.30** |
+| `max_positions_range_scalp` | 4-6 | **5** |
+
+**Decisión de diseño — Kelly uniforme**: Los perfiles diferencian riesgo via entry gates (min_success_probability: A=0.44, B=0.46, C=0.48) y exit timers (SSO/PRS), NO via sizing. Si C aprobó un trade, pasó filtros más estrictos — merece el mismo capital.
+
+### Workflow documentado
+- Nuevo: `.windsurf/workflows/post_sweep_analysis.md` — protocolo repetible de 10 pasos para análisis post-sweep de cualquier modo.
+
+### Rollback
+```
+Revert DB: modificar KELLY_UNIFORM en Dev/scripts/_tmp_update_rs_kelly.py con valores anteriores y re-ejecutar.
+Revert código: git checkout run_trades.py (líneas 916, 925, 1293)
+```
+
+---
+
+## 🗺️ Estado del Sistema — jul 12 2026 (madrugada) — Fix SL RANGE_SCALP-A
+
+### Problema verificado
+- Post-implementación del perfil RANGE_SCALP-A: 5 de 10 cierres (50%) fueron por `stop_loss`, con PnL% entre -0.31% y -1.07%.
+- Causa raíz: el perfil A solo seteaba `stop_loss_pct=2.5%` (global/category), pero `run_trades.py:5701` usa `range_scalp_sl_pct` para RANGE_SCALP. Como el perfil no lo definía, el sistema usaba el default `0.8%`, reducido por harmony a ~0.69%.
+- El Hard SL actuaba como **primer mecanismo de salida**, sin dejar espacio a SSO/PRS/PredExit/UG.
+
+### Fix aplicado
+1. `range_scalp_sl_pct` y `range_scalp_tp_pct` añadidos al `_scalar_map` de `_apply_regime_params` en `run_trades.py`.
+2. `range_scalp_sl_pct` y `range_scalp_tp_pct` añadidos a `_KELLY_EDITABLE_FIELDS` en `app.py` para gobernanza futura vía API.
+3. Perfil RANGE_SCALP-A actualizado en DB: `range_scalp_sl_pct=2.5`, `range_scalp_tp_pct=1.8`.
+4. Contenedor reiniciado para recargar `kelly_config_override` y limpiar caché `_last_applied_regime_*`.
+
+### Resultado runtime
+- `mode_profile_harmony_snapshot` (2026-07-12T00:40:20Z) reporta:
+  - `range_scalp_sl_pct = 2.375%` (2.5% × 0.95 régimen RANGE_SCALP)
+  - `range_scalp_tp_pct = 1.656%` (1.8% × 0.92 régimen RANGE_SCALP)
+- Esto alinea el SL con lo que el sweep de MIMIC validó para lateral.
+
+### Sweep MIMIC RANGE_SCALP full overnight — ✅ completado
+- Lanzado: 2026-07-12T00:53:47Z con `max_cycles=50`, `max_workers=10`, ventanas `win_20250525_20250608` y `win_20250718_20250807`.
+- Completado: 2026-07-12T10:44:36Z — 5,184 / 5,184 jobs, 0 fallas.
+- Resumen por perfil (mejor PnL% del sweep):
+  - **A:** PnL% 3.19%, PnL USDT 92.74, Sharpe 76.17, DD 0.05%, trades 87
+  - **B:** PnL% 4.05%, PnL USDT 117.86, Sharpe 58.72, DD 0.47%, trades 79
+  - **C:** PnL% 4.38%, PnL USDT 127.58, Sharpe 69.82, DD 0.38%, trades 119
+- Meta-fields `sharpe`, `win_rate_pct`, `max_drawdown_pct`, `expected_return_pct` actualizados en `regime_profile_RANGE_SCALP_A/B/C` desde `mimic_sweep_postprocess`.
+- Verificación del selector: score A=2162.63, B=1673.63, C=1901.71. `selected_profile` = **A**, `active_before` = A, `switched` = false, razón `best_already_active`. A sigue siendo el atractor gracias a `profile_rank` base (A=250, B=200, C=150) + mejor Sharpe.
+- **Fix dashboard:** `frontend/dashboard.js` ahora muestra "Corriendo" cuando `state === 'running'`, independientemente del flag `running` del backend. `app.py:/mimic/sweep-status` también deriva `running` del estado en disco para futuros reinicios.
+
+### Pendiente / monitoreo
+- Observar los próximos cierres para confirmar que baja la proporción de SL y que SSO/PRS/PredExit/UG capturan más salidas.
+- Si el win-rate post-cambio cae o el drawdown aumenta, rollback vía snapshot `config_snapshot_pre_full_audit_20260628`.
+
+### Reinicio post-sweep (2026-07-12 08:16 UTC-6)
+- Contenedor `crypto-agent-app` reiniciado para activar el backend fix de `/mimic/sweep-status` en `app.py`. Verificado: el endpoint ahora deriva `running` del estado en disco correctamente.
+- **Problema detectado tras reinicio:** `last_cycle_error` reporta `Binance account info error: APIError(code=-2015): Invalid API-key, IP, or permissions for action`. La misma API key falla tanto dentro del contenedor como desde el host Windows con un request firmado a `https://api.binance.com/api/v3/account`. Los endpoints públicos (precio BNB) sí responden.
+- **Diagnóstico IP:** El host y el contenedor salen a internet por `189.155.4.106`. La whitelist de la API key en Binance tenía `189.155.130.4`. **Era un mismatch de IP.**
+- **Resuelto:** usuario actualizó la whitelist de Binance a la IP actual. Se reinició el contenedor para recrear el singleton de `BinanceClient`. `cycle_failures` volvió a 0, `last_error` = None, trade cycle activo en `RANGE_SCALP-A`.
+
+---
+
+## 🗺️ Estado del Sistema — jul 11 2026 (noche) — TRXUSDT ghost fix + auditoría cerradas
+
+### ✅ Fix TRXUSDT `ghost_balance_mismatch` — `position_manager.py`
+
+**Root cause:** `TRX` estaba en `EXCLUDED_ASSETS`, por lo que el sistema no importaba TRX como posición SPOT, **pero sí reconciliaba y cerraba** posiciones `TRXUSDT` existentes. Cuando el balance spot de TRX era cero/dust o residía en Funding/Earn, el ratio `balance_binance / qty_db` caía bajo 0.001 y se disparaba `ghost_balance_mismatch`, cerrando posiciones reales.
+
+**Fix aplicado:**
+1. Removido `"TRX"` de `EXCLUDED_ASSETS` en `position_manager.py`.
+2. El cierre por `ghost_balance_mismatch` ahora exige un **SELL reciente en Binance** (`get_my_trades`) dentro de las últimas `spot_ghost_sell_confirmation_hours` (default 24h).
+3. Si no hay SELL reciente, el cierre se **difiere**, se emite audit `ghost_balance_mismatch_deferred` y la posición permanece abierta.
+
+**Tests:**
+- `test_ghost_balance_mismatch_deferred_without_recent_sell` ✅
+- `test_trx_imported_from_balance_after_removing_exclusion` ✅
+- `test_spot_sync_closes_ghost_when_balance_ratio_below_threshold` actualizado con SELL reciente ✅
+- `test_restart_reconciliation.py`: 6/6 pasan.
+- `test_position_reconciliation.py` + `test_position_manager.py`: 20/20 pasan.
+
+### 🔄 Fase 2 — Auditoría de posiciones cerradas (en progreso)
+
+Se agregó `evaluate_closed_positions_parity` en `binance_truth_guard.py` para cruzar `trades_closed` contra Binance SPOT `myTrades` y FUTURES `userTrades`. Detecta discrepancias de cantidad, PnL, comisión y precio de cierre, además de registros ausentes en cualquiera de los dos lados.
+
+Pendiente: ejecución de la auditoría real y análisis de hallazgos.
+
+---
+
+## 🗺️ Estado del Sistema — jul 11 2026 (tarde) — RANGE_SCALP perfiles + selector automático
+
+### ✅ Sweep full RANGE_SCALP completado (5,184 jobs, max_cycles=5)
+
+Sweep `full` sobre 2 ventanas RANGE_SCALP puras (`win_20250525_20250608`, `win_20250718_20250807`), 6 workers.  
+Resultados en `Dev/benchmarks/mimic_sweep_results.jsonl`.
+
+**Hallazgo clave:** 5 ciclos insuficientes para trades completos (PnL flotante, 0 SL/TP disparados).  
+Señal válida: Kelly 1200 > 1000 > 800 linealmente, SS=0.55 óptimo, SL=2.5% domina en lateral.  
+Sweep overnight con `max_cycles=50` pendiente para datos estadísticamente significativos.
+
+### ✅ Perfiles RANGE_SCALP A/B/C configurados y en producción
+
+Tres tipos de lateral identificados por el sweep y mapeados a perfiles (rules.md §3.5):
+
+| Perfil | Escenario | RS% | Buy/Trade | Parámetros clave |
+|--------|-----------|-----|-----------|-----------------|
+| A (activo) | Lateral puro con rebotes | 99.9% | 0.78 | SS=0.55, SP=0.48, K=1200, SL=2.5%, pos=5 |
+| B | Lateral mixto con ruido | 87% | 0.62 | SS=0.60, SP=0.45, K=1000, SL=2.5%, vol_min=0.60 |
+| C | Lateral degradado | ~80% | 0.56 | SS=0.55, SP=0.50, K=1200, kd=0.14, pos=4, vol_min=0.50 |
+
+Aplicados vía `POST /regime/profiles` (no `PATCH /config/kelly` — afecta solo RANGE_SCALP).  
+Perfil A activo (`regime_profile_active_RANGE_SCALP`).
+
+### ✅ Bug crítico selector automático reparado — profile_rank corrupto
+
+**Root cause:** `profile_rank` en DB tenía `{A:1000, B:200, C:100}` de sesión anterior.  
+Con A=1000, B necesitaba 800 pts de ventaja en métricas para ganar → imposible.  
+El selector llevaba **2,713 ciclos sin cambiar** (`best_already_active` en cada ciclo).  
+Los 3 perfiles también tenían `meta` vacío (sin `expected_return_pct`, `win_rate_pct`, `sharpe`).
+
+**Fix aplicado:**
+1. `POST /regime/profiles/selector-config` → `{A:250, B:200, C:150}` + `profile_min_hold_cycles=4`
+2. Meta-fields de rendimiento cargados en los 3 perfiles con datos del sweep
+
+**Scoring post-fix:**
+
+| Perfil | rank_base | meta_perf | confidence | **Score total** |
+|--------|-----------|-----------|------------|-----------------|
+| A | 250 | +76.5 | +4.0 | **330.5** |
+| B | 200 | +55.1 | +4.0 | **259.1** |
+| C | 150 | +42.6 | +4.0 | **196.6** |
+
+Delta A→B = 71.4 pts → B solo activa si win_rate de A cae >15% ó sharpe >1.1 en producción real.  
+**A es el atractor permanente** — retorno automático tras 4 ciclos (~3h) de hold mínimo.
+
+### ⏳ Pendiente — Sweep overnight max_cycles=50
+
+```json
+POST /mimic/sweep
+{
+  "windows": ["win_20250525_20250608", "win_20250718_20250807"],
+  "strategy": "full",
+  "max_cycles": 50,
+  "max_workers": 6,
+  "clear_results": false
+}
+```
+Después del sweep: actualizar `meta-fields` de los 3 perfiles con datos reales (`win_rate_pct`, `sharpe`, `expected_return_pct`).
+
+---
+
+## 🗺️ Estado del Sistema — jul 11 2026 (MIMIC ventanas RANGE_SCALP + sweep full)
+
+### ✅ Ventanas RANGE_SCALP construidas
+
+Se construyeron 3 ventanas para sweep de régimen RANGE_SCALP (lateral) usando datos históricos 2025:
+
+| ID | Período | RS% | SB% | Símbolos | Notas |
+|----|---------|-----|-----|---------|-------|
+| `win_20250116_20250131` | 16–31 ene 2025 | 46% | 54% | 27 | Mixta — transiciones RS↔SB |
+| `win_20250525_20250608` | 25 may – 8 jun 2025 | **95%** | 5% | 28 | **Pura — usar para sweep RS** |
+| `win_20250718_20250807` | 18 jul – 7 ago 2025 | **90%** | 10% | 29 | **Pura — usar para sweep RS** |
+
+Las ventanas existentes (mar–jul 2026) son 100% SPOT_BULL. Total inventario: 12 ventanas.  
+Registro completo en `rules.md § 9`.
+
+### 🔴 Bug fix — parquets BTC 4h/1d no existían
+
+**Root cause:** `mimic_build_window.py` usa `detect_regime_at()` que requiere barras 4h y 1d de BTC. Los archivos `BTCUSDT_4h.parquet` y `BTCUSDT_1d.parquet` no existían — el feed devolvía `[]` silenciosamente → el detector defaulteaba a `SPOT_BULL` con `reason: detection failed` para TODAS las ventanas sin importar el período real del mercado.
+
+**Fix aplicado:** Generados los parquets 4h y 1d resampleando desde `BTCUSDT_1h.parquet`.
+
+**Detalle crítico:** `mimic_feed.py` línea 48 espera `open_time` en **ms enteros** (`float(ot) / 1000.0`). Guardar con `int(x.timestamp() * 1000)` — si se guardan en segundos las fechas caen en 1970.
+
+Script de reconstrucción (ejecutar si se pierden al rebuild Docker):
+
+```python
+import pandas as pd, os
+df = pd.read_parquet('historical_data/BTCUSDT_1h.parquet')
+df = df.sort_values('open_time').drop_duplicates('open_time').set_index('open_time')
+for iv, rule in [('4h', '4h'), ('1d', 'D')]:
+    rs = df.resample(rule).agg({'open':'first','high':'max','low':'min','close':'last','volume':'sum'}).dropna().reset_index()
+    rs['open_time'] = rs['open_time'].apply(lambda x: int(x.timestamp() * 1000))
+    rs[['open_time','open','high','low','close','volume']].to_parquet(
+        f'historical_data/BTCUSDT_{iv}.parquet', index=False)
+```
+
+### ✅ Sweep B completado (coarse, ventanas mar–jun 2026)
+
+- 192 jobs / 0 failed — estrategia `coarse` sobre ventanas SPOT_BULL existentes.
+- Resultados en `Dev/benchmarks/mimic_sweep_results.json`.
+
+### ⏳ Siguiente paso — Sweep full baseline RANGE_SCALP
+
+Lanzar sweep `full` con `max_cycles=10` sobre las 2 ventanas RS puras:
+
+```json
+POST /mimic/sweep
+{
+  "windows": ["win_20250525_20250608", "win_20250718_20250807"],
+  "strategy": "full",
+  "max_cycles": 10,
+  "max_workers": 6,
+  "clear_results": true
+}
+```
+
+- **Jobs:** 864 combos × 3 perfiles × 2 ventanas = 5,184
+- **ETA:** ~50 min con `max_workers=6` (i9-12900H, 14 cores, sin límite Docker)
+- **Objetivo:** línea base de parámetros para RANGE_SCALP — confirmar overnight con `max_cycles=50`
+- **Nota:** `ProcessPoolExecutor` — no se puede cambiar `max_workers` en caliente; se fija al lanzar
+
+### ✅ rules.md actualizado — sección § 9
+
+Agregada sección `## 9. MIMIC — VENTANAS DE SIMULACIÓN DISPONIBLES` con inventario de 12 ventanas, bug fix snippet, comandos de construcción y tabla de workers óptimos.
+
+### Hardware de referencia para sweep
+
+- CPU: i9-12900H / 14 cores físicos / 20 lógicos / sin límite Docker
+- RAM disponible: ~13.5 GB de 15.45 GB
+- **Workers óptimos: 6** (~50 min para 5k jobs) — con 8+ el sistema host se vuelve lento
 
 ---
 
@@ -5082,5 +5621,56 @@ cur.execute('SELECT event, detail FROM trades_audit WHERE symbol=%s ORDER BY ts 
 for r in cur.fetchall(): print(r)
 "
 ```
+
+---
+
+## MIMIC — Conceptos y flujo de trabajo
+
+**MIMIC** (*Market-Informed Meta-Intelligence Calibration*) es el banco de pruebas histórico del bot: ejecuta la lógica de producción (`run_trades.execute_once()`) contra datos históricos locales (parquet) para calibrar perfiles de régimen A/B/C sin arriesgar capital real.
+
+### Qué hace
+
+- Replica el ciclo de trading real en un entorno simulado.
+- Usa los mismos módulos de producción: `market_regime`, `autonomous_signals`, `portfolio_selector`, `smart_scale_out`, `unified_governance_supervisor`, etc.
+- Reemplaza los clientes de Binance por mocks determinísticos que operan sobre velas históricas.
+- Detecta el régimen dinámicamente en cada punto histórico, igual que en vivo.
+- Permite forzar perfiles A/B/C y barrer parámetros para medir PnL, drawdown, Sharpe y win rate.
+
+### Componentes principales
+
+| Componente | Archivo | Responsabilidad |
+|---|---|---|
+| **Orchestrator CLI** | `simulation/mimic_orchestrator.py` | Punto de entrada por consola. |
+| **Scheduler** | `simulation/mimic_scheduler.py` | Máquina de estados con fases (`SELECT_UNIVERSE`, `AUDIT`, `DOWNLOAD`, `VALIDATE`, `MAP_REGIMES`, `CALIBRATE`, `CONSOLIDATE`, `CROSS_VALIDATE`, `APPLY`, `MONITOR`). |
+| **Window controller** | `simulation/mimic_window_controller.py` | Horarios y condiciones de ejecución. |
+| **Micro-universe selector** | `simulation/mimic_universe_selector.py` | Cola priorizada de micro-universos. |
+| **Simulation runner** | `simulation/mimic_runner.py` | Ejecuta `execute_once` contra datos históricos. |
+| **Historical data feed** | `simulation/mimic_feed.py` | Carga y sirve velas históricas. |
+| **Regime detector histórico** | `simulation/mimic_regime_detector.py` | Replica `market_regime.py` con datos históricos. |
+| **Simulation clients** | `simulation/mimic_clients.py` | Mocks de SPOT/FUTURES. |
+| **Simulation DB** | `simulation/mimic_db.py` | DB en memoria con overrides de perfiles. |
+| **Paper trader** | `simulation/mimic_paper_trader.py` | Paper trading con precios live. |
+| **Mode × Profile sweep** | `Dev/scripts/mimic_mode_profile_sweep.py` | Barrido de parámetros. |
+| **Window builder** | `Dev/scripts/mimic_build_window.py` | Construcción de ventanas históricas. |
+
+### Flujo de fases
+
+1. **SELECT_UNIVERSE** — elige micro-universo.
+2. **AUDIT** — verifica datos parquet.
+3. **DOWNLOAD** — ingesta datos externos.
+4. **VALIDATE** — sanity-check.
+5. **MAP_REGIMES** — etiqueta régimen histórico.
+6. **CALIBRATE** — simula perfiles/parámetros.
+7. **CONSOLIDATE** — agrega métricas.
+8. **CROSS_VALIDATE** — valida en ventanas nuevas.
+9. **APPLY** — escribe perfiles óptimos en `regime_profiles`.
+10. **MONITOR** — observa resultados live.
+
+### Relación con perfiles A/B/C
+
+- Cada modo tiene perfiles `A` (agresivo), `B` (balanceado), `C` (conservador).
+- El sweep fuerza un perfil sobre ventanas puras de un régimen.
+- Los resultados actualizan `sharpe`, `win_rate_pct`, `max_drawdown_pct`, `expected_return_pct` en `regime_profile_{REGIME}_{A/B/C}`.
+- El selector automático usa `profile_rank` + métricas + confianza para elegir el perfil activo.
 
 *Revisar este archivo al inicio de cada sesión de análisis o implementación.*

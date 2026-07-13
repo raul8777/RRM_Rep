@@ -35,6 +35,8 @@ from lifecycle.exit import ExitEngine, update_peak_pnl
 from lifecycle.adapter import ExecutionAdapter
 from lifecycle.runner import LifecycleRunner
 from lifecycle.adapter_mimic import MimicExecutionAdapter
+from lifecycle.adapter_spot import BinanceSpotAdapter
+from lifecycle.adapter_futures import BinanceFuturesAdapter
 from lifecycle.super_mimic_integration import (
     lifecycle_config_to_dict,
     fingerprint,
@@ -73,6 +75,8 @@ __all__ = [
     "ExecutionAdapter",
     "LifecycleRunner",
     "MimicExecutionAdapter",
+    "BinanceSpotAdapter",
+    "BinanceFuturesAdapter",
     "lifecycle_config_to_dict",
     "fingerprint",
     "build_mimic_experiment_design",
