@@ -35,6 +35,13 @@ from lifecycle.exit import ExitEngine, update_peak_pnl
 from lifecycle.adapter import ExecutionAdapter
 from lifecycle.runner import LifecycleRunner
 from lifecycle.adapter_mimic import MimicExecutionAdapter
+from lifecycle.super_mimic_integration import (
+    lifecycle_config_to_dict,
+    fingerprint,
+    build_mimic_experiment_design,
+    run_mimic_backtest,
+    compute_metrics,
+)
 
 __all__ = [
     "LifecycleConfig",
@@ -66,4 +73,9 @@ __all__ = [
     "ExecutionAdapter",
     "LifecycleRunner",
     "MimicExecutionAdapter",
+    "lifecycle_config_to_dict",
+    "fingerprint",
+    "build_mimic_experiment_design",
+    "run_mimic_backtest",
+    "compute_metrics",
 ]
