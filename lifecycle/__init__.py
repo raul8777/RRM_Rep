@@ -25,6 +25,7 @@ from lifecycle.base import (
 )
 
 from lifecycle.regime import RegimeState, RegimeKernel, get_regime_v2
+from lifecycle.signal import SignalPipeline, analysis_to_signal
 
 __all__ = [
     "LifecycleConfig",
@@ -42,4 +43,6 @@ __all__ = [
     "RegimeState",
     "RegimeKernel",
     "get_regime_v2",
+    "SignalPipeline",
+    "analysis_to_signal",
 ]
