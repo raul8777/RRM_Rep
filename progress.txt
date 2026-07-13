@@ -496,6 +496,20 @@ Resultados de tests:
 Pendiente Fase 8:
 - Ejecutar MIMIC sweep baseline con datos reales y documentar métricas.
 - Dry-run / paper trading del LifecycleRunner con datos históricos MIMIC.
-- Crear adapters concretos SPOT (binance_client) y FUTURES (futures_client).
 - Reemplazar gradualmente los bucles actuales de run_trades.py por el LifecycleRunner.
-- Documentar en SYSTEM_REFERENCE.md la arquitectura del lifecycle kernel.
+
+2026-07-13 (continuación) - Adapters SPOT/FUTURES y documentación de arquitectura
+==================================================================================
+Archivos: lifecycle/adapter_spot.py, lifecycle/adapter_futures.py, SYSTEM_REFERENCE.md,
+          tests/test_lifecycle_adapters.py, progress.txt.
+
+- Creado `BinanceSpotAdapter`: build_context, get_positions, execute_entry (market order),
+  execute_exit (full/partial), audit a trades_audit. Usa `binance_client` y `position_manager`.
+- Creado `BinanceFuturesAdapter`: build_context, get_positions, execute_entry SHORT
+  (open_short), execute_exit (close_short), audit. Usa `futures_client`.
+- Ambos adapters son esqueletos funcionales; requieren integración real en `run_trades.py`
+  (reemplazar bucles heredados por `LifecycleRunner`).
+- Documentada arquitectura completa del lifecycle kernel en `SYSTEM_REFERENCE.md`
+  con diagrama ASCII, tabla de módulos, decisiones de diseño confirmadas y estado de tests.
+- Tests nuevos: `tests/test_lifecycle_adapters.py` 5/5 pasan.
+- lifecycle + super_mimic tests: 65 passed.
