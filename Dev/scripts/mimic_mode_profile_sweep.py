@@ -343,6 +343,8 @@ def _run_single_config(
     max_drawdown_stop_pct: float = 15.0,
     lifecycle: bool = False,
 ) -> Dict[str, Any]:
+    if _logger is None:
+        _configure_logging(_DEFAULT_LOG_PATH)
     _logger.info("Running window=%s profile=%s lifecycle=%s params=%s", window.get("window_id"), profile, lifecycle, params)
     _clear_global_caches()
 
@@ -591,6 +593,16 @@ def run_sweep(
     elif strategy == "exhaustive":
         grid = PARAM_GRID
         grid = {**grid, "min_signal_strength": [0.45, 0.50, 0.55, 0.60]}
+    elif strategy == "lifecycle-quick":
+        # Focused grid for lifecycle kernel baseline: best SPOT_BULL-A params + neighbors
+        grid = {
+            "min_signal_strength": [0.50, 0.55, 0.60],
+            "min_success_probability": [0.50, 0.55, 0.60],
+            "stop_loss_pct": [2.5, 4.5],
+            "kelly_max_usdt": [800.0, 1000.0, 1200.0],
+            "kelly_dynamic_base_pct": [0.18, 0.22],
+            "max_positions_spot_bull": [5, 8],
+        }
     else:  # full
         grid = PARAM_GRID
 
@@ -937,7 +949,7 @@ def _build_report(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="MIMIC continuous-window profile sweep")
     parser.add_argument("--windows", default=None, help="Comma-separated window IDs")
-    parser.add_argument("--strategy", choices=["quick", "coarse", "full", "exhaustive"], default="full")
+    parser.add_argument("--strategy", choices=["quick", "coarse", "full", "exhaustive", "lifecycle-quick"], default="full")
     parser.add_argument("--max-cycles", type=int, default=None)
     parser.add_argument("--max-workers", type=int, default=1, help="Parallel workers for simulations (default 1)")
     parser.add_argument("--max-dd-stop", type=float, default=15.0, help="Early-stop drawdown threshold %% (default 15.0, 0=disable)")
