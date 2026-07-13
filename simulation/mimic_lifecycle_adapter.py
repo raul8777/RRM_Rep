@@ -264,7 +264,10 @@ def run_lifecycle_simulation(
     lifecycle_runner = LifecycleRunner(
         adapter=adapter,
         signal_pipeline=SignalPipeline(),
-        entry_gate=EntryGate(),
+        entry_gate=EntryGate(
+            price_resolver=adapter.price_resolver,
+            atr_resolver=adapter.atr_resolver,
+        ),
         position_sizer=PositionSizer(),
         exit_engine=ExitEngine(
             price_resolver=adapter.price_resolver,

@@ -237,6 +237,28 @@ def _derive_metrics(results: List[Dict[str, Any]], initial_usdt: float) -> Dict[
     winning_trades = total_pnl_trades = 0
     for r in results:
         res = r.get("result", {})
+        if r.get("lifecycle") or "summary" in r:
+            # Lifecycle kernel result shape: entries/buy_orders and exits/sell_orders live in summary
+            summary = r.get("summary", {})
+            entries = summary.get("entries", [])
+            exits = summary.get("exits", [])
+            buys += len(entries)
+            sells += len(exits)
+            # Approximate per-exit PnL from equity change since previous cycle
+            idx = results.index(r)
+            if idx > 0:
+                cycle_pnl = equity[idx] - equity[idx - 1]
+                per_exit_pnl = cycle_pnl / max(1, len(exits))
+            else:
+                per_exit_pnl = 0.0
+            for _ in exits:
+                total_pnl_trades += 1
+                if per_exit_pnl > 0:
+                    gross_wins += per_exit_pnl
+                    winning_trades += 1
+                else:
+                    gross_losses += abs(per_exit_pnl)
+            continue
         bo = res.get("buy_orders", []) or []
         so = res.get("sell_orders", []) or []
         st = res.get("sl_tp_closes", []) or []

@@ -34,7 +34,7 @@ DEFAULT_WINDOWS = [
 def main() -> int:
     parser = argparse.ArgumentParser(description="Optimized lifecycle kernel MIMIC sweep")
     parser.add_argument("--max-workers", type=int, default=20, help="Parallel workers (default 20)")
-    parser.add_argument("--max-cycles", type=int, default=None, help="Cap cycles per simulation")
+    parser.add_argument("--max-cycles", type=int, default=100, help="Cap cycles per simulation (default 100)")
     parser.add_argument("--windows", default=",".join(DEFAULT_WINDOWS), help="Comma-separated window IDs")
     parser.add_argument("--output-dir", default=os.path.join(repo_root, "Dev", "benchmarks", "lifecycle_sweep"), help="Output directory")
     parser.add_argument("--max-dd-stop", type=float, default=15.0, help="Early-stop drawdown threshold %%")
