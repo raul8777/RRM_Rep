@@ -15,6 +15,9 @@ from lifecycle.base import (
     EntryPolicy,
     SizingPolicy,
     ExitPolicy,
+    PartialTake,
+    MomentumExitRule,
+    StagnationRule,
     MarketContext,
     Signal,
     EntryDecision,
@@ -29,6 +32,9 @@ from lifecycle.signal import SignalPipeline, analysis_to_signal
 from lifecycle.entry import EntryGate, count_positions_by_category
 from lifecycle.sizing import PositionSizer, size_entry
 from lifecycle.exit import ExitEngine, update_peak_pnl
+from lifecycle.adapter import ExecutionAdapter
+from lifecycle.runner import LifecycleRunner
+from lifecycle.adapter_mimic import MimicExecutionAdapter
 
 __all__ = [
     "LifecycleConfig",
@@ -36,6 +42,9 @@ __all__ = [
     "EntryPolicy",
     "SizingPolicy",
     "ExitPolicy",
+    "PartialTake",
+    "MomentumExitRule",
+    "StagnationRule",
     "MarketContext",
     "Signal",
     "EntryDecision",
@@ -54,4 +63,7 @@ __all__ = [
     "size_entry",
     "ExitEngine",
     "update_peak_pnl",
+    "ExecutionAdapter",
+    "LifecycleRunner",
+    "MimicExecutionAdapter",
 ]
