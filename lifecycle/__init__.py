@@ -26,6 +26,7 @@ from lifecycle.base import (
 
 from lifecycle.regime import RegimeState, RegimeKernel, get_regime_v2
 from lifecycle.signal import SignalPipeline, analysis_to_signal
+from lifecycle.entry import EntryGate, count_positions_by_category
 
 __all__ = [
     "LifecycleConfig",
@@ -45,4 +46,6 @@ __all__ = [
     "get_regime_v2",
     "SignalPipeline",
     "analysis_to_signal",
+    "EntryGate",
+    "count_positions_by_category",
 ]
