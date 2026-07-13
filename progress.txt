@@ -530,6 +530,27 @@ Archivos: lifecycle/mimic_baseline_eval.py, lifecycle/mimic_baseline_report.py,
 - Tests: `tests/test_lifecycle_baseline_eval.py` 2/2 pasan.
 - lifecycle + super_mimic tests: 67 passed.
 
+2026-07-13 (sweep integration) - Lifecycle kernel integrado en MIMIC sweep
+=======================================================================
+Archivos: simulation/mimic_lifecycle_adapter.py, Dev/scripts/mimic_mode_profile_sweep.py,
+          progress.txt.
+
+- Creado `SimulationLifecycleAdapter`: conecta lifecycle kernel a `SimulationBinanceClient`
+  y `SimulationFuturesClient`, genera análisis sintéticos desde el feed histórico, ejecuta
+  entradas/salidas y audita decisiones.
+- Creado `run_lifecycle_simulation()`: ejecuta una simulación MIMIC completa usando
+  `LifecycleRunner` en lugar de `run_trades.execute_once`.
+- Modificado `mimic_mode_profile_sweep.py`: nuevo flag `--lifecycle` y parámetro
+  `lifecycle` en `run_sweep()`; propagado a ruta secuencial y paralela.
+- Test de integración: 3 jobs quick en ventana `win_20260628_20260630` con max_cycles=3
+  ejecutaron sin errores (requirió setear secrets dummy en entorno de prueba).
+
+Comando para sweep completo con lifecycle y 10 workers:
+  python Dev/scripts/mimic_mode_profile_sweep.py --lifecycle --max-workers 10 --strategy full
+
+Limitación actual: el modo lifecycle usa régimen `SPOT_BULL` estático. La detección dinámica
+por ventana se puede agregar mapeando el régimen dominante de cada ventana a un `LifecycleConfig`.
+
 Pendiente:
-- Integrar `LifecycleRunner` en `simulation/mimic_runner.py` para sweep histórico real.
-- Calcular métricas reales: PnL/día, drawdown, win_rate, CDR.
+- Correr sweep lifecycle real con datos históricos y 10 workers (~1.5–2 horas estimadas).
+- Comparar métricas contra sweep baseline heredado.
