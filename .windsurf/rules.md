@@ -199,6 +199,16 @@ Nunca `getattr(settings, 'key', hardcode)` — el hardcode puede quedar stale y 
 → Revisar en orden: `trading_runtime_state.pause_new_entries` → max_positions por régimen → **`category_max_positions_enabled` + límite por bucket** (gate R4: log `LÍM_CATEGORÍA MIDCAP_ALT 2/2` bloquea TODAS las señales si el bucket está lleno) → `min_signal_strength`/`min_success_probability` → filtros BTC (dominance, momentum 4h/3h/1h) → `regime.confirmed` (necesita 2 ciclos) → `entry_quality_gate` → QUBO resultado vacío.
 Logs: `[BuyTop]`, `[Screener]`, `[Kelly]`, `[QUBO]`.
 
+**"RANGE_SCALP no abre posiciones" (gates específicos s78)**
+→ Si todos los candidatos son rechazados con `RANGE_VOL` o `RANGE_BB`, verificar los 3 parámetros calibrados en s78:
+1. `entry_quality_vol_spike_min_range_scalp` (DB override) — debe ser ≤ 0.20 en F&G bajo. Valor 0.35+ bloquea todos los candidatos en mercados de Extreme Fear donde vol es estructuralmente bajo.
+2. BB gate en `_check_entry_quality()` (`run_trades.py` ~línea 4699) — si `bb_position is None` y `not _bb_touch_ok` → skip gate (no rechazar). Señales autónomas pueden no incluir `bb_position`; dato faltante ≠ posición incorrecta.
+3. `kelly_multiplier` RANGE_SCALP en `market_regime.py` línea 253 — debe ser 0.95 (no 0.70). Con caps de liquidez (90%) y concentration multiplier activos, ×0.70 aplasta el sizing innecesariamente.
+⚠️ **Estos 3 parámetros fueron calibrados y validados en producción (jul 14 2026, 5/5 cierres positivos). No modificar sin análisis de impacto.**
+
+**"SPOT_BULL rechaza breakouts fuertes" (extensión s79)**
+→ Si el modo SPOT_BULL sigue rechazando señales con RSI y volumen elevados, revisar la vía de breakout controlado en `_check_entry_quality()` (`run_trades.py`) y sus parámetros gobernables: `entry_quality_breakout_min_vol_spot_bull`, `entry_quality_breakout_rsi_max_spot_bull`, `entry_quality_breakout_min_strength_spot_bull`. La regla base sigue siendo pullback-first; la extensión solo evita rechazos automáticos de breakouts con convicción suficiente.
+
 **Capital subinvertido (ej. $1k de $5k en posiciones):** verificar `screener_decisions` por rejections con razón `LIM_CATEGORIA` — indica `category_max_positions_enabled=True` y bucket lleno. Solución: `PATCH /config/kelly` con `{"category_max_positions_enabled": false, "max_positions_range_scalp": 6}`. El QUBO sigue minimizando correlación Pearson como diversificación real — no se pierde protección ante correlación.
 
 **"Un exit (SSO/PRS/trailing/BE) no disparó cuando debía"**
@@ -259,6 +269,12 @@ Fix: `auto_reconcile_spot()` / `auto_reconcile_futures()` o endpoint `/reconcile
 - **Escalado de boosts con `_lw_scale` aplicado dos veces**: si otro módulo también carga pesos del learning_engine y los aplica sobre una señal que ya pasó por `analyze_symbol`, los boosts se duplican. `_lw_scale` solo se aplica dentro de `analyze_symbol` — no debe re-aplicarse externamente.
 
 - **🔴 Comisión de fill no convertida a USDT (posición PEPE jul-2026)**: `verify_and_fetch_fills()` en `binance_client.py` debe convertir `commission` a USDT antes de retornar. Si `commissionAsset` es el base asset del par (ej. PEPE) y no es USDT/BNB, multiplicar `commission × fill_price`. De lo contrario la `entry_commission` persiste en unidades del asset (268K PEPE ≠ $0.71) → el `unrealized_pnl` calculado sobre la qty de DB resulta ficticio.
+
+- **⚠️ s78 RANGE_SCALP entry gates — NO MODIFICAR sin análisis**: tres fixes calibrados en jul 14 2026 que desbloquearon entradas en RANGE_SCALP. Validados con 5/5 cierres positivos (+$12.37, +$7.67, +$8.00, +$4.83, +$4.02). **No revertir individualmente** — los tres actúan como sistema:
+  1. **BB gate skip (`run_trades.py` ~4699)**: `if bb_position is None and not _bb_touch_ok: pass` — evita rechazar señales válidas sin dato BB. Solo RANGE_SCALP.
+  2. **Vol threshold 0.20 (`entry_quality_vol_spike_min_range_scalp`)**: DB override vía `PATCH /config/kelly`. Rollback: `PATCH /config/kelly {"entry_quality_vol_spike_min_range_scalp": 0.35}`.
+  3. **Kelly regime mult 0.95 (`market_regime.py:253`)**: `kelly_mult=0.95` (era 0.70). Da ~$1,199/trade MEDIA. Rollback: editar línea + restart.
+  Si el sistema vuelve a no abrir posiciones en RANGE_SCALP: verificar que estos 3 valores no hayan sido revertidos antes de diagnosticar cualquier otra causa.
 
 - **🔴 Posición fantasma (ghost) por divergencia balance/qty > 1000×**: si `binance_balance / db_qty < 0.001`, la posición es candidata a ghost — el SL/TP se bloqueará para siempre porque el clamp deja `qty=0`. Detectar en dos puntos: (1) `position_manager.py` durante `sync_with_exchange_balance` → loguear CRITICAL; (2) `run_trades.py` en SL/TP clamp → auto-close del registro DB con `close_reason='ghost_balance_mismatch'`. Sin esta detección, el ciclo imprime `cannot sell` silenciosamente durante horas y el UG queda bloqueado con `watchdog_level` creciente.
 

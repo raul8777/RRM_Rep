@@ -72,7 +72,10 @@ class Settings(BaseSettings):
     spot_bull_pnl_boost_enabled: bool = Field(default=True)
     spot_bull_pnl_boost_large_cap: float = Field(default=0.0)    # BTC/ETH: allow up to 0 PnL
     spot_bull_pnl_boost_midcap: float = Field(default=-0.10)        # alts: allow -0.10
+    spot_bull_pnl_boost_prob_large_cap: float = Field(default=-0.02)  # relax min_prob for BTC/ETH/BNB in confirmed SPOT_BULL
+    spot_bull_pnl_boost_prob_midcap: float = Field(default=-0.04)     # wider relaxation for midcaps in confirmed SPOT_BULL
     spot_bull_btc_4h_up_required: bool = Field(default=True)      # only apply when BTC 4h=UP
+    spot_ignore_bnb_when_commission_enabled: bool = Field(default=True)  # keep BNB reserve out of spot parity when used for fees
     # Regime whipsaw protection â€” minimum consecutive PRESERVATION cycles before closing shorts
     min_cycles_before_close_shorts: int = Field(default=5)  # H-FIX: 3â†’5 evita cierre prematuro en oscilaciones de rÃ©gimen
     # Protect profitable shorts on regime change â€” only close if unrealized PnL < this threshold (USD)
@@ -274,6 +277,12 @@ class Settings(BaseSettings):
     entry_quality_min_vol_spike: float = Field(default=1.2)  # concentrated: volumen confirma dirección
     entry_quality_min_strength: float = Field(default=0.40)  # jul07: 0.35→0.40
     entry_quality_max_failures: int = Field(default=0)  # concentrated: todos los gates deben pasar
+    entry_quality_vol_spike_min_spot_bull: float = Field(default=0.85)
+    entry_quality_rsi_min_spot_bull: float = Field(default=33.0)
+    entry_quality_rsi_max_spot_bull: float = Field(default=68.0)
+    entry_quality_breakout_min_vol_spot_bull: float = Field(default=1.20)
+    entry_quality_breakout_rsi_max_spot_bull: float = Field(default=78.0)
+    entry_quality_breakout_min_strength_spot_bull: float = Field(default=0.58)
     # BTC dominance filter
     btc_dominance_filter_enabled: bool = Field(default=True)
     btc_dominance_altcoin_threshold: float = Field(default=56.0)  # if BTC.D > this, skip alts

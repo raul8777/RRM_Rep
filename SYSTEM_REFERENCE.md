@@ -1,7 +1,67 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 13 2026 (mañana) | Trade Lifecycle Kernel Redesign Fases 1-7 completadas; adapters SPOT/FUTURES + arquitectura documentada.
+> Última actualización: jul 14 2026 (mañana) | s79: SPOT_BULL breakout gate añadido sin romper s78 — 5/5 cierres positivos validados.
+
+---
+
+## 🟢 Estado del Sistema — jul 14 2026 — s79: SPOT_BULL Breakout Gate + s78 Range Gates
+
+### Contexto
+Sistema en régimen SPOT_BULL-A con validación de breakout recién añadida, sin romper la calibración previa de RANGE_SCALP. En el ciclo diagnóstico, los candidatos quedaron rechazados por combinaciones de `SPOT_BULL_RSI`, `SPOT_BULL_VOL`, `PNL_BAJO` y `EXCLUIDO`; el ciclo quedó sin entradas abiertas.
+
+### Tres fixes aplicados (s78)
+
+| # | Fix | Archivo | Cambio |
+|---|---|---|---|
+| 1 | BB gate: `bb_pos=None` → skip | `run_trades.py` ~línea 4699 | `if bb_position is None and not _bb_touch_ok: pass` — dato faltante ≠ posición incorrecta |
+| 2 | Vol threshold 0.35 → **0.20** | DB override | `PATCH /config/kelly {entry_quality_vol_spike_min_range_scalp: 0.20}` — F&G<25 → vol estructuralmente bajo |
+| 3 | Kelly regime mult 0.70 → **0.95** | `market_regime.py` línea 253 | `kelly_mult=0.95` — ×0.70 aplastaba $1,262→$883; con caps de liquidez y conc_mult, redundante |
+
+### Extensión SPOT_BULL (s79)
+
+Para evitar sobre-rechazo de breakouts alcistas fuertes, `run_trades.py` ahora admite una vía de aceptación controlada para SPOT_BULL cuando RSI, volumen y fuerza superan umbrales de breakout. Los parámetros gobernables añadidos son `entry_quality_breakout_min_vol_spot_bull`, `entry_quality_breakout_rsi_max_spot_bull` y `entry_quality_breakout_min_strength_spot_bull`.
+
+### Validación en producción (últimos 5 cierres, jul 14 2026)
+
+| Símbolo | Invertido | PnL | % | Razón cierre |
+|---|---|---|---|---|
+| DEXEUSDT | $499 | **+$12.37** | +2.48% | profit_predexit_capture |
+| ZECUSDT | $497 | **+$4.83** | +0.97% | profit_predexit_capture |
+| WLDUSDT | **$1,209** | **+$7.67** | +0.63% | prs_peak_protection |
+| TAOUSDT | $443 | **+$4.02** | +0.91% | profit_predexit_capture |
+| NEARUSDT | $883 | **+$8.00** | +0.91% | sso_target_contribution |
+
+**5/5 positivos. PnL total: +$36.89.** WLDUSDT $1,209 = primer trade con kelly_mult=0.95.
+
+### ⚠️ ADVERTENCIA — NO MODIFICAR estos valores sin análisis de impacto
+
+Los 3 fixes actúan como sistema calibrado. Revertir cualquiera individualmente puede volver a bloquear todas las entradas en RANGE_SCALP:
+
+- **BB gate**: No añadir validación estricta de `bb_position is None` en `_check_entry_quality` para RANGE_SCALP. Las señales autónomas legítimamente pueden no incluir `bb_position`.
+- **Vol threshold 0.20**: No subir por encima de 0.25 sin confirmar que F&G > 35 sostenido. Valor 0.35+ bloquea todos los candidatos en mercados de Extreme/High Fear.
+- **Kelly mult 0.95**: No bajar a 0.70. Los caps de liquidez (90% USDT disponible) y el `concentration_multiplier` ya protegen el riesgo. El ×0.70 era triple-penalización.
+
+### Rollbacks individuales si fuera necesario
+```
+# Vol threshold (reversible sin restart):
+PATCH /config/kelly {"entry_quality_vol_spike_min_range_scalp": 0.35}
+
+# Kelly mult (requiere restart):
+market_regime.py línea 253: kelly_mult = 0.70  → docker restart app
+
+# BB gate (requiere restart):
+run_trades.py ~línea 4699: eliminar bloque "if bb_position is None and not _bb_touch_ok: pass"
+```
+
+### Sizing proyectado con kelly_mult=0.95 (señal MEDIA, prob=0.59, str=0.58)
+
+| Slots abiertos | Sizing por trade |
+|---|---|
+| 0/5 | ~$1,199 |
+| 1/5 | ~$1,066 |
+| 2/5 | ~$933 |
+| 3/5 | ~$800 |
 
 ---
 

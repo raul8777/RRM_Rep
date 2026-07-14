@@ -2493,43 +2493,124 @@ def _get_news_scores(symbols: List[str], news_client: NewsClient, settings) -> D
     return scores
 
 
-def _filter_by_quality(symbols: List[str], client, settings, target_count: int = 100) -> List[str]:
+def _quality_score_for_regime(
+    regime_mode: str,
+    price_change_pct_abs: float,
+    price_change_pct_signed: float,
+    volatility_limit: float,
+    volume_usdt: float = 0.0,
+    min_volume_usdt: float = 10_000_000.0,
+) -> float:
     """
-    Apply quality filters to screener symbols for top 100 selection.
-    Filters by: volatility, price minimum.
+    Return a mode-aware quality score used by screener top-N prefilter.
+
+    Higher score means better rank inside the active regime objective.
     """
-    filtered = []
-    max_volatility = _get_param(settings, 'screener_quality_max_volatility')
-    min_price = _get_param(settings, 'screener_quality_min_price_usdt')
-    
+    _regime = str(regime_mode or '').strip().upper() or 'SPOT_BULL'
+    _abs = max(0.0, float(price_change_pct_abs))
+    _signed = float(price_change_pct_signed)
+    _vol_limit = max(0.01, float(volatility_limit))
+    _vol_usdt = max(0.0, float(volume_usdt or 0.0))
+    _min_vol = max(1.0, float(min_volume_usdt or 1.0))
+
+    # Liquidity proxy: better execution quality for short-term opportunities.
+    # Saturates above ~10x the minimum volume threshold.
+    _liq = min(1.0, _vol_usdt / (_min_vol * 10.0)) if _min_vol > 0 else 0.0
+    _liq_mult = 0.80 + 0.40 * _liq
+
+    if _regime == 'SPOT_BULL':
+        # Prefer constructive momentum, penalize high-vol downside moves.
+        upside = max(0.0, _signed)
+        downside_penalty = max(0.0, -_signed) * 2.0
+        volatility_penalty = min(1.0, _abs / _vol_limit) * 0.25
+        return (upside - downside_penalty - volatility_penalty) * _liq_mult
+
+    if _regime == 'RANGE_SCALP':
+        # Prefer mean-reversion opportunities with tradable oscillation.
+        # Target moderate oscillation; extremely low/high movement is less useful.
+        _target = max(0.01, min(0.06, _vol_limit * 0.30))
+        _distance = abs(_abs - _target)
+        _shape_bonus = max(0.0, 1.0 - (_distance / max(_target, 1e-6)))
+        return (_abs * 0.70 + _shape_bonus * 0.30) * _liq_mult
+
+    if _regime == 'PRESERVATION':
+        # Defensive mode: prefer calmer assets with mild positive drift.
+        calmness = max(0.0, _vol_limit - _abs)
+        stability = max(0.0, _signed)
+        return (calmness + stability * 0.20) * (0.90 + 0.20 * _liq)
+
+    if _regime == 'FUTURES_SHORT':
+        # For short bias, prioritize overbought bounces that can mean-revert down,
+        # while still allowing continuation setups.
+        bounce = max(0.0, _signed)
+        downside = max(0.0, -_signed)
+        return (bounce * 1.10 + downside * 0.55 + _abs * 0.20) * _liq_mult
+
+    return max(0.0, _signed)
+
+
+def _filter_by_quality(
+    symbols: List[str],
+    client,
+    settings,
+    target_count: int = 100,
+    regime_mode: Optional[str] = None,
+) -> List[str]:
+    """
+    Regime-aware quality prefilter for screener symbols.
+
+    Shared hard filters:
+    - max volatility
+    - minimum price
+    """
+    max_volatility = float(_get_param(settings, 'screener_quality_max_volatility'))
+    min_vol_usdt = float(_get_param(settings, 'screener_quality_min_vol_usdt'))
+    min_price = float(_get_param(settings, 'screener_quality_min_price_usdt'))
+    _regime = str(regime_mode or _get_param(settings, 'current_regime_mode', 'SPOT_BULL')).strip().upper() or 'SPOT_BULL'
+
+    accepted: List[Tuple[str, float]] = []
+    fallback_symbols: List[str] = []
+
     for symbol in symbols:
         try:
-            # Get 24h ticker for volatility check
             ticker = client.get_client().get_ticker(symbol=symbol)
-            price_change_pct = abs(float(ticker.get('priceChangePercent', 0))) / 100
-            last_price = float(ticker.get('lastPrice', 0))
-            
-            # Filter by volatility
-            if price_change_pct > max_volatility:
+            price_change_signed = float(ticker.get('priceChangePercent', 0.0)) / 100.0
+            price_change_abs = abs(price_change_signed)
+            last_price = float(ticker.get('lastPrice', 0.0))
+            vol_usdt = float(ticker.get('quoteVolume', 0.0) or 0.0)
+
+            if price_change_abs > max_volatility:
                 continue
-            
-            # Filter by minimum price
             if last_price < min_price:
                 continue
-            
-            filtered.append(symbol)
-            
-            if len(filtered) >= target_count:
-                break
-                
+            if vol_usdt < min_vol_usdt:
+                continue
+
+            score = _quality_score_for_regime(
+                _regime,
+                price_change_pct_abs=price_change_abs,
+                price_change_pct_signed=price_change_signed,
+                volatility_limit=max_volatility,
+                volume_usdt=vol_usdt,
+                min_volume_usdt=min_vol_usdt,
+            )
+            accepted.append((symbol, score))
         except Exception:
-            # If we can't get data, include the symbol (will be filtered later)
+            # Keep unknown data as fallback only; known-quality symbols rank first.
+            fallback_symbols.append(symbol)
+
+    accepted.sort(key=lambda x: x[1], reverse=True)
+    filtered = [sym for sym, _ in accepted[:target_count]]
+
+    if len(filtered) < target_count and fallback_symbols:
+        for symbol in fallback_symbols:
+            if symbol in filtered:
+                continue
             filtered.append(symbol)
             if len(filtered) >= target_count:
                 break
-    
+
     # Adaptive relaxation to avoid collapsing coverage in stressed markets.
-    # Keep quality-first behavior, but if too few symbols pass, do one relaxed pass.
     _min_required = max(10, int(target_count * 0.30))
     if len(filtered) >= _min_required:
         return filtered
@@ -2556,7 +2637,7 @@ def _filter_by_quality(symbols: List[str], client, settings, target_count: int =
     if len(relaxed) > len(filtered):
         print(
             f"[Screener v2] quality relax enabled: {len(filtered)} -> {len(relaxed)} "
-            f"(target={target_count}, max_vol={max_volatility:.2f}->{relaxed_volatility:.2f})"
+            f"(target={target_count}, regime={_regime}, max_vol={max_volatility:.2f}->{relaxed_volatility:.2f})"
         )
     return relaxed
 
@@ -2649,6 +2730,7 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                     client,
                     settings,
                     target_count=settings.screener_top_n_count,
+                    regime_mode=regime,
                 )
                 print(f"[Screener v2] Selected top {len(symbols)} quality assets (target: {settings.screener_top_n_count})")
                 _new = [s for s in symbols if s not in _static_symbols]
@@ -2661,6 +2743,14 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                 _new = [s for s in symbols if s not in _static_symbols]
                 if _new:
                     print(f"[Screener] Added {len(_new)} dynamic pairs: {_new[:10]}")
+
+            _invalid_analysis_symbols = _INVALID_SYMBOLS | _INVALID_FUTURES_SYMBOLS
+            _before_filter_count = len(symbols)
+            symbols = [s for s in symbols if s not in _invalid_analysis_symbols]
+            if len(symbols) != _before_filter_count:
+                print(
+                    f"[Screener] Removed {_before_filter_count - len(symbols)} invalid symbol(s) from analysis universe"
+                )
 
             signal_generator = AutonomousSignalGenerator(client, symbols)  # reuse shared client
             signal_generator._regime_mode = regime  # s72 A4: expose to analyze_symbol for per-regime 4h filter
@@ -2692,6 +2782,8 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                     "strength": signal['strength'],
                     "volume_confirmed": signal.get('volume_confirmed', False),
                     "higher_tf_trend": signal.get('higher_tf_trend', 'FLAT'),
+                    "expected_side": signal.get('expected_side', 'SHORT' if str(regime).upper() == 'FUTURES_SHORT' else 'LONG'),
+                    "trade_type": signal.get('trade_type', 'futures' if str(regime).upper() == 'FUTURES_SHORT' else 'spot'),
                     # M3/M4: propagate vol_spike and breakout flag for conviction sizing
                     "vol_spike": signal.get('vol_spike', signal.get('indicators', {}).get('vol_spike', 0.0)),
                     "breakout_12h": signal.get('breakout_12h', False),
@@ -4661,16 +4753,28 @@ def _check_entry_quality(
         # Volume floor is lower than the 4h expert rule (1.5x) because the 1h
         # signal generator is more reactive; volume_confirmed is still a sizing
         # booster.
-        _min_vol = max(0.8, 1.0 * _profile_mult)
-        _rsi_min = 35.0
-        _rsi_max = min(70.0, 65.0 / _profile_mult)
+        _min_vol_base = float(_get_param(settings, 'entry_quality_vol_spike_min_spot_bull', 0.85))
+        _rsi_min_base = float(_get_param(settings, 'entry_quality_rsi_min_spot_bull', 33.0))
+        _rsi_max_base = float(_get_param(settings, 'entry_quality_rsi_max_spot_bull', 68.0))
+        _breakout_min_vol = float(_get_param(settings, 'entry_quality_breakout_min_vol_spot_bull', 1.20))
+        _breakout_rsi_max = float(_get_param(settings, 'entry_quality_breakout_rsi_max_spot_bull', 78.0))
+        _breakout_min_strength = float(_get_param(settings, 'entry_quality_breakout_min_strength_spot_bull', 0.58))
+        _min_vol = max(0.7, _min_vol_base * _profile_mult)
+        _rsi_min = max(25.0, _rsi_min_base * (2.0 - _profile_mult))
+        _rsi_max = min(72.0, _rsi_max_base / _profile_mult)
+        _breakout_ok = (
+            rsi > _rsi_max
+            and rsi <= _breakout_rsi_max
+            and vol_spike >= _breakout_min_vol
+            and strength >= _breakout_min_strength
+        )
         if trend_4h == "DOWN":
             return False, f"SPOT_BULL_4H_DOWN (trend={trend_4h})"
         if ema200_trend == "DOWN":
             return False, "SPOT_BULL_EMA200_DOWN"
-        if vol_spike < _min_vol:
+        if vol_spike < _min_vol and not _breakout_ok:
             return False, f"SPOT_BULL_VOL (vol_spike={vol_spike:.2f} < {_min_vol:.2f})"
-        if not (_rsi_min <= rsi <= _rsi_max):
+        if not (_rsi_min <= rsi <= _rsi_max) and not _breakout_ok:
             return False, f"SPOT_BULL_RSI (rsi={rsi:.1f})"
         if strength < float(getattr(settings, "entry_quality_min_strength", 0.40)):
             return False, f"SPOT_BULL_STRENGTH (strength={strength:.2f})"
@@ -4680,7 +4784,9 @@ def _check_entry_quality(
         # Want: price in the lower half of the Bollinger range, mean-reversion
         # pressure, with volume.  Either a lower-band touch/near-touch OR a low
         # bb_position confirms the behavior.
-        _min_vol = max(0.4, 0.6 * _profile_mult)
+        # s77: read DB-governable override; fall back to formula if not set
+        _vol_rs_override = float(getattr(settings, 'entry_quality_vol_spike_min_range_scalp', 0.0) or 0.0)
+        _min_vol = _vol_rs_override if _vol_rs_override > 0 else max(0.4, 0.6 * _profile_mult)
         _rsi_min = float(getattr(settings, "range_scalp_min_rsi", 25.0))
         _rsi_max = min(70.0, float(getattr(settings, "range_scalp_max_rsi", 60.0)) / _profile_mult)
         _max_bb_pos = 0.45 / _profile_mult
@@ -4690,7 +4796,13 @@ def _check_entry_quality(
             return False, f"RANGE_VOL (vol_spike={vol_spike:.2f} < {_min_vol:.2f})"
         _bb_pos_ok = bb_position is not None and float(bb_position) <= _max_bb_pos
         _bb_touch_ok = bb_lower_touch or bb_near_lower
-        if not (_bb_pos_ok or _bb_touch_ok):
+        # s78: if bb_position is None AND no touch/near flags, skip gate — missing
+        # data should not reject an otherwise valid signal (autonomous signals may
+        # not carry bb_position). Only reject when we have data that shows price is
+        # NOT at the lower band.
+        if bb_position is None and not _bb_touch_ok:
+            pass  # gate skipped: no BB data available
+        elif not (_bb_pos_ok or _bb_touch_ok):
             _bb_pos_str = f"{float(bb_position):.2f}" if bb_position is not None else "?"
             return False, f"RANGE_BB (bb_pos={_bb_pos_str} > {_max_bb_pos:.2f}, touch={bb_lower_touch}, near={bb_near_lower})"
         if strength < float(getattr(settings, "entry_quality_min_strength", 0.40)):
@@ -5083,7 +5195,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     _f_prediction, _f_indicators = pnl_service.predict_for_symbol(
                         symbol, client, settings,
                         position_size_usdt=_get_param(settings, 'futures_usdt_per_trade'),
-                        trade_type='futures'
+                        trade_type='futures',
+                        trade_side='SHORT',
                     )
                     if _f_prediction:
                         print(f"[Futures/Pred] {symbol}: EV={_f_prediction.get('expected_pnl', 0):.2f} USDT "
@@ -5672,18 +5785,29 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             _boost_pnl = (getattr(settings, 'spot_bull_pnl_boost_large_cap', 0.0)
                           if symbol in _large_cap_set
                           else getattr(settings, 'spot_bull_pnl_boost_midcap', -0.10))
+            _boost_prob_delta = (float(getattr(settings, 'spot_bull_pnl_boost_prob_large_cap', -0.02))
+                                 if symbol in _large_cap_set
+                                 else float(getattr(settings, 'spot_bull_pnl_boost_prob_midcap', -0.04)))
             _cat_th = getattr(settings, 'category_thresholds', {})
             _sym_cat = getattr(settings, 'token_categories', {}).get(symbol, {}).get('market_behavior', 'MIDCAP_ALT')
             _cur_min_pnl = _cat_th.get(_sym_cat, {}).get('min_pnl', 0.0)
-            if _boost_pnl < _cur_min_pnl:
+            _cur_min_prob = float(_cat_th.get(_sym_cat, {}).get('min_prob', _get_param(settings, 'min_success_probability')))
+            _boosted_min_prob = max(0.45, _cur_min_prob + _boost_prob_delta)
+            if (_boost_pnl < _cur_min_pnl) or (_boosted_min_prob < _cur_min_prob):
                 import copy
                 _pnl_boosted_settings = copy.copy(settings)
                 _new_th = copy.deepcopy(_cat_th)
                 if _sym_cat not in _new_th:
                     _new_th[_sym_cat] = {}
-                _new_th[_sym_cat]['min_pnl'] = _boost_pnl
+                _new_th[_sym_cat]['min_pnl'] = min(_boost_pnl, _cur_min_pnl)
+                _new_th[_sym_cat]['min_prob'] = min(_boosted_min_prob, _cur_min_prob)
                 _pnl_boosted_settings.category_thresholds = _new_th
-                print(f"[SPOT_BULL boost] {symbol} ({_sym_cat}): min_pnl {_cur_min_pnl:.2f}→{_boost_pnl:.2f} (BTC 4h={btc_4h_chg_pct:+.2f}%)")
+                print(
+                    f"[SPOT_BULL boost] {symbol} ({_sym_cat}): "
+                    f"min_pnl {_cur_min_pnl:.2f}→{_new_th[_sym_cat]['min_pnl']:.2f}, "
+                    f"min_prob {_cur_min_prob:.2f}→{_new_th[_sym_cat]['min_prob']:.2f} "
+                    f"(BTC 4h={btc_4h_chg_pct:+.2f}%)"
+                )
         is_valid, reason = pnl_service.validate(prediction, _pnl_boosted_settings, symbol=symbol, news_client=news_client)
         if not is_valid:
             ep = prediction.get('expected_pnl', 0) if prediction else 0
@@ -5992,7 +6116,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     if formatted_indicators is None:
                         try:
                             from trade_utils import format_indicators_for_predictor
-                            _raw_ind = sig.get('indicators') if isinstance(sig, dict) else {}
+                            _raw_ind = meta.get('indicators') if isinstance(meta, dict) else {}
                             if _raw_ind:
                                 formatted_indicators = format_indicators_for_predictor(_raw_ind, price)
                         except Exception:
@@ -6262,7 +6386,7 @@ def _apply_qubo_selector(
     return selected_signals, filtered_predictions
 
 
-def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, portfolio_manager, signal_meta: Dict = None, trade_type: str = 'spot') -> Dict:
+def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, portfolio_manager, signal_meta: Dict = None, trade_type: str = 'spot', regime_mode: str = 'SPOT_BULL') -> Dict:
     """Step 2: Generate PnL predictions once for all top symbols (reused in buy step).
     BUG-E4: accepts signal_meta to reuse pre-computed indicators from Step 1,
     avoiding redundant analyze_symbol() calls inside pnl_service."""
@@ -6270,11 +6394,15 @@ def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, 
     if not portfolio_manager or not top_symbols:
         return predictions
     try:
+        _default_side = 'SHORT' if (str(trade_type).lower() == 'futures' and str(regime_mode or '').strip().upper() == 'FUTURES_SHORT') else 'LONG'
         _pm_balance = portfolio_manager.get_total_balance()
         usdt_liquid = float(_pm_balance.get("usdt_available_after_reserve", _pm_balance.get("usdt_available", 0)))
         alloc_per = min(settings.max_per_trade_usdt, usdt_liquid / len(top_symbols))
         for symbol in top_symbols:
             _pre_sig = (signal_meta or {}).get(symbol)
+            _side = str((_pre_sig or {}).get('expected_side', _default_side) or _default_side).strip().upper()
+            if _side not in ('LONG', 'SHORT'):
+                _side = _default_side
             pred, _ = pnl_service.predict_for_symbol(
                 symbol,
                 client,
@@ -6282,6 +6410,7 @@ def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, 
                 alloc_per,
                 precomputed_signal=_pre_sig,
                 trade_type=trade_type,
+                trade_side=_side,
                 current_price=_get_cycle_price(client, symbol),
             )
             if pred:
@@ -6800,7 +6929,7 @@ def execute_once(monitor_only: bool = False, components=None):
         print(f"[BinanceTruth] pretrade gate failed: {_truth_gate_err}")
 
     try:
-        _spot_truth_status = evaluate_spot_parity(position_manager, client)
+        _spot_truth_status = evaluate_spot_parity(position_manager, client, settings=settings)
         persist_truth_status_spot(_db_client_ref, _spot_truth_status, source='execute_once_pretrade')
         if (_spot_truth_status.get('mismatch_count') or 0) > 0:
             audit_truth_mismatches(_db_client_ref, _spot_truth_status, source='execute_once_pretrade_spot')
@@ -7587,20 +7716,32 @@ def execute_once(monitor_only: bool = False, components=None):
                         f"(age={_age_txt}) — skipping injection"
                     )
                     continue
-                # FUTURES_SHORT requires bearish technical direction only.
-                if _ta and isinstance(_ta, dict) and _ta_signal == 'SELL':
+                # FUTURES_SHORT candidates: SELL always valid; HOLD can be valid on
+                # overbought bounces with enough strength.
+                _hold_min_strength = float(getattr(settings, 'futures_hold_short_min_strength', 0.55) or 0.55)
+                _hold_min_rsi = float(getattr(settings, 'futures_hold_short_min_rsi', 60.0) or 60.0)
+                if _ta and isinstance(_ta, dict):
                     _ta_strength = float(_ta.get("strength", 0.5))
                     _ta_ind      = _ta.get("indicators", {})
+                    _ta_rsi      = float(_ta_ind.get("rsi", 50.0))
+                    _is_short_candidate = (
+                        _ta_signal == 'SELL'
+                        or (_ta_signal == 'HOLD' and _ta_strength >= _hold_min_strength and _ta_rsi >= _hold_min_rsi)
+                    )
+                    if not _is_short_candidate:
+                        if _ta_signal:
+                            print(f"[Futures/Inject] {_fsym}: skipped signal={_ta_signal} (requires SELL or HOLD with strength>={_hold_min_strength:.2f} and RSI>={_hold_min_rsi:.1f})")
+                        continue
                     _fsig["strength"]       = _ta_strength
                     _fsig["vol_spike"]      = float(_ta.get("vol_spike", _ta_ind.get("volume_spike", 0.0)))
-                    _fsig["rsi"]            = float(_ta_ind.get("rsi", 50.0))
+                    _fsig["rsi"]            = _ta_rsi
                     _fsig["change_24h_pct"] = float(_ta.get("change_24h_pct", 0.0))
                     _fsig["score"]          = int(_ta_strength * 100)
                     _fsig["reason"]         = _ta.get("reason", "FUTURES_SHORT_AUTO")
-                    print(f"[Futures/Inject] {_fsym}: strength={_ta_strength:.2f} rsi={_fsig['rsi']:.1f} signal=SELL")
+                    _fsig["expected_side"]  = "SHORT"
+                    _fsig["trade_type"]     = "futures"
+                    print(f"[Futures/Inject] {_fsym}: strength={_ta_strength:.2f} rsi={_fsig['rsi']:.1f} signal={_ta_signal} candidate=SHORT")
                 else:
-                    if _ta_signal:
-                        print(f"[Futures/Inject] {_fsym}: skipped signal={_ta_signal} (requires SELL in FUTURES_SHORT)")
                     continue
             except Exception as _te:
                 print(f"[Futures/Inject] {_fsym}: analysis failed ({_te}) — skipping")
@@ -7628,7 +7769,15 @@ def execute_once(monitor_only: bool = False, components=None):
     # BUG-E4: pass signal_meta so pnl_service reuses pre-computed indicators from Step 1
     _step2_signal_meta = {s['symbol']: s for s in top_signals if isinstance(s, dict)}
     _prediction_trade_type = 'futures' if _regime_mode == 'FUTURES_SHORT' else 'spot'
-    predictions = _build_predictions(top_symbols, client, settings, portfolio_manager, signal_meta=_step2_signal_meta, trade_type=_prediction_trade_type)
+    predictions = _build_predictions(
+        top_symbols,
+        client,
+        settings,
+        portfolio_manager,
+        signal_meta=_step2_signal_meta,
+        trade_type=_prediction_trade_type,
+        regime_mode=_regime_mode,
+    )
 
     # ── GAP-B: Profit-potential scoring — rank by EV+prob+strength+regime ───────
     try:
