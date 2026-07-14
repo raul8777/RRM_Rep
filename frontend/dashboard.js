@@ -1825,11 +1825,20 @@ function showPositionDetailModal(symbol, positionId, status) {
                         </div>
                     </div>
                     ` : ''}
+
+                    ${status === 'open' ? `
+                    <div class="modal-section modal-actions">
+                        <button class="btn btn-danger" id="btnManualClose" onclick="previewManualClose('${symbol}', '${positionId}', '${status}')">
+                            🚪 Cerrar posición
+                        </button>
+                        <small>Se mostrará preview de Binance antes de confirmar.</small>
+                    </div>
+                    ` : ''}
                 </div>
             </div>
         </div>
     `;
-    
+
     modal.style.display = 'block';
     document.body.style.overflow = 'hidden';
     
@@ -1881,6 +1890,76 @@ function closePositionDetailModal() {
     if (modal) {
         modal.style.display = 'none';
         document.body.style.overflow = '';
+    }
+}
+
+// ── Manual position close from detail modal ─────────────────────────────────
+let _manualCloseInProgress = false;
+
+async function previewManualClose(symbol, positionId, status) {
+    if (_manualCloseInProgress) return;
+    if (status !== 'open') {
+        alert('Solo se pueden cerrar posiciones abiertas desde este modal.');
+        return;
+    }
+    _manualCloseInProgress = true;
+    try {
+        const res = await fetch(`${API_BASE}/positions/${encodeURIComponent(symbol)}/close/preview`, {
+            headers: _authHeaders()
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const preview = await res.json();
+        if (!preview.ok) {
+            alert(`No se puede cerrar ${symbol}: ${preview.reason || 'desconocido'}`);
+            return;
+        }
+        const lines = [
+            `Tipo: ${preview.trade_type || 'spot'}`,
+            `Entradas DB: ${preview.entries ?? '?'}`,
+            `Cantidad en Binance: ${(preview.binance_qty ?? 0).toFixed(6)}`,
+            `Precio actual: $${fmt(preview.price)}`,
+            `Notional: $${fmt(preview.notional_held)}`,
+        ];
+        if (preview.topup_needed) {
+            lines.push(`⚠️ Se requiere top-up: ${preview.topup_qty.toFixed(6)} (~$${fmt(preview.topup_usdt)})`);
+        }
+        if (!preview.sell_valid) {
+            lines.push(`❌ Venta no válida: ${preview.sell_invalid_reason || ''}`);
+            return;
+        }
+        lines.push('', '¿Confirmas cierre al mercado?');
+        if (!confirm(lines.join('\n'))) return;
+        await executeManualClose(symbol);
+    } catch (e) {
+        console.error('previewManualClose error', e);
+        alert(`Error al obtener preview: ${e.message}`);
+    } finally {
+        _manualCloseInProgress = false;
+    }
+}
+
+async function executeManualClose(symbol) {
+    try {
+        const res = await fetch(`${API_BASE}/positions/${encodeURIComponent(symbol)}/close`, {
+            method: 'POST',
+            headers: _authHeaders(),
+            body: JSON.stringify({ trade_type: 'auto', ghost: false })
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const result = await res.json();
+        if (!result.ok) {
+            alert(`Cierre falló: ${result.reason || JSON.stringify(result)}`);
+            return;
+        }
+        alert(`${symbol} cerrado: ${result.entries_closed ?? 0} entrada(s) @ $${fmt(result.fill_price)}`);
+        closePositionDetailModal();
+        // refresh cached dashboard data
+        _cachedData = null;
+        _lastFetch = 0;
+        fetchDashboardData();
+    } catch (e) {
+        console.error('executeManualClose error', e);
+        alert(`Error al cerrar: ${e.message}`);
     }
 }
 
@@ -6195,383 +6274,4 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     setInterval(tickCountdown, 1000);
-
-    // ── MIMIC tab initialization ──────────────────────────────────
-    initMimicTab();
 });
-
-// ── MIMIC tab functions ───────────────────────────────────────────────────────
-
-let _mimicState = null;
-let _mimicUniverses = null;
-let _mimicSchedule = null;
-
-async function mimicApi(path, method = 'GET', body = null) {
-    const opts = { method, headers: _authHeaders() };
-    if (body) opts.body = JSON.stringify(body);
-    const res = await fetch(`${API_BASE}/mimic${path}`, opts);
-    if (!res.ok) {
-        let detail = `HTTP ${res.status}`;
-        try {
-            const err = await res.json();
-            detail = err.detail || JSON.stringify(err);
-        } catch (e) {
-            // ignore
-        }
-        throw new Error(`${detail} (${res.url})`);
-    }
-    return res.json();
-}
-
-async function initMimicTab() {
-    console.log('[MIMIC] initializing tab');
-    await updateMimicStatus();
-    await updateMimicUniverses();
-    await updateMimicSchedule();
-    await updateMimicRecommendations();
-    setInterval(updateMimicStatus, 10000);   // every 10s for live progress
-    setInterval(updateMimicUniverses, 30000);
-    setInterval(updateMimicSchedule, 30000);
-    setInterval(updateMimicRecommendations, 60000);
-}
-
-async function updateMimicStatus() {
-    try {
-        const data = await mimicApi('/status');
-        _mimicState = data;
-        renderMimicStatus(data);
-        renderMimicCoverage(data.state);
-        renderMimicResults(data.state);
-        await updateMimicRecommendations();
-    } catch (e) {
-        console.error('MIMIC status error:', e);
-        const panel = document.getElementById('mimicStatusPanel');
-        if (panel) {
-            panel.innerHTML = `<p style="color:#f44;font-size:13px">Error cargando estado: ${e.message}</p>`;
-        }
-    }
-}
-
-function renderMimicStatus(data) {
-    const panel = document.getElementById('mimicStatusPanel');
-    const state = data.state || {};
-    const statusColor = {
-        'ready': '#4caf50',
-        'running': '#2196f3',
-        'paused': '#ff9800',
-        'failed': '#f44336',
-        'completed': '#8bc34a',
-    }[state.status] || '#888';
-    document.getElementById('mimicStatusBadge').style.background = statusColor;
-
-    const canRun = data.can_run_now || {};
-    panel.innerHTML = `
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
-            <div><strong>Fase:</strong> ${state.phase || '—'}</div>
-            <div><strong>Estado:</strong> <span style="color:${statusColor}">${state.status || '—'}</span></div>
-            <div><strong>Progreso:</strong> ${(state.progress_pct || 0).toFixed(1)}%</div>
-            <div><strong>Avance:</strong> ${(_mimicUniverses && _mimicUniverses.summary) ? `${_mimicUniverses.summary.completed} / ${_mimicUniverses.summary.total} micro universos` : '—'}</div>
-            <div><strong>Micro universo:</strong> ${state.current_micro_universe_id || '—'}</div>
-            <div><strong>Puede correr:</strong> ${canRun.can_run ? 'Sí' : 'No'}</div>
-            <div><strong>Razón:</strong> ${canRun.reason || '—'}</div>
-            <div><strong>Próxima ventana:</strong> ${canRun.next_window ? new Date(canRun.next_window).toLocaleString() : '—'}</div>
-            <div><strong>Actualizado:</strong> ${state.updated_at ? new Date(state.updated_at).toLocaleTimeString() : '—'}</div>
-            <div><strong>Auto-run worker:</strong> ${data.autorun_worker && data.autorun_worker.active ? 'Activo' : 'Inactivo'}</div>
-            <div></div>
-        </div>
-    `;
-}
-
-async function updateMimicUniverses() {
-    try {
-        const data = await mimicApi('/universes');
-        _mimicUniverses = data;
-        renderMimicUniverses(data);
-    } catch (e) {
-        console.error('MIMIC universes error:', e);
-        const panel = document.getElementById('mimicUniversesPanel');
-        if (panel) {
-            panel.innerHTML = `<p style="color:#f44;font-size:13px">Error cargando universos: ${e.message}</p>`;
-        }
-    }
-}
-
-function renderMimicUniverses(data) {
-    const panel = document.getElementById('mimicUniversesPanel');
-    const allUniverses = data.universes || [];
-    const forcedId = (data.summary || {}).forced_id;
-    if (!allUniverses.length) {
-        panel.innerHTML = '<p>No hay micro universos en cola. Ejecuta la auditoría.</p>';
-        return;
-    }
-    const total = allUniverses.length;
-    let html = `<p style="font-size:12px;margin:0 0 6px 0;color:#aaa">Mostrando ${total} / ${total} micro universos</p>` +
-        '<div style="max-height:320px;overflow-y:auto;border:1px solid #333;border-radius:4px">' +
-        '<table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr>' +
-        '<th style="text-align:left">ID</th>' +
-        '<th style="text-align:left">Régimen</th>' +
-        '<th style="text-align:left">Ventana</th>' +
-        '<th style="text-align:right">Score</th>' +
-        '<th style="text-align:left">Estado</th>' +
-        '<th style="text-align:left">Acción</th>' +
-        '</tr></thead><tbody>';
-    allUniverses.forEach(u => {
-        const isForced = u.id === forcedId;
-        const rowStyle = isForced ? 'background:rgba(33,150,243,0.15)' : '';
-        const score = (u.score || 0).toFixed(3);
-        html += `<tr style="${rowStyle};border-bottom:1px solid #333">
-            <td>${u.id}${isForced ? ' ⭐' : ''}</td>
-            <td>${u.regime_target}</td>
-            <td>${u.start} → ${u.end}</td>
-            <td style="text-align:right">${score}</td>
-            <td>${u.status}</td>
-            <td><button class="btn btn-xs" onclick="forceMimicUniverse('${u.id}')">Forzar</button></td>
-        </tr>`;
-    });
-    html += '</tbody></table></div>';
-    panel.innerHTML = html;
-}
-
-async function updateMimicSchedule() {
-    try {
-        const data = await mimicApi('/schedule');
-        _mimicSchedule = data;
-        renderMimicSchedule(data);
-    } catch (e) {
-        console.error('MIMIC schedule error:', e);
-        const panel = document.getElementById('mimicSchedulePanel');
-        if (panel) {
-            panel.innerHTML = `<p style="color:#f44;font-size:13px">Error cargando horario: ${e.message}</p>`;
-        }
-    }
-}
-
-function _normalizeDays(days) {
-    if (Array.isArray(days)) return days;
-    if (typeof days === 'string') return days.split(/[,\s]+/).filter(Boolean);
-    return [];
-}
-
-function renderMimicSchedule(data) {
-    const panel = document.getElementById('mimicSchedulePanel');
-    const windows = (data.windows || []).map(w => {
-        const days = _normalizeDays(w.days).join(',');
-        return `${days} ${w.start}-${w.end}`;
-    }).join('<br>');
-    panel.innerHTML = `
-        <div style="font-size:13px">
-            <div><strong>Modo:</strong> ${data.mode}</div>
-            <div><strong>Habilitado:</strong> ${data.enabled ? 'Sí' : 'No'}</div>
-            <div><strong>Ventanas:</strong><br>${windows}</div>
-            <div><strong>Max run:</strong> ${data.max_run_minutes} min</div>
-        </div>
-    `;
-    document.getElementById('mimicScheduleMode').value = data.mode || 'auto';
-}
-
-function renderMimicCoverage(state) {
-    const panel = document.getElementById('mimicCoveragePanel');
-    if (!state || !state.metrics) {
-        panel.innerHTML = '<p>Sin datos de cobertura.</p>';
-        return;
-    }
-    const regimes = state.metrics.regimes || {};
-    const total = state.metrics.total_days || 0;
-    let html = `<div style="font-size:13px;margin-bottom:8px"><strong>Total días acumulados:</strong> ${total}</div>`;
-    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">';
-    Object.entries(regimes).forEach(([regime, days]) => {
-        const pct = Math.min((days / 30) * 100, 100);
-        html += `<div>
-            <div style="font-size:12px;margin-bottom:2px">${regime}: ${days} días</div>
-            <div style="background:#333;height:8px;border-radius:4px;overflow:hidden">
-                <div style="background:#4caf50;width:${pct}%;height:100%"></div>
-            </div>
-        </div>`;
-    });
-    html += '</div>';
-    panel.innerHTML = html;
-}
-
-let _mimicSweepReport = null;
-let _mimicCurrentConfig = null;
-
-async function updateMimicRecommendations() {
-    try {
-        // Load sweep report if available
-        try {
-            const sweepData = await mimicApi('/sweep-report');
-            _mimicSweepReport = (sweepData && sweepData.report) ? sweepData.report : null;
-        } catch (e) {
-            _mimicSweepReport = null;
-        }
-        // Load current production config for comparison
-        try {
-            _mimicCurrentConfig = await fetch('/config/kelly', {
-                headers: { 'X-API-Key': _apiKey }
-            }).then(r => r.json());
-        } catch (e) {
-            _mimicCurrentConfig = null;
-        }
-        renderMimicRecommendations(_mimicState ? _mimicState.state : null, _mimicSweepReport, _mimicCurrentConfig);
-    } catch (e) {
-        console.error('MIMIC recommendations error:', e);
-    }
-}
-
-function renderMimicRecommendations(state, sweep, currentConfig) {
-    const panel = document.getElementById('mimicRecommendationsPanel');
-    if (!state || !state.metrics) {
-        panel.innerHTML = '<p>Sin datos suficientes para recomendar.</p>';
-        return;
-    }
-    const total = state.metrics.total_days || 0;
-    const target = 90;
-    const ready = total >= target;
-    const statusColor = ready ? '#4caf50' : (total >= target * 0.7 ? '#ff9800' : '#f44336');
-
-    let html = `<div style="font-size:13px;margin-bottom:10px">
-        <strong>Cobertura MIMIC:</strong> <span style="color:${statusColor}">${total} / ${target} días</span>
-        ${ready ? '<span style="color:#4caf50">✅ Listo para cross-validation</span>' : '<span style="color:#ff9800">⏳ Acumulando datos</span>'}
-    </div>`;
-
-    if (sweep && sweep.summary) {
-        const s = sweep.summary;
-        html += '<div style="background:rgba(255,255,255,0.03);border:1px solid #333;border-radius:6px;padding:10px;margin-bottom:10px">';
-        html += '<div style="font-size:13px;font-weight:700;margin-bottom:6px">📊 Último sweep de parámetros</div>';
-        html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;color:#ccc">
-            <div>Combinaciones: ${s.total_combinations || '-'}</div>
-            <div>Exitosas: ${s.successful_runs || '-'}</div>
-            <div>Mejor PnL%: <span style="color:#4caf50">${((s.best_pnl_pct || 0) * 100).toFixed(2)}%</span></div>
-            <div>Peor PnL%: <span style="color:#f44336">${((s.worst_pnl_pct || 0) * 100).toFixed(2)}%</span></div>
-            <div>Promedio PnL%: ${((s.avg_pnl_pct || 0) * 100).toFixed(2)}%</div>
-            <div>Mejor PnL USDT: $${(s.best_pnl_usdt || 0).toFixed(2)}</div>
-        </div>`;
-
-        const best = s.best_config;
-        if (best) {
-            html += '<div style="margin-top:8px;font-size:12px"><strong>Configuración recomendada:</strong></div>';
-            html += '<pre style="background:#111;padding:8px;border-radius:4px;font-size:11px;overflow:auto;margin:4px 0">' +
-                JSON.stringify(best, null, 2) + '</pre>';
-
-            const current = (currentConfig && currentConfig.override) ? currentConfig.override : {};
-            let diffHtml = '';
-            Object.entries(best).forEach(([k, v]) => {
-                const cur = current[k];
-                if (cur === undefined || Math.abs(parseFloat(cur) - parseFloat(v)) > 1e-6) {
-                    diffHtml += `<div style="font-size:11px;color:#ff9800">• ${k}: ${cur !== undefined ? cur : 'no definido'} → ${v}</div>`;
-                }
-            });
-            if (diffHtml) {
-                html += '<div style="margin-top:6px"><strong style="font-size:12px">Diferencias vs producción:</strong>' + diffHtml + '</div>';
-                html += `<button class="btn btn-primary btn-xs" onclick="applyMimicRecommendation()" style="margin-top:8px">🚀 Aplicar config recomendada</button>`;
-            } else {
-                html += '<div style="font-size:12px;color:#4caf50;margin-top:6px">La configuración recomendada ya está activa.</div>';
-            }
-        }
-        html += '</div>';
-    } else {
-        html += '<p style="font-size:12px;color:#888">No hay sweep report disponible. Cuando MIMIC acumule ≥90 días, corré un sweep desde el servidor.</p>';
-    }
-
-    panel.innerHTML = html;
-}
-
-async function applyMimicRecommendation() {
-    if (!_mimicSweepReport || !_mimicSweepReport.summary || !_mimicSweepReport.summary.best_config) {
-        alert('No hay configuración recomendada para aplicar.');
-        return;
-    }
-    if (!confirm('¿Aplicar la configuración recomendada por MIMIC a producción?')) return;
-    try {
-        const body = _mimicSweepReport.summary.best_config;
-        const res = await fetch('/config/apply', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-API-Key': _apiKey },
-            body: JSON.stringify(body)
-        });
-        const data = await res.json();
-        if (data.ok) {
-            alert('Configuración aplicada correctamente.');
-            await updateMimicRecommendations();
-        } else {
-            alert('Error aplicando configuración: ' + JSON.stringify(data));
-        }
-    } catch (e) {
-        alert('Error: ' + e.message);
-    }
-}
-
-function renderMimicResults(state) {
-    const panel = document.getElementById('mimicResultsPanel');
-    const completed = (state && state.completed_micro_universes) || [];
-    if (!completed.length) {
-        panel.innerHTML = '<p>Aún no hay micro universos completados.</p>';
-        return;
-    }
-    panel.innerHTML = `<p style="font-size:13px"><strong>Micro universos completados:</strong> ${completed.length}</p>
-        <p style="font-size:12px;color:#aaa">${completed.slice(-10).join(', ')}</p>`;
-}
-
-async function mimicAction(action) {
-    try {
-        let body = {};
-        if (action === 'reset') {
-            if (!confirm('¿Resetear MIMIC a IDLE? Se perderá el progreso no guardado.')) return;
-            body = { confirm: true };
-        }
-        const data = await mimicApi(`/${action}`, 'POST', body);
-        if (data.ok) {
-            _mimicState = data.state;
-            renderMimicStatus({ state: data.state, can_run_now: {} });
-        } else {
-            alert(`No se pudo ${action}: ${JSON.stringify(data.can_run || data)}`);
-        }
-    } catch (e) {
-        console.error(`MIMIC ${action} error:`, e);
-        alert(`Error: ${e.message}`);
-    }
-}
-
-async function mimicRun() {
-    try {
-        const data = await mimicApi('/run', 'POST', { force: true });
-        _mimicState = data.state;
-        renderMimicStatus({ state: data.state, can_run_now: {} });
-        if (!data.ok) {
-            alert(`Run cycle failed: ${JSON.stringify(data.result || data)}`);
-        }
-    } catch (e) {
-        console.error('MIMIC run error:', e);
-        alert(`Error: ${e.message}`);
-    }
-}
-
-async function forceMimicUniverse(id) {
-    try {
-        await mimicApi('/select-universe', 'POST', { micro_universe_id: id });
-        await updateMimicUniverses();
-        await updateMimicStatus();
-    } catch (e) {
-        console.error('Force universe error:', e);
-    }
-}
-
-async function saveMimicSchedule() {
-    try {
-        const mode = document.getElementById('mimicScheduleMode').value;
-        const days = document.getElementById('mimicScheduleDays').value.split(',').map(d => parseInt(d.trim()));
-        const start = document.getElementById('mimicScheduleStart').value;
-        const end = document.getElementById('mimicScheduleEnd').value;
-        const schedule = {
-            enabled: true,
-            mode: mode,
-            windows: [{ days, start, end }],
-            max_run_minutes: 90,
-            market_condition_check: true,
-        };
-        await mimicApi('/schedule', 'POST', schedule);
-        await updateMimicSchedule();
-    } catch (e) {
-        console.error('Update schedule error:', e);
-    }
-}

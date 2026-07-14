@@ -5695,3 +5695,23 @@ for r in cur.fetchall(): print(r)
 - `tests/test_entry_quality_gate.py`: 16 tests.
 - `tests/test_mimic_regression.py`: pasa con baseline actualizado.
 - `tests/test_system_health.py -k "not Cat7"`: 116 tests pasan.
+
+---
+
+## s76b — Manual close button for open positions (jul 13 2026)
+
+### Cambios
+- `frontend/dashboard.js`: agregados `previewManualClose()` y `executeManualClose()`.
+- Botón `🚪 Cerrar posición` en el modal de detalle de posiciones abiertas (`showPositionDetailModal`).
+- Flujo:
+  1. Llama `GET /positions/{symbol}/close/preview`.
+  2. Muestra datos (tipo, entradas, qty Binance, precio, notional, top-up si aplica).
+  3. Si `sell_valid`, confirma con `confirm()`.
+  4. Ejecuta `POST /positions/{symbol}/close` con `{trade_type: 'auto', ghost: false}`.
+  5. Refresca `fetchDashboardData()` y cierra modal.
+- `frontend/styles.css`: estilos `.modal-actions` para alinear botón y nota.
+
+### Notas operativas
+- Solo visible para posiciones con `status === 'open'`.
+- Reutiliza backend existente `manual_position_closer` + endpoints `/positions/{symbol}/close[/preview]`.
+- El cierre se audita como `manual_close` y se excluye de análisis de learning por defecto.

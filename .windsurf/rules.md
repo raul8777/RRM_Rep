@@ -92,8 +92,8 @@ unified_governance_supervisor.py → UG: árbitro final — consolida advisories
 
 **Entrada SPOT:**
 1. `pair_screener` → candidato → señal en `signal_store`
-2. `_buy_top_symbols()` aplica gates secuenciales: régimen confirmado → RSI por modo → filtros BTC → funding rate → predictor ML → entry_quality_gate (todos los sub-gates deben pasar)
-3. VolSpike override: señal de volumen excepcional en NARRATIVE bypasa el predictor (pero no los filtros de régimen)
+2. `_buy_top_symbols()` aplica gates secuenciales: régimen confirmado → `_filter_buy_candidates` (behavior-first gate) → RSI por modo → filtros BTC → funding rate → predictor ML (no hay bypass bootstrap)
+3. VolSpike override: señal de volumen excepcional en NARRATIVE bypasa el predictor (pero no los filtros de régimen ni el behavior gate)
 4. QUBO selector → Kelly sizing (`_kelly_position_size()`) → `BinanceClient.buy()` → `_verify_entry_filled()`
 5. Solo si fill confirmado: INSERT `trades_open` con `regime_at_entry`, `profile_at_entry`, `config_snapshot_id`, comisión de entrada
 
@@ -108,6 +108,7 @@ unified_governance_supervisor.py → UG: árbitro final — consolida advisories
 - Parcial: UPDATE `trades_open` (reduce qty, persiste `_smart_meta` actualizado)
 - Total: DELETE `trades_open` + INSERT `trades_closed` (PnL neto, comisiones, motivo, trigger)
 - Siempre: INSERT `trades_audit` con event, detail, pnl_pct, pnl_usdt, regime, profile
+- Cierre manual desde dashboard: modal de posición abierta → preview (`GET /positions/{symbol}/close/preview`) → confirmación → `POST /positions/{symbol}/close`. Se audita como `manual_close` y se excluye de learning.
 
 **Persistencia restart-safe:**
 - Estado trailing/breakeven/SSO vive en `trades_open.metadata._smart_meta`

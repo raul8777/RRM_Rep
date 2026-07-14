@@ -264,6 +264,8 @@ body {
 .btn-primary { background:#3498db; color:#fff; }
 .btn-xs  { padding:3px 10px; font-size:11px; }
 .btn-sm  { padding:5px 12px; font-size:12px; }
+.pos-close-btn { opacity:0.75; transition:opacity 0.15s, filter 0.15s; }
+.pos-close-btn:hover { opacity:1; filter:brightness(1.2); transform:none; }
 
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    TAB 1 â€” OPERACIONES LAYOUT
@@ -1365,6 +1367,8 @@ body {
 .modal-section { padding:14px 18px; border-bottom:1px solid var(--border); }
 .modal-section:last-child { border-bottom:none; }
 .modal-section h4 { font-size:11px; color:#888; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:10px; }
+.modal-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding-top:18px; padding-bottom:18px; }
+.modal-actions small { color:#888; font-size:11px; }
 .detail-grid   { display:grid; grid-template-columns:1fr 1fr; gap:9px 18px; }
 .detail-grid div { display:flex; justify-content:space-between; align-items:center; font-size:13px; }
 .detail-grid label { color:#888; }
