@@ -757,6 +757,8 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             # s70: RANGE_SCALP new fields
             'range_scalp_min_rsi':          'range_scalp_min_rsi',
             'range_scalp_breakeven_pct':    'range_scalp_breakeven_pct',
+            'range_scalp_sl_pct':           'range_scalp_sl_pct',
+            'range_scalp_tp_pct':           'range_scalp_tp_pct',
             # s72: RANGE_SCALP entry gate new fields — fully DB-governable per profile
             'range_scalp_max_rsi':                        'range_scalp_max_rsi',
             'range_scalp_max_bb_position':                'range_scalp_max_bb_position',
@@ -911,7 +913,7 @@ def _get_kelly_context_multiplier(settings, regime: str = None, trade_type: str 
     }.get(_profile, 1.00)
     _regime_mult = {
         'SPOT_BULL': 1.05,
-        'RANGE_SCALP': 0.95,
+        'RANGE_SCALP': 1.05,  # s76: 0.95→1.05 (sweep: 0 SL exits, CDR~50% → aggressive sizing)
         'PRESERVATION': 0.85,
         'FUTURES_SHORT': 1.00,
     }.get(_regime, 1.00)
@@ -920,7 +922,7 @@ def _get_kelly_context_multiplier(settings, regime: str = None, trade_type: str 
         _profile_mult *= 1.02 if _profile == 'A' else (0.98 if _profile == 'C' else 1.0)
     # Wolf Hunter s63: Perfil A + SPOT_BULL tiene cap 1.35 (vs 1.20 general)
     # para permitir posiciones más grandes en el régimen más favorable
-    _cap = 1.35 if (_profile == 'A' and _regime == 'SPOT_BULL') else 1.20
+    _cap = 1.35 if (_profile == 'A' and _regime in ('SPOT_BULL', 'RANGE_SCALP')) else 1.20  # s76: RS aggressive
     return max(0.75, min(_cap, _profile_mult * _regime_mult))
 
 
@@ -1288,7 +1290,7 @@ def _apply_mode_profile_harmony(settings, regime: str, profile: str, profile_par
         ('futures_long_tp_pct', (2.0, 10.0)),
         ('max_rebalance_per_cycle', (1, 5)),
         ('max_total_exposure_pct', (0.20, 0.95)),
-        ('kelly_conviction_max_pct', (0.05, 0.25)),
+        ('kelly_conviction_max_pct', (0.05, 0.35)),  # s76: 0.25→0.35 (aggressive RS profiles use 0.30)
         ('prediction_add_min_strength', (0.30, 0.90)),
         ('prediction_add_min_ev_ratio', (0.80, 2.50)),
         # s70: per-regime SSO timing — profile multiplier only (regime value already baked into field default)
@@ -3129,6 +3131,23 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 if entry_price <= 0:
                     continue
 
+                # ── Dust detection: position value below min_notional — auto-close ──
+                try:
+                    _dust_filters = get_symbol_filters(client, symbol)
+                    _dust_notional = float(pos.quantity) * current_price
+                    _dust_min = _dust_filters.get('min_notional', 1.0)
+                    if 0 < _dust_notional < _dust_min:
+                        _dust_msg = (f"[DUST] {symbol}: qty={pos.quantity} value=${_dust_notional:.4f} "
+                                     f"< min_notional=${_dust_min:.2f} — auto-closing dust position")
+                        print(_dust_msg)
+                        ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_WARNING, _dust_msg)
+                        if position_manager:
+                            position_manager.close_all_positions_for_symbol(
+                                symbol, current_price, 'dust_below_min_notional', commission_rate)
+                        continue
+                except Exception as _dust_err:
+                    print(f"[DUST] {symbol}: dust check failed: {_dust_err}")
+
                 # C0: gross PnL for price-based SL/TP triggers; net PnL for supervisors/Kelly/decisions
                 pnl_pct_gross = (current_price - entry_price) / entry_price
                 _pnl_gross_usdt, pnl_usdt_net, pnl_pct_net = _spot_net_pnl(pos, current_price, settings)
@@ -3700,6 +3719,11 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                             continue
                                         _sso_s_remaining = align_quantity_to_step(
                                             _sso_s_full_qty - _sso_s_sell_qty, _sso_s_filters["step"])
+                                        # Dust guard: if remaining < min_notional, treat as full close
+                                        if 0 < _sso_s_remaining * current_price < _sso_s_filters.get('min_notional', 1.0):
+                                            print(f"[SSO/SPOT] {symbol}: remaining ${_sso_s_remaining * current_price:.4f} < min_notional — converting to full close")
+                                            _sso_s_sell_qty = _sso_s_full_qty
+                                            _sso_s_remaining = 0.0
                                         # Update metadata
                                         metadata['sso_last_trigger'] = _sso_s_action.trigger
                                         metadata['sso_last_reason'] = _sso_s_action.reason
@@ -4010,6 +4034,11 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             continue
 
                         remaining_qty = align_quantity_to_step(full_qty - sell_qty, filters["step"])
+                        # Dust guard: if remaining < min_notional, treat as full close
+                        if 0 < remaining_qty * current_price < filters.get('min_notional', 1.0):
+                            print(f"[ProfitRealization] {symbol}: remaining ${remaining_qty * current_price:.4f} < min_notional — converting to full close")
+                            sell_qty = full_qty
+                            remaining_qty = 0.0
                         metadata['profit_realization_last_triggered_at'] = datetime.now(timezone.utc).isoformat()
                         metadata['profit_realization_partial_qty'] = sell_qty
                         metadata['profit_realization_partial_reason'] = supervisor_decision.reason if supervisor_decision else 'profit_realization_supervisor_partial'
@@ -4259,6 +4288,11 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                             print(f"[WARN] SCALE-OUT SELL {symbol}: order NOT confirmed filled — skipping")
                                             continue
                                         remaining_qty = align_quantity_to_step(full_qty - sell_qty, filters["step"])
+                                        # Dust guard: if remaining < min_notional, treat as full close
+                                        if 0 < remaining_qty * current_price < filters.get('min_notional', 1.0):
+                                            print(f"[SCALE-OUT] {symbol}: remaining ${remaining_qty * current_price:.4f} < min_notional — converting to full close")
+                                            sell_qty = full_qty
+                                            remaining_qty = 0.0
                                         print(f"SCALE-OUT {symbol}: sold {sell_qty} ({_scale_pct*100:.0f}%) @ {current_price:.4f}, remaining={remaining_qty}, SL→breakeven={entry_price:.4f}")
                                         _tp_decisions = metadata.get('tp_decisions', [])
                                         _tp_decisions.append({
@@ -4298,8 +4332,25 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             _bal = client.get_account_balance()
                             _avail = float(_bal.get(_asset, 0))
                             if _avail < qty:
+                                _ratio = _avail / qty if qty > 0 else 0.0
                                 _clamped = align_quantity_to_step(_avail, filters["step"])
-                                print(f"[SL/TP] {symbol}: clamping qty {qty} → {_clamped} (Binance balance={_avail})")
+                                print(f"[SL/TP] {symbol}: clamping qty {qty} → {_clamped} (Binance balance={_avail}, ratio={_ratio:.6f})")
+                                # ── Ghost detection: DB qty >> Binance balance (>1000x) ───────────
+                                if _clamped <= 0 and _ratio < 0.001:
+                                    _ghost_msg = (
+                                        f"[GHOST] {symbol}: DB qty={qty:.0f} but Binance balance={_avail} "
+                                        f"(ratio={_ratio:.6f}) — auto-closing ghost position"
+                                    )
+                                    print(_ghost_msg)
+                                    ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_ERROR, _ghost_msg)
+                                    if position_manager:
+                                        try:
+                                            position_manager.close_all_positions_for_symbol(
+                                                symbol, current_price, 'ghost_balance_mismatch', commission_rate
+                                            )
+                                        except Exception as _ghost_err:
+                                            print(f"[GHOST] close failed for {symbol}: {_ghost_err}")
+                                    continue
                                 qty = _clamped
                         except Exception as _be:
                             print(f"[SL/TP] balance clamp failed for {symbol}: {_be}")
@@ -4570,7 +4621,142 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
     return final
 
 
-def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: List, portfolio_manager=None, position_manager=None, precomputed_predictions: Dict = None, news_client=None, regime_obj: "MarketRegime" = None, regime_mode_override: str = None, screened_pairs_cache: dict = None, pre_switch_state: Optional[Dict[str, Any]] = None) -> List[Dict]:
+def _check_entry_quality(
+    symbol: str,
+    signal_meta: Dict[str, Any],
+    settings,
+    regime_mode: str,
+    active_profile_label: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """
+    Behavior-first entry gate.
+
+    Returns (is_valid, reason).  Only approve assets whose current price
+    behavior matches a short-term profitable pattern for the active regime and
+    profile.  The asset's name is irrelevant; only its current behavior matters.
+
+    Profile modifiers affect patience/selectivity, never the hard behavioral
+    floor.  Profile A is slightly more permissive, profile C slightly tighter.
+    """
+    _regime = str(regime_mode or "").strip().upper() or "SPOT_BULL"
+    _profile = str(active_profile_label or "").strip().upper() or "B"
+    meta = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
+
+    strength = float(meta.get("strength", 0.0) or 0.0)
+    rsi_raw = meta.get("rsi")
+    rsi = float(rsi_raw.get("value") if isinstance(rsi_raw, dict) else (rsi_raw or 50.0))
+    vol_spike = float(meta.get("vol_spike", 1.0) or 1.0)
+    bb_position = meta.get("bb_position")
+    bb_lower_touch = bool(meta.get("bb_lower_touch", False))
+    bb_near_lower = bool(meta.get("bb_near_lower", False))
+    trend_4h = str(meta.get("higher_tf_trend", "FLAT") or "FLAT").strip().upper()
+    ema200_trend = str(meta.get("ema200_trend", "UNKNOWN") or "UNKNOWN").strip().upper()
+
+    # Profile modifier: A = more aggressive, C = more selective, B = baseline.
+    # Applied to upper/lower bounds so that the hard floor is never breached.
+    _profile_mult = {"A": 0.92, "B": 1.0, "C": 1.12}.get(_profile, 1.0)
+
+    if _regime == "SPOT_BULL":
+        # Want: rising assets, entering on pullbacks, with volume.
+        # Volume floor is lower than the 4h expert rule (1.5x) because the 1h
+        # signal generator is more reactive; volume_confirmed is still a sizing
+        # booster.
+        _min_vol = max(0.8, 1.0 * _profile_mult)
+        _rsi_min = 35.0
+        _rsi_max = min(70.0, 65.0 / _profile_mult)
+        if trend_4h == "DOWN":
+            return False, f"SPOT_BULL_4H_DOWN (trend={trend_4h})"
+        if ema200_trend == "DOWN":
+            return False, "SPOT_BULL_EMA200_DOWN"
+        if vol_spike < _min_vol:
+            return False, f"SPOT_BULL_VOL (vol_spike={vol_spike:.2f} < {_min_vol:.2f})"
+        if not (_rsi_min <= rsi <= _rsi_max):
+            return False, f"SPOT_BULL_RSI (rsi={rsi:.1f})"
+        if strength < float(getattr(settings, "entry_quality_min_strength", 0.40)):
+            return False, f"SPOT_BULL_STRENGTH (strength={strength:.2f})"
+        return True, "OK"
+
+    if _regime == "RANGE_SCALP":
+        # Want: price in the lower half of the Bollinger range, mean-reversion
+        # pressure, with volume.  Either a lower-band touch/near-touch OR a low
+        # bb_position confirms the behavior.
+        _min_vol = max(0.4, 0.6 * _profile_mult)
+        _rsi_min = float(getattr(settings, "range_scalp_min_rsi", 25.0))
+        _rsi_max = min(70.0, float(getattr(settings, "range_scalp_max_rsi", 60.0)) / _profile_mult)
+        _max_bb_pos = 0.45 / _profile_mult
+        if not (_rsi_min <= rsi <= _rsi_max):
+            return False, f"RANGE_RSI (rsi={rsi:.1f})"
+        if vol_spike < _min_vol:
+            return False, f"RANGE_VOL (vol_spike={vol_spike:.2f} < {_min_vol:.2f})"
+        _bb_pos_ok = bb_position is not None and float(bb_position) <= _max_bb_pos
+        _bb_touch_ok = bb_lower_touch or bb_near_lower
+        if not (_bb_pos_ok or _bb_touch_ok):
+            _bb_pos_str = f"{float(bb_position):.2f}" if bb_position is not None else "?"
+            return False, f"RANGE_BB (bb_pos={_bb_pos_str} > {_max_bb_pos:.2f}, touch={bb_lower_touch}, near={bb_near_lower})"
+        if strength < float(getattr(settings, "entry_quality_min_strength", 0.40)):
+            return False, f"RANGE_STRENGTH (strength={strength:.2f})"
+        return True, "OK"
+
+    if _regime == "PRESERVATION":
+        # Want: only narrative/trending catalysts with strong volume and not overbought.
+        _min_vol = max(0.8, 1.0 * _profile_mult)
+        _rsi_max = min(70.0, 60.0 / _profile_mult)
+        if vol_spike < _min_vol:
+            return False, f"PRESERVATION_VOL (vol_spike={vol_spike:.2f} < {_min_vol:.2f})"
+        if rsi > _rsi_max:
+            return False, f"PRESERVATION_RSI (rsi={rsi:.1f})"
+        if strength < float(getattr(settings, "entry_quality_min_strength", 0.45)):
+            return False, f"PRESERVATION_STRENGTH (strength={strength:.2f})"
+        return True, "OK"
+
+    if _regime == "FUTURES_SHORT":
+        # Want: assets bouncing within a bearish structure — declining price is
+        # the product.  We need moderate RSI (not oversold), trend DOWN, volume.
+        _min_vol = max(0.5, 0.8 * _profile_mult)
+        _rsi_min = min(55.0, 45.0 * _profile_mult)
+        _rsi_max = 75.0
+        if trend_4h != "DOWN":
+            return False, f"FUTURES_SHORT_TREND (trend={trend_4h})"
+        if vol_spike < _min_vol:
+            return False, f"FUTURES_SHORT_VOL (vol_spike={vol_spike:.2f} < {_min_vol:.2f})"
+        if not (_rsi_min <= rsi <= _rsi_max):
+            return False, f"FUTURES_SHORT_RSI (rsi={rsi:.1f})"
+        if strength < float(getattr(settings, "futures_min_inject_strength", 0.40)):
+            return False, f"FUTURES_SHORT_STRENGTH (strength={strength:.2f})"
+        return True, "OK"
+
+    return False, f"UNKNOWN_REGIME ({_regime})"
+
+
+def _filter_buy_candidates(
+    candidates: List[Any],
+    signal_meta: Dict[str, Any],
+    settings,
+    regime_mode: str,
+    active_profile_label: Optional[str] = None,
+) -> List[Any]:
+    """
+    Pre-filter candidate signals using the behavior-first entry gate.
+
+    Accepts either symbol strings or dicts with a 'symbol' key.  Returns the same
+    shape filtered to candidates whose current behavior matches the active
+    regime/profile objective.
+    """
+    passed: List[Any] = []
+    for cand in candidates:
+        symbol = cand["symbol"] if isinstance(cand, dict) else cand
+        _ok, _reason = _check_entry_quality(
+            symbol, signal_meta, settings, regime_mode, active_profile_label
+        )
+        if _ok:
+            passed.append(cand)
+        else:
+            print(f"[FilterBuy] Rejected {symbol}: {_reason}")
+            update_signal_decision(symbol, "rejected", _reason.split(" ")[0])
+    return passed
+
+
+def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: List, portfolio_manager=None, position_manager=None, precomputed_predictions: Dict = None, news_client=None, regime_obj: "MarketRegime" = None, regime_mode_override: str = None, screened_pairs_cache: dict = None, pre_switch_state: Optional[Dict[str, Any]] = None, futures_client=None) -> List[Dict]:
     # Accept either plain symbol strings or dicts with metadata (for aggressive mode)
     if top_signals_with_meta and isinstance(top_signals_with_meta[0], dict):
         top_symbols = [s['symbol'] for s in top_signals_with_meta]
@@ -4620,13 +4806,38 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         except Exception:
             pass
 
+    # ── Behavior-first candidate filter ───────────────────────────────────────
+    # Reject assets whose current price behavior does not match the short-term
+    # profit objective of the active regime/profile.  This is a hard pre-filter
+    # before predictor, sizing, and execution.
+    top_signals_with_meta = _filter_buy_candidates(
+        top_signals_with_meta, signal_meta, settings, _regime_mode, _active_profile_label
+    )
+    if top_signals_with_meta and isinstance(top_signals_with_meta[0], dict):
+        top_symbols = [s['symbol'] for s in top_signals_with_meta]
+    else:
+        top_symbols = list(top_signals_with_meta)
+    if not top_symbols:
+        return orders
+
     balances = client.get_account_balance()
     usdt = float(balances.get("USDT", 0.0))
     usdt_liquid = usdt  # default; overridden below if portfolio_manager available
     
     # Use Portfolio Manager for allocation if available
     if portfolio_manager:
-        balance = portfolio_manager.get_total_balance()
+        # Use unified balance (spot+futures) when UnifiedPM is enabled so that
+        # _total_portfolio reflects real capital across both wallets.
+        _use_unified = _get_param(settings, 'use_unified_portfolio_manager')
+        if _use_unified:
+            try:
+                _fc_bal = _get_futures_client(settings, injected_client=futures_client)
+                balance = portfolio_manager.get_unified_balance(_fc_bal)
+            except Exception as _ub_err:
+                print(f"[Portfolio] unified balance failed ({_ub_err}), falling back to spot-only")
+                balance = portfolio_manager.get_total_balance()
+        else:
+            balance = portfolio_manager.get_total_balance()
         # Use liquid USDT as the actual cap — not total portfolio value
         # Prefer BNB-reserve-aware balance so commission buffer is never traded away
         usdt_liquid = float(balance.get("usdt_available_after_reserve", balance.get("usdt_available", usdt)))
@@ -4802,7 +5013,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     update_signal_decision(symbol, 'rejected', 'SL_COOLDOWN')
                     continue
                 # Enforce futures-specific max shorts (separate from spot limit)
-                _fc = _get_futures_client(settings)
+                _fc = _get_futures_client(settings, injected_client=futures_client)
                 _max_shorts = getattr(settings, 'futures_max_shorts', 5)
                 _open_shorts = len([p for p in _fc._open_positions.values() if not p.closed and p.side == "SHORT"])
                 # LARGECAP guard: limit large-cap SHORTs to force MID diversification (slots 6-7)
@@ -5298,7 +5509,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         except Exception:
                             pass
                     if symbol in _f_sym_list:
-                        _fc_l = _get_futures_client(settings)
+                        _fc_l = _get_futures_client(settings, injected_client=futures_client)
                         _l_usdt = getattr(settings, 'futures_usdt_per_trade', 150.0)
                         _l_sl   = getattr(settings, 'futures_long_sl_pct', 2.5)
                         _l_tp   = getattr(settings, 'futures_long_tp_pct', 5.0)
@@ -5338,7 +5549,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     except Exception:
                         pass
                 if symbol in _l_sym_list:
-                    _fc_sb = _get_futures_client(settings)
+                    _fc_sb = _get_futures_client(settings, injected_client=futures_client)
                     _l_sl   = getattr(settings, 'futures_long_sl_pct', 2.5)
                     _l_tp   = getattr(settings, 'futures_long_tp_pct', 5.0)
                     _l_lev  = getattr(settings, 'futures_leverage', 10)
@@ -5600,43 +5811,6 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     print(f"CoinGecko Trending BOOST {symbol}: strength → {strength:.2f}")
             except Exception:
                 pass
-
-        # ── A4: Entry quality score gate ────────────────────────────────
-        # Block if 2+ quality dimensions fail simultaneously (prevents OPGUSDT-style RSI=87 entries)
-        if getattr(settings, 'entry_quality_gate_enabled', True) and not volspike_override:
-            _eq_rsi       = float(signal_meta.get(symbol, {}).get('rsi', 50.0))
-            _eq_vol       = float(signal_meta.get(symbol, {}).get('vol_spike', 1.0))
-            _eq_strength  = float(signal_meta.get(symbol, {}).get('strength', strength))
-            _eq_bad = 0
-            # s72: RSI range is per-regime — RANGE_SCALP uses its own min/max (25-60), others use 35-65
-            if _regime_mode == 'RANGE_SCALP':
-                _eq_rsi_ok = float(getattr(settings, 'range_scalp_min_rsi', 25.0)) <= _eq_rsi <= float(getattr(settings, 'range_scalp_max_rsi', 60.0))
-            else:
-                _eq_rsi_ok = 35.0 <= _eq_rsi <= 65.0
-            # s72: vol threshold per-regime — RANGE_SCALP has dedicated lower floor (lateral = structurally low vol)
-            if _regime_mode == 'RANGE_SCALP':
-                _eq_vol_min = float(getattr(settings, 'entry_quality_vol_spike_min_range_scalp', 0.35))
-            else:
-                _eq_vol_min = float(getattr(settings, 'entry_quality_min_vol_spike', 1.2))
-            _eq_vol_ok      = _eq_vol >= _eq_vol_min
-            _eq_str_ok      = _eq_strength >= float(getattr(settings, 'entry_quality_min_strength', 0.40))
-            if not _eq_rsi_ok:  _eq_bad += 1
-            if not _eq_vol_ok:  _eq_bad += 1
-            if not _eq_str_ok:  _eq_bad += 1
-            # s70: read per-regime field, fall back to global (global NEVER modified)
-            _eq_regime_field = f'entry_quality_max_failures_{_regime_mode.lower()}' if _regime_mode else None
-            _eq_max_bad = int(
-                getattr(settings, _eq_regime_field, None)
-                if (_eq_regime_field and hasattr(settings, _eq_regime_field))
-                else getattr(settings, 'entry_quality_max_failures', 0)
-            )
-            if _eq_bad > _eq_max_bad:  # s72 A1: was >= (bug: blocked with exactly max_failures, not above)
-                print(f"[A4/Quality] Skipping {symbol}: {_eq_bad} quality failures "
-                      f"(RSI={_eq_rsi:.1f}{'✓' if _eq_rsi_ok else '✗'} "
-                      f"vol={_eq_vol:.2f}x{'✓' if _eq_vol_ok else '✗'} "
-                      f"str={_eq_strength:.2f}{'✓' if _eq_str_ok else '✗'}) — A4 gate")
-                update_signal_decision(symbol, "rejected", "QUALITY_SCORE")
-                continue
 
         # ── Kelly dynamic position sizing ───────────────────────────────
         # Fase E: SL/TP base from category_thresholds (per token type) — fallback to global settings
@@ -6971,7 +7145,7 @@ def execute_once(monitor_only: bool = False, components=None):
     # ── Auto BNB commission discount management (after regime detection) ───────────
     try:
         from binance_commission import auto_manage_bnb_discount
-        _fc = _get_futures_client(settings)
+        _fc = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None), injected_client=getattr(comp, 'futures_client', None))
         _bnb_status = auto_manage_bnb_discount(
             settings=settings,
             spot_client=client,
@@ -7521,7 +7695,7 @@ def execute_once(monitor_only: bool = False, components=None):
         print("Balances after sells:", balances)
 
     # ── Step 5: Buy top symbols — pass full signal dicts for aggressive mode ───
-    buy_orders = _buy_top_symbols(client, settings, top_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client, regime_obj=_regime_exe, regime_mode_override=_regime_mode, screened_pairs_cache=_cached_screened_pairs, pre_switch_state=_pre_switch_state)
+    buy_orders = _buy_top_symbols(client, settings, top_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client, regime_obj=_regime_exe, regime_mode_override=_regime_mode, screened_pairs_cache=_cached_screened_pairs, pre_switch_state=_pre_switch_state, futures_client=comp.futures_client)
 
     # ── Dynamic cycle scheduling — return next interval based on active regime ──
     _cycle_by_regime = {

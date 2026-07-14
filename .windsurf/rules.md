@@ -40,9 +40,13 @@ learning_engine.py            → pesos por indicador (symbol, regime) → escal
     ↓
 _compute_profit_score()       → profit_score = ev_norm×0.40 + prob×0.30 + strength×0.20 + regime_bonus×0.10
     ↓
+_check_entry_quality()        → regime/profile-aware behavior gate: trend, RSI, vol_spike, BB position, strength
+_filter_buy_candidates()       → hard pre-filter before predictor; rejects mismatched behavior
+    ↓
 portfolio_selector.py         → QUBO: elige K señales ortogonales (maximiza EV, minimiza correlación)
     ↓
 _kelly_position_size()        → sizing: base × regime_mult × profile_mult × conviction × concentration × F&G
+pnl_service.validate()         → NO bootstrap bypass: predictions must satisfy thresholds regardless of history
     ↓
 BinanceClient / FuturesClient → ejecuta orden → _verify_entry_filled() → persiste en DB
     ↓

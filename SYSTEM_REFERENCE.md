@@ -5674,3 +5674,24 @@ for r in cur.fetchall(): print(r)
 - El selector automático usa `profile_rank` + métricas + confianza para elegir el perfil activo.
 
 *Revisar este archivo al inicio de cada sesión de análisis o implementación.*
+
+---
+
+## s76 — Behavior-First Entry Gate + Predictor Bypass Removal (jul 13 2026)
+
+### Cambios
+- `run_trades.py`: implementados `_check_entry_quality()` y `_filter_buy_candidates()` como pre-filtro de entrada antes del predictor/sizing/ejecución.
+- Gate consciente de régimen y perfil: SPOT_BULL, RANGE_SCALP, PRESERVATION, FUTURES_SHORT con modificadores A/B/C.
+- Criterios: trend 4h, EMA200, RSI, vol_spike, BB position/touch/near, signal strength.
+- Eliminada la gate A4 legacy (RSI/vol/strength failure-count) de `_buy_top_symbols`.
+- `pnl_service.py`: eliminado el bypass `if prediction.get("bootstrap_mode"): return True`; ahora las predicciones deben cumplir thresholds normales sin importar historia de trades.
+- `Dev/benchmarks/mimic_baseline.json` regenerado para reflejar el nuevo comportamiento.
+
+### Notas operativas
+- Los floors de volumen se calibraron a 1h (menos estrictos que la regla experta 4h de 1.5x) para no bloquear toda oportunidad histórica, manteniendo el rechazo a setups sin convicción.
+- `volume_confirmed` sigue siendo un booster de sizing, no un requisito duro de la gate.
+
+### Tests
+- `tests/test_entry_quality_gate.py`: 16 tests.
+- `tests/test_mimic_regression.py`: pasa con baseline actualizado.
+- `tests/test_system_health.py -k "not Cat7"`: 116 tests pasan.

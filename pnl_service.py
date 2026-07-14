@@ -113,10 +113,11 @@ def validate(prediction: Dict, settings, symbol: str = None,
     """
     if prediction is None:
         return True, "no prediction available – allowing trade"
-    # Bootstrap mode: no learned data yet → skip PnL/probability gates so the
-    # system can execute trades and accumulate the history needed for learning.
-    if prediction.get("bootstrap_mode"):
-        return True, "bootstrap mode – thresholds relaxed until trade history builds"
+    # s76: No bootstrap bypass — predictions must satisfy the same thresholds
+    # regardless of how much trade history exists.  The behavior-first entry gate
+    # in run_trades already filters out setups whose current price action is
+    # incompatible with the active regime, so only well-behaved candidates reach
+    # this validation.
     if prediction.get("degenerate_output"):
         return False, "degenerate predictor output (near-zero EV with neutral probability)"
     predictor = get_predictor()
