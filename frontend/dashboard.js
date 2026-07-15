@@ -639,19 +639,29 @@ function switchInnerTab(card, filter) {
 }
 
 // ── Render functions (pure – no fetch) ───────────────────────────────────────
-function renderSystemStatus(d) {
-    if (!d) return;
-    const state = (d.state || 'unknown').toLowerCase();
+function renderSystemStatus(d, unified) {
+    if (!d && !unified) return;
+    const baseState = (d?.state || 'unknown').toLowerCase();
+    const effectiveState = String(unified?.effective_state || '').toUpperCase();
+    const statusLabel = String(unified?.ui_label || d?.state || 'Unknown');
+    let state = baseState;
+    if (effectiveState === 'RUNNING_ENTRIES_PAUSED' || effectiveState === 'PAUSED') {
+        state = 'paused';
+    } else if (effectiveState === 'RUNNING_FULL') {
+        state = 'running';
+    } else if (effectiveState === 'STOPPED') {
+        state = 'stopped';
+    }
     const dot = document.querySelector('.status-dot');
     const txt = document.querySelector('.status-text');
     if (dot) dot.className = 'status-dot ' + state;
-    if (txt) txt.textContent = d.state || '—';
+    if (txt) txt.textContent = statusLabel;
     // Header health chip
     const hDot  = document.getElementById('healthDot');
     const hText = document.getElementById('healthText');
     const color = state === 'running' ? '#4ecca3' : state === 'paused' ? '#f39c12' : '#e74c3c';
     if (hDot)  { hDot.style.background = color; hDot.style.boxShadow = `0 0 5px ${color}`; }
-    if (hText) hText.textContent = d.state || 'Unknown';
+    if (hText) hText.textContent = statusLabel;
 }
 
 function renderPortfolio(d) {
@@ -1084,6 +1094,8 @@ function renderOpenPositions(d) {
     }
 
     const totalUnreal = visiblePositions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
+    const totalRealized = visiblePositions.reduce((s, p) => s + parseFloat(p.realized_pnl || 0), 0);
+    const totalPnl = totalUnreal + totalRealized;
     const totalInvested = visiblePositions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
 
     const predPositions = visiblePositions.filter(p => p.pnl_prediction && p.pnl_prediction.expected_pnl);
@@ -1124,7 +1136,9 @@ function renderOpenPositions(d) {
         const _fieldHrs = parseFloat(p.hours_held || 0);
         const realHrs = Math.max(_firstHrs, _entriesMaxHrs, _fieldHrs);
         const ageCls = realHrs < 2 ? 'age-fresh' : realHrs < 8 ? 'age-mid' : 'age-old';
-        const ageStr = realHrs < 1 ? '<1h' : realHrs < 24 ? realHrs.toFixed(0) + 'h' : (realHrs/24).toFixed(1) + 'd';
+        const ageStr = realHrs < 1
+            ? `${Math.max(1, Math.floor(realHrs * 60))} min`
+            : realHrs < 24 ? realHrs.toFixed(0) + 'h' : (realHrs / 24).toFixed(1) + 'd';
 
         const overflowBadge = p.is_overflow ? ' <span class="badge-overflow" title="Posición extra por señal excepcional">⚡OVF</span>' : '';
         const _btcTip = p.btc_chg_since_entry_pct != null ? ` BTC ${p.btc_chg_since_entry_pct >= 0 ? '+' : ''}${p.btc_chg_since_entry_pct.toFixed(1)}% desde entrada` : '';
@@ -1156,6 +1170,7 @@ function renderOpenPositions(d) {
             ? ` <span class="badge-partial" title="${_partialTooltip}">✂️PARCIAL</span>`
             : '';
         const contextBadge = fmtContextBadge(p);
+        const entryMode = p.entry_regime_mode || p.metadata?.regime_at_entry || '—';
 
         const tp = parseFloat(p.take_profit || 0);
         let progressHtml = '—';
@@ -1174,14 +1189,20 @@ function renderOpenPositions(d) {
             ? `<br><small class="inv-margin" title="Margin comprometido">mgn $${fmt(p.margin_usdt)}</small>`
             : '';
         rows.push(`
-        <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id}', 'open')" style="cursor:pointer" data-symbol="${p.symbol}">
+        <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'open')" style="cursor:pointer" data-symbol="${p.symbol}">
             <td>${typeBadge} <strong>${p.symbol}</strong>${contextBadge}${overflowBadge}${escBadge}${partialBadge}${bounceBadge}</td>
             <td>$${fmt(entryP)}<br><small class="entry-time">${entryTimeStr}</small></td>
+            <td>$${fmt(curP)}</td>
+            <td>${entryMode}</td>
             <td class="inv-cell" title="${p.trade_type === 'futures' ? 'Notional invertido' : 'Costo total'}">$${fmt(invVal)} USDT${invMargin}</td>
             <td class="sl-tp-cell">${fmtSlTpCell(p)}</td>
             <td class="sl-tp-badges">${fmtSlTpBadges(p)}</td>
             <td>${progressHtml}</td>
-            <td class="${pnlClass(p.unrealized_pnl)}">${fmt(p.unrealized_pnl)} USDT</td>
+            <td class="${pnlClass(p.unrealized_pnl + (p.realized_pnl || 0))}">
+                <div class="${pnlClass(p.unrealized_pnl)}">No Real: ${fmt(p.unrealized_pnl)} USDT</div>
+                ${parseFloat(p.realized_pnl || 0) !== 0 ? `<div class="${pnlClass(p.realized_pnl)}">Real: ${fmt(p.realized_pnl)} USDT</div>` : ''}
+                <div class="${pnlClass((p.unrealized_pnl || 0) + (p.realized_pnl || 0))}"><strong>Total: ${fmt((p.unrealized_pnl || 0) + (p.realized_pnl || 0))} USDT</strong></div>
+            </td>
             <td class="${ageCls}">${ageStr}</td>
         </tr>`);
 
@@ -1199,7 +1220,7 @@ function renderOpenPositions(d) {
                 <span style="color:#888;font-weight:600">Esc${_idx}</span>
                 <small style="color:#555;font-style:italic">&nbsp;(entrada anterior — no disponible tras reinicio)</small>
             </td>
-            <td colspan="7" style="color:#555;font-size:11px;font-style:italic">Datos no recuperables: posición promediada por Binance al sincronizar</td>
+            <td colspan="9" style="color:#555;font-size:11px;font-style:italic">Datos no recuperables: posición promediada por Binance al sincronizar</td>
         </tr>`);
                 }
             }
@@ -1220,6 +1241,8 @@ function renderOpenPositions(d) {
             </td>
             <td><small class="entry-time">${escEntryFmt}</small></td>
             <td></td>
+            <td></td>
+            <td></td>
             <td colspan="3" style="color:#888;font-size:12px">
                 PnL entrada: <span class="${escPnl>=0?'positive':'negative'}" style="font-weight:600">${escPnl>=0?'+':''}${fmt(escPnl)} USDT (${escPct>=0?'+':''}${fmt(escPct)}%)</span>
             </td>
@@ -1237,11 +1260,13 @@ function renderOpenPositions(d) {
                 <tr>
                     <th>Símbolo</th>
                     <th>Entrada</th>
+                    <th>Precio actual</th>
+                    <th>Modo al abrir</th>
                     <th>Invertido</th>
                     <th>SL / TP</th>
                     <th>Estado SL/TP</th>
                     <th>Progreso</th>
-                    <th>PnL No Real.</th>
+                    <th>PnL (No Real / Real / Total)</th>
                     <th>Edad</th>
                 </tr>
             </thead>
@@ -1258,6 +1283,14 @@ function renderOpenPositions(d) {
             PnL No Realizado:
             <span class="${pnlClass(totalUnreal)}">
                 <strong>${totalUnreal >= 0 ? '+' : ''}${fmt(totalUnreal)} USDT</strong>
+            </span>
+            &nbsp;|&nbsp; Realizado:
+            <span class="${pnlClass(totalRealized)}">
+                <strong>${totalRealized >= 0 ? '+' : ''}${fmt(totalRealized)} USDT</strong>
+            </span>
+            &nbsp;|&nbsp; Total:
+            <span class="${pnlClass(totalPnl)}">
+                <strong>${totalPnl >= 0 ? '+' : ''}${fmt(totalPnl)} USDT</strong>
             </span>
             ${predPositions.length > 0 ? `&nbsp;|&nbsp;Precisión Pred. Promedio: <strong>${(avgAccuracy * 100).toFixed(0)}%</strong>` : ''}
             &nbsp;|&nbsp;SL Global:
@@ -1343,6 +1376,7 @@ function renderClosedPositions(d) {
                 <tr>
                     <th>Símbolo</th>
                     <th>Entrada → Salida</th>
+                    <th>Modo al abrir</th>
                     <th>Invertido</th>
                     <th>Resultado</th>
                     <th>Razón</th>
@@ -1362,6 +1396,7 @@ function renderClosedPositions(d) {
                     ].filter(Boolean).join(' ');
                     const typeBadge = tradeTypeBadge(p.trade_type);
                     const contextBadge = fmtContextBadge(p);
+                    const entryMode = p.entry_regime_mode || p.metadata?.regime_at_entry || '—';
                     const exitTimeFmt = fmtDateLocal(p.exit_time);
 
                     // VIS-3b: SL/TP lifecycle badges for closed
@@ -1398,6 +1433,7 @@ function renderClosedPositions(d) {
                     <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'closed')" style="cursor:pointer">
                         <td>${typeBadge} ${catIcon(p.category || 'MIDCAP_ALT')} <strong>${p.symbol}</strong>${contextBadge}</td>
                         <td>$${fmt(p.entry_price)} → $${fmt(p.exit_price)}</td>
+                        <td>${entryMode}</td>
                         <td class="inv-cell" title="${p.trade_type === 'futures' ? 'Notional invertido' : 'Costo total'}">$${fmt(p.invested_usdt || 0)} USDT</td>
                         <td class="${pnlClass(actualPnl)}">${actualPnl >= 0 ? '+' : ''}${fmt(actualPnl)} USDT<br><small>${fmt(p.pnl_percentage)}%</small></td>
                         <td>${fmtCloseReason(p.close_reason)}</td>
@@ -1624,7 +1660,7 @@ function showPositionDetailModal(symbol, positionId, status) {
         ? (data.open_positions?.positions || [])
         : (data.closed_positions?.positions || []);
     
-    const position = positions.find(p => p.symbol === symbol && (p.position_id === positionId || !positionId));
+    const position = positions.find(p => p.symbol === symbol && (p.position_id === positionId || !positionId || positionId === 'undefined'));
     if (!position) return;
     
     const pred = position.pnl_prediction || {};
@@ -4341,7 +4377,7 @@ async function updateDashboard() {
     const data = await fetchDashboardData();
     if (!data) return;
 
-    renderSystemStatus(data.system_status);
+    renderSystemStatus(data.system_status, data.unified_status);
     renderExecutiveSummary(data);
     renderKPIRow(data);
     renderSignals(data.signals);
@@ -5614,6 +5650,7 @@ async function controlAction(path) {
         '/control/pause': 'Pausar nuevas entradas',
         '/control/stop': 'Detener ciclo',
         '/control/start': 'Reanudar ciclo',
+        '/control/resume-all': 'Reanudar todo',
     };
     const actionLabel = actionMap[path] || path;
     const confirmResult = await askSensitiveConfirmation({
@@ -6084,7 +6121,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const runSmartBacktestBtn = document.getElementById('runSmartBacktestBtn');
     if (controlPauseBtn) controlPauseBtn.addEventListener('click', () => controlAction('/control/pause'));
     if (controlStopBtn) controlStopBtn.addEventListener('click', () => controlAction('/control/stop'));
-    if (controlStartBtn) controlStartBtn.addEventListener('click', () => controlAction('/control/start'));
+    if (controlStartBtn) controlStartBtn.addEventListener('click', () => controlAction('/control/resume-all'));
     if (controlAuditClearBtn) controlAuditClearBtn.addEventListener('click', () => clearControlAuditLog());
     if (controlAuditExportBtn) controlAuditExportBtn.addEventListener('click', () => exportControlAuditLog());
     if (runSmartBacktestBtn) runSmartBacktestBtn.addEventListener('click', () => runSmartBacktest());

@@ -20,6 +20,8 @@ Son contexto arquitectónico y guía de diagnóstico, no valores hardcodeados.
 
 Si una propuesta no responde estos 6 puntos, no está lista para rollout.
 
+**🔴 Regla dura — cierres parciales:** todo cierre parcial (SSO, PRS, UG, PredExit) debe insertar un registro en `trades_closed` con `metadata.partial_close=True` y reducir `quantity` en `trades_open`. Nunca se limita a mutar `quantity` o metadata sin fila de cierre. El dashboard debe mostrar PnL realizado + no realizado + total por posición abierta.
+
 ---
 
 ## 1. ARQUITECTURA GENERAL
@@ -105,7 +107,7 @@ unified_governance_supervisor.py → UG: árbitro final — consolida advisories
 - La escalación automática de parcial a cierre total está desactivada por defecto: un advisory SSO partial + PRS full no colapsa a 100% sin confirmación explícita de UG
 
 **Salida:**
-- Parcial: UPDATE `trades_open` (reduce qty, persiste `_smart_meta` actualizado)
+- Parcial: INSERT `trades_closed` (PnL neto proporcional, comisiones, motivo, trigger, `metadata.partial_close=True`) + UPDATE `trades_open` (reduce qty, persiste `_smart_meta` actualizado)
 - Total: DELETE `trades_open` + INSERT `trades_closed` (PnL neto, comisiones, motivo, trigger)
 - Siempre: INSERT `trades_audit` con event, detail, pnl_pct, pnl_usdt, regime, profile
 - Cierre manual desde dashboard: modal de posición abierta → preview (`GET /positions/{symbol}/close/preview`) → confirmación → `POST /positions/{symbol}/close`. Se audita como `manual_close` y se excluye de learning.
@@ -206,8 +208,9 @@ Logs: `[BuyTop]`, `[Screener]`, `[Kelly]`, `[QUBO]`.
 3. `kelly_multiplier` RANGE_SCALP en `market_regime.py` línea 253 — debe ser 0.95 (no 0.70). Con caps de liquidez (90%) y concentration multiplier activos, ×0.70 aplasta el sizing innecesariamente.
 ⚠️ **Estos 3 parámetros fueron calibrados y validados en producción (jul 14 2026, 5/5 cierres positivos). No modificar sin análisis de impacto.**
 
-**"SPOT_BULL rechaza breakouts fuertes" (extensión s79)**
+**"SPOT_BULL rechaza breakouts fuertes / rechaza por volúmen" (extensión s79)**
 → Si el modo SPOT_BULL sigue rechazando señales con RSI y volumen elevados, revisar la vía de breakout controlado en `_check_entry_quality()` (`run_trades.py`) y sus parámetros gobernables: `entry_quality_breakout_min_vol_spot_bull`, `entry_quality_breakout_rsi_max_spot_bull`, `entry_quality_breakout_min_strength_spot_bull`. La regla base sigue siendo pullback-first; la extensión solo evita rechazos automáticos de breakouts con convicción suficiente.
+→ Para rechazos por volumen bajo (`SPOT_BULL_VOL`), los parámetros por perfil son: `entry_quality_vol_spike_min_spot_bull` (default 0.85) y `entry_quality_vol_spike_floor_spot_bull` (default 0.70). Perfil A actual: `min=0.50`, `floor=0.45` → umbral efectivo ~0.46. Perfil B: `min=0.50`, `floor=0.45` → umbral efectivo 0.50.
 
 **Capital subinvertido (ej. $1k de $5k en posiciones):** verificar `screener_decisions` por rejections con razón `LIM_CATEGORIA` — indica `category_max_positions_enabled=True` y bucket lleno. Solución: `PATCH /config/kelly` con `{"category_max_positions_enabled": false, "max_positions_range_scalp": 6}`. El QUBO sigue minimizando correlación Pearson como diversificación real — no se pierde protección ante correlación.
 
@@ -253,6 +256,8 @@ Fix: `auto_reconcile_spot()` / `auto_reconcile_futures()` o endpoint `/reconcile
 - **REPLACE en lugar de MERGE en DB**: cualquier operación que sobreescriba el JSON completo de `kelly_config_override` o `regime_profiles` destruye fixes manuales previos. Siempre hacer `json_merge_patch` o actualizar solo los campos afectados. **Desde S75b `/config/apply` también hace MERGE** — patrón correcto implementado en los 3 endpoints que escriben `kelly_config_override`: `PATCH /config/kelly`, `_apply_regime_params` y `/config/apply`.
 
 - **Campo per-régimen sin equivalente global**: agregar `sso_stagnant_min_hours_range_scalp` sin agregar el fallback global correspondiente → `KeyError` o comportamiento indefinido en otros modos.
+
+- **Nuevo parámetro hot-config sin campo en `config.py`**: `run_trades._apply_regime_params()` usa `setattr(settings, ...)`. Si `Settings` (pydantic) tiene `extra='forbid'`, el `setattr` lanza `"Settings" object has no field ...`, el campo queda sin aplicar y el fallback hardcodeado en `_check_entry_quality` sigue activo. Solución: agregar el campo con `Field(default=...)` en `config.py` y asegurar que `_PARAM_DEFAULTS`/`_scalar_map` lo reflejen.
 
 - **Persistencia antes de confirmación de fill**: INSERT en `trades_open` antes de `_verify_entry_filled()` → posición zombie si Binance no ejecutó la orden (`positionAmt == 0`).
 

@@ -28,6 +28,7 @@ from orchestrator import SystemState
 from init_components import get_components
 from audit_tools import check_signal_audit_consistency
 import error_collector as ec
+from super_mimic.api import router as super_mimic_router
 from binance_truth_guard import (
     get_truth_status,
     get_truth_status_spot,
@@ -40,6 +41,7 @@ from binance_truth_guard import (
 
 settings = get_settings()
 app = FastAPI(title="Binance Trading Agent")
+app.include_router(super_mimic_router)
 
 # Add CORS middleware — restrict to localhost only
 _CORS_ORIGINS = [
@@ -435,7 +437,7 @@ async def get_spot_reconciliation(_auth: None = Depends(_require_api_key)) -> Di
         comp = get_components()
         if not comp.position_manager or not comp.binance_client:
             raise HTTPException(status_code=503, detail="Components not initialized")
-        parity = evaluate_spot_parity(comp.position_manager, comp.binance_client)
+        parity = evaluate_spot_parity(comp.position_manager, comp.binance_client, settings=settings)
         persisted = get_truth_status_spot(comp.db_client)
         return {
             "ok": parity.get("ok", True),
@@ -458,7 +460,7 @@ async def run_spot_reconciliation(dry_run: bool = True, _auth: None = Depends(_r
         if not comp.position_manager or not comp.binance_client:
             raise HTTPException(status_code=503, detail="Components not initialized")
         report = auto_reconcile_spot(
-            comp.position_manager, comp.binance_client, comp.db_client, dry_run=dry_run
+            comp.position_manager, comp.binance_client, comp.db_client, settings=settings, dry_run=dry_run
         )
         return {
             "status": "ok",
@@ -530,7 +532,7 @@ async def get_position_reconciliation_health(_auth: None = Depends(_require_api_
         comp = get_components()
         if not comp.position_manager or not comp.binance_client:
             raise HTTPException(status_code=503, detail="Components not initialized")
-        spot_parity = evaluate_spot_parity(comp.position_manager, comp.binance_client)
+        spot_parity = evaluate_spot_parity(comp.position_manager, comp.binance_client, settings=settings)
         spot_status = get_truth_status_spot(comp.db_client)
         futures_parity = {}
         futures_status = {}
@@ -706,6 +708,86 @@ async def start_system(payload: ControlRequest, _auth: None = Depends(_require_a
     return orchestrator.get_state()
 
 
+@app.post("/control/resume-all")
+async def resume_all(payload: ControlRequest, _auth: None = Depends(_require_api_key)) -> Dict:
+    """Resume full operation: RUNNING state, entries unpaused, operator alerts cleared."""
+    if not db_client:
+        raise HTTPException(status_code=503, detail="DB not available")
+
+    _before_state = orchestrator.get_state()
+    _before_pause = _get_pause_new_entries_status()
+    _before_alerts = _list_active_operator_alerts()
+    _resume_reason = (payload.reason or "manual_resume_all").strip() or "manual_resume_all"
+
+    _orchestrator_started = False
+    if not orchestrator.is_running():
+        _orchestrator_started = bool(orchestrator.start(changed_by="api", reason=_resume_reason))
+
+    db_client.execute_update(
+        "DELETE FROM trading_runtime_state WHERE key=%s",
+        ('pause_new_entries',),
+    )
+
+    _cleared_alert_types = [str(a.get("alert_type") or "") for a in _before_alerts if a.get("alert_type")]
+    if _cleared_alert_types:
+        db_client.execute_update(
+            "DELETE FROM trading_runtime_state WHERE key LIKE %s",
+            ('operator_alert_%',),
+        )
+
+    _after_state = orchestrator.get_state()
+    _after_pause = _get_pause_new_entries_status()
+    _after_alerts = _list_active_operator_alerts()
+    _unified = _build_unified_system_status(_after_state, _after_pause, _after_alerts)
+
+    try:
+        _audit_payload = {
+            "reason": _resume_reason,
+            "before": {
+                "system_state": _before_state,
+                "pause_new_entries": _before_pause,
+                "operator_alerts_count": len(_before_alerts),
+            },
+            "after": {
+                "system_state": _after_state,
+                "pause_new_entries": _after_pause,
+                "operator_alerts_count": len(_after_alerts),
+            },
+            "actions": {
+                "orchestrator_started": _orchestrator_started,
+                "pause_cleared": bool(_before_pause.get("active")),
+                "alerts_cleared": _cleared_alert_types,
+            },
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+            ('__config__', 'system', 'resume_all', json.dumps(_audit_payload), False),
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "before": {
+            "system_state": _before_state,
+            "pause_new_entries": _before_pause,
+            "operator_alerts_count": len(_before_alerts),
+        },
+        "after": {
+            "system_state": _after_state,
+            "pause_new_entries": _after_pause,
+            "operator_alerts_count": len(_after_alerts),
+        },
+        "actions": {
+            "orchestrator_started": _orchestrator_started,
+            "pause_cleared": bool(_before_pause.get("active")),
+            "alerts_cleared": _cleared_alert_types,
+        },
+        "unified_status": _unified,
+    }
+
+
 @app.post("/control/pause-new-entries")
 async def pause_new_entries(payload: PauseEntriesRequest, _auth: None = Depends(_require_api_key)) -> Dict:
     """Pause only new entries via runtime-state key with optional TTL auto-expiry."""
@@ -783,7 +865,19 @@ async def resume_new_entries(_auth: None = Depends(_require_api_key)) -> Dict:
 @app.get("/control/status")
 async def get_control_status() -> Dict:
     """Get current system control status."""
-    return orchestrator.get_state()
+    _state = orchestrator.get_state()
+    _pause = _get_pause_new_entries_status()
+    _alerts = _list_active_operator_alerts()
+    _unified = _build_unified_system_status(_state, _pause, _alerts)
+    return {
+        **_state,
+        "pause_new_entries": _pause,
+        "operator_alerts_active": {
+            "count": len(_alerts),
+            "alerts": _alerts,
+        },
+        "unified_status": _unified,
+    }
 
 
 @app.get("/system/operator-alerts")
@@ -1226,6 +1320,77 @@ async def close_all_positions(_auth: None = Depends(_require_api_key)) -> Dict:
     return {"closed": results, "count": len(results)}
 
 
+@app.get("/positions/{symbol}/close/preview")
+async def preview_position_close(symbol: str, trade_type: str = "auto", _auth: None = Depends(_require_api_key)) -> Dict:
+    """Preview what would happen when manually closing a position. Does NOT mutate state."""
+    import manual_position_closer as mpc
+    comp = get_components()
+    sym = symbol.upper()
+    tt = trade_type.lower()
+    if tt == "auto":
+        db_rows = db_client.execute_query(
+            "SELECT metadata FROM trades_open WHERE symbol=%s LIMIT 5", (sym,)
+        ) if db_client else []
+        tt = "spot"
+        for row in db_rows:
+            meta = row.get("metadata") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            if meta.get("trade_type") == "futures":
+                tt = "futures"
+                break
+    if tt == "futures":
+        return mpc.preview_futures(sym, comp)
+    return mpc.preview_spot(sym, comp)
+
+
+@app.post("/positions/{symbol}/close")
+async def close_position_manual(
+    symbol: str,
+    trade_type: str = "auto",
+    side: str = "SHORT",
+    ghost: bool = False,
+    _auth: None = Depends(_require_api_key),
+) -> Dict:
+    """
+    Manually close a single open position.
+    - SPOT: reads real Binance balance, auto top-up if below minNotional, sells and closes DB.
+    - FUTURES: cancels SL/TP algos, closes position, verifies amt=0, closes DB.
+    - ghost=true: close DB record only (no real Binance balance to sell).
+    Marked as manual_close + exclude_from_analysis in metadata.
+    """
+    import manual_position_closer as mpc
+    comp = get_components()
+    sym = symbol.upper()
+    tt = trade_type.lower()
+    if tt == "auto":
+        db_rows = db_client.execute_query(
+            "SELECT metadata FROM trades_open WHERE symbol=%s LIMIT 5", (sym,)
+        ) if db_client else []
+        tt = "spot"
+        for row in db_rows:
+            meta = row.get("metadata") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            if meta.get("trade_type") == "futures":
+                tt = "futures"
+                break
+    try:
+        if ghost:
+            return mpc.close_ghost_db(sym, comp, source="dashboard")
+        if tt == "futures":
+            return mpc.execute_futures(sym, side.upper(), comp, source="dashboard")
+        return mpc.execute_spot(sym, comp, source="dashboard")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/positions/closed")
 async def get_closed_positions(limit: int = 20) -> Dict:
     """Get last N closed positions."""
@@ -1656,6 +1821,90 @@ def _get_pause_new_entries_status() -> Dict[str, Any]:
         return _status
 
 
+def _list_active_operator_alerts() -> List[Dict[str, Any]]:
+    """Return active operator alerts stored in runtime_state."""
+    if not db_client:
+        return []
+    _alerts: List[Dict[str, Any]] = []
+    try:
+        _rows = db_client.execute_query(
+            "SELECT key, value, updated_at FROM trading_runtime_state "
+            "WHERE key LIKE %s ORDER BY updated_at DESC",
+            ('operator_alert_%',),
+        )
+        for _row in (_rows or []):
+            try:
+                _payload = _decode_runtime_state_value(_row.get('value') or {})
+                if not isinstance(_payload, dict):
+                    continue
+                if bool(_payload.get('acknowledged', False)):
+                    continue
+                _alerts.append({
+                    "key": _row.get('key'),
+                    "alert_type": _payload.get('alert_type'),
+                    "message": _payload.get('message'),
+                    "ts": _payload.get('ts'),
+                    "updated_at": _row.get('updated_at').isoformat() if _row.get('updated_at') else None,
+                })
+            except Exception:
+                continue
+    except Exception:
+        return []
+    return _alerts
+
+
+def _build_unified_system_status(
+    system_state: Optional[Dict[str, Any]] = None,
+    pause_state: Optional[Dict[str, Any]] = None,
+    alerts: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Build a single operational status used by dashboard and control panel."""
+    _base = str((system_state or {}).get("state") or "UNKNOWN").strip().upper() or "UNKNOWN"
+    _pause = pause_state or {}
+    _entries_paused = bool(_pause.get("active"))
+    _alerts = alerts or []
+
+    if _base == "STOPPED":
+        _effective = "STOPPED"
+        _label = "Stopped"
+        _dot = "stopped"
+        _severity = "critical"
+    elif _base == "PAUSED":
+        _effective = "PAUSED"
+        _label = "Paused"
+        _dot = "paused"
+        _severity = "warning"
+    elif _base == "RUNNING" and _entries_paused:
+        _effective = "RUNNING_ENTRIES_PAUSED"
+        _label = "Running (Entradas en pausa)"
+        _dot = "paused"
+        _severity = "warning"
+    elif _base == "RUNNING":
+        _effective = "RUNNING_FULL"
+        _label = "Running"
+        _dot = "running"
+        _severity = "ok"
+    else:
+        _effective = "UNKNOWN"
+        _label = "Unknown"
+        _dot = "stopped"
+        _severity = "critical"
+
+    return {
+        "base_state": _base,
+        "entries_paused": _entries_paused,
+        "effective_state": _effective,
+        "ui_label": _label,
+        "dot_state": _dot,
+        "severity": _severity,
+        "can_open_new_entries": _base == "RUNNING" and not _entries_paused,
+        "has_operator_alerts": len(_alerts) > 0,
+        "operator_alerts_count": len(_alerts),
+        "pause_reason": _pause.get("reason"),
+        "pause_remaining_minutes": _pause.get("remaining_minutes"),
+    }
+
+
 def _get_effective_runtime_selection(summary_mode: Optional[str] = None) -> Dict[str, Any]:
     """Return effective mode/profile used by the live engine whenever possible."""
     _fallback_mode = str(summary_mode or "SPOT_BULL").strip().upper() or "SPOT_BULL"
@@ -1693,7 +1942,7 @@ def _get_effective_runtime_selection(summary_mode: Optional[str] = None) -> Dict
             )
             if _pr_rows:
                 _pr_row = _pr_rows[0]
-        if _pr_row and not _profile:
+        if _pr_row:
             _pv = _decode_runtime_state_value(_pr_row.get('value'))
             if isinstance(_pv, dict):
                 _profile = str(_pv.get('profile') or _pv.get('label') or '').strip().upper()
@@ -2196,6 +2445,16 @@ async def get_dashboard_summary() -> Dict:
     except Exception as e:
         result["pause_new_entries"] = {"active": False, "error": str(e)}
 
+    # Unified operational status (single source for UI chips and control panel)
+    try:
+        result["unified_status"] = _build_unified_system_status(
+            result.get("system_status", {}),
+            result.get("pause_new_entries", {}),
+            _list_active_operator_alerts(),
+        )
+    except Exception as e:
+        result["unified_status"] = {"effective_state": "UNKNOWN", "ui_label": "Unknown", "error": str(e)}
+
     # Binance truth parity status (runtime vs exchange)
     try:
         result["binance_truth"] = get_truth_status(comp.db_client)
@@ -2623,6 +2882,19 @@ async def get_dashboard_summary() -> Dict:
             _sp_wap       = round(_sp_wap, 8)
             _sp_total_cost = round(_sp_total_cost, 4)
             _sp_esc_n = len(pos_list)
+            # Realized PnL from partial closes for this symbol (e.g. SSO scale-outs)
+            _sp_realized_pnl = 0.0
+            try:
+                if db_client:
+                    _sp_real_rows = db_client.execute_query(
+                        "SELECT COALESCE(SUM(pnl), 0) AS realized FROM trades_closed "
+                        "WHERE symbol=%s AND metadata->>'partial_close' = 'true'",
+                        (symbol,),
+                    )
+                    if _sp_real_rows:
+                        _sp_realized_pnl = float(_sp_real_rows[0].get('realized', 0) or 0)
+            except Exception:
+                _sp_realized_pnl = 0.0
 
             # Backfill prediction if still None
             if _sp_pred is None:
@@ -2663,6 +2935,10 @@ async def get_dashboard_summary() -> Dict:
                 "current_value_mxn": round(_sp_cp * _sp_total_qty * _usd_mxn, 2),
                 "unrealized_pnl": _sp_total_pnl,
                 "unrealized_pnl_mxn": round(_sp_total_pnl * _usd_mxn, 2),
+                "realized_pnl": round(_sp_realized_pnl, 4),
+                "realized_pnl_mxn": round(_sp_realized_pnl * _usd_mxn, 2),
+                "total_pnl": round(_sp_total_pnl + _sp_realized_pnl, 4),
+                "total_pnl_mxn": round((_sp_total_pnl + _sp_realized_pnl) * _usd_mxn, 2),
                 "entry_time": _sp_first_entry_time,
                 "first_entry_time": _sp_first_entry_time,
                 "hours_held": round(_sp_max_age_h, 1),
@@ -2771,7 +3047,9 @@ async def get_dashboard_summary() -> Dict:
                         _fp_invested = round(fp["entry_price"] * fp["qty"], 2)
                         _fp_pred, _ = _pnl_svc.predict_for_symbol(
                             symbol=fp["symbol"], client=binance_client, settings=settings,
-                            position_size_usdt=_fp_invested or 100.0, trade_type='futures'
+                            position_size_usdt=_fp_invested or 100.0,
+                            trade_type='futures',
+                            trade_side=('SHORT' if str(fp.get('side', '')).upper() == 'SHORT' else 'LONG'),
                         )
                         if _fp_pred and db_client:
                             import json as _json
@@ -2879,6 +3157,8 @@ async def get_dashboard_summary() -> Dict:
         _spot_count = sum(1 for p in open_list if p.get('trade_type') != 'futures')
         _fut_count  = sum(1 for p in open_list if p.get('trade_type') == 'futures')
         _open_unrealized_total = round(sum(float(p.get('unrealized_pnl', 0.0) or 0.0) for p in open_list), 4)
+        _open_realized_total = round(sum(float(p.get('realized_pnl', 0.0) or 0.0) for p in open_list), 4)
+        _open_total_pnl = round(_open_unrealized_total + _open_realized_total, 4)
         _open_context_counts = {
             "legacy": sum(1 for p in open_list if p.get('config_context_state') == 'legacy'),
             "partial": sum(1 for p in open_list if p.get('config_context_state') == 'partial'),
@@ -2891,6 +3171,8 @@ async def get_dashboard_summary() -> Dict:
             "spot_count": _spot_count,
             "futures_count": _fut_count,
             "total_unrealized_pnl": _open_unrealized_total,
+            "total_realized_pnl": _open_realized_total,
+            "total_pnl": _open_total_pnl,
             "legacy_count": _open_context_counts["legacy"],
             "partial_context_count": _open_context_counts["partial"],
             "current_context_count": _open_context_counts["current"],
@@ -6445,7 +6727,7 @@ async def get_health_status() -> Dict:
                 _open_longs  = 0
             checks["futures_api"] = {
                 "status": "ok", "latency_ms": _fapi_lat,
-                "open_shorts": _open_shorts, "open_longs": _open_longs, "leverage_max": 2,
+                "open_shorts": _open_shorts, "open_longs": _open_longs, "leverage_max": getattr(_fc, '_active_leverage', 10),
             }
         else:
             checks["futures_api"] = {"status": "disabled"}
@@ -6488,7 +6770,9 @@ async def get_health_status() -> Dict:
         _bal = comp.portfolio_manager.get_unified_balance(futures_client=_fc_health)
         _total = float(_bal.get("total_usdt", 0))
         _liquid = float(_bal.get("usdt_available", 0)) + float(_bal.get("futures_available", 0))
-        _invested = _total - _liquid
+        # BNB commission reserve is cash-equivalent, not invested trading capital
+        _spot_bnb_value = float(_bal.get("spot_bnb_usdt", 0.0))
+        _invested = max(0.0, _total - _liquid - _spot_bnb_value)
         _exp_pct = _invested / _total if _total > 0 else 0.0
         _max_exp = getattr(settings, 'max_total_exposure_pct', 0.75)
         _exp_status = "ok" if _exp_pct < _max_exp * 0.85 else ("warning" if _exp_pct < _max_exp else "cap_reached")
@@ -6671,19 +6955,19 @@ async def get_health_full_check() -> Dict:
         _check("smart_tp_disabled_regimes_is_list",
                lambda: assert_(isinstance(cfg.smart_tp_extend_disabled_regimes, list),
                                "must be list")),
-        _check("kelly_max_pct_liquid_lt_60pct",
-               lambda: assert_(cfg.kelly_max_pct_liquid < 0.60,
-                               f"kelly_max_pct_liquid={cfg.kelly_max_pct_liquid} too high"),
+        _check("kelly_max_pct_liquid_lte_95pct",
+               lambda: assert_(cfg.kelly_max_pct_liquid <= 0.95,
+                               f"kelly_max_pct_liquid={cfg.kelly_max_pct_liquid} exceeds 0.95 cap"),
                warn_only=True),
         _check("futures_leverage_matches_backtest",
                lambda: assert_(cfg.futures_leverage == 10,
                                f"futures_leverage={cfg.futures_leverage} != 10 (backtest run_0812)")),
-        _check("futures_kelly_max_pct_liquid_matches_backtest",
-               lambda: assert_(cfg.futures_kelly_max_pct_liquid == 0.621,
-                               f"futures_kelly_max_pct_liquid={cfg.futures_kelly_max_pct_liquid} != 0.621")),
-        _check("max_positions_futures_short_matches_backtest",
-               lambda: assert_(cfg.max_positions_futures_short == 12,
-                               f"max_positions_futures_short={cfg.max_positions_futures_short} != 12")),
+        _check("futures_kelly_max_pct_liquid_matches_deployed_config",
+               lambda: assert_(cfg.futures_kelly_max_pct_liquid == 0.85,
+                               f"futures_kelly_max_pct_liquid={cfg.futures_kelly_max_pct_liquid} != 0.85")),
+        _check("max_positions_futures_short_matches_deployed_config",
+               lambda: assert_(cfg.max_positions_futures_short == 5,
+                               f"max_positions_futures_short={cfg.max_positions_futures_short} != 5")),
         _check("no_module_level_leverage_override",
                lambda: assert_(cfg.futures_leverage <= 10,
                                f"futures_leverage={cfg.futures_leverage} exceeds module cap 10")),
@@ -7197,6 +7481,7 @@ _KELLY_EDITABLE_FIELDS = {
     "hybrid_optimizer_enabled", "auto_apply_backtest", "backtest_safe_only",
     # s72: new per-regime fields — DB-governed, expected to differ from code defaults
     "range_scalp_max_rsi", "range_scalp_max_bb_position",
+    "range_scalp_sl_pct", "range_scalp_tp_pct",
     "entry_quality_vol_spike_min_range_scalp",
     "min_hold_for_prediction_exit_futures_short",
     "sso_target_contribution_pct_range_scalp",  # s73 C2: DB-governed per profile
@@ -7740,6 +8025,119 @@ async def post_activate_regime_profile(body: Dict, _auth=Depends(_require_api_ke
         return {"ok": False, "error": str(e)}
 
 
+def _apply_kelly_config_patch(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Core logic reused by PATCH /config/kelly and Super MIMIC deploy.
+
+    Applies only whitelisted fields, updates in-memory settings, persists to
+    trading_runtime_state and writes a trades_audit entry.
+    """
+    from init_components import get_components
+    _comp = get_components()
+    _s = _comp.settings
+
+    applied = {}
+    rejected = {}
+
+    _ALLOWED_CAT_FIELDS = {"min_prob", "min_pnl", "min_volspike",
+                           "stop_loss_pct", "take_profit_pct",
+                           "trailing_activation_pct", "trailing_distance_pct",
+                           "tp_extension_pct"}
+
+    def _apply_category_thresholds(attr_name: str, cat_patch: Dict):
+        """Partial merge of category thresholds for SPOT or FUTURES."""
+        if not isinstance(cat_patch, dict):
+            rejected[attr_name] = "value must be a dict"
+            return
+        _current_ct = dict(getattr(_s, attr_name, {}))
+        _merged = {}
+        for cat, fields in cat_patch.items():
+            if not isinstance(fields, dict):
+                rejected[f"{attr_name}.{cat}"] = "value must be a dict"
+                continue
+            _cat_old = dict(_current_ct.get(cat, {}))
+            for cf, cv in fields.items():
+                if cf not in _ALLOWED_CAT_FIELDS:
+                    rejected[f"{attr_name}.{cat}.{cf}"] = "field not allowed"
+                    continue
+                _cat_old[cf] = float(cv)
+                _merged[f"{cat}.{cf}"] = {"old": _current_ct.get(cat, {}).get(cf), "new": float(cv)}
+            _current_ct[cat] = _cat_old
+        if _merged:
+            setattr(_s, attr_name, _current_ct)
+            applied[attr_name] = {"merged": _merged}
+
+    # Special handlers: category thresholds for SPOT and FUTURES
+    if "category_thresholds" in body:
+        _apply_category_thresholds("category_thresholds", body.pop("category_thresholds"))
+    if "futures_category_thresholds" in body:
+        _apply_category_thresholds("futures_category_thresholds", body.pop("futures_category_thresholds"))
+
+    for field, value in body.items():
+        if field not in _KELLY_EDITABLE_FIELDS:
+            rejected[field] = "not in whitelist"
+            continue
+        try:
+            _current = getattr(_s, field, None)
+            setattr(_s, field, type(_current)(value) if _current is not None else value)
+            applied[field] = {"old": _current, "new": value}
+        except Exception as _fe:
+            rejected[field] = str(_fe)
+
+    if not applied:
+        return {"ok": False, "error": "No valid fields applied", "rejected": rejected}
+
+    # Persist to trading_runtime_state — MERGE into existing override so all values survive restart
+    import json as _json
+    _existing_ov = {}
+    try:
+        _ex_rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
+        )
+        if _ex_rows and _ex_rows[0].get('value'):
+            _ex_raw = _ex_rows[0]['value']
+            if isinstance(_ex_raw, str):
+                _ex_raw = _json.loads(_ex_raw)
+            if isinstance(_ex_raw, dict):
+                _existing_ov = _ex_raw
+    except Exception:
+        pass
+    _existing_ov.update(applied)
+    _payload = _json.dumps(_existing_ov)
+    db_client.execute_update(
+        "INSERT INTO trading_runtime_state (key, value, updated_at) "
+        "VALUES ('kelly_config_override', %s, NOW()) "
+        "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+        (_payload, _payload)
+    )
+
+    # Persist category_thresholds separately so it can be reloaded on restart
+    for _ct_key in ("category_thresholds", "futures_category_thresholds"):
+        if _ct_key in applied:
+            _ct_payload = _json.dumps(getattr(_s, _ct_key, {}))
+            _state_key = f"{_ct_key}_override"
+            db_client.execute_update(
+                "INSERT INTO trading_runtime_state (key, value, updated_at) "
+                "VALUES (%s, %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                (_state_key, _ct_payload, _ct_payload)
+            )
+
+    # Trazabilidad: trades_audit entry
+    db_client.execute_update(
+        "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+        "VALUES ('__config__', 'system', 'kelly_config_change', %s, false)",
+        (_json.dumps({"applied": applied, "rejected": rejected}),)
+    )
+
+    return {
+        "ok": True,
+        "applied": applied,
+        "rejected": rejected,
+        "message": f"{len(applied)} campos actualizados — activos inmediatamente (sin restart)",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @app.patch("/config/kelly")
 async def patch_kelly_config(body: Dict, _auth=Depends(_require_api_key)) -> Dict:
     """
@@ -7748,111 +8146,7 @@ async def patch_kelly_config(body: Dict, _auth=Depends(_require_api_key)) -> Dic
     and recorded in trades_audit for 100% traceability.
     """
     try:
-        from init_components import get_components
-        _comp = get_components()
-        _s = _comp.settings
-
-        applied = {}
-        rejected = {}
-
-        _ALLOWED_CAT_FIELDS = {"min_prob", "min_pnl", "min_volspike",
-                               "stop_loss_pct", "take_profit_pct",
-                               "trailing_activation_pct", "trailing_distance_pct",
-                               "tp_extension_pct"}
-
-        def _apply_category_thresholds(attr_name: str, cat_patch: Dict):
-            """Partial merge of category thresholds for SPOT or FUTURES."""
-            if not isinstance(cat_patch, dict):
-                rejected[attr_name] = "value must be a dict"
-                return
-            _current_ct = dict(getattr(_s, attr_name, {}))
-            _merged = {}
-            for cat, fields in cat_patch.items():
-                if not isinstance(fields, dict):
-                    rejected[f"{attr_name}.{cat}"] = "value must be a dict"
-                    continue
-                _cat_old = dict(_current_ct.get(cat, {}))
-                for cf, cv in fields.items():
-                    if cf not in _ALLOWED_CAT_FIELDS:
-                        rejected[f"{attr_name}.{cat}.{cf}"] = "field not allowed"
-                        continue
-                    _cat_old[cf] = float(cv)
-                    _merged[f"{cat}.{cf}"] = {"old": _current_ct.get(cat, {}).get(cf), "new": float(cv)}
-                _current_ct[cat] = _cat_old
-            if _merged:
-                setattr(_s, attr_name, _current_ct)
-                applied[attr_name] = {"merged": _merged}
-
-        # Special handlers: category thresholds for SPOT and FUTURES
-        if "category_thresholds" in body:
-            _apply_category_thresholds("category_thresholds", body.pop("category_thresholds"))
-        if "futures_category_thresholds" in body:
-            _apply_category_thresholds("futures_category_thresholds", body.pop("futures_category_thresholds"))
-
-        for field, value in body.items():
-            if field not in _KELLY_EDITABLE_FIELDS:
-                rejected[field] = "not in whitelist"
-                continue
-            try:
-                _current = getattr(_s, field, None)
-                setattr(_s, field, type(_current)(value) if _current is not None else value)
-                applied[field] = {"old": _current, "new": value}
-            except Exception as _fe:
-                rejected[field] = str(_fe)
-
-        if not applied:
-            return {"ok": False, "error": "No valid fields applied", "rejected": rejected}
-
-        # Persist to trading_runtime_state — MERGE into existing override so all values survive restart
-        import json as _json
-        _existing_ov = {}
-        try:
-            _ex_rows = db_client.execute_query(
-                "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
-            )
-            if _ex_rows and _ex_rows[0].get('value'):
-                _ex_raw = _ex_rows[0]['value']
-                if isinstance(_ex_raw, str):
-                    _ex_raw = _json.loads(_ex_raw)
-                if isinstance(_ex_raw, dict):
-                    _existing_ov = _ex_raw
-        except Exception:
-            pass
-        _existing_ov.update(applied)
-        _payload = _json.dumps(_existing_ov)
-        db_client.execute_update(
-            "INSERT INTO trading_runtime_state (key, value, updated_at) "
-            "VALUES ('kelly_config_override', %s, NOW()) "
-            "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
-            (_payload, _payload)
-        )
-
-        # Persist category_thresholds separately so it can be reloaded on restart
-        for _ct_key in ("category_thresholds", "futures_category_thresholds"):
-            if _ct_key in applied:
-                _ct_payload = _json.dumps(getattr(_s, _ct_key, {}))
-                _state_key = f"{_ct_key}_override"
-                db_client.execute_update(
-                    "INSERT INTO trading_runtime_state (key, value, updated_at) "
-                    "VALUES (%s, %s, NOW()) "
-                    "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
-                    (_state_key, _ct_payload, _ct_payload)
-                )
-
-        # Trazabilidad: trades_audit entry
-        db_client.execute_update(
-            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
-            "VALUES ('__config__', 'system', 'kelly_config_change', %s, false)",
-            (_json.dumps({"applied": applied, "rejected": rejected}),)
-        )
-
-        return {
-            "ok": True,
-            "applied": applied,
-            "rejected": rejected,
-            "message": f"{len(applied)} campos actualizados — activos inmediatamente (sin restart)",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        return _apply_kelly_config_patch(body)
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -10323,6 +10617,445 @@ async def mimic_report():
     }
 
 
+# In-memory flag to prevent concurrent MIMIC sweeps; progress lives on disk.
+_mimic_sweep_running = False
+
+
+@app.post("/mimic/external/download", dependencies=[Depends(_require_api_key)])
+async def mimic_external_download(request: Request):
+    """Download external data (funding, ticker 24h, BTC dominance, F&G) for a date range."""
+    body = await request.json()
+    start = body.get("start")
+    end = body.get("end")
+    # Default to full available range when dates not provided
+    if not start:
+        start = "2026-01-01"
+    if not end:
+        import datetime as _dt
+        end = _dt.date.today().isoformat()
+
+    script_path = os.path.join(os.path.dirname(__file__), "Dev", "scripts", "mimic_download_external.py")
+    if not os.path.exists(script_path):
+        return {"ok": False, "error": f"Download script not found: {script_path}"}
+
+    def _run():
+        import subprocess
+        _env = os.environ.copy()
+        _env["PYTHONIOENCODING"] = "utf-8"
+        _env["PYTHONUNBUFFERED"] = "1"
+        _log_path = os.path.join(os.path.dirname(__file__), "Dev", "benchmarks", "mimic_external_download.log")
+        with open(_log_path, "a", encoding="utf-8") as _log_file:
+            subprocess.run(
+                ["python", "-u", script_path, "--start", start, "--end", end],
+                cwd=os.path.dirname(__file__),
+                env=_env,
+                stdout=_log_file,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+
+    import threading
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "message": f"External data download started for {start} to {end}."}
+
+
+@app.post("/mimic/window/build", dependencies=[Depends(_require_api_key)])
+async def mimic_window_build(request: Request):
+    """Build a continuous MIMIC simulation window manifest."""
+    body = await request.json()
+    start = body.get("start")
+    end = body.get("end")
+    symbols = body.get("symbols")
+    top_n = body.get("top_n", 40)
+    if not start or not end:
+        raise HTTPException(status_code=400, detail="start and end dates required")
+
+    script_path = os.path.join(os.path.dirname(__file__), "Dev", "scripts", "mimic_build_window.py")
+    if not os.path.exists(script_path):
+        return {"ok": False, "error": f"Window build script not found: {script_path}"}
+
+    cmd = ["python", "-u", script_path, "--start", start, "--end", end, "--top-n", str(top_n), "--skip-external-check"]
+    if symbols:
+        cmd += ["--symbols", ",".join(symbols)]
+
+    def _run():
+        import subprocess
+        _env = os.environ.copy()
+        _env["PYTHONIOENCODING"] = "utf-8"
+        _env["PYTHONUNBUFFERED"] = "1"
+        _log_path = os.path.join(os.path.dirname(__file__), "Dev", "benchmarks", "mimic_window_build.log")
+        with open(_log_path, "a", encoding="utf-8") as _log_file:
+            subprocess.run(
+                cmd,
+                cwd=os.path.dirname(__file__),
+                env=_env,
+                stdout=_log_file,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+
+    import threading
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "message": f"Window build started for {start} to {end}."}
+
+
+@app.post("/mimic/sweep", dependencies=[Depends(_require_api_key)])
+async def mimic_sweep_start(request: Request):
+    """Start the Mode × Profile MIMIC parameter sweep in a background subprocess."""
+    global _mimic_sweep_running
+    if _mimic_sweep_running:
+        return {"ok": False, "error": "A sweep is already running."}
+
+    body = await request.json()
+    window_ids = body.get("windows")
+    strategy = body.get("strategy", "full")
+    max_cycles = body.get("max_cycles")
+    max_workers = body.get("max_workers", 1)
+    clear_results = bool(body.get("clear_results", False))
+
+    script_path = os.path.join(os.path.dirname(__file__), "Dev", "scripts", "mimic_mode_profile_sweep.py")
+    if not os.path.exists(script_path):
+        return {"ok": False, "error": f"Sweep script not found: {script_path}"}
+
+    _mimic_sweep_running = True
+
+    def _mark_finished():
+        global _mimic_sweep_running
+        _mimic_sweep_running = False
+
+    cmd = ["python", script_path, "--strategy", strategy]
+    if window_ids:
+        cmd += ["--windows", ",".join(window_ids)]
+    if max_cycles is not None:
+        cmd += ["--max-cycles", str(max_cycles)]
+    if max_workers is not None and max_workers > 1:
+        cmd += ["--max-workers", str(max_workers)]
+    if clear_results:
+        cmd += ["--clear-results"]
+
+    def _run_sweep_subprocess():
+        import subprocess
+        _env = os.environ.copy()
+        _env["PYTHONIOENCODING"] = "utf-8"
+        _log_path = os.path.join(os.path.dirname(__file__), "Dev", "benchmarks", "mimic_sweep.log")
+        try:
+            with open(_log_path, "a", encoding="utf-8") as _log_file:
+                subprocess.run(
+                    cmd,
+                    cwd=os.path.dirname(__file__),
+                    env=_env,
+                    stdout=_log_file,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+        finally:
+            _mark_finished()
+
+    import threading
+    threading.Thread(target=_run_sweep_subprocess, daemon=True).start()
+    return {"ok": True, "message": "MIMIC Mode×Profile sweep started in background.", "command": cmd}
+
+
+@app.get("/mimic/sweep-status", dependencies=[Depends(_require_api_key)])
+async def mimic_sweep_status():
+    """Return the current progress of a running MIMIC sweep."""
+    import json
+    status_path = os.path.join(os.path.dirname(__file__), "Dev", "benchmarks", "mimic_sweep_status.json")
+    default = {
+        "state": "idle",
+        "total_jobs": 0,
+        "completed_jobs": 0,
+        "failed_jobs": 0,
+        "errors": [],
+        "eta_seconds": None,
+        "current_job": None,
+    }
+    if not os.path.exists(status_path):
+        return {"ok": True, "running": _mimic_sweep_running or default.get("state") == "running", "status": default}
+    try:
+        with open(status_path, "r", encoding="utf-8") as f:
+            status = json.load(f)
+        status["running"] = _mimic_sweep_running or status.get("state") == "running"
+        return {"ok": True, "status": status}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "status": default}
+
+
+@app.post("/mimic/apply-recommendation", dependencies=[Depends(_require_api_key)])
+async def mimic_apply_recommendation(request: Request):
+    """Apply MIMIC sweep recommendation to production config (MERGE, never REPLACE).
+
+    Accepts:
+      params: dict of scalar config fields (applied via setattr + kelly_config_override merge)
+      profile_overrides: dict of regime_profile_* overrides
+      category_thresholds: dict merged into kelly_config_override.category_thresholds
+      futures_category_thresholds: dict merged into kelly_config_override.futures_category_thresholds
+      profile: str label for audit
+      dry_run: bool — if true, validate only, do not persist
+    """
+    body = await request.json()
+    params = body.get("params") or {}
+    profile_overrides = body.get("profile_overrides") or {}
+    category_thresholds = body.get("category_thresholds") or {}
+    futures_category_thresholds = body.get("futures_category_thresholds") or {}
+    profile = body.get("profile", "B")
+    dry_run = bool(body.get("dry_run", False))
+
+    applied: dict = {"scalars": {}, "profile_overrides": [], "category_thresholds": [], "futures_category_thresholds": []}
+    rejected: dict = {}
+
+    # Apply scalar params (in-memory + kelly_config_override MERGE)
+    if params:
+        try:
+            _s = get_settings()
+            current_override: dict = {}
+            if db_client:
+                try:
+                    row = db_client.fetchone(
+                        "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
+                    )
+                    if row and row.get("value"):
+                        current_override = json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
+                except Exception:
+                    pass
+            for key, new_value in params.items():
+                try:
+                    _old = getattr(_s, key, None)
+                    if _old is not None:
+                        _type = type(_old)
+                        if _type in (bool, int, float, str):
+                            new_value = _type(new_value)
+                    if not dry_run:
+                        setattr(_s, key, new_value)
+                    current_override[key] = new_value
+                    applied["scalars"][key] = new_value
+                except Exception as _e:
+                    rejected[key] = str(_e)
+            if not dry_run and db_client and current_override:
+                db_client.execute_update(
+                    "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                    "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                    ("kelly_config_override", json.dumps(current_override), json.dumps(current_override)),
+                )
+        except Exception as e:
+            return {"ok": False, "error": f"scalar apply failed: {e}"}
+
+    # Merge category_thresholds into kelly_config_override
+    for threshold_key, threshold_dict, applied_list in [
+        ("category_thresholds", category_thresholds, applied["category_thresholds"]),
+        ("futures_category_thresholds", futures_category_thresholds, applied["futures_category_thresholds"]),
+    ]:
+        if threshold_dict and db_client:
+            try:
+                row = db_client.fetchone(
+                    "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
+                )
+                current_override = {}
+                if row and row.get("value"):
+                    current_override = json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
+                existing = current_override.get(threshold_key, {})
+                existing.update(threshold_dict)
+                current_override[threshold_key] = existing
+                if not dry_run:
+                    db_client.execute_update(
+                        "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                        "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                        ("kelly_config_override", json.dumps(current_override), json.dumps(current_override)),
+                    )
+                applied_list.extend(list(threshold_dict.keys()))
+            except Exception as e:
+                rejected[threshold_key] = str(e)
+
+    # Persist profile overrides to trading_runtime_state
+    if profile_overrides and db_client:
+        for key, value in profile_overrides.items():
+            if not isinstance(value, dict):
+                continue
+            clean_key = key if key.startswith("regime_profile_") else f"regime_profile_{key.upper()}"
+            try:
+                if not dry_run:
+                    db_client.execute_update(
+                        "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                        "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                        (clean_key, json.dumps({"params": value}), json.dumps({"params": value})),
+                    )
+                applied["profile_overrides"].append(clean_key)
+            except Exception as e:
+                rejected[clean_key] = str(e)
+
+    # Audit event
+    if not dry_run and db_client:
+        try:
+            db_client.execute_update(
+                "INSERT INTO trades_audit (event, detail, created_at) VALUES (%s, %s, NOW())",
+                ("mimic_config_applied", json.dumps({
+                    "profile": profile,
+                    "scalars": applied["scalars"],
+                    "profile_overrides": applied["profile_overrides"],
+                    "category_thresholds": applied["category_thresholds"],
+                    "rejected": rejected,
+                })),
+            )
+        except Exception:
+            pass
+
+    # F3: Save pre-apply config snapshot for rollback support
+    if not dry_run and db_client:
+        try:
+            _snap = {"applied": applied, "params_before": {}, "applied_at": datetime.now(timezone.utc).isoformat()}
+            _s_snap = get_settings()
+            for k in applied.get("scalars", {}):
+                _snap["params_before"][k] = getattr(_s_snap, k, None)
+            db_client.execute_update(
+                "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                ("mimic_last_apply_snapshot", json.dumps(_snap), json.dumps(_snap)),
+            )
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "applied": applied,
+        "rejected": rejected,
+        "profile": profile,
+        "note": "dry_run — nothing persisted" if dry_run else "applied and audited",
+    }
+
+
+@app.post("/mimic/rollback-check", dependencies=[Depends(_require_api_key)])
+async def mimic_rollback_check(request: Request):
+    """F3: Evaluate post-apply performance and auto-rollback if drawdown>5% or PF<1.0.
+
+    Reads recent closed trades since the last apply event, computes realised PnL
+    and profit factor, and reverts ``kelly_config_override`` to the pre-apply
+    snapshot if thresholds are breached.
+
+    Body (all optional):
+      max_drawdown_pct: float (default 5.0) — rollback if realised DD > this
+      min_profit_factor: float (default 1.0) — rollback if PF < this
+      min_trades: int (default 5) — require at least this many trades before evaluating
+      dry_run: bool (default false) — evaluate only, do not revert
+    """
+    body = await request.json() if await request.body() else {}
+    max_dd = float(body.get("max_drawdown_pct", 5.0))
+    min_pf = float(body.get("min_profit_factor", 1.0))
+    min_trades = int(body.get("min_trades", 5))
+    dry_run_rb = bool(body.get("dry_run", False))
+
+    if not db_client:
+        return {"ok": False, "error": "db_client not available"}
+
+    # Load snapshot
+    try:
+        snap_row = db_client.fetchone(
+            "SELECT value FROM trading_runtime_state WHERE key='mimic_last_apply_snapshot'"
+        )
+        if not snap_row or not snap_row.get("value"):
+            return {"ok": False, "error": "No apply snapshot found — call /mimic/apply-recommendation first"}
+        snap = json.loads(snap_row["value"]) if isinstance(snap_row["value"], str) else snap_row["value"]
+        applied_at = snap.get("applied_at")
+    except Exception as e:
+        return {"ok": False, "error": f"Snapshot load failed: {e}"}
+
+    # Fetch trades closed since apply
+    try:
+        trades = db_client.fetchall(
+            "SELECT pnl_usdt FROM trades_closed WHERE closed_at > %s AND pnl_usdt IS NOT NULL",
+            (applied_at,),
+        ) or []
+    except Exception as e:
+        return {"ok": False, "error": f"Trade fetch failed: {e}", "trades_evaluated": 0}
+
+    if len(trades) < min_trades:
+        return {
+            "ok": True,
+            "rollback_triggered": False,
+            "reason": f"Only {len(trades)} trades since apply; need {min_trades} to evaluate",
+            "trades_evaluated": len(trades),
+        }
+
+    pnl_values = [float(t.get("pnl_usdt", 0) or 0) for t in trades]
+    gross_wins = sum(p for p in pnl_values if p > 0)
+    gross_losses = sum(abs(p) for p in pnl_values if p < 0)
+    pf = round(gross_wins / gross_losses, 4) if gross_losses > 0 else None
+    cumulative = [sum(pnl_values[:i+1]) for i in range(len(pnl_values))]
+    peak_cum = 0.0
+    max_dd_realised = 0.0
+    for c in cumulative:
+        if c > peak_cum:
+            peak_cum = c
+        dd = (peak_cum - c) if peak_cum > 0 else 0.0
+        if dd > max_dd_realised:
+            max_dd_realised = dd
+    # Convert dd to pct of initial portfolio (estimate: 2910 USDT)
+    initial_est = 2910.0
+    max_dd_pct = round(max_dd_realised / initial_est * 100, 4)
+
+    triggers = []
+    if max_dd_pct > max_dd:
+        triggers.append(f"drawdown {max_dd_pct:.2f}% > {max_dd}%")
+    if pf is not None and pf < min_pf:
+        triggers.append(f"profit_factor {pf} < {min_pf}")
+
+    if not triggers:
+        return {
+            "ok": True,
+            "rollback_triggered": False,
+            "reason": "Performance within thresholds",
+            "trades_evaluated": len(trades),
+            "max_drawdown_pct": max_dd_pct,
+            "profit_factor": pf,
+        }
+
+    # Rollback: restore pre-apply params to kelly_config_override
+    if not dry_run_rb:
+        try:
+            row = db_client.fetchone(
+                "SELECT value FROM trading_runtime_state WHERE key='kelly_config_override'"
+            )
+            current_override = {}
+            if row and row.get("value"):
+                current_override = json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
+            for k, v in snap.get("params_before", {}).items():
+                if v is not None:
+                    current_override[k] = v
+                    _live = get_settings()
+                    try:
+                        setattr(_live, k, v)
+                    except Exception:
+                        pass
+            db_client.execute_update(
+                "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                ("kelly_config_override", json.dumps(current_override), json.dumps(current_override)),
+            )
+            db_client.execute_update(
+                "INSERT INTO trades_audit (event, detail, created_at) VALUES (%s, %s, NOW())",
+                ("mimic_config_rollback", json.dumps({
+                    "triggers": triggers,
+                    "max_dd_pct": max_dd_pct,
+                    "profit_factor": pf,
+                    "restored": snap.get("params_before", {}),
+                    "trades_evaluated": len(trades),
+                })),
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"Rollback failed: {e}", "triggers": triggers}
+
+    return {
+        "ok": True,
+        "rollback_triggered": True,
+        "dry_run": dry_run_rb,
+        "triggers": triggers,
+        "max_drawdown_pct": max_dd_pct,
+        "profit_factor": pf,
+        "trades_evaluated": len(trades),
+        "note": "dry_run — rollback NOT applied" if dry_run_rb else "Config reverted to pre-apply snapshot",
+    }
+
+
 @app.get("/mimic/sweep-report", dependencies=[Depends(_require_api_key)])
 async def mimic_sweep_report():
     """Return the latest MIMIC parameter sweep report if available."""
@@ -10336,3 +11069,146 @@ async def mimic_sweep_report():
         return {"ok": True, "report": report}
     except Exception as e:
         return {"ok": False, "error": str(e), "report": None}
+
+
+@app.get("/mimic/sensitivity-report", dependencies=[Depends(_require_api_key)])
+async def mimic_sensitivity_report():
+    """Return the latest MIMIC sensitivity sweep report if available."""
+    report_path = os.path.join(os.path.dirname(__file__), "Dev", "benchmarks", "mimic_sensitivity_report.json")
+    if not os.path.exists(report_path):
+        return {"ok": True, "report": None}
+    try:
+        with open(report_path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+        return {"ok": True, "report": report}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "report": None}
+
+
+@app.post("/mimic/sensitivity", dependencies=[Depends(_require_api_key)])
+async def mimic_sensitivity_start(request: Request):
+    """Run MIMIC sensitivity sweep (1 param at a time) in background subprocess."""
+    body = await request.json() if await request.body() else {}
+    window_id = body.get("window")
+    profile = body.get("profile", "B")
+    max_cycles = body.get("max_cycles")
+
+    script_path = os.path.join(os.path.dirname(__file__), "Dev", "scripts", "mimic_sensitivity_sweep.py")
+    if not os.path.exists(script_path):
+        return {"ok": False, "error": f"Script not found: {script_path}"}
+
+    cmd = ["python", script_path, "--profile", profile]
+    if window_id:
+        cmd += ["--window", window_id]
+    if max_cycles is not None:
+        cmd += ["--max-cycles", str(max_cycles)]
+
+    def _run():
+        import subprocess
+        _env = os.environ.copy()
+        _env["PYTHONIOENCODING"] = "utf-8"
+        log_path = os.path.join(os.path.dirname(__file__), "Dev", "benchmarks", "mimic_sensitivity.log")
+        with open(log_path, "a", encoding="utf-8") as lf:
+            subprocess.run(cmd, cwd=os.path.dirname(__file__), env=_env, stdout=lf, stderr=subprocess.STDOUT, check=False)
+
+    import threading
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "message": "Sensitivity sweep started.", "command": cmd}
+
+
+@app.get("/mimic/bayesian-report", dependencies=[Depends(_require_api_key)])
+async def mimic_bayesian_report():
+    """Return the latest MIMIC Bayesian optimization report if available."""
+    report_path = os.path.join(os.path.dirname(__file__), "Dev", "benchmarks", "mimic_bayesian_report.json")
+    if not os.path.exists(report_path):
+        return {"ok": True, "report": None}
+    try:
+        with open(report_path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+        return {"ok": True, "report": report}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "report": None}
+
+
+@app.post("/mimic/bayesian", dependencies=[Depends(_require_api_key)])
+async def mimic_bayesian_start(request: Request):
+    """Run MIMIC Bayesian optimization in background subprocess."""
+    body = await request.json() if await request.body() else {}
+    window_id = body.get("window")
+    profile = body.get("profile", "B")
+    trials = body.get("trials", 50)
+    max_cycles = body.get("max_cycles")
+    timeout = body.get("timeout")
+
+    script_path = os.path.join(os.path.dirname(__file__), "Dev", "scripts", "mimic_bayesian_opt.py")
+    if not os.path.exists(script_path):
+        return {"ok": False, "error": f"Script not found: {script_path}"}
+
+    cmd = ["python", script_path, "--profile", profile, "--trials", str(trials)]
+    if window_id:
+        cmd += ["--window", window_id]
+    if max_cycles is not None:
+        cmd += ["--max-cycles", str(max_cycles)]
+    if timeout is not None:
+        cmd += ["--timeout", str(timeout)]
+
+    def _run():
+        import subprocess
+        _env = os.environ.copy()
+        _env["PYTHONIOENCODING"] = "utf-8"
+        log_path = os.path.join(os.path.dirname(__file__), "Dev", "benchmarks", "mimic_bayesian.log")
+        with open(log_path, "a", encoding="utf-8") as lf:
+            subprocess.run(cmd, cwd=os.path.dirname(__file__), env=_env, stdout=lf, stderr=subprocess.STDOUT, check=False)
+
+    import threading
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "message": f"Bayesian optimization started ({trials} trials).", "command": cmd}
+
+
+@app.post("/mimic/paper/start", dependencies=[Depends(_require_api_key)])
+async def mimic_paper_start(request: Request):
+    """Start a MIMIC paper trade session against live prices without sending real orders."""
+    body = await request.json() if await request.body() else {}
+    duration_hours = float(body.get("duration_hours", 48))
+    cycle_minutes = int(body.get("cycle_minutes", 60))
+    initial_usdt = float(body.get("initial_usdt", 2910.0))
+    symbols = body.get("symbols") or ["BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT", "SOLUSDT"]
+    try:
+        from simulation.mimic_paper_trader import start_paper_trade
+        from config import get_settings
+        _paper_comp = get_components()
+        paper_settings = get_settings()
+        paper_settings.dry_run = True
+        paper_settings.allow_real_trading = False
+        status = start_paper_trade(
+            settings=paper_settings,
+            symbols=symbols,
+            binance_client=_paper_comp.binance_client,
+            duration_hours=duration_hours,
+            cycle_minutes=cycle_minutes,
+            initial_usdt=initial_usdt,
+        )
+        return {"ok": True, "message": f"Paper trade started ({duration_hours}h)", "status": status}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/mimic/paper/stop", dependencies=[Depends(_require_api_key)])
+async def mimic_paper_stop():
+    """Stop the running paper trade session."""
+    try:
+        from simulation.mimic_paper_trader import stop_paper_trade
+        status = stop_paper_trade()
+        return {"ok": True, "message": "Paper trade stopped", "status": status}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/mimic/paper/status", dependencies=[Depends(_require_api_key)])
+async def mimic_paper_status():
+    """Return current paper trade session status and PnL."""
+    try:
+        from simulation.mimic_paper_trader import get_paper_status
+        return {"ok": True, "status": get_paper_status()}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "status": {"status": "idle"}}

@@ -745,6 +745,13 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'entry_quality_max_failures_range_scalp':    'entry_quality_max_failures_range_scalp',
             'entry_quality_max_failures_preservation':   'entry_quality_max_failures_preservation',
             'entry_quality_max_failures_futures_short':  'entry_quality_max_failures_futures_short',
+            'entry_quality_vol_spike_min_spot_bull':     'entry_quality_vol_spike_min_spot_bull',
+            'entry_quality_vol_spike_floor_spot_bull':   'entry_quality_vol_spike_floor_spot_bull',
+            'entry_quality_rsi_min_spot_bull':           'entry_quality_rsi_min_spot_bull',
+            'entry_quality_rsi_max_spot_bull':           'entry_quality_rsi_max_spot_bull',
+            'entry_quality_breakout_min_vol_spot_bull':  'entry_quality_breakout_min_vol_spot_bull',
+            'entry_quality_breakout_rsi_max_spot_bull':  'entry_quality_breakout_rsi_max_spot_bull',
+            'entry_quality_breakout_min_strength_spot_bull': 'entry_quality_breakout_min_strength_spot_bull',
             # s70: SmartTP EXTEND per regime
             'smart_tp_extend_enabled_spot_bull':    'smart_tp_extend_enabled_spot_bull',
             'smart_tp_extend_enabled_range_scalp':  'smart_tp_extend_enabled_range_scalp',
@@ -3796,77 +3803,97 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                         )
                                 except Exception:
                                     pass
-                            else:
+                                else:
                                 # Partial close for SPOT
-                                try:
-                                    _sso_s_filters = get_symbol_filters(client, symbol)
-                                    _sso_s_full_qty = float(pos.quantity)
-                                    _sso_s_sell_qty = align_quantity_to_step(
-                                        _sso_s_full_qty * _sso_s_action.close_pct, _sso_s_filters["step"])
-                                    _sso_s_valid, _ = is_quantity_valid(_sso_s_sell_qty, current_price, _sso_s_filters)
-                                    if _sso_s_valid and _sso_s_sell_qty > 0:
-                                        _sso_s_order = client.create_market_order(symbol=symbol, side="SELL", quantity=_sso_s_sell_qty)
-                                        if not client.verify_order_filled(_sso_s_order, f"SSO/SPOT SELL {symbol}"):
-                                            print(f"[WARN] SSO/SPOT SELL {symbol}: order NOT confirmed filled — skipping")
-                                            continue
-                                        _sso_s_remaining = align_quantity_to_step(
-                                            _sso_s_full_qty - _sso_s_sell_qty, _sso_s_filters["step"])
-                                        # Dust guard: if remaining < min_notional, treat as full close
-                                        if 0 < _sso_s_remaining * current_price < _sso_s_filters.get('min_notional', 1.0):
-                                            print(f"[SSO/SPOT] {symbol}: remaining ${_sso_s_remaining * current_price:.4f} < min_notional — converting to full close")
-                                            _sso_s_sell_qty = _sso_s_full_qty
-                                            _sso_s_remaining = 0.0
-                                        # Update metadata
-                                        metadata['sso_last_trigger'] = _sso_s_action.trigger
-                                        metadata['sso_last_reason'] = _sso_s_action.reason
-                                        metadata['scale_out_done'] = True
-                                        _sso_s_lvl = extract_sso_level_from_reason(_sso_s_action.reason)
-                                        if _sso_s_lvl:
-                                            _sso_s_done = metadata.get('sso_levels_done', [])
-                                            if _sso_s_lvl not in _sso_s_done:
-                                                _sso_s_done.append(_sso_s_lvl)
-                                            metadata['sso_levels_done'] = _sso_s_done
-                                        try:
-                                            position_manager.update_position_metadata(pos.position_id, metadata)
-                                            position_manager.update_position_sl(pos.position_id, round(entry_price, 8))
-                                            position_manager.update_position_quantity(pos.position_id, _sso_s_remaining)
-                                        except Exception:
-                                            pass
-                                        print(f"[SSO/SPOT] {symbol}: {_sso_s_action.trigger} "
-                                              f"SCALE {_sso_s_action.close_pct*100:.0f}% "
-                                              f"qty={_sso_s_sell_qty} | {_sso_s_action.detail}")
-                                        closed.append({"symbol": symbol, "reason": _sso_s_action.reason,
-                                                       "price": current_price, "order": _sso_s_order,
-                                                       "sso_trigger": _sso_s_action.trigger})
-                                        # s73 E1: trazabilidad SSO partial-close en trades_audit
-                                        try:
-                                            if _db_client_ref:
-                                                _db_client_ref.execute_update(
-                                                    "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
-                                                    "VALUES (%s, %s, %s, %s, %s)",
-                                                    (
-                                                        symbol, 'spot', 'sso_partial_close',
-                                                        __import__('json').dumps({
-                                                            'trigger': _sso_s_action.trigger,
-                                                            'reason': _sso_s_action.reason,
-                                                            'close_pct': round(_sso_s_action.close_pct, 4),
-                                                            'qty_sold': float(_sso_s_sell_qty),
-                                                            'qty_remaining': float(_sso_s_remaining),
-                                                            'pnl_pct': round(pnl_pct * 100, 4),
-                                                            'pnl_usdt': round(_sso_sym_pnl_usdt, 4),
-                                                            'diagnosis': (_sso_s_action.diagnosis or '')[:500],
-                                                            'regime': regime,
-                                                            'profile': str(getattr(settings, 'current_regime_profile_label', '') or '').upper(),
-                                                            'ts': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
-                                                        }),
-                                                        False,
+                                    try:
+                                        _sso_s_filters = get_symbol_filters(client, symbol)
+                                        _sso_s_full_qty = float(pos.quantity)
+                                        _sso_s_sell_qty = align_quantity_to_step(
+                                            _sso_s_full_qty * _sso_s_action.close_pct, _sso_s_filters["step"])
+                                        _sso_s_valid, _ = is_quantity_valid(_sso_s_sell_qty, current_price, _sso_s_filters)
+                                        if _sso_s_valid and _sso_s_sell_qty > 0:
+                                            _sso_s_order = client.create_market_order(symbol=symbol, side="SELL", quantity=_sso_s_sell_qty)
+                                            if not client.verify_order_filled(_sso_s_order, f"SSO/SPOT SELL {symbol}"):
+                                                print(f"[WARN] SSO/SPOT SELL {symbol}: order NOT confirmed filled — skipping")
+                                                continue
+                                            _sso_s_remaining = align_quantity_to_step(
+                                                _sso_s_full_qty - _sso_s_sell_qty, _sso_s_filters["step"])
+                                            # Dust guard: if remaining < min_notional, treat as full close
+                                            if 0 < _sso_s_remaining * current_price < _sso_s_filters.get('min_notional', 1.0):
+                                                print(f"[SSO/SPOT] {symbol}: remaining ${_sso_s_remaining * current_price:.4f} < min_notional — converting to full close")
+                                                _sso_s_sell_qty = _sso_s_full_qty
+                                                _sso_s_remaining = 0.0
+                                            # Persist the partial close in DB via PositionManager so a
+                                            # trades_closed row is created and quantity/commission update atomically.
+                                            _sso_s_closed = position_manager.close_position(
+                                                symbol=symbol,
+                                                exit_price=current_price,
+                                                close_reason='sso_partial_close',
+                                                commission_rate=commission_rate,
+                                                position_id=pos.position_id,
+                                                qty_closed=_sso_s_sell_qty,
+                                                exit_context={'regime_mode': regime, 'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').upper()},
+                                            )
+                                            if _sso_s_closed is None:
+                                                print(f"[WARN] SSO/SPOT {symbol}: position_manager.close_position returned None — falling back to metadata-only update")
+                                                try:
+                                                    position_manager.update_position_quantity(pos.position_id, _sso_s_remaining)
+                                                except Exception:
+                                                    pass
+                                            # Update SSO metadata (level tracking, last trigger) on the residual position
+                                            metadata = getattr(pos, 'metadata', {}) or {}
+                                            if not isinstance(metadata, dict):
+                                                metadata = {}
+                                            metadata['sso_last_trigger'] = _sso_s_action.trigger
+                                            metadata['sso_last_reason'] = _sso_s_action.reason
+                                            metadata['scale_out_done'] = True
+                                            _sso_s_lvl = extract_sso_level_from_reason(_sso_s_action.reason)
+                                            if _sso_s_lvl:
+                                                _sso_s_done = metadata.get('sso_levels_done', [])
+                                                if _sso_s_lvl not in _sso_s_done:
+                                                    _sso_s_done.append(_sso_s_lvl)
+                                                metadata['sso_levels_done'] = _sso_s_done
+                                            try:
+                                                position_manager.update_position_metadata(pos.position_id, metadata)
+                                                if _sso_s_remaining > 0:
+                                                    position_manager.update_position_sl(pos.position_id, round(entry_price, 8))
+                                            except Exception:
+                                                pass
+                                            print(f"[SSO/SPOT] {symbol}: {_sso_s_action.trigger} "
+                                                  f"SCALE {_sso_s_action.close_pct*100:.0f}% "
+                                                  f"qty={_sso_s_sell_qty} | {_sso_s_action.detail}")
+                                            closed.append({"symbol": symbol, "reason": _sso_s_action.reason,
+                                                           "price": current_price, "order": _sso_s_order,
+                                                           "sso_trigger": _sso_s_action.trigger})
+                                            # s73 E1: trazabilidad SSO partial-close en trades_audit
+                                            try:
+                                                if _db_client_ref:
+                                                    _db_client_ref.execute_update(
+                                                        "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                                                        "VALUES (%s, %s, %s, %s, %s)",
+                                                        (
+                                                            symbol, 'spot', 'sso_partial_close',
+                                                            __import__('json').dumps({
+                                                                'trigger': _sso_s_action.trigger,
+                                                                'reason': _sso_s_action.reason,
+                                                                'close_pct': round(_sso_s_action.close_pct, 4),
+                                                                'qty_sold': float(_sso_s_sell_qty),
+                                                                'qty_remaining': float(_sso_s_remaining),
+                                                                'pnl_pct': round(pnl_pct * 100, 4),
+                                                                'pnl_usdt': round(_sso_sym_pnl_usdt, 4),
+                                                                'diagnosis': (_sso_s_action.diagnosis or '')[:500],
+                                                                'regime': regime,
+                                                                'profile': str(getattr(settings, 'current_regime_profile_label', '') or '').upper(),
+                                                                'ts': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
+                                                            }),
+                                                            False,
+                                                        )
                                                     )
-                                                )
-                                        except Exception:
-                                            pass
-                                        continue  # partial done, move to next position
-                                except Exception as _sso_s_err:
-                                    print(f"[SSO/SPOT] {symbol} partial close error: {_sso_s_err}")
+                                            except Exception:
+                                                pass
+                                            continue  # partial done, move to next position
+                                    except Exception as _sso_s_err:
+                                        print(f"[SSO/SPOT] {symbol} partial close error: {_sso_s_err}")
                     except Exception as _sso_s_exc:
                         print(f"[SSO/SPOT] {symbol} evaluation error: {_sso_s_exc}")
 
@@ -4759,7 +4786,8 @@ def _check_entry_quality(
         _breakout_min_vol = float(_get_param(settings, 'entry_quality_breakout_min_vol_spot_bull', 1.20))
         _breakout_rsi_max = float(_get_param(settings, 'entry_quality_breakout_rsi_max_spot_bull', 78.0))
         _breakout_min_strength = float(_get_param(settings, 'entry_quality_breakout_min_strength_spot_bull', 0.58))
-        _min_vol = max(0.7, _min_vol_base * _profile_mult)
+        _vol_floor = float(_get_param(settings, 'entry_quality_vol_spike_floor_spot_bull', 0.7))
+        _min_vol = max(_vol_floor, _min_vol_base * _profile_mult)
         _rsi_min = max(25.0, _rsi_min_base * (2.0 - _profile_mult))
         _rsi_max = min(72.0, _rsi_max_base / _profile_mult)
         _breakout_ok = (
@@ -4954,7 +4982,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         # Prefer BNB-reserve-aware balance so commission buffer is never traded away
         usdt_liquid = float(balance.get("usdt_available_after_reserve", balance.get("usdt_available", usdt)))
         _total_portfolio = float(balance.get("total_usdt", usdt_liquid))
-        _invested = _total_portfolio - usdt_liquid
+        # BNB held as commission reserve is cash-equivalent, not invested trading capital
+        _spot_bnb_value = float(balance.get("spot_bnb_usdt", 0.0))
+        _invested = max(0.0, _total_portfolio - usdt_liquid - _spot_bnb_value)
         _exposure_pct = _invested / _total_portfolio if _total_portfolio > 0 else 0.0
         _max_exposure = getattr(settings, 'max_total_exposure_pct', 0.75)
         # Aggressive mode: SPOT_BULL + F&G Fear → higher exposure cap to deploy more capital
@@ -6099,6 +6129,29 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     except Exception as atr_err:
                         print(f"ATR calc failed for {symbol}, using pct fallback: {atr_err}")
 
+                    # Floor ATR-based SL at category minimum to prevent micro-stops from
+                    # dominating exits; tight 15m ATR*1.5 stops bypass category SL%.
+                    if sl_price is not None or tp_price is not None:
+                        _tok_cat = getattr(settings, 'token_categories', {}).get(symbol, {})
+                        _cat_beh = _tok_cat.get('market_behavior', 'MIDCAP_ALT')
+                        _cat_th  = getattr(settings, 'category_thresholds', {}).get(_cat_beh, {})
+
+                    if sl_price is not None:
+                        _cat_sl_pct = _cat_th.get('stop_loss_pct', _get_param(settings, 'stop_loss_pct')) / 100.0
+                        _min_sl_price = price * (1 - _cat_sl_pct)
+                        if sl_price > _min_sl_price:
+                            sl_price = _min_sl_price
+                            print(f"ATR SL for {symbol} floored to category {_cat_beh} SL={_cat_sl_pct*100:.1f}%")
+
+                    # Floor ATR-based TP at category minimum to prevent ATR-derived targets
+                    # that are too tight from producing negative R:R (e.g. SL 4.25% / TP 1.1%).
+                    if tp_price is not None:
+                        _cat_tp_pct = _cat_th.get('take_profit_pct', _get_param(settings, 'take_profit_pct')) / 100.0
+                        _min_tp_price = price * (1 + _cat_tp_pct)
+                        if tp_price < _min_tp_price:
+                            tp_price = _min_tp_price
+                            print(f"ATR TP for {symbol} floored to category {_cat_beh} TP={_cat_tp_pct*100:.1f}%")
+
                     # Fallback to percentage-based if ATR unavailable
                     if sl_price is None:
                         _tok_cat = getattr(settings, 'token_categories', {}).get(symbol, {})
@@ -6135,6 +6188,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "override_used": volspike_override,
                         "strength": float(signal_meta.get(symbol, {}).get('strength', strength)),
                         "entry_regime": _regime_mode,
+                        "entry_profile_label": _active_profile_label,
+                        "regime_mode": _regime_mode,
+                        "profile_label": _active_profile_label,
                         "entry_pred_pnl": float(prediction.get('expected_pnl', 0)) if prediction else None,
                         "entry_pred_prob": float(prediction.get('success_probability', 0)) if prediction else None,
                         "entry_type": "prediction_add" if _is_pred_add else "normal",

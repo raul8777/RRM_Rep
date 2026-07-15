@@ -1,7 +1,26 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 14 2026 (mañana) | s79: SPOT_BULL breakout gate añadido sin romper s78 — 5/5 cierres positivos validados.
+> Última actualización: jul 15 2026 | ONDO PnL drop — cierres parciales SSO reconstruidos, persistencia fix y dashboard PnL realizado+no realizado.
+
+---
+
+## 🟢 Estado del Sistema — jul 15 2026 — ONDO SSO Partial Close Fix + Dashboard PnL Real/No Real
+
+### Problema
+El PnL de ONDOUSDT en el dashboard "bajó" de ~$13 a ~$4 porque solo mostraba el PnL **no realizado** del remanente abierto. Las ganancias realizadas por dos cierres parciales de SSO no aparecían: no se habían insertado filas en `trades_closed`.
+
+### Correcciones aplicadas
+- **DB**: eliminado cierre erróneo `trades_closed.id=890`; restaurado `trades_open.id=1055` con qty=454.9; insertados dos cierres parciales (`sso_partial_close`) con PnL +$14.31 y +$1.57 USDT.
+- **Código**: `run_trades.py` ahora llama `position_manager.close_position(..., qty_closed=...)` para cierres parciales de SSO, persistiendo automáticamente en `trades_closed`.
+- **Dashboard**: `app.py:/dashboard/summary` expone `realized_pnl`/`total_pnl`; `frontend/dashboard.js` muestra en cada posición abierta PnL no realizado, realizado y total.
+- **Tests**: `test_system_health.py` 116 passed; `test_position_manager.py` + `test_smart_scale_out.py` 16 passed.
+
+### Archivos clave
+- `run_trades.py` — bloque SSO partial close.
+- `app.py` — `/dashboard/summary`.
+- `frontend/dashboard.js` — tabla de posiciones abiertas.
+- `Dev/lifecycle_tools_review_20260715_implemented.md` — reporte detallado.
 
 ---
 
