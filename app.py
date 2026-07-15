@@ -538,7 +538,7 @@ async def cleanup_dust(dry_run: bool = True, _auth: None = Depends(_require_api_
         balances = client.get_account_balance()
         plan = []
         executed = []
-        excluded = {"USDT", "BNB"}
+        excluded = {"USDT", "BNB", "BTTC", "WIN", "JST", "IQ"}
         for asset, amount in balances.items():
             if asset in excluded or amount <= 0:
                 continue

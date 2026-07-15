@@ -199,10 +199,12 @@ def evaluate_spot_parity(
     )
     _ignore_bnb_in_parity = bool(getattr(settings, 'spot_ignore_bnb_when_commission_enabled', True))
     _skip_bnb = _keep_bnb_for_commission and _ignore_bnb_in_parity
+    # Assets excluded from parity: not tradable/dust tokens and stablecoins handled separately
+    _excluded_assets = {"USDT", "BTTC", "WIN", "JST", "IQ"}
     try:
         raw_balances = binance_client.get_account_balance() if binance_client else {}
         for asset, qty in raw_balances.items():
-            if asset == "USDT":
+            if asset in _excluded_assets:
                 continue
             if asset == "BNB" and _skip_bnb:
                 continue
