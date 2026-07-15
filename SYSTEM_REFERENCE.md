@@ -23,15 +23,13 @@ Ghost positions creados por cierres parciales calculados desde `db_qty × close_
 
 ### Verificación
 - Contenedor reiniciado con `.env` actualizado (`FUTURES_LEVERAGE=10`).
-- `GET /metrics/ghosts`: spot OK (0 mismatches, 44 dust skipped), futures OK.
+- `GET /metrics/ghosts`: spot OK (0 mismatches, 40 dust skipped), futures OK.
 - `POST /reconciliation/spot/run?dry_run=true`: OK, 0 recomendaciones.
-- `POST /reconcile/cleanup-dust?dry_run=true`: 44 entradas planificadas, símbolos inválidos reportados.
-- Tests: `tests/test_anti_ghost_qty.py` 6/6 passed; `tests/test_position_reconciliation.py` regresión arreglada.
+- `POST /reconcile/cleanup-dust?dry_run=false` ejecutado: 21 órdenes de venta ejecutadas con éxito (dust vendido), 40 dust restantes por debajo de min_notional excluidos.
+- Tests: `tests/test_anti_ghost_qty.py` 6/6 passed; `tests/test_position_reconciliation.py` regresión arreglada; 42 tests críticos passed.
 - Tests globales: 498 passed; 5 fallas pre-existentes en `test_config_governance.py` y `test_entry_quality_gate.py`/`test_mimic_regression.py` (DB host postgres no resoluble fuera de Docker).
 
 ### Pendiente
-- Ejecutar cleanup-dust real bajo supervisión del operador:
-  `curl -X POST -H "X-API-Key: <key>" "http://localhost:8000/reconcile/cleanup-dust?dry_run=false"`.
 - Considerar test `test_futures_ghost.py` para verificación de cierre FUTURES.
 
 ---
