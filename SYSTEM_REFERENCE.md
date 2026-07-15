@@ -21,10 +21,18 @@ Ghost positions creados por cierres parciales calculados desde `db_qty × close_
 - **`config.py` + `config_helpers.py`**: parámetros anti-ghost (`spot_dust_cleanup_min_notional_usdt`, `spot_reconcile_auto_fix_enabled`, `spot_reconcile_min_value_usdt`).
 - **`.windsurf/rules.md`**: reglas duras anti-ghost añadidas.
 
+### Verificación
+- Contenedor reiniciado con `.env` actualizado (`FUTURES_LEVERAGE=10`).
+- `GET /metrics/ghosts`: spot OK (0 mismatches, 44 dust skipped), futures OK.
+- `POST /reconciliation/spot/run?dry_run=true`: OK, 0 recomendaciones.
+- `POST /reconcile/cleanup-dust?dry_run=true`: 44 entradas planificadas, símbolos inválidos reportados.
+- Tests: `tests/test_anti_ghost_qty.py` 6/6 passed; `tests/test_position_reconciliation.py` regresión arreglada.
+- Tests globales: 498 passed; 5 fallas pre-existentes en `test_config_governance.py` y `test_entry_quality_gate.py`/`test_mimic_regression.py` (DB host postgres no resoluble fuera de Docker).
+
 ### Pendiente
-- Tests unitarios `tests/test_anti_ghost_qty.py` y `test_futures_ghost.py`.
-- Ejecutar limpieza de dust en producción: `POST /reconcile/cleanup-dust?dry_run=true` primero.
-- Reiniciar contenedor para cargar `.env` actualizado.
+- Ejecutar cleanup-dust real bajo supervisión del operador:
+  `curl -X POST -H "X-API-Key: <key>" "http://localhost:8000/reconcile/cleanup-dust?dry_run=false"`.
+- Considerar test `test_futures_ghost.py` para verificación de cierre FUTURES.
 
 ---
 
