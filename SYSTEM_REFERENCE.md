@@ -30,7 +30,7 @@ Ghost positions creados por cierres parciales calculados desde `db_qty × close_
 - Tests globales: 498 passed; 5 fallas pre-existentes en `test_config_governance.py` y `test_entry_quality_gate.py`/`test_mimic_regression.py` (DB host postgres no resoluble fuera de Docker).
 
 ### Pendiente
-- Considerar test `test_futures_ghost.py` para verificación de cierre FUTURES.
+- Ninguno crítico. Seguir monitoreando `/metrics/ghosts` y cierres FUTURES en próximos ciclos.
 
 ---
 
