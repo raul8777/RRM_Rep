@@ -24,9 +24,12 @@ class TestSpotReconciliation:
             )
         return pm
 
-    def _make_binance_client(self, balances):
+    def _make_binance_client(self, balances, prices=None):
         client = MagicMock()
         client.get_account_balance.return_value = balances
+        if prices is None:
+            prices = {"BTCUSDT": 100000.0, "ETHUSDT": 100.0}
+        client.get_symbol_price.side_effect = lambda sym: prices.get(sym)
         return client
 
     def test_spot_parity_aligned(self):
