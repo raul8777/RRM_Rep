@@ -1,0 +1,378 @@
+{
+  "ok": false,
+  "severity": "warning",
+  "mismatch_count": 46,
+  "db_count": 1,
+  "binance_count": 47,
+  "mismatches": [
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "BTCUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 7.69e-06,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "LTCUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.00027955,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "ETHUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 4.065e-05,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "BNBUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.01787536,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "TRXUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.05719809,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "LINKUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.00462,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "ZECUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.00084,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "DASHUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.000114,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "XRPUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.0112,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "ADAUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.007,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "XLMUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.401,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "EONUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 5.14485,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "ADDUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 2.572425,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "MEETONEUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 2.572425,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "ATDUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 5.14485,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "EOPUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 5.14485,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "IQUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 26.238735,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "USDCUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.09753178,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "FETUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.0532,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "DOGEUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.182,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "WINUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 23938.47785567,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "BCHUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.001,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "JSTUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.37820179,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "DOTUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.006,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "PAXGUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 8.92e-05,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "AVAXUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.00245,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "NEARUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.0635,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "INJUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.00929,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "GRTUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.042,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "BTTCUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.4,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "ETHWUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 2.75e-06,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "SUIUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.0132,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "PEPEUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.45,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "WLDUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.0794,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "JTOUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.0796,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "TAOUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 7.2e-06,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "ZROUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.0069,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "RENDERUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.00894,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "ONDOUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.0451,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "TRUMPUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.000678,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "ASTERUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.0096,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "MEGAUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.0715,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "XAUTUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 8.88e-05,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "OPGUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.1678,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "CRCLBUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.00318,
+      "detail": "exists_in_binance_not_in_db"
+    },
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "GRAMUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.00284,
+      "detail": "exists_in_binance_not_in_db"
+    }
+  ],
+  "ts": "2026-07-11T20:38:51.257583+00:00"
+}

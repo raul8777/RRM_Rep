@@ -7,7 +7,12 @@ short-term profit objective of the active regime/profile.
 
 import pytest
 
-from run_trades import _check_entry_quality, _filter_buy_candidates
+from run_trades import (
+    _check_entry_quality,
+    _filter_buy_candidates,
+    _filter_by_quality,
+    _quality_score_for_regime,
+)
 
 
 class DummySettings:
@@ -74,6 +79,14 @@ def test_spot_bull_rejects_low_volume():
     )
     assert ok is False
     assert "SPOT_BULL_VOL" in reason
+
+
+def test_spot_bull_allows_moderate_volume_with_tuned_floor():
+    ok, reason = _check_entry_quality(
+        "TESTUSDT", _meta(vol_spike=0.90, rsi=66.0), SETTINGS, "SPOT_BULL", "B"
+    )
+    assert ok is True
+    assert reason == "OK"
 
 
 def test_spot_bull_rejects_overbought():
@@ -228,3 +241,59 @@ def test_filter_buy_candidates_handles_dict_candidates():
     candidates = [{"symbol": "GOOD", "strength": 0.60}]
     passed = _filter_buy_candidates(candidates, meta, SETTINGS, "SPOT_BULL", "B")
     assert passed == [{"symbol": "GOOD", "strength": 0.60}]
+
+
+class _FakeInnerClient:
+    def __init__(self, tickers):
+        self._tickers = tickers
+
+    def get_ticker(self, symbol):
+        if symbol not in self._tickers:
+            raise RuntimeError("missing ticker")
+        return self._tickers[symbol]
+
+
+class _FakeClient:
+    def __init__(self, tickers):
+        self._inner = _FakeInnerClient(tickers)
+
+    def get_client(self):
+        return self._inner
+
+
+def test_quality_score_for_regime_changes_with_mode():
+    up = _quality_score_for_regime("SPOT_BULL", 0.03, 0.03, 0.50)
+    down = _quality_score_for_regime("SPOT_BULL", 0.03, -0.03, 0.50)
+    assert up > down
+
+    rs_small = _quality_score_for_regime("RANGE_SCALP", 0.02, 0.02, 0.50)
+    rs_big = _quality_score_for_regime("RANGE_SCALP", 0.06, -0.06, 0.50)
+    assert rs_big > rs_small
+
+    fs_down = _quality_score_for_regime("FUTURES_SHORT", 0.05, -0.05, 0.50)
+    fs_up = _quality_score_for_regime("FUTURES_SHORT", 0.05, 0.05, 0.50)
+    assert fs_down > fs_up
+
+
+def test_filter_by_quality_is_mode_aware_across_four_modes():
+    tickers = {
+        "UPTREND": {"priceChangePercent": "6.0", "lastPrice": "10"},
+        "DOWNTREND": {"priceChangePercent": "-6.0", "lastPrice": "10"},
+        "STABLE": {"priceChangePercent": "0.4", "lastPrice": "10"},
+        "MEDIUM": {"priceChangePercent": "2.0", "lastPrice": "10"},
+    }
+    symbols = ["UPTREND", "DOWNTREND", "STABLE", "MEDIUM"]
+    client = _FakeClient(tickers)
+
+    bull = _filter_by_quality(symbols, client, SETTINGS, target_count=2, regime_mode="SPOT_BULL")
+    assert bull[0] == "UPTREND"
+
+    range_scalp = _filter_by_quality(symbols, client, SETTINGS, target_count=2, regime_mode="RANGE_SCALP")
+    assert range_scalp[0] in {"UPTREND", "DOWNTREND"}
+    assert "DOWNTREND" in range_scalp
+
+    preservation = _filter_by_quality(symbols, client, SETTINGS, target_count=2, regime_mode="PRESERVATION")
+    assert preservation[0] == "STABLE"
+
+    futures_short = _filter_by_quality(symbols, client, SETTINGS, target_count=2, regime_mode="FUTURES_SHORT")
+    assert futures_short[0] == "DOWNTREND"

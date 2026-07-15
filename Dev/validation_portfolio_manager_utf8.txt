@@ -8,8 +8,8 @@ tests\test_portfolio_manager.py ..........                               [100%]
 
 ============================== warnings summary ===============================
 tests/test_portfolio_manager.py::TestPortfolioManager::test_get_total_balance_respects_bnb_reserve
-  S:\Tools\AI\crypto-agent\portfolio_manager.py:144: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  S:\Tools\AI\crypto-agent\portfolio_manager.py:145: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
     "timestamp": datetime.utcnow().isoformat()
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-======================== 10 passed, 1 warning in 0.25s ========================
+======================== 10 passed, 1 warning in 0.26s ========================

@@ -10,6 +10,53 @@ from datetime import datetime, timezone
 from simulation.mimic_protocols import SimulationClock
 
 
+def _get_commission_rates() -> tuple:
+    """Return (spot_rate, futures_rate, slippage_pct) from binance_commission.py.
+
+    Falls back to conservative defaults if the module or settings are unavailable.
+    """
+    try:
+        import binance_commission as _bc
+        cfg = _bc.get_config()
+        return cfg.rate_for('spot'), cfg.rate_for('futures'), cfg.slippage_pct
+    except Exception:
+        return 0.001, 0.0004, 0.0005
+
+
+def _load_funding_rate_series(data_dir: str = "historical_data") -> Dict[str, Dict[str, float]]:
+    """Load historical funding rates from parquet into {symbol: {ISO-timestamp: rate}} dict.
+
+    Parquet files are expected at data_dir/external/funding_rate_*.parquet with
+    columns: symbol, fundingTime (ms epoch), fundingRate.
+    Returns an empty dict if no data is available.
+    """
+    import os
+    ext_dir = os.path.join(data_dir, "external")
+    result: Dict[str, Dict[str, float]] = {}
+    if not os.path.isdir(ext_dir):
+        return result
+    for fname in os.listdir(ext_dir):
+        if not (fname.startswith("funding_rate") and fname.endswith(".parquet")):
+            continue
+        try:
+            import pandas as pd
+            df = pd.read_parquet(os.path.join(ext_dir, fname))
+            for _, row in df.iterrows():
+                sym = str(row.get("symbol", ""))
+                ts_raw = row.get("fundingTime", 0)
+                rate = float(row.get("fundingRate", 0.0))
+                # Convert ms epoch to ISO date-hour key (funding settles every 8h)
+                from datetime import timezone as _tz
+                dt = datetime.fromtimestamp(int(ts_raw) / 1000.0, tz=_tz.utc)
+                key = dt.strftime("%Y-%m-%dT%H")
+                if sym not in result:
+                    result[sym] = {}
+                result[sym][key] = rate
+        except Exception:
+            pass
+    return result
+
+
 class SimulationBinanceClient:
     """Mock spot client backed by a historical price feed and virtual balance."""
 
@@ -62,6 +109,10 @@ class SimulationBinanceClient:
                 ],
             }
 
+        def universal_transfer(self, **kwargs: Any) -> Dict[str, Any]:
+            """No-op transfer stub for BNB commission simulation."""
+            return {"tranId": 0}
+
         def get_klines(
             self, symbol: str, interval: str = "1h", limit: int = 100,
             startTime: Optional[int] = None, endTime: Optional[int] = None,
@@ -71,6 +122,14 @@ class SimulationBinanceClient:
                 bars = self._resample_4h(bars)
             elif interval == "1d":
                 bars = self._resample_1d(bars)
+            elif interval in ("5m", "15m"):
+                # D4: Try feed_obj.get_klines_resampled for sub-hourly data
+                feed_obj = getattr(self._owner, '_feed_obj', None)
+                if feed_obj is not None and hasattr(feed_obj, 'get_klines_resampled'):
+                    bars = feed_obj.get_klines_resampled(symbol, interval)
+                else:
+                    mins = 5 if interval == "5m" else 15
+                    bars = self._resample_subhour(bars, mins)
             # Convert bars to raw Binance kline format [open_time, open, high, low, close, volume, close_time, ...]
             raw = []
             for b in bars:
@@ -84,6 +143,10 @@ class SimulationBinanceClient:
                     ct = ot + 14_400_000
                 elif interval == "1d":
                     ct = ot + 86_400_000
+                elif interval == "5m":
+                    ct = ot + 300_000
+                elif interval == "15m":
+                    ct = ot + 900_000
                 else:
                     ct = ot + 3_600_000
                 raw.append([
@@ -106,6 +169,38 @@ class SimulationBinanceClient:
             if len(filtered) > limit:
                 filtered = filtered[-limit:]
             return filtered
+
+        def _resample_subhour(
+            self,
+            bars: List[Dict[str, Any]],
+            target_minutes: int,
+        ) -> List[Dict[str, Any]]:
+            """D4: Inline sub-hourly resample when no feed_obj is available."""
+            n_slots = 60 // target_minutes
+            slot_seconds = target_minutes * 60
+            result = []
+            for bar in sorted(bars, key=lambda x: x.get("open_time", x.get("timestamp", 0))):
+                ot = float(bar.get("open_time", bar.get("timestamp", 0)))
+                o = float(bar.get("open", 0))
+                h = float(bar.get("high", 0))
+                lo = float(bar.get("low", 0))
+                c = float(bar.get("close", 0))
+                vol = float(bar.get("volume", 0))
+                for i in range(n_slots):
+                    frac_s = i / n_slots
+                    frac_e = (i + 1) / n_slots
+                    sub_o = o + (c - o) * frac_s
+                    sub_c = o + (c - o) * frac_e
+                    result.append({
+                        "open_time": ot + i * slot_seconds,
+                        "open": sub_o, "high": max(sub_o, sub_c, lo + (h - lo) * frac_e),
+                        "low": min(sub_o, sub_c, h - (h - lo) * (1 - frac_s)),
+                        "close": sub_c,
+                        "volume": vol / n_slots,
+                        "quote_volume": float(bar.get("quote_volume", 0)) / n_slots,
+                        "trades": int(bar.get("trades", 0)) // n_slots,
+                    })
+            return result
 
         def _resample_4h(self, bars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             """Resample 1h bars into 4h bars."""
@@ -166,13 +261,14 @@ class SimulationBinanceClient:
         self,
         clock: SimulationClock,
         initial_balances: Optional[Dict[str, float]] = None,
-        commission_rate: float = 0.001,
-        slippage_pct: float = 0.0,
+        commission_rate: Optional[float] = None,
+        slippage_pct: Optional[float] = None,
     ):
         self.clock = clock
         self.balances: Dict[str, float] = dict(initial_balances or {"USDT": 2910.0})
-        self.commission_rate = commission_rate
-        self.slippage_pct = slippage_pct
+        _spot_rate, _fut_rate, _slip = _get_commission_rates()
+        self.commission_rate = commission_rate if commission_rate is not None else _spot_rate
+        self.slippage_pct = slippage_pct if slippage_pct is not None else _slip
         self._price_feed: Dict[str, List[Dict[str, Any]]] = {}  # symbol -> [{ts, open, high, low, close, volume}]
         self._orders: List[Dict[str, Any]] = []
         self._price_cache: Dict[str, tuple] = {}
@@ -231,9 +327,18 @@ class SimulationBinanceClient:
         self._order_id += 1
         price = self._current_price(symbol)
         if self.slippage_pct:
-            # slippage against the orderer: worse fill price
+            # D3: Volume-adjusted slippage — larger orders relative to bar volume get worse fills.
+            bar = self._current_bar(symbol)
+            bar_vol = float(bar.get("quote_volume", 0)) if bar else 0.0
+            order_notional = (quote_order_qty or (quantity * price))
+            vol_impact = 0.0
+            if bar_vol > 0:
+                # Linear market impact: 1 bp per 0.5% of bar volume
+                vol_ratio = min(order_notional / bar_vol, 0.10)  # cap at 10%
+                vol_impact = vol_ratio * 0.002  # 0.2% per 1% of bar volume
+            effective_slip = self.slippage_pct + vol_impact
             sign = -1 if side.upper() == "BUY" else 1
-            price = price * (1 + sign * self.slippage_pct)
+            price = price * (1 + sign * effective_slip)
 
         asset = symbol.replace("USDT", "")
         if side.upper() == "BUY":
@@ -291,6 +396,43 @@ class SimulationBinanceClient:
             return False
         return order_result.get("status") == "FILLED"
 
+    def verify_and_fetch_fills(self, order_result: dict, label: str = "") -> Optional[Dict[str, Any]]:
+        """Simulation equivalent of BinanceClient.verify_and_fetch_fills.
+
+        Aggregates fill data from the already-executed simulated order so that
+        production ``run_trades.py`` can persist entry data without modification.
+        """
+        if not self.verify_order_filled(order_result, label=label):
+            return None
+        fills = order_result.get("fills") or []
+        if not fills:
+            return None
+        total_qty = 0.0
+        total_quote = 0.0
+        total_commission = 0.0
+        for f in fills:
+            q = float(f.get("qty", 0.0))
+            p = float(f.get("price", 0.0))
+            c_raw = float(f.get("commission", 0.0))
+            c_asset = f.get("commissionAsset", "USDT")
+            if c_asset not in ("USDT", "BNB") and p > 0:
+                c_usdt = c_raw * p
+            else:
+                c_usdt = c_raw
+            total_qty += q
+            total_quote += q * p
+            total_commission += c_usdt
+        avg_price = total_quote / total_qty if total_qty > 0 else 0.0
+        return {
+            "symbol": order_result.get("symbol", ""),
+            "order_id": order_result.get("orderId"),
+            "qty": total_qty,
+            "quote_qty": total_quote,
+            "commission": total_commission,
+            "avg_price": avg_price,
+            "binance_confirmed": True,
+        }
+
     def get_symbol_price(self, symbol: str, use_cache: bool = True) -> float:
         now = self.clock.now().timestamp()
         if use_cache and symbol in self._price_cache:
@@ -332,13 +474,20 @@ class SimulationBinanceClient:
 class SimulationFuturesClient:
     """Mock futures client backed by the same historical price feed."""
 
+    # Funding is charged/credited every 8h; we apply it when the clock crosses
+    # a settlement hour (00:00, 08:00, 16:00 UTC).
+    _FUNDING_SETTLEMENT_HOURS = {0, 8, 16}
+
     def __init__(
         self,
         clock: SimulationClock,
         price_feed: Dict[str, List[Dict[str, Any]]],
-        commission_rate: float = 0.0004,
+        commission_rate: Optional[float] = None,
         leverage: int = 2,
+        data_dir: str = "historical_data",
     ):
+        _spot_rate, _fut_rate, _slip = _get_commission_rates()
+        commission_rate = commission_rate if commission_rate is not None else _fut_rate
         self.clock = clock
         self._price_feed = price_feed
         self.commission_rate = commission_rate
@@ -354,6 +503,10 @@ class SimulationFuturesClient:
         self.max_largecap_shorts = 3
         self.largecap_symbols = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT"}
         self._binance_client_ref = None
+        # D1: Historical funding rate series {symbol: {YYYY-MM-DDTHH: rate}}
+        self._funding_series: Dict[str, Dict[str, float]] = _load_funding_rate_series(data_dir)
+        self._last_funding_hour: Optional[int] = None  # tracks last settlement hour applied
+        self._total_funding_paid: float = 0.0
 
     def _current_price(self, symbol: str) -> float:
         bars = self._price_feed.get(symbol, [])
@@ -368,6 +521,44 @@ class SimulationFuturesClient:
             raise RuntimeError(f"No futures price data for {symbol} at {self.clock.now().isoformat()}")
         return float(bar.get("close", 0))
 
+    def apply_funding_if_due(self) -> float:
+        """D1: Debit/credit funding from open positions when clock crosses a settlement hour.
+
+        Returns total funding PnL applied this call (negative = paid, positive = received).
+        Binance shorts: if fundingRate > 0, short-holder RECEIVES funding.
+        """
+        now = self.clock.now()
+        current_hour = now.hour
+        if current_hour not in self._FUNDING_SETTLEMENT_HOURS:
+            return 0.0
+        if self._last_funding_hour == current_hour and now.date() == getattr(self, '_last_funding_date', None):
+            return 0.0  # already applied this settlement window
+        self._last_funding_hour = current_hour
+        self._last_funding_date = now.date()
+
+        hour_key = now.strftime("%Y-%m-%dT%H")
+        total_funding = 0.0
+        for key, pos in self._open_positions.items():
+            if pos.closed:
+                continue
+            sym = pos.symbol
+            rate = self._funding_series.get(sym, {}).get(hour_key, None)
+            if rate is None:
+                # Fallback: use a small positive rate typical for crypto (0.01%)
+                rate = 0.0001
+            price = self._current_price(sym)
+            notional = abs(float(getattr(pos, 'quantity', 0))) * price
+            if pos.side == "SHORT":
+                # Short receives when rate > 0, pays when rate < 0
+                funding_pnl = notional * rate
+            else:
+                # Long pays when rate > 0, receives when rate < 0
+                funding_pnl = -notional * rate
+            self._available_usdt += funding_pnl
+            total_funding += funding_pnl
+        self._total_funding_paid += total_funding
+        return total_funding
+
     def enable_hedge_mode(self) -> None:
         self._hedge_mode = True
 
@@ -377,7 +568,32 @@ class SimulationFuturesClient:
     def get_available_usdt(self) -> float:
         return self._available_usdt
 
+    def get_total_wallet_usdt(self) -> float:
+        """Return total USDT-equivalent futures wallet value (simulation-only)."""
+        # Include virtual BNB margin value if held, priced from the historical feed.
+        total = self._available_usdt
+        for sym, pos in self._open_positions.items():
+            if pos.closed:
+                continue
+            try:
+                price = self._current_price(pos.symbol)
+                notional = abs(float(getattr(pos, 'quantity', 0))) * price
+                total += notional
+            except Exception:
+                pass
+        return total
+
+    def get_account_info(self) -> Dict[str, Any]:
+        """Return a minimal futures account snapshot for BNB commission simulation."""
+        return {
+            "assets": [
+                {"asset": "USDT", "availableBalance": str(self._available_usdt), "walletBalance": str(self._available_usdt)},
+            ],
+        }
+
     def check_positions(self, settings: Any, monitor_only: bool = False) -> List[Dict[str, Any]]:
+        # D1: Apply funding before evaluating SL/TP
+        self.apply_funding_if_due()
         # Minimal simulation: close positions that hit SL or TP
         closes = []
         for key, pos in list(self._open_positions.items()):
@@ -414,15 +630,42 @@ class SimulationFuturesClient:
             return closed
         return 0
 
-    def smart_rebalance_capital(self, **kwargs: Any) -> Dict[str, Any]:
-        """Capital bridge stub matching FuturesClient return contract."""
-        return {
-            "direction": "none",
-            "amount": 0.0,
-            "reason": "capital bridge disabled in simulation",
-            "success": True,
-            "error": None,
-        }
+    def smart_rebalance_capital(
+        self,
+        spot_client: Optional[Any] = None,
+        target_futures_ratio: float = 0.30,
+        min_transfer: float = 50.0,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """D12: Simulate spot\u2194futures capital bridge.
+
+        Transfers virtual USDT between spot (spot_client.balances) and the
+        futures available balance so the simulation reflects the same
+        allocation logic that production uses.
+        """
+        if spot_client is None:
+            return {"direction": "none", "amount": 0.0, "reason": "no spot_client provided", "success": True, "error": None}
+        spot_usdt = float(spot_client.balances.get("USDT", 0.0))
+        futures_usdt = self._available_usdt
+        total = spot_usdt + futures_usdt
+        if total <= 0:
+            return {"direction": "none", "amount": 0.0, "reason": "zero capital", "success": True, "error": None}
+        target_futures = total * target_futures_ratio
+        delta = target_futures - futures_usdt
+        if abs(delta) < min_transfer:
+            return {"direction": "none", "amount": 0.0, "reason": f"delta {delta:.2f} below min {min_transfer}", "success": True, "error": None}
+        if delta > 0:
+            # Transfer spot \u2192 futures
+            transfer = min(delta, spot_usdt)
+            spot_client.balances["USDT"] = spot_usdt - transfer
+            self._available_usdt += transfer
+            return {"direction": "spot_to_futures", "amount": round(transfer, 2), "reason": "rebalance", "success": True, "error": None}
+        else:
+            # Transfer futures \u2192 spot
+            transfer = min(abs(delta), futures_usdt)
+            self._available_usdt -= transfer
+            spot_client.balances["USDT"] = spot_usdt + transfer
+            return {"direction": "futures_to_spot", "amount": round(transfer, 2), "reason": "rebalance", "success": True, "error": None}
 
     def get_open_positions_summary(self) -> List[Dict[str, Any]]:
         """Stub for dashboard compatibility."""

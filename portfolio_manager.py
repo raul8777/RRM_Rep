@@ -17,13 +17,13 @@ from pnl_service import get_predictor
 import pnl_service
 
 
-def _get_bnb_reserve_usdt(settings) -> float:
-    """Return USD value of BNB that should be reserved for commission buffer."""
+def _get_bnb_reserve_usdt(settings) -> dict:
+    """Return per-wallet BNB reserve dict: spot_reserve_usdt, futures_reserve_usdt, total_reserve_usdt."""
     try:
         from binance_commission import get_bnb_reserve_usdt
-        return get_bnb_reserve_usdt(settings).get('total_reserve_usdt', 0.0)
+        return get_bnb_reserve_usdt(settings)
     except Exception:
-        return 0.0
+        return {'spot_reserve_usdt': 0.0, 'futures_reserve_usdt': 0.0, 'total_reserve_usdt': 0.0}
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +121,7 @@ class PortfolioManager:
             total_usdt = 0.0
             usdt_balance = float(balances.get("USDT", 0))
             total_usdt += usdt_balance
+            spot_bnb_usdt = 0.0
             
             # Convert other assets to USDT value (price cache in BinanceClient prevents extra calls)
             for asset, amount in balances.items():
@@ -129,16 +130,21 @@ class PortfolioManager:
                 try:
                     symbol = f"{asset.upper()}USDT"
                     price = self._get_symbol_price_cached(symbol, price_cache)
-                    total_usdt += amount * price
+                    asset_value = amount * price
+                    total_usdt += asset_value
+                    if asset.upper() == "BNB":
+                        spot_bnb_usdt = asset_value
                 except Exception:
                     pass
             
-            bnb_reserve = _get_bnb_reserve_usdt(self.settings)
+            _bnb_reserves = _get_bnb_reserve_usdt(self.settings)
+            bnb_reserve = _bnb_reserves.get('spot_reserve_usdt', _bnb_reserves.get('total_reserve_usdt', 0.0))
             usdt_available_after_reserve = max(0.0, usdt_balance - bnb_reserve)
             result = {
                 "usdt_available": usdt_balance,
                 "usdt_available_after_reserve": usdt_available_after_reserve,
                 "bnb_reserve_usdt": bnb_reserve,
+                "spot_bnb_usdt": spot_bnb_usdt,
                 "total_usdt": total_usdt,
                 "allocation_usdt": total_usdt * self.allocation_pct,
                 "timestamp": datetime.utcnow().isoformat()
@@ -151,6 +157,7 @@ class PortfolioManager:
                 "usdt_available": 0.0,
                 "usdt_available_after_reserve": 0.0,
                 "bnb_reserve_usdt": 0.0,
+                "spot_bnb_usdt": 0.0,
                 "total_usdt": 0.0,
                 "allocation_usdt": 0.0,
                 "timestamp": datetime.utcnow().isoformat()
@@ -172,10 +179,12 @@ class PortfolioManager:
             futures_total = futures_client.get_total_wallet_usdt()
             futures_avail = futures_client.get_available_usdt()
             spot_usdt     = spot["usdt_available"]
-            bnb_reserve = _get_bnb_reserve_usdt(self.settings)
-            # Reserve applies to the whole system (BNB held across both wallets)
-            usdt_after_reserve = max(0.0, spot_usdt - bnb_reserve)
-            futures_after_reserve = max(0.0, futures_avail - bnb_reserve)
+            _bnb_reserves = _get_bnb_reserve_usdt(self.settings)
+            spot_bnb_reserve = _bnb_reserves.get('spot_reserve_usdt', 0.0)
+            futures_bnb_reserve = _bnb_reserves.get('futures_reserve_usdt', 0.0)
+            bnb_reserve = spot_bnb_reserve  # expose spot reserve for usdt_available_after_reserve
+            usdt_after_reserve = max(0.0, spot_usdt - spot_bnb_reserve)
+            futures_after_reserve = max(0.0, futures_avail - futures_bnb_reserve)
             combined_total = spot["total_usdt"] + futures_total
             result = {
                 "usdt_available":                  spot_usdt,
@@ -183,6 +192,7 @@ class PortfolioManager:
                 "futures_available":               futures_avail,
                 "futures_available_after_reserve": futures_after_reserve,
                 "bnb_reserve_usdt":                bnb_reserve,
+                "spot_bnb_usdt":                   spot.get("spot_bnb_usdt", 0.0),
                 "futures_total":                   futures_total,
                 "total_usdt":                      combined_total,
                 "allocation_usdt":               combined_total * self.allocation_pct,

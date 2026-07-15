@@ -1,0 +1,1187 @@
+{
+  "generated_at": "2026-07-11T03:42:24.000632+00:00",
+  "files": [
+    {
+      "file": "btc_dominance_20260101_20260711.parquet",
+      "path": "/app/historical_data/external/btc_dominance_20260101_20260711.parquet",
+      "sha256": "49146b4aa445309eb2562b55dd270bec1fe9130d8f5bd64a125f66471574f85d",
+      "size_bytes": 4111
+    },
+    {
+      "file": "fear_greed_20250101_20260710.parquet",
+      "path": "/app/historical_data/external/fear_greed_20250101_20260710.parquet",
+      "sha256": "203f95ad3357fa302b7386f546c5eb86bf389b6b0a5bedd7f7f73774435baf4e",
+      "size_bytes": 12312
+    },
+    {
+      "file": "fear_greed_20260101_20260711.parquet",
+      "path": "/app/historical_data/external/fear_greed_20260101_20260711.parquet",
+      "sha256": "f05f06841858c4da993d6f1a08e67d6098cb237a16c8ccbc655a9adc908447f4",
+      "size_bytes": 6631
+    },
+    {
+      "file": "funding_rate_20260101_20260711.parquet",
+      "path": "/app/historical_data/external/funding_rate_20260101_20260711.parquet",
+      "sha256": "e30610468baddf25b53faf19baf562938134454c7539da4ede38990086268a0a",
+      "size_bytes": 35746
+    },
+    {
+      "file": "funding_rate_20260303_20260710.parquet",
+      "path": "/app/historical_data/external/funding_rate_20260303_20260710.parquet",
+      "sha256": "1dbbc879df8e0ef459892ca820030bbfed1be91cad8364391d669ae179e3e786",
+      "size_bytes": 25569
+    },
+    {
+      "file": "ticker_24h_20260101.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260101.parquet",
+      "sha256": "3f5e098cf307e92a40c03bc920aabea9cb915e3f72fb8dec0979b9ecef662f79",
+      "size_bytes": 37599
+    },
+    {
+      "file": "ticker_24h_20260102.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260102.parquet",
+      "sha256": "e3a6c8f68d551e929bec4375e7d6b0418eb6adb5552c032461fec411d0fddc90",
+      "size_bytes": 37582
+    },
+    {
+      "file": "ticker_24h_20260103.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260103.parquet",
+      "sha256": "15e47dd07f009c0bc42cca79349ee36d88757737cf8cd43eed22a7e320298163",
+      "size_bytes": 37588
+    },
+    {
+      "file": "ticker_24h_20260104.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260104.parquet",
+      "sha256": "cc80e225626f74ab42a9a8fec56788a923e4a3f537004bb4ae49ac345a8273b7",
+      "size_bytes": 37572
+    },
+    {
+      "file": "ticker_24h_20260105.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260105.parquet",
+      "sha256": "40e9e420ae4011693134c414e049fba7377a13f29002f613ad7f8d4e090ebc9c",
+      "size_bytes": 37565
+    },
+    {
+      "file": "ticker_24h_20260106.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260106.parquet",
+      "sha256": "503c62472f61400758d81af3b0400b0d5c6986a22ae9766d2fc525a2bb9b5659",
+      "size_bytes": 37571
+    },
+    {
+      "file": "ticker_24h_20260107.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260107.parquet",
+      "sha256": "1924918b2240c4fb131b5d7159aa639498b2a495f003fc7b481a624034293ddf",
+      "size_bytes": 37553
+    },
+    {
+      "file": "ticker_24h_20260108.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260108.parquet",
+      "sha256": "320ef766248e6ef6dd327d24f9a9fec137f0d75ec505cc77f847106311e8b187",
+      "size_bytes": 37679
+    },
+    {
+      "file": "ticker_24h_20260109.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260109.parquet",
+      "sha256": "dbfe396a928339156dab3b91da5b7a38f70f8848b56df0e9f9f9040b41cfbc6d",
+      "size_bytes": 37669
+    },
+    {
+      "file": "ticker_24h_20260110.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260110.parquet",
+      "sha256": "acde2f059b2fa9c9953c6024a33ed8dccbf96321ed715fc3bac80d51f5b71fe3",
+      "size_bytes": 37674
+    },
+    {
+      "file": "ticker_24h_20260111.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260111.parquet",
+      "sha256": "57d677053181033ece2205f18e6ab1c59fe4cd9e559e44915c35f40b9ef47f3b",
+      "size_bytes": 38110
+    },
+    {
+      "file": "ticker_24h_20260112.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260112.parquet",
+      "sha256": "9b4d157065f6b37790fa6cbc9f242d8b7e20185a42c4ed1d4fc71d9f0554eb35",
+      "size_bytes": 37689
+    },
+    {
+      "file": "ticker_24h_20260113.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260113.parquet",
+      "sha256": "81f2ea1407e1a56e08ed0163055246ec5543d3f245e87760cb988e74c60b7ed5",
+      "size_bytes": 37660
+    },
+    {
+      "file": "ticker_24h_20260114.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260114.parquet",
+      "sha256": "0c953f366f41401606cd8328878e15f64d61a4a4cd70ba092bf5d5a2f6da1200",
+      "size_bytes": 37662
+    },
+    {
+      "file": "ticker_24h_20260115.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260115.parquet",
+      "sha256": "ac99b5ec2ef735445cf762cac85bd7d7d6047db312b64479637b190fb32e2be1",
+      "size_bytes": 37537
+    },
+    {
+      "file": "ticker_24h_20260116.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260116.parquet",
+      "sha256": "8275de4ecead0bbfb279bea1a8d61fcf1c0bbc068e529e803131b4d8bb5f8e8b",
+      "size_bytes": 37542
+    },
+    {
+      "file": "ticker_24h_20260117.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260117.parquet",
+      "sha256": "f3487118028db1cd402b8bb7680499f40138f2b2fb425c0e73a8fa0cad545b12",
+      "size_bytes": 38050
+    },
+    {
+      "file": "ticker_24h_20260118.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260118.parquet",
+      "sha256": "a09cd224931db9de3cd65bf407c6509fc621f9c96f1840d292850e7640f2f036",
+      "size_bytes": 38055
+    },
+    {
+      "file": "ticker_24h_20260119.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260119.parquet",
+      "sha256": "84d8cffa5cfcab1d0a871711b324f87b5e573c024e29958698d6b36ddeb99768",
+      "size_bytes": 38055
+    },
+    {
+      "file": "ticker_24h_20260120.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260120.parquet",
+      "sha256": "03796d9d2b4ba6079a1b9c3fa8218f1e2f1c2f3c896ab4a4d4ba25ac0ef137d2",
+      "size_bytes": 37512
+    },
+    {
+      "file": "ticker_24h_20260121.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260121.parquet",
+      "sha256": "162766702496916e8ae522dcee13a4b6dd7c49279412f095b79b393045d37828",
+      "size_bytes": 37475
+    },
+    {
+      "file": "ticker_24h_20260122.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260122.parquet",
+      "sha256": "fcc27cc48f05e609dff8cd6fdf2877ca93aed9ea20b6d81af7900d12ff9f3135",
+      "size_bytes": 37464
+    },
+    {
+      "file": "ticker_24h_20260123.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260123.parquet",
+      "sha256": "090a073426352096ceb467c19260660d53a02f386f271dff71db892fde4624f7",
+      "size_bytes": 37495
+    },
+    {
+      "file": "ticker_24h_20260124.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260124.parquet",
+      "sha256": "231e55d19d7129b545ac184b66711ddbb6dd399b157f243a1e67d4120d40e445",
+      "size_bytes": 37471
+    },
+    {
+      "file": "ticker_24h_20260125.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260125.parquet",
+      "sha256": "6f92124689bd905ccbf66fea767563739b5a9708eed85eb88e2347e54e971cec",
+      "size_bytes": 37467
+    },
+    {
+      "file": "ticker_24h_20260126.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260126.parquet",
+      "sha256": "d24772c66ec04d8c72aa152457b83b4da6477ac06d6639319c5c27dcb43a9269",
+      "size_bytes": 37463
+    },
+    {
+      "file": "ticker_24h_20260127.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260127.parquet",
+      "sha256": "e05a78cda00be26023bba05f46328e116f9a2ebe8d649171fac80df7556c9cb2",
+      "size_bytes": 37550
+    },
+    {
+      "file": "ticker_24h_20260128.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260128.parquet",
+      "sha256": "21a3ecc92ba5b19b1dcfb7d90573311def59b81649142de53a931cf062157377",
+      "size_bytes": 37514
+    },
+    {
+      "file": "ticker_24h_20260129.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260129.parquet",
+      "sha256": "8e09640a9d25817c9b493bf6cd3b4a7e718e0c649ddbdd80b547a681717954d7",
+      "size_bytes": 37503
+    },
+    {
+      "file": "ticker_24h_20260130.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260130.parquet",
+      "sha256": "d6c30a503344e21158852827c13a9b28c138c73d5e1323c521cc32f145ce5119",
+      "size_bytes": 37551
+    },
+    {
+      "file": "ticker_24h_20260131.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260131.parquet",
+      "sha256": "067d64f5567e3f0811053c9d8e03c137fc33f710f7ce744cf26441204e7cb7ce",
+      "size_bytes": 37551
+    },
+    {
+      "file": "ticker_24h_20260201.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260201.parquet",
+      "sha256": "4540c06212221db338cb15ceeb59d4912cd33b3874bbc05c8b824457bfa27f6b",
+      "size_bytes": 37583
+    },
+    {
+      "file": "ticker_24h_20260202.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260202.parquet",
+      "sha256": "9f1b3737a0f9ffd23f1082508bc1ad3c20ffc65e827ae942c67ee087fe11f97d",
+      "size_bytes": 37506
+    },
+    {
+      "file": "ticker_24h_20260203.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260203.parquet",
+      "sha256": "0ddd8891b970505f36110ee929ae8cc05ef63f6ddaf153197ed4758257d3c0a6",
+      "size_bytes": 37504
+    },
+    {
+      "file": "ticker_24h_20260204.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260204.parquet",
+      "sha256": "9740c958e388537b2aee34ccc577ff63a71f5ee34d20f30f422cca856ca4f708",
+      "size_bytes": 37496
+    },
+    {
+      "file": "ticker_24h_20260205.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260205.parquet",
+      "sha256": "1aaa377e2ad3be7fa9f40b46c90d5f8a3fcf8653557c36ddadab112473fb0c5b",
+      "size_bytes": 37496
+    },
+    {
+      "file": "ticker_24h_20260206.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260206.parquet",
+      "sha256": "d7880fa2180ab576fc1807bd63d46662239e05525d58dd632cc3d2283d7ada51",
+      "size_bytes": 37486
+    },
+    {
+      "file": "ticker_24h_20260207.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260207.parquet",
+      "sha256": "0e4edcc4e7381c38bdebaeedc125e89212423b4a5748d8eeed8ece8eaa51a484",
+      "size_bytes": 37532
+    },
+    {
+      "file": "ticker_24h_20260208.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260208.parquet",
+      "sha256": "e372a7fc7d0a6eae5f49a364ca04a49cc32d3597af31df553685be4eb37e69d4",
+      "size_bytes": 37491
+    },
+    {
+      "file": "ticker_24h_20260209.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260209.parquet",
+      "sha256": "853cca7125b0ccd923dc6c44e951c48dffb620b4805230a0eda5f907edc2af5a",
+      "size_bytes": 37490
+    },
+    {
+      "file": "ticker_24h_20260210.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260210.parquet",
+      "sha256": "1d2ab05bb06d6727a291e1988c51f828e5fe29a2adf12c8304a7a671e0010144",
+      "size_bytes": 37711
+    },
+    {
+      "file": "ticker_24h_20260211.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260211.parquet",
+      "sha256": "b9568d8c6089782be9be0dfcc42228a6a7eb3d4358d0046b838470e193abb188",
+      "size_bytes": 37717
+    },
+    {
+      "file": "ticker_24h_20260212.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260212.parquet",
+      "sha256": "670b9530d1e8edb45a22be86294f05ac7be32fe0c82b2ad120b1f732420c2163",
+      "size_bytes": 37710
+    },
+    {
+      "file": "ticker_24h_20260213.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260213.parquet",
+      "sha256": "78fac789b8c3961b8acd95ccc19116dca6427ed62fedfe689722d3182c4f1747",
+      "size_bytes": 37625
+    },
+    {
+      "file": "ticker_24h_20260214.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260214.parquet",
+      "sha256": "a8983f3ce30f0f54996ebacbd24c214f240721f0923652d02436bbf72c632306",
+      "size_bytes": 37581
+    },
+    {
+      "file": "ticker_24h_20260215.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260215.parquet",
+      "sha256": "2aa8584837bddbfee6c0f99bb1d144d1c20e52336842a4a099bfa181b8383ff7",
+      "size_bytes": 37584
+    },
+    {
+      "file": "ticker_24h_20260216.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260216.parquet",
+      "sha256": "aea9d971213a491b14d7e8c49935720eb18586a13f4c57f4fc7831fa715175e8",
+      "size_bytes": 37521
+    },
+    {
+      "file": "ticker_24h_20260217.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260217.parquet",
+      "sha256": "fbe8d07ea38356534ef4c60c461d7105cd27b1133f6e1ae0f373d0ce69e8be60",
+      "size_bytes": 37575
+    },
+    {
+      "file": "ticker_24h_20260218.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260218.parquet",
+      "sha256": "645b93b8491b7c82446e9eb53193a2d0374568df69cc84d85bb4c1ceb826f017",
+      "size_bytes": 37526
+    },
+    {
+      "file": "ticker_24h_20260219.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260219.parquet",
+      "sha256": "4e39497a951cc3f7c65512cd10231fd802407086bccfa00faf86698892d5c044",
+      "size_bytes": 37458
+    },
+    {
+      "file": "ticker_24h_20260220.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260220.parquet",
+      "sha256": "5f850e8dac0173dad546fac183b7b449ad3ea0726181ffbdf8bf2485411db688",
+      "size_bytes": 38037
+    },
+    {
+      "file": "ticker_24h_20260221.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260221.parquet",
+      "sha256": "d5d433d0e8ba80e493ee7b1b3c38822b0fda267fcf2e3558b37d7b8d800b1fb1",
+      "size_bytes": 37540
+    },
+    {
+      "file": "ticker_24h_20260222.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260222.parquet",
+      "sha256": "4a61672302b4ec3827529740092192d0c55cc3659fd5eaf1c66312020f3c93bc",
+      "size_bytes": 37542
+    },
+    {
+      "file": "ticker_24h_20260223.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260223.parquet",
+      "sha256": "ff278b1bbaabb92d72cec1aa7b7901d5444d2d24146fd3ca21d7236eece74225",
+      "size_bytes": 37881
+    },
+    {
+      "file": "ticker_24h_20260224.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260224.parquet",
+      "sha256": "92c37e7d935e99d9711930b8bc66d45e15c37c49dadab8d905e9118bda791fba",
+      "size_bytes": 37833
+    },
+    {
+      "file": "ticker_24h_20260225.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260225.parquet",
+      "sha256": "9ebd1debe9a7771c8365a6825f05508c0bf8446130767409eb66010bb279863e",
+      "size_bytes": 38010
+    },
+    {
+      "file": "ticker_24h_20260226.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260226.parquet",
+      "sha256": "43fee0052314aee0a09af4e7ef8867e5c8c5c5e9b7714b5b4ed0c0101f311252",
+      "size_bytes": 37527
+    },
+    {
+      "file": "ticker_24h_20260227.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260227.parquet",
+      "sha256": "c4a7d21f3fdec50c78f2e1554d2a0bf83c12106f72509c3454349b7caaf58f50",
+      "size_bytes": 37552
+    },
+    {
+      "file": "ticker_24h_20260228.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260228.parquet",
+      "sha256": "87a9206b33c154aadbde8e91d726e4eea4c572239eab3092888aafcffa017f34",
+      "size_bytes": 37535
+    },
+    {
+      "file": "ticker_24h_20260301.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260301.parquet",
+      "sha256": "1ce5d2a272b8c19ac3d2fc3e69e180263ea928d1889e08f1b80ef7c5c09410d7",
+      "size_bytes": 37634
+    },
+    {
+      "file": "ticker_24h_20260302.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260302.parquet",
+      "sha256": "886946e1b27af099db2fda46358e319add637e67103dd13e886a83e9a93b60d5",
+      "size_bytes": 37631
+    },
+    {
+      "file": "ticker_24h_20260303.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260303.parquet",
+      "sha256": "1f6582d606bf14f408ce6bfd6e7ec94c5f8635c4f2daa03123d2b8d211c26e54",
+      "size_bytes": 37628
+    },
+    {
+      "file": "ticker_24h_20260304.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260304.parquet",
+      "sha256": "5b1d46fb96fcf9e3645046b94349aa8ea8f15c34dbc2e6afe3a7fc2f510f7d9e",
+      "size_bytes": 37568
+    },
+    {
+      "file": "ticker_24h_20260305.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260305.parquet",
+      "sha256": "4725a82c2d435f279f417b928bb478eece660f6c9658403d3a982f4d846778d5",
+      "size_bytes": 37595
+    },
+    {
+      "file": "ticker_24h_20260306.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260306.parquet",
+      "sha256": "9096f37bb457cc57703634c8aa84a782b14a3c91e5c2d59826f2c4f16db96871",
+      "size_bytes": 37575
+    },
+    {
+      "file": "ticker_24h_20260307.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260307.parquet",
+      "sha256": "7ee8e59d6d8e3d923cacde017bceebca0f02e25f8cb377d60f33fcc9ab37e0a0",
+      "size_bytes": 37573
+    },
+    {
+      "file": "ticker_24h_20260308.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260308.parquet",
+      "sha256": "e681af722c58d335d7a34bbedd766d36d7e8c7ae0ba7d1c96e9044e65975aed0",
+      "size_bytes": 37563
+    },
+    {
+      "file": "ticker_24h_20260309.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260309.parquet",
+      "sha256": "21e7da5d77eb75d0ea0b11478466fd8a53f41847bcf15375ca836cde6fe131c9",
+      "size_bytes": 37572
+    },
+    {
+      "file": "ticker_24h_20260310.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260310.parquet",
+      "sha256": "da46454dc63bf1c27c6f5e0140165210eb1835dc088cb08be893ae8549afd55b",
+      "size_bytes": 37581
+    },
+    {
+      "file": "ticker_24h_20260311.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260311.parquet",
+      "sha256": "3f51b5dedafa2f69995a0a709614360003f062cddc8300b56e8b13335701c522",
+      "size_bytes": 37676
+    },
+    {
+      "file": "ticker_24h_20260312.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260312.parquet",
+      "sha256": "5005ec74c1a05acb95bb4b1ea84cc7a74e4f7d9a681429762637dcaf8ae2265a",
+      "size_bytes": 37666
+    },
+    {
+      "file": "ticker_24h_20260313.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260313.parquet",
+      "sha256": "e4cd6f5ee4af945a540104827c5f82a2df855b163dc360364fd2fdb19a92d789",
+      "size_bytes": 37670
+    },
+    {
+      "file": "ticker_24h_20260314.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260314.parquet",
+      "sha256": "8e030d8d323330bd07a32bf4a554100877671bf0179bffc5e879bcacfc16fc5c",
+      "size_bytes": 37676
+    },
+    {
+      "file": "ticker_24h_20260315.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260315.parquet",
+      "sha256": "28c3c08023de1557718fe725b35150033a5f76b8e84c3954a3278d446270e27a",
+      "size_bytes": 37688
+    },
+    {
+      "file": "ticker_24h_20260316.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260316.parquet",
+      "sha256": "7bd6d5f1d6bda7979cb8c0f3ed981c7204784108d38386b8ee75f019ffa544f0",
+      "size_bytes": 37664
+    },
+    {
+      "file": "ticker_24h_20260317.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260317.parquet",
+      "sha256": "cc0b0fc3b4455fe32afd2f4ed8a50dc8a985ea44c3ea95551c1e75694e85497b",
+      "size_bytes": 37661
+    },
+    {
+      "file": "ticker_24h_20260318.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260318.parquet",
+      "sha256": "c5d69a4a289b8688d4c5cb11e3c387cbec9e0ff8089a136a87feb3312b2e9881",
+      "size_bytes": 37552
+    },
+    {
+      "file": "ticker_24h_20260319.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260319.parquet",
+      "sha256": "5be3227c4c430d74201948ae98183a79f57266bae75a7fe1532b76c6601c09f9",
+      "size_bytes": 37542
+    },
+    {
+      "file": "ticker_24h_20260320.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260320.parquet",
+      "sha256": "facde78e3dc10f0732fb3de6c1c74b7af979f53098d31fca56ba07e47fe44e60",
+      "size_bytes": 37552
+    },
+    {
+      "file": "ticker_24h_20260321.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260321.parquet",
+      "sha256": "1112cd0a2a58466241fcf17dee1e0c63abc3d71f07794a48c5a87c4176794866",
+      "size_bytes": 38056
+    },
+    {
+      "file": "ticker_24h_20260322.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260322.parquet",
+      "sha256": "2fb70e75df600065a189b8d2f330ede86def0866ffe7ac224e14955c96755485",
+      "size_bytes": 37631
+    },
+    {
+      "file": "ticker_24h_20260323.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260323.parquet",
+      "sha256": "a036c34cc87d623ba4e1a3f189e6bc0fec0acbf135ce369f06d5b03fe674fd45",
+      "size_bytes": 37376
+    },
+    {
+      "file": "ticker_24h_20260324.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260324.parquet",
+      "sha256": "ccc9b39057b074397939186e91269c793338689b04e7e0d382d03b7c032b96c9",
+      "size_bytes": 37458
+    },
+    {
+      "file": "ticker_24h_20260325.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260325.parquet",
+      "sha256": "03fd69612a4b03c96f80ae46ad2a8b0cb7ed524a6832a1c4fb659f855c1391f2",
+      "size_bytes": 37485
+    },
+    {
+      "file": "ticker_24h_20260326.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260326.parquet",
+      "sha256": "f195e3c90cc034bd883b19aef35fb2b2084a5e01dc6225d93dd03c04d5943449",
+      "size_bytes": 37389
+    },
+    {
+      "file": "ticker_24h_20260327.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260327.parquet",
+      "sha256": "31ae19b355132b6ad0c01a6ef045e700c7ca4520805f10d325c371e18f384b87",
+      "size_bytes": 37512
+    },
+    {
+      "file": "ticker_24h_20260328.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260328.parquet",
+      "sha256": "bc1b8cb84073e9e4b932f7b646fb952761bca3151c833b85cd8f7f0a7ab34086",
+      "size_bytes": 37475
+    },
+    {
+      "file": "ticker_24h_20260329.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260329.parquet",
+      "sha256": "d472e75f66e56bdb5a9bc0288e6c2bc97143c5ea3542121a30c8e132b10fdc96",
+      "size_bytes": 37464
+    },
+    {
+      "file": "ticker_24h_20260330.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260330.parquet",
+      "sha256": "b91acc785872f64b7ee8871b13308a7998c22da8e6c55a21e1d1c44e70a767bb",
+      "size_bytes": 37469
+    },
+    {
+      "file": "ticker_24h_20260331.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260331.parquet",
+      "sha256": "06112c58036f360828b3bd15f7684b042ccd9700523ccecf903247de12b8a71d",
+      "size_bytes": 37492
+    },
+    {
+      "file": "ticker_24h_20260401.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260401.parquet",
+      "sha256": "12066cf1a1a0557b48f0ec9563c15875b10bada4d9735ffa05e861129d1fc03c",
+      "size_bytes": 37483
+    },
+    {
+      "file": "ticker_24h_20260402.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260402.parquet",
+      "sha256": "56728a8f349566ca38461fcfb71f82822b1f9b27a8f23a7f467334d0f6fe1286",
+      "size_bytes": 37470
+    },
+    {
+      "file": "ticker_24h_20260403.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260403.parquet",
+      "sha256": "8567c306e5bcfd86cf4c005ff9d0718339eb73a0370e2145e58b7193c8e6e385",
+      "size_bytes": 37463
+    },
+    {
+      "file": "ticker_24h_20260404.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260404.parquet",
+      "sha256": "31b52949a23e3389e8f884681696e3d3bead6ad39cc19104b079872c368a92aa",
+      "size_bytes": 37550
+    },
+    {
+      "file": "ticker_24h_20260405.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260405.parquet",
+      "sha256": "f41aa716b799339cb44563684e6622e527212b73cd982aecfed1e7fe225fae2e",
+      "size_bytes": 37514
+    },
+    {
+      "file": "ticker_24h_20260406.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260406.parquet",
+      "sha256": "ffdc25ad9767f1b8c6829472db09d65cc108b8491ce80118fd9edb33e321b6e6",
+      "size_bytes": 37526
+    },
+    {
+      "file": "ticker_24h_20260407.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260407.parquet",
+      "sha256": "9c568d77b361f655d0e2b6789f34f08f96590d08f68b9428cc5baddf00d9d6fe",
+      "size_bytes": 37545
+    },
+    {
+      "file": "ticker_24h_20260408.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260408.parquet",
+      "sha256": "06b0803b263b95c9ed14aafb49092c6aabd349a7f3db005a1858e87a2d9b277f",
+      "size_bytes": 37553
+    },
+    {
+      "file": "ticker_24h_20260409.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260409.parquet",
+      "sha256": "d7612c12f2575bd88272059a9feefb1cd65223af2c8c29f59aee1e0e05824c08",
+      "size_bytes": 37486
+    },
+    {
+      "file": "ticker_24h_20260410.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260410.parquet",
+      "sha256": "dd316202452fd15bf984efef67402622e99adf8f446ec841a68651902ce18c96",
+      "size_bytes": 38023
+    },
+    {
+      "file": "ticker_24h_20260411.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260411.parquet",
+      "sha256": "fe7bc39bef8b631df57291601e9b102e8097e7701a1456898e2d2e1ec408eba2",
+      "size_bytes": 37812
+    },
+    {
+      "file": "ticker_24h_20260412.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260412.parquet",
+      "sha256": "9e36044ac090eb424b38a27a02dcf84200fb247929545a012a3ad4fbbdc07de8",
+      "size_bytes": 37522
+    },
+    {
+      "file": "ticker_24h_20260413.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260413.parquet",
+      "sha256": "f06aaae5887f924015ed17720a8aceae433d6dda2bab7bbc5773aa293a5713a8",
+      "size_bytes": 37538
+    },
+    {
+      "file": "ticker_24h_20260414.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260414.parquet",
+      "sha256": "eec198053994efac95ec49c3a5c535eee5272bd40d63fef6fc713e13125e2238",
+      "size_bytes": 37491
+    },
+    {
+      "file": "ticker_24h_20260415.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260415.parquet",
+      "sha256": "5878100e77e3873035bc9b962d7d8a797c31f7efc3bc1124a58bb1fc305bd052",
+      "size_bytes": 37553
+    },
+    {
+      "file": "ticker_24h_20260416.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260416.parquet",
+      "sha256": "9473b16fc43af0f08e6e52dae2898b110ab3ac70516baca1b1f069785278896e",
+      "size_bytes": 37502
+    },
+    {
+      "file": "ticker_24h_20260417.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260417.parquet",
+      "sha256": "416ff624878a2dda78a7aa87f5f51ff238171235ad7daa518900c274431de3af",
+      "size_bytes": 37470
+    },
+    {
+      "file": "ticker_24h_20260418.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260418.parquet",
+      "sha256": "5567dbbcac7d385ce50e1c57c9ee28ca6ab752a05629c56c2ceeea11cafc0248",
+      "size_bytes": 37470
+    },
+    {
+      "file": "ticker_24h_20260419.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260419.parquet",
+      "sha256": "17ee258f6a1577ffd84fb08a0e0c441892a2257ca5e9f087bb148fe9ff5cb3f5",
+      "size_bytes": 37474
+    },
+    {
+      "file": "ticker_24h_20260420.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260420.parquet",
+      "sha256": "08d4fbe5c63f20f5948c3ce0b47a8aa55c2fd1da1fb4dbcffdcb371ebdb7c21c",
+      "size_bytes": 37440
+    },
+    {
+      "file": "ticker_24h_20260421.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260421.parquet",
+      "sha256": "acb4889005f90008968751d799f381a0cf05e624b62287620f264526bc6b525a",
+      "size_bytes": 37440
+    },
+    {
+      "file": "ticker_24h_20260422.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260422.parquet",
+      "sha256": "f673b2564d12a1c1cc0da3718b8a51a3813a0855639e51d5c81d0ac22b375532",
+      "size_bytes": 37452
+    },
+    {
+      "file": "ticker_24h_20260423.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260423.parquet",
+      "sha256": "68b8510cd02c1b166a5f472e631155d30bcb94c5e47fac8115eaf449084a97c9",
+      "size_bytes": 37771
+    },
+    {
+      "file": "ticker_24h_20260424.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260424.parquet",
+      "sha256": "dc465e63102b17d3ef87683965da7add5a7ebaf9a72c2ebf2f1d592cafd3cf2a",
+      "size_bytes": 37612
+    },
+    {
+      "file": "ticker_24h_20260425.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260425.parquet",
+      "sha256": "69acfb7a5fd6005d18b68b2193d039892ccce099578fd62726d91dc56b64f9a6",
+      "size_bytes": 37638
+    },
+    {
+      "file": "ticker_24h_20260426.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260426.parquet",
+      "sha256": "9fa938e4671c39ba260e28757d15d0966bfc0efb24c1d0cb03b16ec684f2460b",
+      "size_bytes": 37642
+    },
+    {
+      "file": "ticker_24h_20260427.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260427.parquet",
+      "sha256": "d7c66fcc4a1cf413191a8cec6b7b9827908f168318b1f98dcd12ffa5761ac904",
+      "size_bytes": 37514
+    },
+    {
+      "file": "ticker_24h_20260428.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260428.parquet",
+      "sha256": "e91056687d2f5a17c0df8a8123176666d87736f547bf25a82be71bdd60ae1d97",
+      "size_bytes": 37520
+    },
+    {
+      "file": "ticker_24h_20260429.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260429.parquet",
+      "sha256": "30addd9b47523d7e8492ac37c4b6c8eedaf2d0ef9150daf24d3d44b2f26b58d4",
+      "size_bytes": 37545
+    },
+    {
+      "file": "ticker_24h_20260430.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260430.parquet",
+      "sha256": "a14d84bc10be6df72952b3eb46a39fea539077f01b90c74d731a8f6966ed362d",
+      "size_bytes": 37757
+    },
+    {
+      "file": "ticker_24h_20260501.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260501.parquet",
+      "sha256": "e08ab532f9c041123fd094407ec0402f53ea974780d9daf40b3c70993382d679",
+      "size_bytes": 37972
+    },
+    {
+      "file": "ticker_24h_20260502.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260502.parquet",
+      "sha256": "50486225ac0de1222be968edf9601e317a664682dfd07cb6ff0b8ab0f0c2e56d",
+      "size_bytes": 37524
+    },
+    {
+      "file": "ticker_24h_20260503.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260503.parquet",
+      "sha256": "926e6c4052f2f120d8487d58be89bcd61480f793fe9da2242a978e5e50a9199d",
+      "size_bytes": 37529
+    },
+    {
+      "file": "ticker_24h_20260504.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260504.parquet",
+      "sha256": "4cbe56c063df7e459da279a9b673370a97322c041fd186efd66b1984287d7bbf",
+      "size_bytes": 37533
+    },
+    {
+      "file": "ticker_24h_20260505.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260505.parquet",
+      "sha256": "3d4468df88e9b1fdfae345c70ad44a306a12780125f510b6338873707615e5b5",
+      "size_bytes": 37554
+    },
+    {
+      "file": "ticker_24h_20260506.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260506.parquet",
+      "sha256": "175901ab226729707d5d476e27f396943746b63423c4a7e7da1e1c2218899156",
+      "size_bytes": 37528
+    },
+    {
+      "file": "ticker_24h_20260507.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260507.parquet",
+      "sha256": "787909baa25e14fbe8991b2d6bdb814443a21a7bf6e6a14573ea2a8b497a3cee",
+      "size_bytes": 37572
+    },
+    {
+      "file": "ticker_24h_20260508.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260508.parquet",
+      "sha256": "25955ed0bb07a64f93252acc0f9ee318a4a4e6135ccdfb3035800fe6f62715cc",
+      "size_bytes": 37635
+    },
+    {
+      "file": "ticker_24h_20260509.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260509.parquet",
+      "sha256": "d879201dea928607d98c784d4894a5f4fd907302ba499c173b3a398263d3e501",
+      "size_bytes": 37432
+    },
+    {
+      "file": "ticker_24h_20260510.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260510.parquet",
+      "sha256": "70d060ef9cd94b9e7a621a938821ab4937d1073441189961577c7af96a4a0370",
+      "size_bytes": 37469
+    },
+    {
+      "file": "ticker_24h_20260511.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260511.parquet",
+      "sha256": "431941cce26dc8aadcb9a411e525beeb1c478ac9cddcd7f74e9cc28169d40267",
+      "size_bytes": 37635
+    },
+    {
+      "file": "ticker_24h_20260512.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260512.parquet",
+      "sha256": "6076e714878899e8e2ca65b8150f34136ed4ba12645f3270874bee79caa7deda",
+      "size_bytes": 37541
+    },
+    {
+      "file": "ticker_24h_20260513.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260513.parquet",
+      "sha256": "b9b4ea3491a2125cccb4a8118cab49706245ef7813b04fea04018db56073923d",
+      "size_bytes": 37546
+    },
+    {
+      "file": "ticker_24h_20260514.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260514.parquet",
+      "sha256": "caa1b6a0604c9570c073f26c529326db4245f0706bc45bbd6c86b6d054d7a08d",
+      "size_bytes": 37518
+    },
+    {
+      "file": "ticker_24h_20260515.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260515.parquet",
+      "sha256": "abe098770d242a78f52601a7ce2b3dafd0387a7baa82a978c400b1c3e8dbaafc",
+      "size_bytes": 37535
+    },
+    {
+      "file": "ticker_24h_20260516.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260516.parquet",
+      "sha256": "4bd70fdc9c3515b81f31f3022ce36febdb0eca676ba3eb417158e6c66fcf58e5",
+      "size_bytes": 37560
+    },
+    {
+      "file": "ticker_24h_20260517.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260517.parquet",
+      "sha256": "651dcc2fdcbe8a18cc6b891f3467bc9dd9ebad6d931f7d329a67e39700121094",
+      "size_bytes": 37790
+    },
+    {
+      "file": "ticker_24h_20260518.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260518.parquet",
+      "sha256": "5b84dc10622a9f4340fcf836572d05849fd2dc47718f2d0612057a3fdcb47289",
+      "size_bytes": 37536
+    },
+    {
+      "file": "ticker_24h_20260519.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260519.parquet",
+      "sha256": "8b7537cf6942cc4c8ef5d6df27a9cab3cb6cf3850633e98e8cf81f2228d91042",
+      "size_bytes": 37484
+    },
+    {
+      "file": "ticker_24h_20260520.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260520.parquet",
+      "sha256": "900e0abc544d667fefa58a60599580f7c622ef884b078c0998e18e4417de1871",
+      "size_bytes": 37491
+    },
+    {
+      "file": "ticker_24h_20260521.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260521.parquet",
+      "sha256": "4f172fa3e3870d1b4aa4c0eef87cf53d324ae767b215b9acf2efdb199b2317dc",
+      "size_bytes": 37614
+    },
+    {
+      "file": "ticker_24h_20260522.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260522.parquet",
+      "sha256": "e0e27180fbb6052506e673b84c8d70cf7244b3041a95aebf0c8176f1cd089417",
+      "size_bytes": 37628
+    },
+    {
+      "file": "ticker_24h_20260523.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260523.parquet",
+      "sha256": "41b904ba4ee4dbecc8e4572b91de7b97b306da01d34891c6cac7b5f87c47301f",
+      "size_bytes": 38105
+    },
+    {
+      "file": "ticker_24h_20260524.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260524.parquet",
+      "sha256": "54867a009c983ad91771b4dddfd65f04df52e16e92b0154c19ed7a8a30585363",
+      "size_bytes": 37549
+    },
+    {
+      "file": "ticker_24h_20260525.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260525.parquet",
+      "sha256": "a842d7ee7363e1c217b2e4b23a50a199bf67ccd4cfbc45c31a4188ecca3a3341",
+      "size_bytes": 38102
+    },
+    {
+      "file": "ticker_24h_20260526.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260526.parquet",
+      "sha256": "4906b408c32ea7f8e21dfe056430a202871df046b8fd41bad4d78388a93503fe",
+      "size_bytes": 38141
+    },
+    {
+      "file": "ticker_24h_20260527.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260527.parquet",
+      "sha256": "564476de7fd6b46cb5eb6c890cc54e112280f212b2af0d98933e641f45da09d4",
+      "size_bytes": 38074
+    },
+    {
+      "file": "ticker_24h_20260528.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260528.parquet",
+      "sha256": "b21f318712fea5a5d08922030f78c5f48373bff7f77c854766939308546c850d",
+      "size_bytes": 38060
+    },
+    {
+      "file": "ticker_24h_20260529.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260529.parquet",
+      "sha256": "ff654a5e714674a70a75e18833a04e57ae7fa338d8e1a257b9cbac95fb153393",
+      "size_bytes": 37600
+    },
+    {
+      "file": "ticker_24h_20260530.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260530.parquet",
+      "sha256": "ca348d0fbbd55be325f6564c9d640c638eb657203fc64e7d9073137613bae236",
+      "size_bytes": 37612
+    },
+    {
+      "file": "ticker_24h_20260531.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260531.parquet",
+      "sha256": "9b05fbfc4ab7ace2d6a7bda8fe886eda66adcd13058f072b6c1d8dfc6d15b4ff",
+      "size_bytes": 37603
+    },
+    {
+      "file": "ticker_24h_20260601.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260601.parquet",
+      "sha256": "90fea82d956c4b7eff3e19e7d124ac99bbcc95ed989e35fd1e2ba515ddc09c9a",
+      "size_bytes": 37544
+    },
+    {
+      "file": "ticker_24h_20260602.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260602.parquet",
+      "sha256": "09283bb8af784f51247725e36becbfd514bb06b2cf8df9a990096b3ea7cbf043",
+      "size_bytes": 37528
+    },
+    {
+      "file": "ticker_24h_20260603.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260603.parquet",
+      "sha256": "7ff4eb7226586b9df2c9ed9b34781232653716c23653bc33f073294921a14d73",
+      "size_bytes": 37521
+    },
+    {
+      "file": "ticker_24h_20260604.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260604.parquet",
+      "sha256": "210a0be30e216bf6cfaebbac9c8d0652bb6d9f8e1a192f1bca1f4fc6a56c1e52",
+      "size_bytes": 37412
+    },
+    {
+      "file": "ticker_24h_20260605.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260605.parquet",
+      "sha256": "3afc4f7ab82ebd2fcecd39084f90b2c0af2d585f0cd03779894329b1da3fbae8",
+      "size_bytes": 37544
+    },
+    {
+      "file": "ticker_24h_20260606.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260606.parquet",
+      "sha256": "76dd21fcf57f50771004e3ed37b2e60958ccea790b93a92057e7a71e7b86c092",
+      "size_bytes": 37513
+    },
+    {
+      "file": "ticker_24h_20260607.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260607.parquet",
+      "sha256": "d7c79077713d51e811d8c6bd34b8d0727213d3bcf55958286386b01b6fa67207",
+      "size_bytes": 37730
+    },
+    {
+      "file": "ticker_24h_20260608.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260608.parquet",
+      "sha256": "659f71e4cb36b3daa01e67983c5588ecb117a03f5939b6ffd4dd61422fab19bb",
+      "size_bytes": 37734
+    },
+    {
+      "file": "ticker_24h_20260609.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260609.parquet",
+      "sha256": "989008e54104f6f3fece4fd1805b26589ee9ecb24b55edb6f7ec70c92d7085a1",
+      "size_bytes": 37723
+    },
+    {
+      "file": "ticker_24h_20260610.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260610.parquet",
+      "sha256": "71458dda48e18bfa8eddebee514f6c703c33b0ab60085439384005c0c2de0d25",
+      "size_bytes": 37600
+    },
+    {
+      "file": "ticker_24h_20260611.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260611.parquet",
+      "sha256": "560e01b1771315265ad8b5b4235185cd94a674d896b44856c3c6b39293060cfc",
+      "size_bytes": 37542
+    },
+    {
+      "file": "ticker_24h_20260612.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260612.parquet",
+      "sha256": "22f9a6a8d2e0b3c7b96ccfb8bad011d7de964c1cc5f3a451f821bef6c6c0ec68",
+      "size_bytes": 37604
+    },
+    {
+      "file": "ticker_24h_20260613.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260613.parquet",
+      "sha256": "25cc99f7f2a60a3732fd920e3285453fd57f2878e7ba811b925ceec714578c7b",
+      "size_bytes": 37609
+    },
+    {
+      "file": "ticker_24h_20260614.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260614.parquet",
+      "sha256": "b5b7d97ee8fb1a063c589224283881c1ba9114303a754d45060c6fce171ab14e",
+      "size_bytes": 37545
+    },
+    {
+      "file": "ticker_24h_20260615.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260615.parquet",
+      "sha256": "23ab162b490743282e9305c23a8473cd98e3f9ef84060f9c7b99d32d84624f41",
+      "size_bytes": 37889
+    },
+    {
+      "file": "ticker_24h_20260616.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260616.parquet",
+      "sha256": "aac9686138c527ca9dff8a2c97e569662d13b30accd98f0105a66a160441a140",
+      "size_bytes": 38036
+    },
+    {
+      "file": "ticker_24h_20260617.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260617.parquet",
+      "sha256": "17b19510cfef77323c356c8adf318d177bef5a9c1b8471486bda7e3853c8bc51",
+      "size_bytes": 38035
+    },
+    {
+      "file": "ticker_24h_20260618.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260618.parquet",
+      "sha256": "c3d81ff3946b1ced0e4bee2ec7b3d7be7dee8d8e3e23c35ddbb44674b274f600",
+      "size_bytes": 37736
+    },
+    {
+      "file": "ticker_24h_20260619.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260619.parquet",
+      "sha256": "e787d029b997e1528f238b6b0998042479a66b2c18ae16e0fa6541d99c75021c",
+      "size_bytes": 37753
+    },
+    {
+      "file": "ticker_24h_20260620.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260620.parquet",
+      "sha256": "5dbe74be0fa38585a13e47494cec0e6a9910a9ad859e96cf7564196aec66e4bf",
+      "size_bytes": 37546
+    },
+    {
+      "file": "ticker_24h_20260621.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260621.parquet",
+      "sha256": "1d91f45a5b381f9376b71764cbefb651872f90fa755c414f82383d7c07ee2447",
+      "size_bytes": 37536
+    },
+    {
+      "file": "ticker_24h_20260622.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260622.parquet",
+      "sha256": "538472f1394575f18260ed6652e664ee6338eca11c060358888ba756befaf359",
+      "size_bytes": 37556
+    },
+    {
+      "file": "ticker_24h_20260623.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260623.parquet",
+      "sha256": "b9bb5d890325cdf06f9bf166a4e98b19dab9c85c139c28798151c465de98616f",
+      "size_bytes": 37547
+    },
+    {
+      "file": "ticker_24h_20260624.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260624.parquet",
+      "sha256": "c471f146a5c36bb54c09722197e158a7bd5a97e524c3becae765c511b8158585",
+      "size_bytes": 37567
+    },
+    {
+      "file": "ticker_24h_20260625.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260625.parquet",
+      "sha256": "6a2913f236b38579af1da14076a4b7340de52f26a834aa8ea3df4018176299fc",
+      "size_bytes": 37629
+    },
+    {
+      "file": "ticker_24h_20260626.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260626.parquet",
+      "sha256": "1361e62fc3a561b8c919b0af0ac00d4aab2c5e44d266a3705df5ab9563e31700",
+      "size_bytes": 37606
+    },
+    {
+      "file": "ticker_24h_20260627.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260627.parquet",
+      "sha256": "6d8ae2c1c6f7bf835a6530065376dc13623bbea938fc17c96dd5a1841faed4e8",
+      "size_bytes": 37598
+    },
+    {
+      "file": "ticker_24h_20260628.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260628.parquet",
+      "sha256": "23f3379062a8d014992d9c7a590adf4ee87f3a533d541ca378af1cc750542908",
+      "size_bytes": 37982
+    },
+    {
+      "file": "ticker_24h_20260629.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260629.parquet",
+      "sha256": "d10adf16e30d946f4e7d29066286590bf538180144e05ed3040a1eb9bb8e263c",
+      "size_bytes": 37581
+    },
+    {
+      "file": "ticker_24h_20260630.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260630.parquet",
+      "sha256": "87387bbc71a72b0c765649def8a6c22a0b7e9a51e06f5799cf4220a0aaf99a4b",
+      "size_bytes": 37947
+    },
+    {
+      "file": "ticker_24h_20260701.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260701.parquet",
+      "sha256": "d2843d7b8b70b9cfee20f07729d57224af71770bae3a83b21f127b60d748c896",
+      "size_bytes": 37551
+    },
+    {
+      "file": "ticker_24h_20260702.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260702.parquet",
+      "sha256": "c10a2bc8ba382ba03b68dddbc7e777fecb92cd8bf9d77cce92c04d32686edb14",
+      "size_bytes": 37568
+    },
+    {
+      "file": "ticker_24h_20260703.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260703.parquet",
+      "sha256": "739b82d98301808cd32fe383e9b0d414ad66ebe64fb7cc741b1e993c700ca509",
+      "size_bytes": 37543
+    },
+    {
+      "file": "ticker_24h_20260704.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260704.parquet",
+      "sha256": "e4463d551c5d6f6bc270adfa40d0fc9b1d77e324bc28197d37aa4ee3a68ec9b7",
+      "size_bytes": 37511
+    },
+    {
+      "file": "ticker_24h_20260705.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260705.parquet",
+      "sha256": "c65de9f48619a665205eb8c317431ba5f98262cdd2a6ae2eb13894a36b1c368e",
+      "size_bytes": 37507
+    },
+    {
+      "file": "ticker_24h_20260706.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260706.parquet",
+      "sha256": "18dc3a9f19b49bd4c33470f823f9179c55a14f9bb1113a7bd9fb3ea9ea5b1b2d",
+      "size_bytes": 37511
+    },
+    {
+      "file": "ticker_24h_20260707.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260707.parquet",
+      "sha256": "2a74c7b10e1ee3a050064d4430aa0b43e94badb12ed7dbc5e695797a8f5e22fa",
+      "size_bytes": 37534
+    },
+    {
+      "file": "ticker_24h_20260708.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260708.parquet",
+      "sha256": "1e3ae45570815d299437e10bfe43ca6f02a25505194e013a716d175393edced6",
+      "size_bytes": 37520
+    },
+    {
+      "file": "ticker_24h_20260709.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260709.parquet",
+      "sha256": "98f570d1619df37595372095bbea955437a4b997428a66b596a8893aed1ad3c9",
+      "size_bytes": 37575
+    },
+    {
+      "file": "ticker_24h_20260710.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260710.parquet",
+      "sha256": "80da5c424dd140e3aceb7d3056a6965c97146f81ef3c3f215593ece2fc9ce4d1",
+      "size_bytes": 37555
+    },
+    {
+      "file": "ticker_24h_20260711.parquet",
+      "path": "/app/historical_data/external/ticker_24h_20260711.parquet",
+      "sha256": "f13130c2ddb6750ba09b083fc1d42cb087ced7e89dd33510fc1596bb7361dcf2",
+      "size_bytes": 37632
+    }
+  ]
+}

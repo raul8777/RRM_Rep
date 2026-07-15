@@ -13,4 +13,4 @@ tests/test_futures_smart_exits.py::TestBreakevenSL::test_breakeven_triggers_for_
     import cgi
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-======================= 98 passed, 1 warning in 39.27s ========================
+======================= 98 passed, 1 warning in 40.15s ========================

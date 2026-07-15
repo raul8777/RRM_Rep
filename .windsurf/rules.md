@@ -83,7 +83,7 @@ unified_governance_supervisor.py → UG: árbitro final — consolida advisories
 | `peak_capture_engine.py` | PredExit: ¿capturar ganancia ahora o seguir corriendo? Solo advisory, solo en PnL > 0. | No evalúa pérdidas, no overridea Hard SL/TP |
 | `unified_governance_supervisor.py` | Árbitro final. Recibe advisories SSO + PRS + PredExit → decide acción única. | No genera señales de entrada |
 | `binance_commission.py` | Fuente única de tasas de comisión SPOT/FUTURES. `net_pnl()` para calcular neto. | No persiste, no decide |
-| `binance_truth_guard.py` | Paridad DB vs Binance real. Detecta: `SPOT_GHOST_IN_DB`, `SPOT_QTY_DRIFT`, `SPOT_ORPHAN_IN_BINANCE`. | No corrige automáticamente (requiere reconcile explícito) |
+| `binance_truth_guard.py` | Paridad DB vs Binance real. Detecta: `SPOT_GHOST_IN_DB`, `SPOT_QTY_DRIFT`, `SPOT_ORPHAN_IN_BINANCE`. | Auto-fix corre ghosts/orphans >$5 en pretrade gate; dust < $5 requiere `/reconcile/cleanup-dust` |
 | `learning_engine.py` | Predictor ML con bias correction por símbolo+régimen. Pesos en DB (`indicator_weights`, clave `(symbol, regime)`). Expone `get_weights(symbol, regime)`. | No decide entradas — devuelve probabilidad y EV. Pesos son no-op en bootstrap (todos = defaults) |
 | `portfolio_selector.py` | QUBO selector: cartera óptima de K candidatos. Penaliza correlación Pearson entre pares. | No filtra por régimen (eso lo hace `run_trades.py` antes) |
 | `app.py` | API FastAPI: control, hot-config, dashboard, audit. Módulo de interfaz operativa. | No ejecuta ciclos de trading |
@@ -274,6 +274,14 @@ Fix: `auto_reconcile_spot()` / `auto_reconcile_futures()` o endpoint `/reconcile
 - **Escalado de boosts con `_lw_scale` aplicado dos veces**: si otro módulo también carga pesos del learning_engine y los aplica sobre una señal que ya pasó por `analyze_symbol`, los boosts se duplican. `_lw_scale` solo se aplica dentro de `analyze_symbol` — no debe re-aplicarse externamente.
 
 - **🔴 Comisión de fill no convertida a USDT (posición PEPE jul-2026)**: `verify_and_fetch_fills()` en `binance_client.py` debe convertir `commission` a USDT antes de retornar. Si `commissionAsset` es el base asset del par (ej. PEPE) y no es USDT/BNB, multiplicar `commission × fill_price`. De lo contrario la `entry_commission` persiste en unidades del asset (268K PEPE ≠ $0.71) → el `unrealized_pnl` calculado sobre la qty de DB resulta ficticio.
+
+- **🔴 Ghost positions: cantidad a vender siempre desde balance real de Binance**: todo cierre SPOT (SL/TP, SSO, PRS, UG, PredExit, manual) debe calcular la qty con `trade_utils.get_binance_sell_qty(client, symbol, db_qty, price)` antes de enviar la orden. Nunca vender `db_qty × close_pct` sin verificar el balance real. Si `balance/db_qty < 0.001`, cerrar el registro DB como `ghost_balance_mismatch`.
+
+- **🔴 Ghost positions: partial close persiste qty real vendida, no qty calculada**: después de `create_market_order()`, usar `verify_and_fetch_fills()` (SPOT) o `positionRisk` (FUTURES) para obtener la cantidad real ejecutada. `position_manager.close_position()` recibe `qty_closed=filled_qty`, no `qty_calculated`. Si no se confirma el fill, NO se actualiza `trades_open.quantity` ni se inserta en `trades_closed`.
+
+- **🔴 FUTURES: no marcar cerrado si Binance aún tiene positionAmt > 0**: `futures_client.close_long/close_short` deben verificar `positionRisk.positionAmt == 0` antes de llamar `_save_futures_closed()`. Si aún hay posición residual, actualizar `pos.qty` al residual y seguir gestionando; nunca persistir cierre fantasma.
+
+- **🔴 Reconcile preventivo cada ciclo**: `execute_once()` ejecuta `sync_with_exchange_balance()` + `evaluate_spot_parity()` antes de evaluar salidas. Cualquier `SPOT_GHOST_IN_DB` se cierra automáticamente; cualquier `SPOT_ORPHAN_IN_BINANCE > $5` se importa. Dust `< $5` se ignora en paridad y se limpia vía endpoint `/reconcile/cleanup-dust`.
 
 - **⚠️ s78 RANGE_SCALP entry gates — NO MODIFICAR sin análisis**: tres fixes calibrados en jul 14 2026 que desbloquearon entradas en RANGE_SCALP. Validados con 5/5 cierres positivos (+$12.37, +$7.67, +$8.00, +$4.83, +$4.02). **No revertir individualmente** — los tres actúan como sistema:
   1. **BB gate skip (`run_trades.py` ~4699)**: `if bb_position is None and not _bb_touch_ok: pass` — evita rechazar señales válidas sin dato BB. Solo RANGE_SCALP.

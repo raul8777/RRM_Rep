@@ -1,0 +1,185 @@
+{
+  "generated_at": "2026-07-13T18:09:07.631416+00:00",
+  "results": [
+    {
+      "window": "win_20260415_20260430",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "stop_loss_pct": 2.5,
+        "kelly_max_usdt": 1000.0,
+        "kelly_dynamic_base_pct": 0.22,
+        "max_positions_spot_bull": 5
+      },
+      "pnl_usdt": 0.0,
+      "pnl_pct": 0.0,
+      "trades": 0,
+      "buy_orders": 0,
+      "sell_orders": 0,
+      "max_drawdown_pct": 0.0,
+      "final_balance_usdt": 0.0,
+      "cycles": 361
+    },
+    {
+      "window": "win_20260415_20260430",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.55,
+        "min_success_probability": 0.55,
+        "stop_loss_pct": 3.36,
+        "kelly_max_usdt": 1000.0,
+        "kelly_dynamic_base_pct": 0.18,
+        "max_positions_spot_bull": 5
+      },
+      "pnl_usdt": 0.0,
+      "pnl_pct": 0.0,
+      "trades": 0,
+      "buy_orders": 0,
+      "sell_orders": 0,
+      "max_drawdown_pct": 0.0,
+      "final_balance_usdt": 0.0,
+      "cycles": 361
+    },
+    {
+      "window": "win_20260415_20260430",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.6,
+        "min_success_probability": 0.6,
+        "stop_loss_pct": 4.5,
+        "kelly_max_usdt": 1200.0,
+        "kelly_dynamic_base_pct": 0.18,
+        "max_positions_spot_bull": 8
+      },
+      "pnl_usdt": 0.0,
+      "pnl_pct": 0.0,
+      "trades": 0,
+      "buy_orders": 0,
+      "sell_orders": 0,
+      "max_drawdown_pct": 0.0,
+      "final_balance_usdt": 0.0,
+      "cycles": 361
+    },
+    {
+      "window": "win_20260415_20260430",
+      "profile": "B",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "stop_loss_pct": 2.5,
+        "kelly_max_usdt": 1000.0,
+        "kelly_dynamic_base_pct": 0.22,
+        "max_positions_spot_bull": 5
+      },
+      "pnl_usdt": 0.0,
+      "pnl_pct": 0.0,
+      "trades": 0,
+      "buy_orders": 0,
+      "sell_orders": 0,
+      "max_drawdown_pct": 0.0,
+      "final_balance_usdt": 0.0,
+      "cycles": 361
+    },
+    {
+      "window": "win_20260415_20260430",
+      "profile": "B",
+      "params": {
+        "min_signal_strength": 0.55,
+        "min_success_probability": 0.55,
+        "stop_loss_pct": 3.36,
+        "kelly_max_usdt": 1000.0,
+        "kelly_dynamic_base_pct": 0.18,
+        "max_positions_spot_bull": 5
+      },
+      "pnl_usdt": 0.0,
+      "pnl_pct": 0.0,
+      "trades": 0,
+      "buy_orders": 0,
+      "sell_orders": 0,
+      "max_drawdown_pct": 0.0,
+      "final_balance_usdt": 0.0,
+      "cycles": 361
+    },
+    {
+      "window": "win_20260415_20260430",
+      "profile": "B",
+      "params": {
+        "min_signal_strength": 0.6,
+        "min_success_probability": 0.6,
+        "stop_loss_pct": 4.5,
+        "kelly_max_usdt": 1200.0,
+        "kelly_dynamic_base_pct": 0.18,
+        "max_positions_spot_bull": 8
+      },
+      "pnl_usdt": 0.0,
+      "pnl_pct": 0.0,
+      "trades": 0,
+      "buy_orders": 0,
+      "sell_orders": 0,
+      "max_drawdown_pct": 0.0,
+      "final_balance_usdt": 0.0,
+      "cycles": 361
+    },
+    {
+      "window": "win_20260415_20260430",
+      "profile": "C",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "stop_loss_pct": 2.5,
+        "kelly_max_usdt": 1000.0,
+        "kelly_dynamic_base_pct": 0.22,
+        "max_positions_spot_bull": 5
+      },
+      "pnl_usdt": 0.0,
+      "pnl_pct": 0.0,
+      "trades": 0,
+      "buy_orders": 0,
+      "sell_orders": 0,
+      "max_drawdown_pct": 0.0,
+      "final_balance_usdt": 0.0,
+      "cycles": 361
+    },
+    {
+      "window": "win_20260415_20260430",
+      "profile": "C",
+      "params": {
+        "min_signal_strength": 0.55,
+        "min_success_probability": 0.55,
+        "stop_loss_pct": 3.36,
+        "kelly_max_usdt": 1000.0,
+        "kelly_dynamic_base_pct": 0.18,
+        "max_positions_spot_bull": 5
+      },
+      "pnl_usdt": 0.0,
+      "pnl_pct": 0.0,
+      "trades": 0,
+      "buy_orders": 0,
+      "sell_orders": 0,
+      "max_drawdown_pct": 0.0,
+      "final_balance_usdt": 0.0,
+      "cycles": 361
+    },
+    {
+      "window": "win_20260415_20260430",
+      "profile": "C",
+      "params": {
+        "min_signal_strength": 0.6,
+        "min_success_probability": 0.6,
+        "stop_loss_pct": 4.5,
+        "kelly_max_usdt": 1200.0,
+        "kelly_dynamic_base_pct": 0.18,
+        "max_positions_spot_bull": 8
+      },
+      "pnl_usdt": 0.0,
+      "pnl_pct": 0.0,
+      "trades": 0,
+      "buy_orders": 0,
+      "sell_orders": 0,
+      "max_drawdown_pct": 0.0,
+      "final_balance_usdt": 0.0,
+      "cycles": 361
+    }
+  ]
+}

@@ -244,10 +244,18 @@ class BinanceClient:
         for f in fills:
             q = float(f.get("qty", 0.0)) or float(f.get("quantity", 0.0))
             p = float(f.get("price", 0.0))
-            c = float(f.get("commission", 0.0))
+            c_raw = float(f.get("commission", 0.0))
+            c_asset = f.get("commissionAsset", "USDT")
+            # Convert commission to USDT equivalent.
+            # If paid in base asset (e.g. PEPE), multiply by fill price.
+            # BNB and USDT are already in USDT-equivalent terms.
+            if c_asset not in ("USDT", "BNB") and p > 0:
+                c_usdt = c_raw * p
+            else:
+                c_usdt = c_raw
             total_qty += q
             total_quote += q * p
-            total_commission += c
+            total_commission += c_usdt
         avg_price = total_quote / total_qty if total_qty > 0 else 0.0
         return {
             "symbol": sym,

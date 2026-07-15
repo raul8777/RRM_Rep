@@ -152,6 +152,7 @@ services:
       - BNB_BUFFER_DAYS=7
       - BNB_MIN_BALANCE_USD=5.0
       - BNB_EXTRA_BUFFER_USD=10.0
+      - BNB_MAX_RESERVE_USD=100.0
       - FUTURES_MAX_ESCALAMIENTOS=2
       # PV (Profit Velocity) sesion 17 jun21 2026 — scale-out + momentum reversal
       - FUTURES_SCALE_OUT_PCT=1.5

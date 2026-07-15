@@ -191,7 +191,7 @@ def entry_commission(
 ) -> float:
     """Commission paid on entry order (USDT)."""
     cfg = get_config(settings)
-    return quantity * price * cfg.rate_for(trade_type)
+    return float(quantity) * float(price) * cfg.rate_for(trade_type)
 
 
 def exit_commission(
@@ -202,7 +202,7 @@ def exit_commission(
 ) -> float:
     """Commission paid on exit order (USDT)."""
     cfg = get_config(settings)
-    return quantity * price * cfg.rate_for(trade_type)
+    return float(quantity) * float(price) * cfg.rate_for(trade_type)
 
 
 def total_commission(
@@ -434,6 +434,12 @@ def estimate_bnb_buffer_needed(settings, trade_type: str = 'spot', days: int = 7
         row = rows[0] if rows else {}
         avg_comm = float(row.get('avg_comm') or 0)
         cnt = int(row.get('cnt') or 0)
+        # Guard: max realistic commission per trade ≈ kelly_max_usdt×rate×2 ≈ $2.40.
+        # avg > $5 indicates corrupted data (e.g. commission stored in raw token units).
+        # Reset to trigger the fallback estimator below instead of propagating bad data.
+        if avg_comm > 5.0:
+            avg_comm = 0
+            cnt = 0
         if cnt == 0 or avg_comm == 0:
             # Fallback: estimate from daily trade count and default size
             avg_size = float(_cfg_param(settings, 'kelly_base_usdt'))
@@ -568,7 +574,9 @@ def auto_manage_bnb_discount(
                 account = futures_client.get_account_info()
                 for asset in account.get('assets', []):
                     if asset.get('asset') == 'BNB':
-                        result['futures_bnb'] = float(asset.get('availableBalance', 0))
+                        # s77b: use walletBalance — availableBalance is 0 when BNB is held
+                        # as commission buffer (not used as active margin), causing infinite loop.
+                        result['futures_bnb'] = float(asset.get('walletBalance', 0))
                         break
             except Exception as e:
                 result['errors'].append(f'futures_bnb_balance: {e}')
@@ -597,6 +605,11 @@ def auto_manage_bnb_discount(
         extra_usd = float(getattr(settings, 'bnb_extra_buffer_usd', 10.0))
         target_spot_usd = result['spot_buffer'] + extra_usd
         target_futures_usd = result['futures_buffer'] + extra_usd
+
+        # Hard cap on BNB reserve: never hold more than bnb_max_reserve_usd as commission reserve
+        bnb_max_reserve_usd = float(getattr(settings, 'bnb_max_reserve_usd', 100.0))
+        target_spot_usd = min(target_spot_usd, bnb_max_reserve_usd)
+        target_futures_usd = min(target_futures_usd, bnb_max_reserve_usd)
 
         # Calculate needed BNB for each wallet (rounded UP to 3 decimals for BNBUSDT LOT_SIZE)
         import math
@@ -809,11 +822,99 @@ def auto_manage_bnb_discount(
                 account = futures_client.get_account_info()
                 for asset in account.get('assets', []):
                     if asset.get('asset') == 'BNB':
-                        result['futures_bnb'] = float(asset.get('availableBalance', 0))
+                        # s77b: use walletBalance (same fix as initial read)
+                        result['futures_bnb'] = float(asset.get('walletBalance', 0))
                         futures_bnb_usd = result['futures_bnb'] * result['bnb_price']
                         break
             except Exception as e:
                 result['errors'].append(f'futures_bnb_recheck: {e}')
+
+        # SPOT+FUTURES parity: cap BNB reserve per wallet. If futures exceeds the cap,
+        # transfer excess back to spot so the spot sell logic can liquidate it to USDT.
+        try:
+            from decimal import Decimal, ROUND_DOWN
+            if futures_bnb_usd > bnb_max_reserve_usd and futures_client and spot_client:
+                _bnb_price_d = Decimal(str(result['bnb_price']))
+                _futures_target_qty = (Decimal(str(bnb_max_reserve_usd)) / _bnb_price_d).quantize(Decimal('0.001'), rounding=ROUND_DOWN)
+                _futures_excess_bnb = (Decimal(str(result['futures_bnb'])) - _futures_target_qty).quantize(Decimal('0.001'), rounding=ROUND_DOWN)
+                # Avoid dust transfers below 0.001 BNB (~$0.58 at $580/BNB)
+                if _futures_excess_bnb >= Decimal('0.001'):
+                    record_bnb_operation(db_client, 'bnb_futures_excess_transfer_attempt', {
+                        'bnb_quantity': str(_futures_excess_bnb),
+                        'bnb_price': result['bnb_price'],
+                        'max_reserve_usd': bnb_max_reserve_usd,
+                        'futures_bnb_before': result['futures_bnb'],
+                        'futures_bnb_usd_before': futures_bnb_usd,
+                    })
+                    spot_client.client.universal_transfer(
+                        type='UMFUTURE_MAIN',
+                        asset='BNB',
+                        amount=float(_futures_excess_bnb),
+                    )
+                    result['futures_action'] = f'transferred_excess_{float(_futures_excess_bnb):.6f}_bnb_to_spot'
+                    record_bnb_operation(db_client, 'bnb_futures_excess_transferred', {
+                        'bnb_quantity': str(_futures_excess_bnb),
+                        'bnb_price': result['bnb_price'],
+                        'value_usdt': float(_futures_excess_bnb) * result['bnb_price'],
+                        'max_reserve_usd': bnb_max_reserve_usd,
+                    })
+                    # Re-read futures balance after transfer
+                    account = futures_client.get_account_info()
+                    for asset in account.get('assets', []):
+                        if asset.get('asset') == 'BNB':
+                            result['futures_bnb'] = float(asset.get('walletBalance', 0))
+                            futures_bnb_usd = result['futures_bnb'] * result['bnb_price']
+                            break
+        except Exception as _xfer_err:
+            result['errors'].append(f'bnb_futures_excess_transfer: {_xfer_err}')
+            record_bnb_operation(db_client, 'bnb_futures_excess_transfer_error', {
+                'error': str(_xfer_err),
+                'max_reserve_usd': bnb_max_reserve_usd,
+            })
+
+        # Re-read spot balance after any futures-to-spot transfer
+        if spot_client:
+            try:
+                balances = spot_client.get_account_balance()
+                result['spot_bnb'] = float(balances.get('BNB', 0))
+                spot_bnb_usd = result['spot_bnb'] * result['bnb_price']
+            except Exception as e:
+                result['errors'].append(f'spot_bnb_recheck_after_futures_transfer: {e}')
+
+        # Sell excess BNB above hard cap to USDT (reserve is commission buffer, not invested capital)
+        try:
+            if spot_bnb_usd > bnb_max_reserve_usd and spot_client:
+                _bnb_price_d = Decimal(str(result['bnb_price']))
+                _target_qty = (Decimal(str(bnb_max_reserve_usd)) / _bnb_price_d).quantize(Decimal('0.001'), rounding=ROUND_DOWN)
+                _excess_bnb = (Decimal(str(result['spot_bnb'])) - _target_qty).quantize(Decimal('0.001'), rounding=ROUND_DOWN)
+                _min_notional = 10.0  # BNBUSDT conservative min notional
+                if _excess_bnb >= Decimal('0.001') and float(_excess_bnb) * result['bnb_price'] >= _min_notional:
+                    record_bnb_operation(db_client, 'bnb_excess_sell_attempt', {
+                        'bnb_quantity': str(_excess_bnb),
+                        'bnb_price': result['bnb_price'],
+                        'max_reserve_usd': bnb_max_reserve_usd,
+                        'spot_bnb_before': result['spot_bnb'],
+                        'spot_bnb_usd_before': spot_bnb_usd,
+                    })
+                    _sell_order = spot_client.create_market_order('BNBUSDT', 'SELL', quantity=float(_excess_bnb))
+                    result['spot_action'] = f'sold_excess_{float(_excess_bnb):.6f}_bnb_to_usdt'
+                    record_bnb_operation(db_client, 'bnb_excess_sold', {
+                        'bnb_quantity': str(_excess_bnb),
+                        'bnb_price': result['bnb_price'],
+                        'value_usdt': float(_excess_bnb) * result['bnb_price'],
+                        'max_reserve_usd': bnb_max_reserve_usd,
+                        'order': _sell_order.get('orderId') if isinstance(_sell_order, dict) else None,
+                    })
+                    # Re-read spot balance after sell
+                    balances = spot_client.get_account_balance()
+                    result['spot_bnb'] = float(balances.get('BNB', 0))
+                    spot_bnb_usd = result['spot_bnb'] * result['bnb_price']
+        except Exception as _sell_err:
+            result['errors'].append(f'bnb_excess_sell: {_sell_err}')
+            record_bnb_operation(db_client, 'bnb_excess_sell_error', {
+                'error': str(_sell_err),
+                'max_reserve_usd': bnb_max_reserve_usd,
+            })
 
         # Activate BNB discount only if both wallets have sufficient target buffer
         # and no recent top-up failed (avoid paying standard fees while believing discount is active)

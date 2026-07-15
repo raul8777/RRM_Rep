@@ -41,6 +41,7 @@ def predict_for_symbol(
     interval: str = "1h",
     precomputed_signal: Optional[Dict] = None,
     trade_type: str = "spot",
+    trade_side: Optional[str] = None,
     current_price: Optional[float] = None,
 ) -> Tuple[Optional[Dict], Optional[Dict]]:
     """
@@ -51,6 +52,8 @@ def predict_for_symbol(
             analyze_symbol() and use these indicators directly. Avoids
             redundant API + analysis calls (BUG-E4 fix).
         trade_type: 'spot' or 'futures' — passed to predictor for fee adjustment.
+        trade_side: Optional explicit side ('LONG' or 'SHORT'). When omitted,
+            it is inferred from active regime for futures and defaults to LONG.
         current_price: Optional pre-fetched symbol price. When provided, avoids
             another price call inside the predictor hot path.
 
@@ -74,6 +77,13 @@ def predict_for_symbol(
         # The trade cycle is 5 min (SL/TP check frequency), but actual
         # position duration until SL/TP hit is typically 1-8 hours.
         trade_horizon_minutes = getattr(settings, "trade_horizon_minutes", 240)
+        _side = str(trade_side or '').strip().upper()
+        if _side not in ("LONG", "SHORT"):
+            if str(trade_type or '').strip().lower() == 'futures':
+                _reg = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper()
+                _side = 'SHORT' if _reg == 'FUTURES_SHORT' else 'LONG'
+            else:
+                _side = 'LONG'
         prediction = predictor.predict_pnl(
             symbol=symbol,
             current_price=price,
@@ -81,6 +91,7 @@ def predict_for_symbol(
             cycle_duration_minutes=trade_horizon_minutes,
             position_size_usdt=position_size_usdt,
             trade_type=trade_type,
+            trade_side=_side,
             settings=settings,
         )
         if isinstance(prediction, dict) and not prediction.get("bootstrap_mode"):

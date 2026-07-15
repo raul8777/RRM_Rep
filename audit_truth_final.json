@@ -1,0 +1,248 @@
+time="2026-07-11T14:41:52-06:00" level=warning msg="S:\\Tools\\AI\\crypto-agent\\docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+{
+  "ok": false,
+  "severity": "warning",
+  "mismatch_count": 1,
+  "db_count": 1,
+  "binance_count": 47,
+  "dust_skipped_count": 45,
+  "dust_skipped": [
+    {
+      "symbol": "BTCUSDT",
+      "binance_qty": 7.69e-06,
+      "notional_usdt": 0.4952
+    },
+    {
+      "symbol": "LTCUSDT",
+      "binance_qty": 0.00027955,
+      "notional_usdt": 0.0127
+    },
+    {
+      "symbol": "ETHUSDT",
+      "binance_qty": 4.065e-05,
+      "notional_usdt": 0.0743
+    },
+    {
+      "symbol": "TRXUSDT",
+      "binance_qty": 0.05719809,
+      "notional_usdt": 0.0189
+    },
+    {
+      "symbol": "LINKUSDT",
+      "binance_qty": 0.00462,
+      "notional_usdt": 0.0373
+    },
+    {
+      "symbol": "ZECUSDT",
+      "binance_qty": 0.00084,
+      "notional_usdt": 0.4395
+    },
+    {
+      "symbol": "DASHUSDT",
+      "binance_qty": 0.000114,
+      "notional_usdt": 0.004
+    },
+    {
+      "symbol": "XRPUSDT",
+      "binance_qty": 0.0112,
+      "notional_usdt": 0.0125
+    },
+    {
+      "symbol": "ADAUSDT",
+      "binance_qty": 0.007,
+      "notional_usdt": 0.0012
+    },
+    {
+      "symbol": "XLMUSDT",
+      "binance_qty": 0.401,
+      "notional_usdt": 0.0771
+    },
+    {
+      "symbol": "EONUSDT",
+      "binance_qty": 5.14485,
+      "notional_usdt": 0.0
+    },
+    {
+      "symbol": "ADDUSDT",
+      "binance_qty": 2.572425,
+      "notional_usdt": 0.0
+    },
+    {
+      "symbol": "MEETONEUSDT",
+      "binance_qty": 2.572425,
+      "notional_usdt": 0.0
+    },
+    {
+      "symbol": "ATDUSDT",
+      "binance_qty": 5.14485,
+      "notional_usdt": 0.0
+    },
+    {
+      "symbol": "EOPUSDT",
+      "binance_qty": 5.14485,
+      "notional_usdt": 0.0
+    },
+    {
+      "symbol": "IQUSDT",
+      "binance_qty": 26.238735,
+      "notional_usdt": 0.0202
+    },
+    {
+      "symbol": "USDCUSDT",
+      "binance_qty": 0.09753178,
+      "notional_usdt": 0.0976
+    },
+    {
+      "symbol": "FETUSDT",
+      "binance_qty": 0.0532,
+      "notional_usdt": 0.0087
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "binance_qty": 0.182,
+      "notional_usdt": 0.0137
+    },
+    {
+      "symbol": "WINUSDT",
+      "binance_qty": 23938.47785567,
+      "notional_usdt": 0.5058
+    },
+    {
+      "symbol": "BCHUSDT",
+      "binance_qty": 0.001,
+      "notional_usdt": 0.2479
+    },
+    {
+      "symbol": "JSTUSDT",
+      "binance_qty": 0.37820179,
+      "notional_usdt": 0.0384
+    },
+    {
+      "symbol": "DOTUSDT",
+      "binance_qty": 0.006,
+      "notional_usdt": 0.0053
+    },
+    {
+      "symbol": "PAXGUSDT",
+      "binance_qty": 8.92e-05,
+      "notional_usdt": 0.3663
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "binance_qty": 0.00245,
+      "notional_usdt": 0.0166
+    },
+    {
+      "symbol": "NEARUSDT",
+      "binance_qty": 0.0635,
+      "notional_usdt": 0.1213
+    },
+    {
+      "symbol": "INJUSDT",
+      "binance_qty": 0.00929,
+      "notional_usdt": 0.0471
+    },
+    {
+      "symbol": "GRTUSDT",
+      "binance_qty": 0.042,
+      "notional_usdt": 0.0008
+    },
+    {
+      "symbol": "BTTCUSDT",
+      "binance_qty": 0.4,
+      "notional_usdt": 0.0
+    },
+    {
+      "symbol": "ETHWUSDT",
+      "binance_qty": 2.75e-06,
+      "notional_usdt": 0.0
+    },
+    {
+      "symbol": "SUIUSDT",
+      "binance_qty": 0.0132,
+      "notional_usdt": 0.0099
+    },
+    {
+      "symbol": "PEPEUSDT",
+      "binance_qty": 0.45,
+      "notional_usdt": 0.0
+    },
+    {
+      "symbol": "WLDUSDT",
+      "binance_qty": 0.0794,
+      "notional_usdt": 0.0327
+    },
+    {
+      "symbol": "JTOUSDT",
+      "binance_qty": 0.0796,
+      "notional_usdt": 0.0492
+    },
+    {
+      "symbol": "TAOUSDT",
+      "binance_qty": 7.2e-06,
+      "notional_usdt": 0.0015
+    },
+    {
+      "symbol": "ZROUSDT",
+      "binance_qty": 0.0069,
+      "notional_usdt": 0.0064
+    },
+    {
+      "symbol": "RENDERUSDT",
+      "binance_qty": 0.00894,
+      "notional_usdt": 0.0141
+    },
+    {
+      "symbol": "ONDOUSDT",
+      "binance_qty": 0.0451,
+      "notional_usdt": 0.0151
+    },
+    {
+      "symbol": "TRUMPUSDT",
+      "binance_qty": 0.000678,
+      "notional_usdt": 0.0011
+    },
+    {
+      "symbol": "ASTERUSDT",
+      "binance_qty": 0.0096,
+      "notional_usdt": 0.0061
+    },
+    {
+      "symbol": "MEGAUSDT",
+      "binance_qty": 0.0715,
+      "notional_usdt": 0.0034
+    },
+    {
+      "symbol": "XAUTUSDT",
+      "binance_qty": 8.88e-05,
+      "notional_usdt": 0.3644
+    },
+    {
+      "symbol": "OPGUSDT",
+      "binance_qty": 0.1678,
+      "notional_usdt": 0.0199
+    },
+    {
+      "symbol": "CRCLBUSDT",
+      "binance_qty": 0.00318,
+      "notional_usdt": 0.2128
+    },
+    {
+      "symbol": "GRAMUSDT",
+      "binance_qty": 0.00284,
+      "notional_usdt": 0.0047
+    }
+  ],
+  "mismatches": [
+    {
+      "code": "SPOT_ORPHAN_IN_BINANCE",
+      "severity": "warning",
+      "symbol": "BNBUSDT",
+      "db_qty": 0.0,
+      "binance_qty": 0.01787536,
+      "notional_usdt": 10.3897,
+      "detail": "exists_in_binance_not_in_db"
+    }
+  ],
+  "ts": "2026-07-11T20:41:55.007857+00:00"
+}

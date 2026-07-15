@@ -471,23 +471,29 @@ class FuturesClient:
             print(f"[Futures] _get_realized_pnl_from_trades {symbol}: {e}")
         return {"exit_price": 0, "pnl": 0, "reason": "binance_safety_close"}
 
-    def _verify_position_closed(self, symbol: str, side: str) -> bool:
-        """Query Binance positionRisk to confirm position is actually closed (qty=0)."""
+    def _get_position_qty_real(self, symbol: str, side: str) -> float:
+        """Return absolute positionAmt for symbol/side from Binance positionRisk."""
         if self.dry_run:
-            return True
+            return 0.0
         try:
             positions = self._get("/fapi/v2/positionRisk", {"symbol": symbol}, signed=True)
             for p in positions:
                 if p.get("positionSide") == side.upper():
-                    amt = abs(float(p.get("positionAmt", 0)))
-                    if amt > 0:
-                        print(f"[Futures/Verify] {symbol} {side}: STILL OPEN on Binance (amt={amt})")
-                        return False
-            print(f"[Futures/Verify] {symbol} {side}: confirmed closed on Binance ✓")
-            return True
+                    return abs(float(p.get("positionAmt", 0)))
         except Exception as e:
-            print(f"[Futures/Verify] {symbol} {side}: verification failed: {e}")
+            print(f"[Futures/Verify] {symbol} {side}: qty fetch failed: {e}")
+        return 0.0
+
+    def _verify_position_closed(self, symbol: str, side: str) -> bool:
+        """Query Binance positionRisk to confirm position is actually closed (qty=0)."""
+        if self.dry_run:
+            return True
+        qty = self._get_position_qty_real(symbol, side)
+        if qty > 0:
+            print(f"[Futures/Verify] {symbol} {side}: STILL OPEN on Binance (amt={qty})")
             return False
+        print(f"[Futures/Verify] {symbol} {side}: confirmed closed on Binance ✓")
+        return True
 
     def _verify_entry_filled(self, symbol: str, side: str) -> bool:
         """Query Binance positionRisk to confirm entry order was actually executed (qty>0).
@@ -498,18 +504,15 @@ class FuturesClient:
         if self.dry_run:
             return True
         try:
-            positions = self._get("/fapi/v2/positionRisk", {"symbol": symbol}, signed=True)
-            for p in positions:
-                if p.get("positionSide") == side.upper():
-                    amt = abs(float(p.get("positionAmt", 0)))
-                    if amt > 0:
-                        print(f"[Futures/Verify] {symbol} {side}: entry confirmed on Binance (amt={amt}) ✓")
-                        return True
+            qty = self._get_position_qty_real(symbol, side)
+            if qty > 0:
+                print(f"[Futures/Verify] {symbol} {side}: entry confirmed on Binance (amt={qty}) ✓")
+                return True
             print(f"[Futures/Verify] {symbol} {side}: entry NOT confirmed on Binance — positionAmt=0")
             return False
         except Exception as e:
-            print(f"[Futures/Verify] {symbol} {side}: entry verification failed: {e} — assuming filled")
-            return True
+            print(f"[Futures/Verify] {symbol} {side}: entry verification failed: {e} — NOT assuming filled")
+            return False
 
     # ── Position key helpers ──────────────────────────────────────────────────
 
@@ -1380,13 +1383,26 @@ class FuturesClient:
         return 0.0
 
     def get_total_wallet_usdt(self) -> float:
-        """Return total USDT in futures wallet: margin + available + unrealized PnL.
+        """Return total USDT-equivalent value of all assets in the futures wallet.
+        Converts non-USDT assets (e.g. BNB used as margin) to USDT using live price.
         Uses walletBalance which includes committed margin, unlike availableBalance."""
         try:
             account = self.get_account_info()
+            total = 0.0
             for asset in account.get("assets", []):
-                if asset.get("asset") == "USDT":
-                    return float(asset.get("walletBalance", 0))
+                wallet_bal = float(asset.get("walletBalance", 0))
+                if wallet_bal <= 0:
+                    continue
+                asset_name = asset.get("asset", "")
+                if asset_name == "USDT":
+                    total += wallet_bal
+                else:
+                    try:
+                        price = self.get_price(f"{asset_name}USDT")
+                        total += wallet_bal * price
+                    except Exception:
+                        pass
+            return total
         except Exception:
             pass
         return 0.0
@@ -1442,13 +1458,15 @@ class FuturesClient:
             print(f"[Futures DRY] Transfer ${amount:.2f} USDT futures→spot")
             return True
         try:
+            # Cap against available USDT balance (walletBalance includes non-USDT assets like BNB
+            # which cannot be transferred directly as USDT via this endpoint).
             available = self.get_available_usdt()
             max_transfer = max(0.0, available - safety_buffer_usdt)
             if amount <= 0:
                 print(f"[Futures] Nothing to transfer to spot (amount={amount:.2f})")
                 return False
             if amount > max_transfer:
-                print(f"[Futures] Transfer capped: requested ${amount:.2f} > max safe ${max_transfer:.2f} (available=${available:.2f}, buffer={safety_buffer_usdt:.2f})")
+                print(f"[Futures] Transfer capped: requested ${amount:.2f} > max safe ${max_transfer:.2f} (available_usdt=${available:.2f}, buffer={safety_buffer_usdt:.2f})")
                 amount = max_transfer
             if amount < 1.0:
                 print(f"[Futures] Transfer amount too small (${amount:.2f}), skipping")
@@ -1541,7 +1559,14 @@ class FuturesClient:
         """
         result = {"direction": "none", "amount": 0.0, "reason": "", "success": True, "error": None}
         try:
-            futures_usdt = self.get_available_usdt()
+            # s77b: distinguish available (free margin) from total wallet balance.
+            # Case 1 (spot→futures shortfall) uses available; Cases 2/3 (futures→spot)
+            # use total so idle capital is correctly detected and returned.
+            futures_available = self.get_available_usdt()
+            futures_total = self.get_total_wallet_usdt()
+            # Fallback: if total unavailable, use available as conservative estimate
+            if futures_total <= 0:
+                futures_total = futures_available
 
             # ── Compute committed margin (margin locked in open shorts) ──────────
             committed_margin = 0.0
@@ -1558,6 +1583,7 @@ class FuturesClient:
 
             # ── Case 1: Futures needs capital (FUTURES_SHORT, open slots exist) ─
             if regime == "FUTURES_SHORT":
+                futures_usdt = futures_available  # use available for shortfall check
                 open_slots = max(0, max_shorts - open_shorts)
                 if open_slots > 0:
                     needed_futures = open_slots * kelly_margin
@@ -1605,7 +1631,8 @@ class FuturesClient:
                     needed_spot = spot_open_slots * kelly_spot_amount
                     spot_shortfall = needed_spot - spot_usdt
                     if spot_shortfall >= min_transfer:
-                        futures_excess = max(0.0, futures_usdt - futures_min_reserve)
+                        # s77b: use available USDT (not total which includes BNB) for actual transfer cap
+                        futures_excess = max(0.0, futures_available - futures_min_reserve)
                         transfer_amount = round(min(spot_shortfall, futures_excess), 2)
                         if transfer_amount >= min_transfer:
                             reason = (f"{regime}: {spot_open_slots} spot slot(s) × ${kelly_spot_amount:.0f}/slot "
@@ -1628,7 +1655,9 @@ class FuturesClient:
 
             # ── Case 3: Idle futures capital — no open shorts, return excess ────
             if open_shorts == 0 and regime not in ("FUTURES_SHORT", "PRESERVATION"):
-                excess = futures_usdt - futures_min_reserve
+                # s77b: only transfer available USDT — futures_total includes non-USDT (e.g. BNB) which
+                # cannot be sent via /sapi/v1/futures/transfer. Non-USDT assets must be handled separately.
+                excess = futures_available - futures_min_reserve
                 if excess >= min_transfer:
                     reason = f"Idle futures capital ${excess:.2f} (no open shorts, regime={regime}) → returning to spot"
                     print(f"[CapBridge] {reason}")
@@ -1644,8 +1673,9 @@ class FuturesClient:
                     return result
 
             if result["direction"] == "none":
-                print(f"[CapBridge] No transfer needed — futures=${futures_usdt:.2f}, spot=${spot_usdt:.2f}, "
-                      f"regime={regime}, open_shorts={open_shorts}/{max_shorts}")
+                print(f"[CapBridge] No transfer needed — futures_avail=${futures_available:.2f} total=${futures_total:.2f} "
+                      f"(non-USDT assets={futures_total-futures_available:.2f}), "
+                      f"spot=${spot_usdt:.2f}, regime={regime}, open_shorts={open_shorts}/{max_shorts}")
 
         except Exception as e:
             result["success"] = False
@@ -2111,10 +2141,17 @@ class FuturesClient:
                 "symbol": symbol, "side": "SELL", "type": "MARKET",
                 "quantity": str(aligned_qty), "positionSide": "LONG",
             })
+            # Verify real position size before persisting close; if still open, keep tracking residual.
+            _real_qty = self._get_position_qty_real(symbol, "LONG")
+            if _real_qty > 0:
+                print(f"[Futures/WARN] LONG {symbol}: close order sent but position still open (amt={_real_qty}) — NOT marking closed")
+                if pos:
+                    pos.qty = _real_qty
+                    self._persist_smart_meta(pos)
+                return result
             if pos:
                 pos.closed = True; pos.closed_at = datetime.now(timezone.utc); pos.exit_price = current_price; pos.pnl = pnl
                 self._save_futures_closed(pos, reason)  # FIX-G: persist to DB
-            self._verify_position_closed(symbol, "LONG")
             print(f"[Futures] LONG {symbol} CLOSED: PnL~${pnl:.2f}")
             return result
         except Exception as e:
@@ -2180,13 +2217,20 @@ class FuturesClient:
                 "symbol": symbol, "side": "BUY", "type": "MARKET",
                 "quantity": str(aligned_qty), "positionSide": "SHORT",
             })
+            # Verify real position size before persisting close; if still open, keep tracking residual.
+            _real_qty = self._get_position_qty_real(symbol, "SHORT")
+            if _real_qty > 0:
+                print(f"[Futures/WARN] SHORT {symbol}: close order sent but position still open (amt={_real_qty}) — NOT marking closed")
+                if pos:
+                    pos.qty = _real_qty
+                    self._persist_smart_meta(pos)
+                return result
             if pos:
                 pos.closed     = True
                 pos.closed_at  = datetime.now(timezone.utc)
                 pos.exit_price = current_price
                 pos.pnl        = pnl
                 self._save_futures_closed(pos, reason)  # FIX-G: persist to DB
-            self._verify_position_closed(symbol, "SHORT")
             print(f"[Futures] SHORT {symbol} CLOSED: PnL~${pnl:.2f}")
             return result
         except Exception as e:
@@ -2807,6 +2851,7 @@ class FuturesClient:
                                     position_size_usdt=round(entry * pos.qty, 2),
                                     precomputed_signal=(_sso_sig if '_sso_sig' in dir() else None),
                                     trade_type='futures',
+                                    trade_side=('SHORT' if str(pos.side).upper() == 'SHORT' else 'LONG'),
                                 )
                                 if _gate_pred:
                                     _rescue_pred_ev = float(_gate_pred.get('expected_pnl', 0.0))
@@ -3430,7 +3475,9 @@ class FuturesClient:
             _effective_size = min(position_size_usdt, _max_size) if position_size_usdt else _default_size
             prediction, _ = _pnl_service_module.predict_for_symbol(
                 symbol=symbol, client=_bc, settings=settings,
-                position_size_usdt=_effective_size, trade_type='futures'
+                position_size_usdt=_effective_size,
+                trade_type='futures',
+                trade_side='SHORT',
             )
             success_prob = float((prediction or {}).get("success_probability", 0.5))
 

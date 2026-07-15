@@ -106,14 +106,37 @@ class BNBAutoSettings:
     bnb_buffer_days = 7
     bnb_min_balance_usd = 5.0
     bnb_extra_buffer_usd = 10.0
+    bnb_max_reserve_usd = 100.0
     db_url = ""
 
 
+class FakeUniversalTransferClient:
+    def __init__(self, spot_client, futures_client=None):
+        self._spot = spot_client
+        self._futures = futures_client
+
+    def universal_transfer(self, type, asset, amount):
+        if asset != 'BNB':
+            raise Exception("bad transfer asset")
+        if type == 'MAIN_UMFUTURE':
+            self._spot._bnb -= amount
+            if self._futures is not None:
+                self._futures._bnb += amount
+            return {'tranId': 1}
+        if type == 'UMFUTURE_MAIN':
+            if self._futures is not None:
+                self._futures._bnb -= amount
+            self._spot._bnb += amount
+            return {'tranId': 2}
+        raise Exception("bad transfer type")
+
+
 class FakeSpotClient:
-    def __init__(self, bnb=0.0, usdt=1000.0):
+    def __init__(self, bnb=0.0, usdt=1000.0, futures_client=None):
         self._bnb = bnb
         self._usdt = usdt
         self.orders = []
+        self.client = FakeUniversalTransferClient(self, futures_client)
 
     def get_symbol_price(self, symbol):
         return 600.0 if symbol == 'BNBUSDT' else 1.0
@@ -127,14 +150,12 @@ class FakeSpotClient:
             self._bnb += quantity
             self.orders.append(('BUY', quantity))
             return {'orderId': 1}
+        if side == 'SELL' and symbol == 'BNBUSDT':
+            self._usdt += quantity * 600.0
+            self._bnb -= quantity
+            self.orders.append(('SELL', quantity))
+            return {'orderId': 2}
         raise Exception("bad order")
-
-    class client:
-        @staticmethod
-        def universal_transfer(type, asset, amount):
-            if type == 'MAIN_UMFUTURE' and asset == 'BNB':
-                return {'tranId': 1}
-            raise Exception("bad transfer")
 
 
 class FakeFuturesClient:
@@ -143,12 +164,15 @@ class FakeFuturesClient:
         self._usdt = usdt
         self._spot_client = spot_client
         self.transferred_to_spot = 0.0
+        # Link the spot client's transfer helper to this futures client
+        if spot_client is not None and hasattr(spot_client, 'client'):
+            spot_client.client._futures = self
 
     def get_price(self, symbol):
         return 600.0
 
     def get_account_info(self):
-        return {'assets': [{'asset': 'BNB', 'availableBalance': self._bnb}, {'asset': 'USDT', 'availableBalance': self._usdt}]}
+        return {'assets': [{'asset': 'BNB', 'walletBalance': self._bnb}, {'asset': 'USDT', 'availableBalance': self._usdt}]}
 
     def get_available_usdt(self):
         return self._usdt
@@ -196,8 +220,8 @@ def test_auto_manage_bnb_discount_skips_when_insufficient_usdt():
 
 
 def test_auto_manage_bnb_discount_no_action_when_funded():
-    spot = FakeSpotClient(bnb=1.0, usdt=1000.0)
-    fut = FakeFuturesClient(bnb=1.0)
+    spot = FakeSpotClient(bnb=0.1, usdt=1000.0)  # ~$60, under max reserve
+    fut = FakeFuturesClient(bnb=0.1)
     db = MagicMock()
     res = auto_manage_bnb_discount(BNBAutoSettings(), spot_client=spot, futures_client=fut, db_client=db)
     assert res['spot_action'] == 'none'
@@ -235,3 +259,32 @@ def test_auto_manage_bnb_discount_both_wallets_shortfall():
     assert res['spot_action'] == 'buy_skipped_insufficient_usdt'
     assert res['shortfall_usdt'] > 0
     assert res['usdt_source'] == 'insufficient'
+
+
+def test_auto_manage_bnb_discount_sells_excess_above_max_reserve():
+    # Spot holds $3,000 worth of BNB (5.0 BNB @ $600), max reserve is $100
+    spot = FakeSpotClient(bnb=5.0, usdt=1000.0)
+    fut = FakeFuturesClient(bnb=0.0, usdt=0.0, spot_client=spot)
+    db = MagicMock()
+    res = auto_manage_bnb_discount(BNBAutoSettings(), spot_client=spot, futures_client=fut, db_client=db, regime_mode='SPOT_BULL')
+    # Should sell excess down to ~$100 reserve (~0.167 BNB), leaving ~0.167 BNB
+    assert res['spot_action'].startswith('sold_excess')
+    assert res['spot_bnb'] < 0.2  # ~0.167 BNB
+    # Verify a SELL order was recorded
+    sell_orders = [o for o in spot.orders if o[0] == 'SELL']
+    assert len(sell_orders) == 1
+    assert sell_orders[0][1] > 4.8  # sold most of the 5.0 BNB
+
+
+def test_auto_manage_bnb_discount_transfers_futures_excess_to_spot():
+    # Futures holds $300 worth of BNB (0.5 BNB @ $600), spot is empty; max per wallet is $100
+    spot = FakeSpotClient(bnb=0.0, usdt=1000.0)
+    fut = FakeFuturesClient(bnb=0.5, usdt=0.0, spot_client=spot)
+    db = MagicMock()
+    res = auto_manage_bnb_discount(BNBAutoSettings(), spot_client=spot, futures_client=fut, db_client=db, regime_mode='SPOT_BULL')
+    # Futures excess is transferred to spot, then spot sells excess above $100
+    assert res['futures_action'].startswith('transferred_excess')
+    assert res['spot_action'].startswith('sold_excess')
+    # Final per-wallet reserves should be near $100 each
+    assert fut._bnb < 0.2  # ~0.167 BNB in futures
+    assert spot._bnb < 0.2  # ~0.167 BNB in spot

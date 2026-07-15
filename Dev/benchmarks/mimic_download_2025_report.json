@@ -1,0 +1,150 @@
+{
+  "generated_at": "2026-07-11T14:52:14.736439+00:00",
+  "symbols": [
+    {
+      "symbol": "AAVEUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "ADAUSDT",
+      "new_rows": 10201,
+      "total": 13292
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "BCHUSDT",
+      "new_rows": 10201,
+      "total": 13292
+    },
+    {
+      "symbol": "BNBUSDT",
+      "new_rows": 10201,
+      "total": 13292
+    },
+    {
+      "symbol": "BTCUSDT",
+      "new_rows": 10201,
+      "total": 13292
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "ENAUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "ETHUSDT",
+      "new_rows": 10201,
+      "total": 13292
+    },
+    {
+      "symbol": "FETUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "IDUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "INJUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "JTOUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "LINKUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "NEARUSDT",
+      "new_rows": 10201,
+      "total": 13292
+    },
+    {
+      "symbol": "ONDOUSDT",
+      "new_rows": 7787,
+      "total": 10667
+    },
+    {
+      "symbol": "PAXGUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "PEPEUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "SOLUSDT",
+      "new_rows": 10201,
+      "total": 13292
+    },
+    {
+      "symbol": "SUIUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "TAOUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "TONUSDT",
+      "new_rows": 10201,
+      "total": 13054
+    },
+    {
+      "symbol": "TRXUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "UNIUSDT",
+      "new_rows": 10201,
+      "total": 13292
+    },
+    {
+      "symbol": "WLDUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "XAUTUSDT",
+      "new_rows": 0,
+      "error": "no data"
+    },
+    {
+      "symbol": "XLMUSDT",
+      "new_rows": 10201,
+      "total": 13292
+    },
+    {
+      "symbol": "XRPUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    },
+    {
+      "symbol": "ZECUSDT",
+      "new_rows": 10201,
+      "total": 13081
+    }
+  ]
+}

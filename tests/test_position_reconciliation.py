@@ -2,6 +2,7 @@
 
 import pytest
 from unittest.mock import MagicMock
+import types
 
 from position_manager import PositionManager, Position
 from binance_truth_guard import evaluate_spot_parity, evaluate_futures_parity
@@ -55,10 +56,72 @@ class TestSpotReconciliation:
     def test_spot_qty_drift_detected(self):
         pm = self._make_pm({"BTCUSDT": 0.5})
         client = self._make_binance_client({"BTC": 0.55})
+        # Drift 0.05 BTC at $100k -> $5k notional, material
+        client.client.get_symbol_ticker.return_value = [
+            {"symbol": "BTCUSDT", "price": "100000.0"},
+        ]
         result = evaluate_spot_parity(pm, client)
         assert result["severity"] == "warning"
         assert result["ok"] is False
         assert any(m["code"] == "SPOT_QTY_DRIFT" for m in result["mismatches"])
+
+    def test_spot_orphan_dust_below_min_notional_is_ignored(self):
+        pm = self._make_pm({"BTCUSDT": 0.5})
+        client = self._make_binance_client({"BTC": 0.5, "ETH": 0.001})
+        # ETH at $100 -> notional $0.10, below default $1.0 threshold
+        client.client.get_symbol_ticker.return_value = [
+            {"symbol": "BTCUSDT", "price": "100000.0"},
+            {"symbol": "ETHUSDT", "price": "100.0"},
+        ]
+        result = evaluate_spot_parity(pm, client)
+        assert result["severity"] == "ok"
+        assert result["mismatch_count"] == 0
+        assert result["dust_skipped_count"] >= 1
+
+    def test_spot_orphan_above_min_notional_is_reported(self):
+        pm = self._make_pm({"BTCUSDT": 0.5})
+        client = self._make_binance_client({"BTC": 0.5, "ETH": 2.0})
+        client.client.get_symbol_ticker.return_value = [
+            {"symbol": "BTCUSDT", "price": "100000.0"},
+            {"symbol": "ETHUSDT", "price": "100.0"},
+        ]
+        result = evaluate_spot_parity(pm, client)
+        assert result["severity"] == "warning"
+        assert result["ok"] is False
+        assert any(m["code"] == "SPOT_ORPHAN_IN_BINANCE" and m["symbol"] == "ETHUSDT" for m in result["mismatches"])
+
+    def test_spot_parity_ignores_bnb_when_commission_reserve_enabled(self):
+        pm = self._make_pm({"BTCUSDT": 0.5})
+        client = self._make_binance_client({"BTC": 0.5, "BNB": 2.0})
+        client.client.get_symbol_ticker.return_value = [
+            {"symbol": "BTCUSDT", "price": "100000.0"},
+            {"symbol": "BNBUSDT", "price": "600.0"},
+        ]
+        settings = types.SimpleNamespace(
+            use_bnb_for_commission=True,
+            auto_bnb_for_commission=True,
+            spot_ignore_bnb_when_commission_enabled=True,
+        )
+        result = evaluate_spot_parity(pm, client, settings=settings)
+        assert result["severity"] == "ok"
+        assert result["mismatch_count"] == 0
+        assert "BNB" in result.get("excluded_assets", [])
+
+    def test_spot_parity_reports_bnb_when_commission_reserve_disabled(self):
+        pm = self._make_pm({"BTCUSDT": 0.5})
+        client = self._make_binance_client({"BTC": 0.5, "BNB": 2.0})
+        client.client.get_symbol_ticker.return_value = [
+            {"symbol": "BTCUSDT", "price": "100000.0"},
+            {"symbol": "BNBUSDT", "price": "600.0"},
+        ]
+        settings = types.SimpleNamespace(
+            use_bnb_for_commission=False,
+            auto_bnb_for_commission=False,
+            spot_ignore_bnb_when_commission_enabled=True,
+        )
+        result = evaluate_spot_parity(pm, client, settings=settings)
+        assert result["severity"] == "warning"
+        assert any(m["code"] == "SPOT_ORPHAN_IN_BINANCE" and m["symbol"] == "BNBUSDT" for m in result["mismatches"])
 
 
 class TestFuturesReconciliation:

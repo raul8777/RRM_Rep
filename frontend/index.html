@@ -134,8 +134,8 @@
     <button class="tab-btn"        data-tab="tab-control" onclick="switchTab('tab-control')">
         <span class="tab-icon">🧭</span> Acciones
     </button>
-    <button class="tab-btn"        data-tab="tab-mimic" onclick="switchTab('tab-mimic')">
-        <span class="tab-icon">🔬</span> MIMIC
+    <button class="tab-btn"        data-tab="tab-super-mimic" onclick="switchTab('tab-super-mimic')">
+        <span class="tab-icon">⚛️</span> Super MIMIC
     </button>
 </nav>
 
@@ -665,99 +665,151 @@
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
-<!-- TAB 6 — MIMIC                                                             -->
+<!-- TAB 6 — SUPER MIMIC                                                         -->
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
-<div class="tab-content" id="tab-mimic">
-    <div class="mimic-layout" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px">
+<div class="tab-content" id="tab-super-mimic">
+    <div class="super-mimic-layout" style="display:grid;grid-template-columns:320px 1fr;gap:16px;padding:16px">
 
-        <!-- LEFT COLUMN -->
-        <div class="mimic-left" style="display:flex;flex-direction:column;gap:16px">
-            <!-- Estado actual -->
+        <!-- LEFT COLUMN — Pipeline control -->
+        <div class="super-mimic-left" style="display:flex;flex-direction:column;gap:16px">
             <div class="card">
                 <div class="card-header">
-                    <h2>🔬 MIMIC — Estado</h2>
+                    <h2>⚛️ Super MIMIC</h2>
                     <div class="card-actions">
-                        <span id="mimicStatusBadge" class="mode-pill-dot" style="background:#888"></span>
+                        <span id="superMimicStatusDot" class="mode-pill-dot" style="background:#888"></span>
                     </div>
                 </div>
-                <div id="mimicStatusPanel" style="padding:12px">
-                    <p class="loading">Inicializando MIMIC...</p>
-                </div>
-                <div class="card-actions" style="padding:12px;border-top:1px solid #333">
-                    <button class="btn btn-primary btn-xs" onclick="mimicAction('start')">▶ Start</button>
-                    <button class="btn btn-success btn-xs" onclick="mimicRun()">⏵ Run cycle</button>
-                    <button class="btn btn-warning btn-xs" onclick="mimicAction('pause')">⏸ Pause</button>
-                    <button class="btn btn-primary btn-xs" onclick="mimicAction('resume')">⏵ Resume</button>
-                    <button class="btn btn-danger btn-xs" onclick="mimicAction('retry')">🔄 Retry</button>
-                    <button class="btn btn-xs" onclick="mimicAction('reset')">⏹ Reset</button>
+                <div style="padding:12px;font-size:12px;color:#aaa">
+                    Diseña, ejecuta y despliega configuraciones optimizadas. Cada experimento es un artefacto aislado con trazabilidad completa.
                 </div>
             </div>
 
-            <!-- Recomendaciones -->
-            <div class="card">
-                <div class="card-header"><h2>🎯 Recomendaciones</h2></div>
-                <div id="mimicRecommendationsPanel" style="padding:12px">
-                    <p class="loading">Cargando recomendaciones...</p>
-                </div>
-            </div>
-
-            <!-- Programador de ventanas -->
-            <div class="card">
-                <div class="card-header"><h2>⏰ Ventanas de ejecución</h2></div>
-                <div id="mimicSchedulePanel" style="padding:12px">
-                    <p class="loading">Cargando horario...</p>
-                </div>
-                <div style="padding:12px;border-top:1px solid #333">
-                    <label>Modo
-                        <select id="mimicScheduleMode" style="background:#222;color:#eee;border:1px solid #444;padding:4px">
-                            <option value="auto">Auto</option>
-                            <option value="manual">Manual</option>
-                            <option value="suggest-only">Suggest-only</option>
+            <!-- Design stage -->
+            <div class="card" id="superMimicDesignCard">
+                <div class="card-header"><h2>1️⃣ Diseñar experimento</h2></div>
+                <div style="padding:12px;display:flex;flex-direction:column;gap:12px;font-size:12px">
+                    <label>Modo de mercado
+                        <select id="smDesignMode" style="background:#222;color:#eee;border:1px solid #444;padding:4px;width:100%">
+                            <option value="RANGE_SCALP" selected>RANGE_SCALP</option>
+                            <option value="SPOT_BULL">SPOT_BULL</option>
+                            <option value="FUTURES_SHORT">FUTURES_SHORT</option>
                         </select>
                     </label>
-                    <label style="margin-left:12px">Días (0=Lun)
-                        <input id="mimicScheduleDays" type="text" value="0,1,2,3,4,5,6" style="width:120px;background:#222;color:#eee;border:1px solid #444;padding:4px" />
+                    <label>Perfil
+                        <select id="smDesignProfile" style="background:#222;color:#eee;border:1px solid #444;padding:4px;width:100%">
+                            <option value="A" selected>A</option>
+                            <option value="B">B</option>
+                            <option value="C">C</option>
+                        </select>
                     </label>
-                    <label style="margin-left:12px">Inicio
-                        <input id="mimicScheduleStart" type="time" value="00:00" style="background:#222;color:#eee;border:1px solid #444;padding:4px" />
+                    <label>Motor
+                        <select id="smDesignEngine" style="background:#222;color:#eee;border:1px solid #444;padding:4px;width:100%">
+                            <option value="mimic_sweep" selected>MIMIC Sweep</option>
+                        </select>
                     </label>
-                    <label style="margin-left:12px">Fin
-                        <input id="mimicScheduleEnd" type="time" value="07:00" style="background:#222;color:#eee;border:1px solid #444;padding:4px" />
+                    <label>Estrategia
+                        <select id="smDesignStrategy" style="background:#222;color:#eee;border:1px solid #444;padding:4px;width:100%">
+                            <option value="quick">Quick</option>
+                            <option value="full" selected>Full</option>
+                            <option value="coarse">Coarse</option>
+                        </select>
                     </label>
-                    <button class="btn btn-primary btn-xs" style="margin-left:12px" onclick="saveMimicSchedule()">Guardar</button>
+                    <label>Ventanas (IDs separados por coma, vacío = todas)
+                        <input id="smDesignWindows" type="text" placeholder="win_20260628_20260630,..." style="background:#222;color:#eee;border:1px solid #444;padding:4px;width:100%">
+                    </label>
+                    <label>Max ciclos/simulación
+                        <input id="smDesignMaxCycles" type="number" min="0" placeholder="∞" style="background:#222;color:#eee;border:1px solid #444;padding:4px;width:100%">
+                    </label>
+                    <button class="btn btn-primary" style="width:100%" onclick="superMimicCreate()">🚀 Crear experimento</button>
+                </div>
+            </div>
+
+            <!-- Execution stage -->
+            <div class="card" id="superMimicExecuteCard" style="display:none">
+                <div class="card-header"><h2>2️⃣ Ejecutar</h2></div>
+                <div style="padding:12px;display:flex;flex-direction:column;gap:12px;font-size:12px">
+                    <div><strong>ID:</strong> <span id="smActiveId" style="font-family:monospace">—</span></div>
+                    <div><strong>Estado:</strong> <span id="smActiveStatus">—</span></div>
+                    <div class="progress-bar" style="background:#222;border-radius:4px;height:16px;overflow:hidden">
+                        <div id="smProgressBar" style="background:#0d8f3c;height:100%;width:0%;transition:width 0.5s"></div>
+                    </div>
+                    <div id="smEta" style="color:#aaa">ETA: —</div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap">
+                        <button class="btn btn-success btn-xs" onclick="superMimicStart()">▶ Iniciar</button>
+                        <button class="btn btn-warning btn-xs" onclick="superMimicCancel()">⏹ Cancelar</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Validation & Deploy stage -->
+            <div class="card" id="superMimicDeployCard" style="display:none">
+                <div class="card-header"><h2>3️⃣ Validar / Desplegar</h2></div>
+                <div style="padding:12px;display:flex;flex-direction:column;gap:12px;font-size:12px">
+                    <div id="smDeployGate" style="color:#ffab40">Pendiente de finalización.</div>
+                    <pre id="smRecommendedConfig" style="background:#1a1a1a;border:1px solid #333;padding:8px;border-radius:4px;overflow:auto;max-height:200px;font-family:monospace;font-size:11px">—</pre>
+                    <button class="btn btn-danger" style="width:100%" onclick="superMimicDeploy()" id="smDeployBtn" disabled>� Desplegar config (manual)</button>
+                    <div style="color:#888;font-size:11px">El despliegue siempre requiere confirmación y deja rollback.</div>
                 </div>
             </div>
         </div>
 
-        <!-- RIGHT COLUMN -->
-        <div class="mimic-right" style="display:flex;flex-direction:column;gap:16px">
-            <!-- Cola de micro universos -->
+        <!-- RIGHT COLUMN — Monitor & history -->
+        <div class="super-mimic-right" style="display:flex;flex-direction:column;gap:16px">
             <div class="card">
-                <div class="card-header"><h2>🌌 Micro universos</h2></div>
-                <div id="mimicUniversesPanel" style="padding:12px">
-                    <p class="loading">Cargando cola...</p>
+                <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+                    <h2>📋 Experimentos recientes</h2>
+                    <button class="btn btn-xs" onclick="superMimicRefreshList()">↻</button>
+                </div>
+                <div id="superMimicListPanel" style="padding:12px">
+                    <p style="font-size:12px;color:#888">Cargando experimentos...</p>
                 </div>
             </div>
 
-            <!-- Progreso de cobertura -->
             <div class="card">
-                <div class="card-header"><h2>📊 Cobertura acumulada</h2></div>
-                <div id="mimicCoveragePanel" style="padding:12px">
-                    <p class="loading">Cargando cobertura...</p>
+                <div class="card-header"><h2>🪵 Log del experimento activo</h2></div>
+                <pre id="superMimicLogPanel" style="padding:12px;background:#0b0b0b;border:1px solid #333;min-height:200px;max-height:400px;overflow:auto;font-family:monospace;font-size:11px;color:#aaa">Selecciona o ejecuta un experimento para ver su log.</pre>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><h2>🧠 Meta-Learner</h2></div>
+                <div style="padding:12px;display:flex;flex-direction:column;gap:12px;font-size:12px">
+                    <div id="superMimicFingerprintPanel" style="color:#aaa">
+                        <strong>Regimen fingerprint:</strong> —
+                    </div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap">
+                        <button class="btn btn-primary btn-xs" onclick="superMimicCaptureFingerprint()">🎯 Capturar fingerprint</button>
+                        <button class="btn btn-xs" onclick="superMimicWarmStart()">🔥 Warm-start configs</button>
+                        <button class="btn btn-xs" onclick="superMimicRetrain()">🧠 Retrain predictor</button>
+                    </div>
+                    <div id="superMimicWarmStartPanel" style="color:#888">
+                        Sin warm-start todavía.
+                    </div>
                 </div>
             </div>
 
-            <!-- Resultados recientes -->
             <div class="card">
-                <div class="card-header"><h2>📈 Resultados recientes</h2></div>
-                <div id="mimicResultsPanel" style="padding:12px">
-                    <p class="loading">Cargando resultados...</p>
+                <div class="card-header"><h2>⚛️ Quantum Landscape</h2></div>
+                <div style="padding:12px;display:flex;flex-direction:column;gap:12px;font-size:12px">
+                    <div style="display:flex;gap:8px;flex-wrap:wrap">
+                        <button class="btn btn-primary btn-xs" onclick="superMimicLoadLandscape()">🗺️ Cargar mapa</button>
+                        <button class="btn btn-xs" onclick="superMimicLoadAttractors()">🧲 Atractores</button>
+                    </div>
+                    <div id="superMimicLandscapeMap" style="color:#888">Selecciona un experimento completado y carga el mapa.</div>
+                    <div id="superMimicAttractorsPanel" style="color:#888"></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><h2>🎯 Recomendación del mejor config</h2></div>
+                <div id="superMimicRecommendPanel" style="padding:12px;font-size:12px;color:#888">
+                    Sin resultados todavía.
                 </div>
             </div>
         </div>
     </div>
 </div>
 
-<script src="/frontend/dashboard.js?v=108"></script>
+<script src="/frontend/dashboard.js?v=112"></script>
+<script src="/frontend/super_mimic.js?v=1"></script>
 </body>
 </html>

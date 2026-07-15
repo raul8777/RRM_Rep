@@ -38,6 +38,7 @@ from binance_truth_guard import (
     auto_reconcile_spot,
     auto_reconcile_futures,
 )
+from trade_utils import get_min_notional_delta, get_symbol_filters
 
 settings = get_settings()
 app = FastAPI(title="Binance Trading Agent")
@@ -514,6 +515,107 @@ async def run_futures_reconciliation(dry_run: bool = True, _auth: None = Depends
             "status": "ok",
             "dry_run": dry_run,
             "report": report,
+            "timestamp": to_mexico_time(datetime.utcnow()).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/reconcile/cleanup-dust")
+async def cleanup_dust(dry_run: bool = True, _auth: None = Depends(_require_api_key)) -> Dict:
+    """
+    Sell all SPOT balances in Binance that are below $5 notional.
+    For each symbol: if balance*price < min_notional, buy the delta needed to reach
+    min_notional, then sell the whole balance. dry_run=True returns plan only.
+    """
+    try:
+        comp = get_components()
+        if not comp.binance_client or not comp.position_manager:
+            raise HTTPException(status_code=503, detail="Components not initialized")
+        client = comp.binance_client
+        balances = client.get_account_balance()
+        plan = []
+        executed = []
+        excluded = {"USDT", "BNB"}
+        for asset, amount in balances.items():
+            if asset in excluded or amount <= 0:
+                continue
+            symbol = f"{asset}USDT"
+            try:
+                price = client.get_symbol_price(symbol)
+                notional = amount * price
+                filters = get_symbol_filters(client, symbol)
+                min_notional = filters.get('min_notional', 5.0)
+                if notional >= min_notional:
+                    continue
+                if notional <= 0:
+                    continue
+                delta = get_min_notional_delta(client, symbol, price, target_notional_usdt=max(min_notional, 5.0))
+                plan.append({
+                    "symbol": symbol,
+                    "balance": amount,
+                    "notional": round(notional, 4),
+                    "buy_qty": delta.get('buy_qty'),
+                    "sell_qty": delta.get('sell_qty'),
+                    "min_notional": min_notional,
+                })
+                if not dry_run:
+                    if delta.get('needed') and delta.get('buy_qty', 0) > 0:
+                        client.create_market_order(symbol=symbol, side="BUY", quantity=delta['buy_qty'])
+                    sell_qty = delta.get('sell_qty', amount)
+                    if sell_qty > 0:
+                        order = client.create_market_order(symbol=symbol, side="SELL", quantity=sell_qty)
+                        executed.append({"symbol": symbol, "sell_qty": sell_qty, "order": order.get('orderId')})
+            except Exception as e:
+                plan.append({"symbol": symbol, "error": str(e)})
+        return {
+            "status": "ok",
+            "dry_run": dry_run,
+            "plan": plan,
+            "executed": executed,
+            "timestamp": to_mexico_time(datetime.utcnow()).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/metrics/ghosts")
+async def get_ghost_metrics(_auth: None = Depends(_require_api_key)) -> Dict:
+    """Current DB/Binance parity metrics for ghost/orphan/dust detection."""
+    try:
+        comp = get_components()
+        spot_parity = evaluate_spot_parity(comp.position_manager, comp.binance_client, settings=settings, min_notional_usdt=5.0)
+        futures_parity = {"ok": True, "severity": "ok", "mismatch_count": 0}
+        try:
+            from run_trades import _get_futures_client
+            fc = _get_futures_client(settings, db_client=comp.db_client)
+            fc._binance_client_ref = comp.binance_client
+            futures_parity = evaluate_futures_parity(fc)
+        except Exception as fe:
+            futures_parity = {"ok": False, "error": str(fe)}
+        spot_status = get_truth_status_spot(comp.db_client)
+        futures_status = get_truth_status(comp.db_client)
+        return {
+            "ok": spot_parity.get("ok", True) and futures_parity.get("ok", True),
+            "spot": {
+                "ok": spot_parity.get("ok", True),
+                "severity": spot_parity.get("severity", "unknown"),
+                "db_count": spot_parity.get("db_count", 0),
+                "binance_count": spot_parity.get("binance_count", 0),
+                "mismatch_count": spot_parity.get("mismatch_count", 0),
+                "dust_skipped_count": spot_parity.get("dust_skipped_count", 0),
+                "last_status": spot_status,
+            },
+            "futures": {
+                "ok": futures_parity.get("ok", True),
+                "severity": futures_parity.get("severity", "unknown"),
+                "mismatch_count": futures_parity.get("mismatch_count", 0),
+                "last_status": futures_status,
+            },
             "timestamp": to_mexico_time(datetime.utcnow()).isoformat(),
         }
     except HTTPException:

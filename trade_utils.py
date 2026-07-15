@@ -56,6 +56,108 @@ def compute_commission(quantity: float, price: float, settings, trade_type: str 
     return entry_commission(quantity, price, trade_type, settings)
 
 
+def get_binance_sell_qty(
+    client: "BinanceClient",
+    symbol: str,
+    db_qty: float,
+    current_price: float,
+    min_notional_usdt: float = 5.0,
+) -> dict:
+    """
+    Return the quantity that can actually be sold on Binance for *symbol*.
+
+    Compares the DB quantity with the real free balance and returns a dict:
+      - qty_to_sell: quantity aligned to LOT_SIZE, capped to real balance
+      - balance_qty: raw free balance for the asset
+      - is_ghost: True when balance / db_qty < 0.001 (DB record has no backing)
+      - is_dust: True when 0 < balance * price < min_notional_usdt
+      - top_up_qty: qty needed to reach min_notional_usdt (None if already >= min_notional)
+      - reason: human-readable explanation
+    """
+    asset = symbol.replace("USDT", "")
+    balance_qty = 0.0
+    try:
+        balances = client.get_account_balance()
+        balance_qty = float(balances.get(asset, 0.0))
+    except Exception:
+        balance_qty = 0.0
+
+    filters = get_symbol_filters(client, symbol)
+    step = filters.get("step", 0.001)
+    min_notional = filters.get("min_notional", min_notional_usdt)
+
+    ratio = balance_qty / db_qty if db_qty > 0 else 0.0
+    is_ghost = ratio < 0.001 and db_qty > 0
+
+    effective_qty = min(db_qty, balance_qty)
+    aligned_qty = align_quantity_to_step(effective_qty, step)
+
+    balance_notional = balance_qty * current_price
+    is_dust = 0 < balance_notional < min_notional
+    top_up_qty = None
+    if is_dust:
+        target_qty = math.ceil(min_notional / max(current_price, 1e-12) / step) * step
+        target_qty = align_quantity_to_step(target_qty, step)
+        if target_qty > balance_qty:
+            top_up_qty = align_quantity_to_step(target_qty - balance_qty, step)
+
+    return {
+        "qty_to_sell": aligned_qty,
+        "balance_qty": balance_qty,
+        "db_qty": db_qty,
+        "is_ghost": is_ghost,
+        "is_dust": is_dust,
+        "top_up_qty": top_up_qty,
+        "ratio": ratio,
+        "min_notional": min_notional,
+        "reason": (
+            "ghost" if is_ghost else
+            "dust" if is_dust else
+            "balance_capped" if aligned_qty < db_qty else
+            "ok"
+        ),
+    }
+
+
+def get_min_notional_delta(
+    client: "BinanceClient",
+    symbol: str,
+    current_price: float,
+    target_notional_usdt: float = 5.0,
+) -> dict:
+    """
+    For a Binance orphan/dust balance, compute the BUY qty needed so the total
+    reaches the exchange min_notional and can be sold in one MARKET order.
+    """
+    filters = get_symbol_filters(client, symbol)
+    step = filters.get("step", 0.001)
+    min_notional = filters.get("min_notional", target_notional_usdt)
+    asset = symbol.replace("USDT", "")
+
+    balance_qty = 0.0
+    try:
+        balances = client.get_account_balance()
+        balance_qty = float(balances.get(asset, 0.0))
+    except Exception:
+        balance_qty = 0.0
+
+    total_notional = balance_qty * current_price
+    if total_notional >= min_notional:
+        return {"needed": False, "buy_qty": 0.0, "sell_qty": balance_qty, "min_notional": min_notional}
+
+    needed_notional = max(min_notional, target_notional_usdt) - total_notional
+    needed_qty = align_quantity_to_step(needed_notional / max(current_price, 1e-12), step)
+    # Make sure we cover rounding and commission; add one step of buffer.
+    needed_qty = align_quantity_to_step(needed_qty + step, step)
+    return {
+        "needed": True,
+        "buy_qty": needed_qty,
+        "sell_qty": align_quantity_to_step(balance_qty + needed_qty, step),
+        "min_notional": min_notional,
+        "balance_qty": balance_qty,
+    }
+
+
 def format_indicators_for_predictor(indicators: dict, price: float) -> dict:
     """
     Normalise the raw indicator dict returned by AutonomousSignalGenerator

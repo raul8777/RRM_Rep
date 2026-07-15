@@ -1,3 +1,21 @@
+2026-07-14 05:24 UTC-6 — [s78] FIX: RANGE_SCALP BB gate skip when bb_pos=None + vol_spike floor 0.35→0.20
+==========================================================================================================
+INICIO MONITOREO s78:
+- BB gate fix: bb_pos=None → skip en _check_entry_quality (run_trades.py ~4699)
+- vol threshold: 0.35→0.20 (DB override entry_quality_vol_spike_min_range_scalp)
+- kelly_mult RANGE_SCALP: 0.70→0.95 (market_regime.py line 253) → ~$1199/trade MEDIA
+- Primera posición abierta: NEARUSDT 444.5 qty @~1.989 SL=1.970 TP=2.019 ($883 con mult viejo)
+Rollback kelly_mult: editar market_regime.py línea 253 → kelly_mult = 0.7 + restart
+Rollback vol: PATCH /config/kelly entry_quality_vol_spike_min_range_scalp=0.35
+Rollback BB: revertir s78 en run_trades.py línea 4693 (eliminar bloque if bb_position is None)
+==========================================================================================================
+
+2026-07-13 21:46 UTC-6 — [s77] FIX: RANGE_SCALP vol_spike floor: 0.55 → 0.35 (DB override entry_quality_vol_spike_min_range_scalp)
+==========================================================================================================
+INICIO MONITOREO: comparar trades/h, WR, profit_factor antes/después de esta línea.
+Revisar en 24h: ¿entran ZECUSDT/OPNUSDT/SNDKBUSDT? ¿BB gate sigue filtrando techos?
+Rollback: PATCH /config/kelly entry_quality_vol_spike_min_range_scalp=0.55 (o eliminar override → fórmula original)
+
 2026-07-11 (noche) - Fix TRXUSDT ghost_balance_mismatch + Continúa Fase 2 Auditoría Cerradas
 ==========================================================================================================
 Archivos: position_manager.py, tests/test_restart_reconciliation.py, progress.txt, SYSTEM_REFERENCE.md

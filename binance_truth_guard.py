@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 RUNTIME_KEY = "binance_truth_status"
@@ -163,13 +163,18 @@ def evaluate_futures_parity(
 def evaluate_spot_parity(
     position_manager,
     binance_client,
+    settings=None,
     qty_tol_pct: float = 0.05,
+    min_notional_usdt: float = 5.0,
 ) -> Dict[str, Any]:
     """Compare DB SPOT positions vs Binance account balances.
 
     Mirrors evaluate_futures_parity() for SPOT.
     Detects: ghost in DB (severity=high), orphan in Binance (severity=warning),
     qty drift >qty_tol_pct (severity=warning).
+
+    Orphan balances below min_notional_usdt are ignored as dust and reported
+    only in the dust_skipped counter, reducing noise from airdrops/sweep dust.
     """
     db_positions: Dict[str, Any] = {}
     try:
@@ -189,10 +194,17 @@ def evaluate_spot_parity(
                 "error": "db_positions_unavailable", "ts": _utc_now_iso()}
 
     binance_balances: Dict[str, float] = {}
+    _keep_bnb_for_commission = bool(getattr(settings, 'use_bnb_for_commission', False)) or bool(
+        getattr(settings, 'auto_bnb_for_commission', False)
+    )
+    _ignore_bnb_in_parity = bool(getattr(settings, 'spot_ignore_bnb_when_commission_enabled', True))
+    _skip_bnb = _keep_bnb_for_commission and _ignore_bnb_in_parity
     try:
         raw_balances = binance_client.get_account_balance() if binance_client else {}
         for asset, qty in raw_balances.items():
             if asset == "USDT":
+                continue
+            if asset == "BNB" and _skip_bnb:
                 continue
             sym = f"{asset}USDT"
             if _safe_float(qty) > 0:
@@ -202,6 +214,30 @@ def evaluate_spot_parity(
                 "error": "binance_balance_unavailable", "ts": _utc_now_iso()}
 
     mismatches: List[Dict[str, Any]] = []
+    dust_skipped: List[Dict[str, Any]] = []
+
+    # Single bulk price fetch to evaluate materiality of orphans/drift.
+    _prices: Dict[str, float] = {}
+    try:
+        if binance_client and hasattr(binance_client, "client") and binance_client.client:
+            _tickers = binance_client.client.get_symbol_ticker() or []
+            for t in _tickers:
+                _s = str(t.get("symbol") or "").upper()
+                if _s:
+                    _prices[_s] = _safe_float(t.get("price"), 0.0)
+    except Exception:
+        _prices = {}
+
+    def _notional(sym: str, qty: float) -> float:
+        if qty <= 0:
+            return 0.0
+        px = _prices.get(sym)
+        if not px and binance_client:
+            try:
+                px = _safe_float(binance_client.get_symbol_price(sym), 0.0)
+            except Exception:
+                px = 0.0
+        return qty * _safe_float(px, 0.0)
 
     for sym, db_qty in db_positions.items():
         bn_qty = binance_balances.get(sym, 0.0)
@@ -217,23 +253,36 @@ def evaluate_spot_parity(
         else:
             drift = abs(db_qty - bn_qty) / max(bn_qty, 1e-12)
             if drift > qty_tol_pct:
-                mismatches.append({
-                    "code": "SPOT_QTY_DRIFT",
-                    "severity": "warning",
-                    "symbol": sym,
-                    "db_qty": db_qty,
-                    "binance_qty": bn_qty,
-                    "drift_pct": round(drift * 100.0, 4),
-                })
+                _drift_notional = _notional(sym, abs(db_qty - bn_qty))
+                # Only flag drift if it is material; otherwise treat as rounding dust.
+                if _drift_notional >= min_notional_usdt:
+                    mismatches.append({
+                        "code": "SPOT_QTY_DRIFT",
+                        "severity": "warning",
+                        "symbol": sym,
+                        "db_qty": db_qty,
+                        "binance_qty": bn_qty,
+                        "drift_pct": round(drift * 100.0, 4),
+                        "drift_notional_usdt": round(_drift_notional, 4),
+                    })
 
     for sym, bn_qty in binance_balances.items():
         if sym not in db_positions and bn_qty > 0:
+            _bn_notional = _notional(sym, bn_qty)
+            if _bn_notional < min_notional_usdt:
+                dust_skipped.append({
+                    "symbol": sym,
+                    "binance_qty": bn_qty,
+                    "notional_usdt": round(_bn_notional, 4),
+                })
+                continue
             mismatches.append({
                 "code": "SPOT_ORPHAN_IN_BINANCE",
                 "severity": "warning",
                 "symbol": sym,
                 "db_qty": 0.0,
                 "binance_qty": bn_qty,
+                "notional_usdt": round(_bn_notional, 4),
                 "detail": "exists_in_binance_not_in_db",
             })
 
@@ -249,6 +298,9 @@ def evaluate_spot_parity(
         "mismatch_count": len(mismatches),
         "db_count": len(db_positions),
         "binance_count": len(binance_balances),
+        "excluded_assets": ["BNB"] if _skip_bnb else [],
+        "dust_skipped_count": len(dust_skipped),
+        "dust_skipped": dust_skipped[:50],
         "mismatches": mismatches[:50],
         "ts": _utc_now_iso(),
     }
@@ -258,8 +310,10 @@ def auto_reconcile_spot(
     position_manager,
     binance_client,
     db_client=None,
+    settings=None,
     dry_run: bool = True,
     qty_tol_pct: float = 0.05,
+    min_notional_usdt: float = 1.0,
 ) -> Dict[str, Any]:
     """Advisory reconciliation of SPOT DB/Binance discrepancies.
 
@@ -271,7 +325,10 @@ def auto_reconcile_spot(
     """
     from datetime import datetime, timezone
     from position_manager import Position
-    status = evaluate_spot_parity(position_manager, binance_client, qty_tol_pct)
+    status = evaluate_spot_parity(
+        position_manager, binance_client, settings=settings, qty_tol_pct=qty_tol_pct,
+        min_notional_usdt=min_notional_usdt,
+    )
     recommendations: List[Dict[str, Any]] = []
     applied: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
@@ -359,8 +416,8 @@ def auto_reconcile_spot(
                             quantity=target_qty - current_total,
                             entry_price=px,
                             entry_time=datetime.now(timezone.utc).isoformat(),
-                        ),
-                        metadata={"source": "truth_reconcile_drift", "synthetic": True},
+                            metadata={"source": "truth_reconcile_drift", "synthetic": True},
+                        )
                     )
                     applied.append({**rec, "action": "expand_to_binance", "added_qty": target_qty - current_total, "entry_price": px})
                 else:
@@ -384,8 +441,8 @@ def auto_reconcile_spot(
                         quantity=bn_qty,
                         entry_price=px,
                         entry_time=datetime.now(timezone.utc).isoformat(),
-                    ),
-                    metadata={"source": "truth_reconcile_orphan", "synthetic": True},
+                        metadata={"source": "truth_reconcile_orphan", "synthetic": True},
+                    )
                 )
                 applied.append({**rec, "action": "import_orphan", "entry_price": px})
                 continue
@@ -722,5 +779,453 @@ def compute_basket_reset_decision(
             "min_avg_age_hours": min_avg_age_hours,
             "momentum_positive_count_limit": momentum_positive_count_limit,
         },
+        "ts": _utc_now_iso(),
+    }
+
+
+# ── Phase 2: Closed-positions parity audit (report-only) ─────────────────────
+
+
+def _parse_iso_ts(v: Any) -> Optional[datetime]:
+    try:
+        s = str(v).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _match_db_trade_to_binance(
+    db_trade: Dict[str, Any],
+    binance_trades: List[Dict[str, Any]],
+    qty_tol_pct: float = 0.05,
+    time_tol_minutes: int = 5,
+) -> Optional[Dict[str, Any]]:
+    """Return the best-matching Binance trade for a DB closed position.
+
+    Matching uses quantity first, then time proximity.  Binance trades must
+    already be filtered to the correct side/close direction.
+    """
+    db_exit = _parse_iso_ts(db_trade.get("exit_time"))
+    db_qty = _safe_float(db_trade.get("quantity"), 0.0)
+    if db_qty <= 0:
+        return None
+
+    best: Optional[Dict[str, Any]] = None
+    best_score = float("inf")
+    for bt in binance_trades:
+        bn_qty = _safe_float(bt.get("qty"), 0.0)
+        if bn_qty <= 0:
+            continue
+        qty_ratio = min(db_qty, bn_qty) / max(db_qty, bn_qty)
+        if qty_ratio < (1.0 - qty_tol_pct):
+            continue
+
+        bn_ts = bt.get("time_ms") or bt.get("time")
+        if bn_ts:
+            try:
+                bn_dt = datetime.fromtimestamp(int(bn_ts) / 1000.0, tz=timezone.utc)
+            except Exception:
+                bn_dt = None
+        else:
+            bn_dt = None
+
+        time_min = float("inf")
+        if db_exit and bn_dt:
+            time_min = abs((db_exit - bn_dt).total_seconds()) / 60.0
+            if time_min > time_tol_minutes:
+                continue
+
+        # Score: prefer exact qty match, then time proximity
+        score = (1.0 - qty_ratio) * 1000.0 + time_min
+        if score < best_score:
+            best_score = score
+            best = bt
+
+    return best
+
+
+def _fetch_db_closed_positions(
+    db_client,
+    since: datetime,
+    limit: int = 10000,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Return (spot_closed, futures_closed) from trades_closed since ``since``."""
+    if not db_client:
+        return [], []
+    try:
+        query = """
+            SELECT symbol, side, quantity, entry_price, exit_price,
+                   entry_time, exit_time, pnl, pnl_percentage, close_reason,
+                   metadata, entry_commission, exit_commission
+            FROM trades_closed
+            WHERE exit_time >= %s
+            ORDER BY exit_time DESC
+            LIMIT %s
+        """
+        rows = db_client.execute_query(query, (since.isoformat(), limit))
+    except Exception as e:
+        return [], [{"error": str(e)}]
+
+    spot_closed: List[Dict[str, Any]] = []
+    futures_closed: List[Dict[str, Any]] = []
+    for row in rows:
+        meta = row.get("metadata") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        trade_type = str(meta.get("trade_type") or "").lower()
+        rec = {
+            "symbol": str(row.get("symbol") or "").upper(),
+            "side": str(row.get("side") or "").upper(),
+            "quantity": _safe_float(row.get("quantity"), 0.0),
+            "entry_price": _safe_float(row.get("entry_price"), 0.0),
+            "exit_price": _safe_float(row.get("exit_price"), 0.0),
+            "entry_time": row.get("entry_time"),
+            "exit_time": row.get("exit_time"),
+            "pnl": _safe_float(row.get("pnl"), 0.0),
+            "pnl_percentage": _safe_float(row.get("pnl_percentage"), 0.0),
+            "close_reason": str(row.get("close_reason") or ""),
+            "entry_commission": _safe_float(row.get("entry_commission"), 0.0),
+            "exit_commission": _safe_float(row.get("exit_commission"), 0.0),
+            "metadata": meta,
+        }
+        if trade_type == "futures":
+            futures_closed.append(rec)
+        else:
+            spot_closed.append(rec)
+    return spot_closed, futures_closed
+
+
+def _fetch_binance_spot_closing_trades(
+    binance_client,
+    symbols: List[str],
+    cutoff_ms: int,
+    limit: int = 100,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Fetch recent SPOT myTrades per symbol and keep only SELL trades after cutoff."""
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    if not binance_client or not symbols:
+        return out
+    for sym in symbols:
+        try:
+            raw = binance_client.get_my_trades(symbol=sym, limit=limit) or []
+        except Exception as e:
+            out[sym] = [{"error": str(e)}]
+            continue
+        sells = []
+        for t in raw:
+            ts = int(t.get("time", 0))
+            if ts < cutoff_ms:
+                continue
+            is_buyer = bool(t.get("isBuyer", True))
+            if is_buyer:
+                continue  # only SELL closes a long SPOT position
+            qty = _safe_float(t.get("qty"), 0.0) or _safe_float(t.get("quantity"), 0.0)
+            price = _safe_float(t.get("price"), 0.0)
+            comm = _safe_float(t.get("commission"), 0.0)
+            c_asset = t.get("commissionAsset", "USDT")
+            if c_asset not in ("USDT", "BNB") and price > 0:
+                comm = comm * price
+            sells.append({
+                "symbol": sym,
+                "qty": qty,
+                "price": price,
+                "commission": comm,
+                "commission_asset": c_asset,
+                "time_ms": ts,
+                "order_id": str(t.get("orderId") or ""),
+                "trade_id": str(t.get("id") or ""),
+            })
+        out[sym] = sells
+    return out
+
+
+def _fetch_binance_futures_closing_trades(
+    futures_client,
+    symbols: List[str],
+    days: int = 30,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Fetch recent FUTURES closing trades per symbol (realizedPnl != 0)."""
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    if not futures_client or not symbols:
+        return out
+    try:
+        trades = futures_client.get_recent_trades(days=days, extra_symbols=symbols) or []
+    except Exception as e:
+        return {"_error": [{"error": str(e)}]}
+
+    for t in trades:
+        sym = str(t.get("symbol") or "").upper()
+        if sym not in out:
+            out[sym] = []
+        out[sym].append(t)
+    return out
+
+
+def evaluate_closed_positions_parity(
+    position_manager,
+    futures_client,
+    binance_client,
+    days: int = 30,
+    qty_tol_pct: float = 0.05,
+    pnl_tol_usdt: float = 1.0,
+    commission_tol_usdt: float = 1.0,
+    time_tol_minutes: int = 5,
+) -> Dict[str, Any]:
+    """Compare ``trades_closed`` against Binance executed closing trades.
+
+    This is a **report-only** audit.  It detects:
+      - DB_CLOSED_MISSING_IN_BINANCE: closed position in DB with no Binance trade.
+      - BINANCE_CLOSED_MISSING_IN_DB: Binance closing trade without a DB record.
+      - CLOSED_QTY_MISMATCH: quantity differs beyond tolerance.
+      - CLOSED_PNL_MISMATCH: futures realized PnL differs beyond tolerance.
+      - CLOSED_COMMISSION_MISMATCH: spot exit commission differs beyond tolerance.
+      - CLOSED_PRICE_MISMATCH: spot exit price differs beyond tolerance.
+
+    Returns a dict with totals, per-symbol summaries, and a mismatch list.
+    """
+    db_client = getattr(position_manager, "db_client", None) if position_manager else None
+    if not db_client:
+        return {
+            "ok": True, "severity": "unknown", "mismatch_count": 0,
+            "error": "db_client_unavailable", "ts": _utc_now_iso(),
+        }
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff_ms = int(cutoff.timestamp() * 1000)
+
+    spot_db, futures_db = _fetch_db_closed_positions(db_client, cutoff)
+
+    spot_symbols = sorted({r["symbol"] for r in spot_db})
+    futures_symbols = sorted({r["symbol"] for r in futures_db})
+
+    spot_bn = _fetch_binance_spot_closing_trades(binance_client, spot_symbols, cutoff_ms)
+    futures_bn = _fetch_binance_futures_closing_trades(futures_client, futures_symbols, days)
+
+    mismatches: List[Dict[str, Any]] = []
+    matched_spot: List[Dict[str, Any]] = []
+    matched_futures: List[Dict[str, Any]] = []
+
+    # ── SPOT reconciliation ───────────────────────────────────────────────────
+    for rec in spot_db:
+        sym = rec["symbol"]
+        sells = spot_bn.get(sym, [])
+        if sells and "error" in sells[0]:
+            mismatches.append({
+                "code": "BINANCE_SPOT_TRADES_UNAVAILABLE",
+                "severity": "warning",
+                "symbol": sym,
+                "detail": sells[0].get("error"),
+            })
+            continue
+
+        match = _match_db_trade_to_binance(rec, sells, qty_tol_pct, time_tol_minutes)
+        if not match:
+            mismatches.append({
+                "code": "DB_CLOSED_MISSING_IN_BINANCE",
+                "severity": "high",
+                "symbol": sym,
+                "trade_type": "spot",
+                "db_qty": rec["quantity"],
+                "db_exit_time": rec["exit_time"],
+                "db_close_reason": rec["close_reason"],
+                "detail": "no_matching_sell_trade_on_binance",
+            })
+            continue
+
+        matched_spot.append({
+            "symbol": sym,
+            "db_qty": rec["quantity"],
+            "binance_qty": match["qty"],
+            "db_exit_price": rec["exit_price"],
+            "binance_exit_price": match["price"],
+            "db_exit_commission": rec["exit_commission"],
+            "binance_commission": match["commission"],
+            "db_pnl": rec["pnl"],
+        })
+
+        qty_diff = abs(rec["quantity"] - match["qty"])
+        if qty_diff / max(rec["quantity"], 1e-12) > qty_tol_pct:
+            mismatches.append({
+                "code": "CLOSED_QTY_MISMATCH",
+                "severity": "high",
+                "symbol": sym,
+                "trade_type": "spot",
+                "db_qty": rec["quantity"],
+                "binance_qty": match["qty"],
+                "qty_diff": round(qty_diff, 8),
+            })
+
+        if rec["exit_price"] > 0 and match["price"] > 0:
+            price_gap = abs(rec["exit_price"] - match["price"]) / max(rec["exit_price"], 1e-12)
+            if price_gap > 0.002:
+                mismatches.append({
+                    "code": "CLOSED_PRICE_MISMATCH",
+                    "severity": "warning",
+                    "symbol": sym,
+                    "trade_type": "spot",
+                    "db_exit_price": rec["exit_price"],
+                    "binance_exit_price": match["price"],
+                    "price_gap_pct": round(price_gap * 100.0, 4),
+                })
+
+        comm_diff = abs(rec["exit_commission"] - match["commission"])
+        if comm_diff > commission_tol_usdt:
+            mismatches.append({
+                "code": "CLOSED_COMMISSION_MISMATCH",
+                "severity": "warning",
+                "symbol": sym,
+                "trade_type": "spot",
+                "db_exit_commission": rec["exit_commission"],
+                "binance_commission": match["commission"],
+                "commission_diff": round(comm_diff, 8),
+            })
+
+    # Detect Binance SPOT sells not present in DB
+    db_spot_keys = {(r["symbol"], _parse_iso_ts(r["exit_time"])) for r in spot_db}
+    for sym, sells in spot_bn.items():
+        for s in sells:
+            if "error" in s:
+                continue
+            bn_dt = datetime.fromtimestamp(int(s["time_ms"]) / 1000.0, tz=timezone.utc)
+            # Approximate match by symbol + time proximity
+            found = any(
+                sym == db_sym and bn_dt and db_dt and abs((bn_dt - db_dt).total_seconds()) <= time_tol_minutes * 60
+                for db_sym, db_dt in db_spot_keys
+            )
+            if not found:
+                mismatches.append({
+                    "code": "BINANCE_CLOSED_MISSING_IN_DB",
+                    "severity": "high",
+                    "symbol": sym,
+                    "trade_type": "spot",
+                    "binance_qty": s["qty"],
+                    "binance_exit_price": s["price"],
+                    "binance_time": bn_dt.isoformat() if bn_dt else None,
+                    "detail": "sell_trade_on_binance_without_db_closed_record",
+                })
+
+    # ── FUTURES reconciliation ────────────────────────────────────────────────
+    for rec in futures_db:
+        sym = rec["symbol"]
+        db_side = rec["side"]  # BUY=LONG, SELL=SHORT
+        expected_bn_side = "LONG" if db_side == "BUY" else "SHORT"
+        trades = futures_bn.get(sym, [])
+        if isinstance(trades, list) and trades and "error" in trades[0]:
+            mismatches.append({
+                "code": "BINANCE_FUTURES_TRADES_UNAVAILABLE",
+                "severity": "warning",
+                "symbol": sym,
+                "detail": trades[0].get("error"),
+            })
+            continue
+
+        side_trades = [t for t in trades if str(t.get("side") or "").upper() == expected_bn_side]
+        match = _match_db_trade_to_binance(rec, side_trades, qty_tol_pct, time_tol_minutes)
+        if not match:
+            mismatches.append({
+                "code": "DB_CLOSED_MISSING_IN_BINANCE",
+                "severity": "high",
+                "symbol": sym,
+                "trade_type": "futures",
+                "db_side": db_side,
+                "db_qty": rec["quantity"],
+                "db_exit_time": rec["exit_time"],
+                "db_close_reason": rec["close_reason"],
+                "detail": "no_matching_closing_trade_on_binance",
+            })
+            continue
+
+        matched_futures.append({
+            "symbol": sym,
+            "db_side": db_side,
+            "db_qty": rec["quantity"],
+            "binance_qty": match.get("qty"),
+            "db_pnl": rec["pnl"],
+            "binance_pnl": match.get("pnl"),
+        })
+
+        qty_diff = abs(rec["quantity"] - _safe_float(match.get("qty"), 0.0))
+        if qty_diff / max(rec["quantity"], 1e-12) > qty_tol_pct:
+            mismatches.append({
+                "code": "CLOSED_QTY_MISMATCH",
+                "severity": "high",
+                "symbol": sym,
+                "trade_type": "futures",
+                "db_qty": rec["quantity"],
+                "binance_qty": match.get("qty"),
+                "qty_diff": round(qty_diff, 8),
+            })
+
+        bn_pnl = _safe_float(match.get("pnl"), 0.0)
+        pnl_diff = abs(rec["pnl"] - bn_pnl)
+        if pnl_diff > pnl_tol_usdt:
+            mismatches.append({
+                "code": "CLOSED_PNL_MISMATCH",
+                "severity": "high",
+                "symbol": sym,
+                "trade_type": "futures",
+                "db_pnl": round(rec["pnl"], 4),
+                "binance_pnl": round(bn_pnl, 4),
+                "pnl_diff": round(pnl_diff, 4),
+            })
+
+    # Detect Binance FUTURES closing trades not in DB
+    db_futures_keys = {(r["symbol"], _parse_iso_ts(r["exit_time"])) for r in futures_db}
+    for sym, trades in futures_bn.items():
+        if not isinstance(trades, list):
+            continue
+        for t in trades:
+            bn_ts = t.get("closed_at") or t.get("time")
+            bn_dt = _parse_iso_ts(bn_ts)
+            if not bn_dt:
+                continue
+            found = any(
+                sym == db_sym and bn_dt and db_dt and abs((bn_dt - db_dt).total_seconds()) <= time_tol_minutes * 60
+                for db_sym, db_dt in db_futures_keys
+            )
+            if not found:
+                mismatches.append({
+                    "code": "BINANCE_CLOSED_MISSING_IN_DB",
+                    "severity": "high",
+                    "symbol": sym,
+                    "trade_type": "futures",
+                    "binance_side": t.get("side"),
+                    "binance_qty": t.get("qty"),
+                    "binance_pnl": t.get("pnl"),
+                    "binance_time": bn_dt.isoformat(),
+                    "detail": "closing_trade_on_binance_without_db_closed_record",
+                })
+
+    total_db_pnl = sum(r["pnl"] for r in spot_db) + sum(r["pnl"] for r in futures_db)
+    total_bn_pnl = (
+        sum(_safe_float(m.get("binance_pnl"), 0.0) for m in matched_futures)
+    )  # SPOT PnL not directly available from closing trade alone
+
+    severity = "ok"
+    if any(m.get("severity") == "high" for m in mismatches):
+        severity = "warning"
+    if any(m.get("severity") == "critical" for m in mismatches):
+        severity = "critical"
+
+    return {
+        "ok": severity == "ok",
+        "severity": severity,
+        "mismatch_count": len(mismatches),
+        "window_days": days,
+        "spot_db_count": len(spot_db),
+        "futures_db_count": len(futures_db),
+        "spot_matched_count": len(matched_spot),
+        "futures_matched_count": len(matched_futures),
+        "total_db_pnl": round(total_db_pnl, 4),
+        "total_binance_pnl_futures": round(total_bn_pnl, 4),
+        "mismatches": mismatches[:50],
+        "matched_spot": matched_spot[:50],
+        "matched_futures": matched_futures[:50],
         "ts": _utc_now_iso(),
     }

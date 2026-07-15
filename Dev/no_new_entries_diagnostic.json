@@ -1,0 +1,172 @@
+{
+  "generated_at": "2026-07-14T16:57:50.334691+00:00",
+  "scope": {
+    "mode": "SPOT_BULL",
+    "changes_applied": false,
+    "diagnosis_only": true
+  },
+  "inputs": {
+    "last_2h": "last_2h_logs.txt",
+    "context": "last_logs_context.txt"
+  },
+  "analysis": {
+    "last_2h": {
+      "line_count": 3354,
+      "counters": {
+        "paused": 18,
+        "empty_candidates": 19,
+        "nonempty_candidates": 0,
+        "prediction_ok": 0,
+        "prediction_zero": 147,
+        "cycle_error": 3,
+        "entry_blocked": 6,
+        "entry_executed": 0
+      },
+      "evidence": {
+        "paused": [
+          "[execute_once] pause_new_entries=True \u00d4\u00c7\u00f6 running SL/TP monitor only",
+          "[execute_once] monitor_only=True (system PAUSED) \u00d4\u00c7\u00f6 running SL/TP monitor only",
+          "[execute_once] pause_new_entries=True \u00d4\u00c7\u00f6 running SL/TP monitor only"
+        ],
+        "empty_candidates": [
+          "Top buy symbols: []",
+          "Top buy symbols: []",
+          "Top buy symbols: []"
+        ],
+        "nonempty_candidates": [],
+        "prediction_ok": [],
+        "prediction_zero": [
+          "Prediction for ETHUSDT: 0.00 USDT",
+          "Prediction for SOLUSDT: 0.00 USDT",
+          "Prediction for SUIUSDT: 0.00 USDT"
+        ],
+        "cycle_error": [
+          "Commission refresh error (non-fatal): name '_get_futures_client' is not defined",
+          "Commission refresh error (non-fatal): name '_get_futures_client' is not defined",
+          "Commission refresh error (non-fatal): name '_get_futures_client' is not defined"
+        ],
+        "entry_blocked": [
+          "[BNB] spot=0.0000 futures=0.0000 price=561.87 use_bnb=False actions=[spot:buy_skipped_insufficient_usdt, futures:none]",
+          "[BNB] spot=0.0000 futures=0.0000 price=561.02 use_bnb=False actions=[spot:buy_skipped_insufficient_usdt, futures:none]",
+          "[BNB] spot=0.0000 futures=0.0000 price=561.62 use_bnb=False actions=[spot:buy_skipped_insufficient_usdt, futures:none]"
+        ],
+        "entry_executed": []
+      },
+      "by_segment": {
+        "first_half": {
+          "paused": 18,
+          "empty_candidates": 9,
+          "nonempty_candidates": 0,
+          "prediction_ok": 0,
+          "prediction_zero": 72,
+          "cycle_error": 3,
+          "entry_blocked": 6,
+          "entry_executed": 0
+        },
+        "second_half": {
+          "paused": 0,
+          "empty_candidates": 10,
+          "nonempty_candidates": 0,
+          "prediction_ok": 0,
+          "prediction_zero": 75,
+          "cycle_error": 0,
+          "entry_blocked": 0,
+          "entry_executed": 0
+        }
+      },
+      "dominant_category": "pausa_operativa",
+      "current_window_category": "falta_estructural_de_candidatos"
+    },
+    "context": {
+      "line_count": 512,
+      "counters": {
+        "paused": 0,
+        "empty_candidates": 5,
+        "nonempty_candidates": 5,
+        "prediction_ok": 1,
+        "prediction_zero": 22,
+        "cycle_error": 8,
+        "entry_blocked": 10,
+        "entry_executed": 0
+      },
+      "evidence": {
+        "paused": [],
+        "empty_candidates": [
+          "Top buy symbols: []",
+          "Top buy symbols: []",
+          "No buy signals available; skipping new buys this cycle."
+        ],
+        "nonempty_candidates": [
+          "Top buy symbols: ['NEARUSDT', 'TAOUSDT']",
+          "Top buy symbols: ['NEARUSDT', 'TAOUSDT']",
+          "Top buy symbols: ['NEARUSDT', 'TAOUSDT']"
+        ],
+        "prediction_ok": [
+          "Prediction OK for AAVEUSDT: 0.57 USDT, prob=0.67"
+        ],
+        "prediction_zero": [
+          "Prediction for ETHUSDT: 0.00 USDT",
+          "> Prediction for BNBUSDT: 0.00 USDT",
+          "Prediction for SUIUSDT: 0.00 USDT"
+        ],
+        "cycle_error": [
+          "> Error in cycle: cannot access local variable 'datetime' where it is not associated with a value",
+          "> Error in cycle: cannot access local variable 'datetime' where it is not associated with a value",
+          "> Error in cycle: cannot access local variable 'datetime' where it is not associated with a value"
+        ],
+        "entry_blocked": [
+          "[Futures] SHORT ETHUSDT SKIPPED: escalamiento cap 2/2 \u00d4\u00c7\u00f6 max entries per symbol reached",
+          "> [Futures] SHORT BNBUSDT SKIPPED: escalamiento cap 2/2 \u00d4\u00c7\u00f6 max entries per symbol reached",
+          "[Futures] SHORT SUIUSDT SKIPPED: escalamiento cap 2/2 \u00d4\u00c7\u00f6 max entries per symbol reached"
+        ],
+        "entry_executed": []
+      },
+      "by_segment": {
+        "first_half": {
+          "paused": 0,
+          "empty_candidates": 0,
+          "nonempty_candidates": 3,
+          "prediction_ok": 0,
+          "prediction_zero": 18,
+          "cycle_error": 4,
+          "entry_blocked": 7,
+          "entry_executed": 0
+        },
+        "second_half": {
+          "paused": 0,
+          "empty_candidates": 5,
+          "nonempty_candidates": 2,
+          "prediction_ok": 1,
+          "prediction_zero": 4,
+          "cycle_error": 4,
+          "entry_blocked": 3,
+          "entry_executed": 0
+        }
+      },
+      "dominant_category": "excepcion_de_ciclo",
+      "current_window_category": "excepcion_de_ciclo"
+    }
+  },
+  "current_focus": {
+    "last_2h_current_window": "falta_estructural_de_candidatos",
+    "context_current_window": "excepcion_de_ciclo"
+  },
+  "root_cause_rank": [
+    {
+      "category": "falta_estructural_de_candidatos",
+      "source": "last_2h_second_half"
+    },
+    {
+      "category": "excepcion_de_ciclo",
+      "source": "context_second_half"
+    },
+    {
+      "category": "pausa_operativa",
+      "source": "last_2h_all"
+    },
+    {
+      "category": "excepcion_de_ciclo",
+      "source": "context_all"
+    }
+  ]
+}

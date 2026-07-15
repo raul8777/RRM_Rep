@@ -9,11 +9,19 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 
+_INVALID_ANALYSIS_SYMBOLS = {
+    "EONUSDT", "ADDUSDT", "MEETONEUSDT", "ATDUSDT", "EOPUSDT", "ETHWUSDT",
+    "USD1USDT", "PAXGUSDT", "XAUTUSDT", "RLUSDUSDT", "USDCUSDT", "BUSDUSDT",
+    "TUSDUSDT", "FDUSDUSDT", "DAIUSDT", "USDDUSDT", "GUSDUSDT", "UUSDUSDT",
+    "1000PEPEUSDT",
+}
+
+
 _REGIME_CAPS = {
-    "SPOT_BULL": 20,
-    "RANGE_SCALP": 16,
-    "PRESERVATION": 8,
-    "FUTURES_SHORT": 14,
+    "SPOT_BULL": 48,
+    "RANGE_SCALP": 40,
+    "PRESERVATION": 24,
+    "FUTURES_SHORT": 36,
 }
 
 _PROFILE_MULTIPLIERS = {
@@ -35,6 +43,10 @@ def _dedupe_preserve_order(values: List[str]) -> List[str]:
     return list(dict.fromkeys([v for v in values if v]))
 
 
+def _drop_invalid_symbols(values: List[str]) -> List[str]:
+    return [v for v in values if v not in _INVALID_ANALYSIS_SYMBOLS]
+
+
 def _normalized_mode(value: Optional[str]) -> str:
     mode = str(value or "").strip().upper()
     return mode or "SPOT_BULL"
@@ -52,10 +64,30 @@ def _resolve_cap(settings=None, regime_mode: str = "SPOT_BULL", max_symbols: Opt
         except Exception:
             return 1
 
-    base_cap = _REGIME_CAPS.get(_normalized_mode(regime_mode), 16)
+    _regime = _normalized_mode(regime_mode)
+    base_cap = _REGIME_CAPS.get(_regime, 24)
     profile = _normalized_profile(getattr(settings, "current_regime_profile_label", None))
     multiplier = _PROFILE_MULTIPLIERS.get(profile or "B", 1.0)
-    return max(1, int(round(base_cap * multiplier)))
+    cap = max(1, int(round(base_cap * multiplier)))
+
+    # Keep analysis breadth aligned with screener breadth so top-N quality
+    # filtering has enough candidates to rank in short-term windows.
+    if settings is not None:
+        try:
+            top_n = int(getattr(settings, "screener_top_n_count", 100) or 100)
+        except Exception:
+            top_n = 100
+        try:
+            max_pairs = int(getattr(settings, "screener_max_pairs", 50) or 50)
+        except Exception:
+            max_pairs = 50
+
+        adaptive_floor = min(top_n, max(24, max_pairs * 2))
+        if _regime == "PRESERVATION":
+            adaptive_floor = max(12, adaptive_floor // 2)
+        cap = max(cap, adaptive_floor)
+
+    return cap
 
 
 def select_analysis_universe(
@@ -71,9 +103,9 @@ def select_analysis_universe(
     profile = _normalized_profile(profile_label or getattr(settings, "current_regime_profile_label", None))
     cap = _resolve_cap(settings=settings, regime_mode=regime, max_symbols=max_symbols)
 
-    static_symbols = _normalize_list(getattr(settings, "analysis_symbols", []))
-    futures_symbols = _normalize_list(getattr(settings, "futures_symbols", []))
-    narrative_tokens = _normalize_list(getattr(settings, "narrative_tokens", []))
+    static_symbols = _drop_invalid_symbols(_normalize_list(getattr(settings, "analysis_symbols", [])))
+    futures_symbols = _drop_invalid_symbols(_normalize_list(getattr(settings, "futures_symbols", [])))
+    narrative_tokens = _drop_invalid_symbols(_normalize_list(getattr(settings, "narrative_tokens", [])))
 
     screened: Dict[str, Any] = {"spot": [], "futures": [], "all": [], "_meta": {}}
     source = "static"
@@ -97,8 +129,8 @@ def select_analysis_universe(
     else:
         reason = "screener_disabled"
 
-    screened_spot = _normalize_list((screened or {}).get("spot", []))
-    screened_futures = _normalize_list((screened or {}).get("futures", []))
+    screened_spot = _drop_invalid_symbols(_normalize_list((screened or {}).get("spot", [])))
+    screened_futures = _drop_invalid_symbols(_normalize_list((screened or {}).get("futures", [])))
 
     if regime == "FUTURES_SHORT":
         primary = screened_futures + futures_symbols + static_symbols
@@ -107,9 +139,9 @@ def select_analysis_universe(
     else:
         primary = screened_spot + static_symbols
 
-    symbols = _dedupe_preserve_order(primary)[:cap]
+    symbols = _drop_invalid_symbols(_dedupe_preserve_order(primary))[:cap]
     if not symbols:
-        symbols = _dedupe_preserve_order(static_symbols or futures_symbols or narrative_tokens)[:cap]
+        symbols = _drop_invalid_symbols(_dedupe_preserve_order(static_symbols or futures_symbols or narrative_tokens))[:cap]
         if symbols:
             source = "static"
             reason = "static_fallback"

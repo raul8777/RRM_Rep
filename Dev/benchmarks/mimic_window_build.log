@@ -1,0 +1,211 @@
+[Window] Building window 2026-03-03 to 2026-03-17
+[Window] BTCUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-10 00:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] ETHUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-10 00:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] BNBUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-10 00:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] SOLUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-10 00:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] XRPUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] ADAUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-10 00:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] DOGEUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] AVAXUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] LINKUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] Missing parquet for DOTUSDT
+[Window] TRXUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] TONUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-06-30 02:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] NEARUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-10 00:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] Missing parquet for MATICUSDT
+[Window] FETUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] Missing parquet for LTCUSDT
+[Window] BCHUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-10 00:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] UNIUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-10 00:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] Missing parquet for APTUSDT
+[Window] Missing parquet for ATOMUSDT
+[Window] Missing parquet for ICPUSDT
+[Window] Missing parquet for FILUSDT
+[Window] XLMUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-10 00:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] Missing parquet for ALGOUSDT
+[Window] INJUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] SUIUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] Missing parquet for OPUSDT
+[Window] Missing parquet for ARBUSDT
+[Window] Missing parquet for RENDERUSDT
+[Window] WLDUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] ONDOUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] PEPEUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] Missing parquet for SHIBUSDT
+[Window] Missing parquet for WIFUSDT
+[Window] JTOUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-03-03 - 2026-03-17
+[Window] Missing parquet for TIAUSDT
+[Window] Missing parquet for SEIUSDT
+[Window] Missing parquet for STRKUSDT
+[Window] Missing parquet for PYTHUSDT
+[Window] Missing parquet for AXSUSDT
+[Window] Missing parquet for SANDUSDT
+[Window] Missing parquet for MANAUSDT
+[Window] Coverage check failed. Download missing symbols first.
+[Window] Building window 2026-03-17 to 2026-03-31
+[Window] Missing parquet for DOTUSDT
+[Window] Missing parquet for MATICUSDT
+[Window] Missing parquet for LTCUSDT
+[Window] Missing parquet for APTUSDT
+[Window] Missing parquet for ATOMUSDT
+[Window] Missing parquet for ICPUSDT
+[Window] Missing parquet for FILUSDT
+[Window] Missing parquet for ALGOUSDT
+[Window] Missing parquet for OPUSDT
+[Window] Missing parquet for ARBUSDT
+[Window] Missing parquet for RENDERUSDT
+[Window] Missing parquet for SHIBUSDT
+[Window] Missing parquet for WIFUSDT
+[Window] Missing parquet for TIAUSDT
+[Window] Missing parquet for SEIUSDT
+[Window] Missing parquet for STRKUSDT
+[Window] Missing parquet for PYTHUSDT
+[Window] Missing parquet for AXSUSDT
+[Window] Missing parquet for SANDUSDT
+[Window] Missing parquet for MANAUSDT
+[Window] Coverage check failed. Download missing symbols first.
+[Window] Building window 2026-04-01 to 2026-04-15
+[Window] Missing parquet for DOTUSDT
+[Window] Missing parquet for MATICUSDT
+[Window] Missing parquet for LTCUSDT
+[Window] Missing parquet for APTUSDT
+[Window] Missing parquet for ATOMUSDT
+[Window] Missing parquet for ICPUSDT
+[Window] Missing parquet for FILUSDT
+[Window] Missing parquet for ALGOUSDT
+[Window] Missing parquet for OPUSDT
+[Window] Missing parquet for ARBUSDT
+[Window] Missing parquet for RENDERUSDT
+[Window] Missing parquet for SHIBUSDT
+[Window] Missing parquet for WIFUSDT
+[Window] Missing parquet for TIAUSDT
+[Window] Missing parquet for SEIUSDT
+[Window] Missing parquet for STRKUSDT
+[Window] Missing parquet for PYTHUSDT
+[Window] Missing parquet for AXSUSDT
+[Window] Missing parquet for SANDUSDT
+[Window] Missing parquet for MANAUSDT
+[Window] Coverage check failed. Download missing symbols first.
+[Window] Building window 2026-04-15 to 2026-04-30
+[Window] Missing parquet for DOTUSDT
+[Window] Missing parquet for MATICUSDT
+[Window] Missing parquet for LTCUSDT
+[Window] Missing parquet for APTUSDT
+[Window] Missing parquet for ATOMUSDT
+[Window] Missing parquet for ICPUSDT
+[Window] Missing parquet for FILUSDT
+[Window] Missing parquet for ALGOUSDT
+[Window] Missing parquet for OPUSDT
+[Window] Missing parquet for ARBUSDT
+[Window] Missing parquet for RENDERUSDT
+[Window] Missing parquet for SHIBUSDT
+[Window] Missing parquet for WIFUSDT
+[Window] Missing parquet for TIAUSDT
+[Window] Missing parquet for SEIUSDT
+[Window] Missing parquet for STRKUSDT
+[Window] Missing parquet for PYTHUSDT
+[Window] Missing parquet for AXSUSDT
+[Window] Missing parquet for SANDUSDT
+[Window] Missing parquet for MANAUSDT
+[Window] Coverage check failed. Download missing symbols first.
+[Window] Building window 2026-05-01 to 2026-05-15
+[Window] Missing parquet for DOTUSDT
+[Window] Missing parquet for MATICUSDT
+[Window] Missing parquet for LTCUSDT
+[Window] Missing parquet for APTUSDT
+[Window] Missing parquet for ATOMUSDT
+[Window] Missing parquet for ICPUSDT
+[Window] Missing parquet for FILUSDT
+[Window] Missing parquet for ALGOUSDT
+[Window] Missing parquet for OPUSDT
+[Window] Missing parquet for ARBUSDT
+[Window] Missing parquet for RENDERUSDT
+[Window] Missing parquet for SHIBUSDT
+[Window] Missing parquet for WIFUSDT
+[Window] Missing parquet for TIAUSDT
+[Window] Missing parquet for SEIUSDT
+[Window] Missing parquet for STRKUSDT
+[Window] Missing parquet for PYTHUSDT
+[Window] Missing parquet for AXSUSDT
+[Window] Missing parquet for SANDUSDT
+[Window] Missing parquet for MANAUSDT
+[Window] Coverage check failed. Download missing symbols first.
+[Window] Building window 2026-05-15 to 2026-05-31
+[Window] Missing parquet for DOTUSDT
+[Window] Missing parquet for MATICUSDT
+[Window] Missing parquet for LTCUSDT
+[Window] Missing parquet for APTUSDT
+[Window] Missing parquet for ATOMUSDT
+[Window] Missing parquet for ICPUSDT
+[Window] Missing parquet for FILUSDT
+[Window] Missing parquet for ALGOUSDT
+[Window] Missing parquet for OPUSDT
+[Window] Missing parquet for ARBUSDT
+[Window] Missing parquet for RENDERUSDT
+[Window] Missing parquet for SHIBUSDT
+[Window] Missing parquet for WIFUSDT
+[Window] Missing parquet for TIAUSDT
+[Window] Missing parquet for SEIUSDT
+[Window] Missing parquet for STRKUSDT
+[Window] Missing parquet for PYTHUSDT
+[Window] Missing parquet for AXSUSDT
+[Window] Missing parquet for SANDUSDT
+[Window] Missing parquet for MANAUSDT
+[Window] Coverage check failed. Download missing symbols first.
+[Window] Building window 2026-06-01 to 2026-06-20
+[Window] Missing parquet for DOTUSDT
+[Window] Missing parquet for MATICUSDT
+[Window] Missing parquet for LTCUSDT
+[Window] Missing parquet for APTUSDT
+[Window] Missing parquet for ATOMUSDT
+[Window] Missing parquet for ICPUSDT
+[Window] Missing parquet for FILUSDT
+[Window] Missing parquet for ALGOUSDT
+[Window] Missing parquet for OPUSDT
+[Window] Missing parquet for ARBUSDT
+[Window] Missing parquet for RENDERUSDT
+[Window] Missing parquet for SHIBUSDT
+[Window] Missing parquet for WIFUSDT
+[Window] Missing parquet for TIAUSDT
+[Window] Missing parquet for SEIUSDT
+[Window] Missing parquet for STRKUSDT
+[Window] Missing parquet for PYTHUSDT
+[Window] Missing parquet for AXSUSDT
+[Window] Missing parquet for SANDUSDT
+[Window] Missing parquet for MANAUSDT
+[Window] Coverage check failed. Download missing symbols first.
+[Window] Building window 2026-06-20 to 2026-07-05
+[Window] XRPUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-06-20 - 2026-07-05
+[Window] DOGEUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-06-20 - 2026-07-05
+[Window] AVAXUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-06-20 - 2026-07-05
+[Window] LINKUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-06-20 - 2026-07-05
+[Window] Missing parquet for DOTUSDT
+[Window] TRXUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-06-20 - 2026-07-05
+[Window] TONUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-06-30 02:00:00+00:00 does not contain 2026-06-20 - 2026-07-05
+[Window] Missing parquet for MATICUSDT
+[Window] FETUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-06-20 - 2026-07-05
+[Window] Missing parquet for LTCUSDT
+[Window] Missing parquet for APTUSDT
+[Window] Missing parquet for ATOMUSDT
+[Window] Missing parquet for ICPUSDT
+[Window] Missing parquet for FILUSDT
+[Window] Missing parquet for ALGOUSDT
+[Window] INJUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-06-20 - 2026-07-05
+[Window] SUIUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-06-20 - 2026-07-05
+[Window] Missing parquet for OPUSDT
+[Window] Missing parquet for ARBUSDT
+[Window] Missing parquet for RENDERUSDT
+[Window] WLDUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-06-20 - 2026-07-05
+[Window] ONDOUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-06-20 - 2026-07-05
+[Window] PEPEUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-06-20 - 2026-07-05
+[Window] Missing parquet for SHIBUSDT
+[Window] Missing parquet for WIFUSDT
+[Window] JTOUSDT coverage 2026-03-03 06:00:00+00:00 - 2026-07-01 05:00:00+00:00 does not contain 2026-06-20 - 2026-07-05
+[Window] Missing parquet for TIAUSDT
+[Window] Missing parquet for SEIUSDT
+[Window] Missing parquet for STRKUSDT
+[Window] Missing parquet for PYTHUSDT
+[Window] Missing parquet for AXSUSDT
+[Window] Missing parquet for SANDUSDT
+[Window] Missing parquet for MANAUSDT
+[Window] Coverage check failed. Download missing symbols first.

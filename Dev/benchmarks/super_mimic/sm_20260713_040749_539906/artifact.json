@@ -1,0 +1,35 @@
+{
+  "experiment_id": "sm_20260713_040749_539906",
+  "phase": "design",
+  "status": "designing",
+  "design": {
+    "mode": "RANGE_SCALP",
+    "profile": "A",
+    "windows": [
+      "win_20260628_20260630"
+    ],
+    "engine": "mimic_sweep",
+    "strategy": "quick",
+    "max_cycles": null,
+    "max_workers": 1,
+    "param_grid": null,
+    "output_dir": "s:\\Tools\\AI\\crypto-agent\\Dev\\benchmarks\\super_mimic\\sm_20260713_040749_539906"
+  },
+  "engine_results": {
+    "engine": "",
+    "summary": {},
+    "recommendations": [],
+    "results": [],
+    "report_path": null,
+    "results_path": null,
+    "status_path": null
+  },
+  "metrics": {},
+  "fingerprint": {},
+  "recommended_config": {},
+  "deploy_gate": {},
+  "created_at": "2026-07-13T04:07:49.296132+00:00",
+  "completed_at": null,
+  "error": null,
+  "log_tail": []
+}

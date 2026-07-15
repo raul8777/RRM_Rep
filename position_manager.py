@@ -224,11 +224,15 @@ class PositionManager:
             position.metadata.setdefault('trade_type', 'spot')
             position.metadata.setdefault(
                 'regime_at_entry',
-                position.metadata.get('regime_mode') or position.metadata.get('current_regime_mode'),
+                position.metadata.get('entry_regime')
+                or position.metadata.get('regime_mode')
+                or position.metadata.get('current_regime_mode'),
             )
             position.metadata.setdefault(
                 'profile_at_entry',
-                position.metadata.get('profile_label') or position.metadata.get('current_profile_label'),
+                position.metadata.get('entry_profile_label')
+                or position.metadata.get('profile_label')
+                or position.metadata.get('current_profile_label'),
             )
             if not position.metadata.get('config_snapshot_id') and self.db_client:
                 try:
@@ -372,6 +376,41 @@ class PositionManager:
                 logger.warning(f"Could not refresh positions from DB: {e}")
         return dict(self._open_positions)
 
+    def _has_recent_binance_sell_trade(
+        self,
+        binance_client,
+        symbol: str,
+        hours: int = 24,
+    ) -> bool:
+        """Return True if there is a SELL trade on Binance for ``symbol`` within the last ``hours``.
+
+        This prevents `ghost_balance_mismatch` from closing a real position when the
+        asset balance is temporarily not visible in the spot wallet (e.g. in funding/earn).
+        On API errors we default to False (defer closure).
+        """
+        if not binance_client:
+            return False
+        try:
+            raw_trades = binance_client.get_my_trades(symbol=symbol, limit=50)
+            if not raw_trades:
+                return False
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+            cutoff_ms = int(cutoff.timestamp() * 1000)
+            for t in raw_trades:
+                if not isinstance(t, dict):
+                    continue
+                ts = int(t.get("time", 0))
+                if ts < cutoff_ms:
+                    continue
+                is_buyer = bool(t.get("isBuyer", True))
+                qty = float(t.get("qty", 0.0)) or float(t.get("quantity", 0.0))
+                if not is_buyer and qty > 0:
+                    return True
+            return False
+        except Exception as e:
+            logger.warning(f"Could not verify recent SELL trades for {symbol}: {e}")
+            return False
+
     def sync_with_exchange_balance(self, binance_client, settings, min_value_usdt: float = 5.0) -> List[str]:
         """
         Reconcile SPOT state against Binance balances.
@@ -388,7 +427,12 @@ class PositionManager:
         Returns:
             List of symbols imported as new positions
         """
-        EXCLUDED_ASSETS = {"USDT", "BNB", "BTTC", "WIN", "TRX", "JST", "IQ"}
+        # Default $5 aligns with user-defined dust threshold; anything below is not imported.
+        min_value_usdt = float(min_value_usdt or 5.0)
+        EXCLUDED_ASSETS = {"USDT", "BTTC", "WIN", "JST", "IQ"}
+        _keep_bnb_for_commission = bool(get_param(settings, 'use_bnb_for_commission')) or bool(
+            get_param(settings, 'auto_bnb_for_commission')
+        )
         imported = []
         try:
             balances = binance_client.get_account_balance()
@@ -396,6 +440,8 @@ class PositionManager:
             existing = set(existing_positions.keys())
 
             for asset, amount in balances.items():
+                if asset == "BNB" and _keep_bnb_for_commission:
+                    continue
                 if asset in EXCLUDED_ASSETS or amount <= 0:
                     continue
                 symbol = f"{asset}USDT"
@@ -457,6 +503,50 @@ class PositionManager:
                     continue
                 if balance_qty > 0:
                     self._missing_balance_streak[symbol] = 0
+                    # ── Ghost detection: Binance balance << DB qty by factor >1000x ──
+                    _ratio = balance_qty / db_qty if db_qty > 0 else 1.0
+                    if _ratio < 0.001:
+                        _ghost_hours = int(getattr(settings, 'spot_ghost_sell_confirmation_hours', 24) or 24)
+                        _recent_sell = self._has_recent_binance_sell_trade(binance_client, symbol, hours=_ghost_hours)
+                        _ghost_warn = (
+                            f"[GHOST_WARN] {symbol}: Binance balance={balance_qty} vs DB qty={db_qty:.2f} "
+                            f"(ratio={_ratio:.6f}, recent_sell={_recent_sell})"
+                        )
+                        logger.error(_ghost_warn)
+                        try:
+                            ec.add_error(ec.SOURCE_SYSTEM, ec.LEVEL_ERROR, _ghost_warn)
+                        except Exception:
+                            pass
+                        try:
+                            exit_price = binance_client.get_symbol_price(symbol)
+                        except Exception:
+                            exit_price = float(pos_list[0].entry_price or 0)
+                        if not _recent_sell:
+                            # Balance is tiny but no evidence of a recent sale — the asset may be
+                            # in funding/earn or the wallet snapshot may be transient. Defer closure.
+                            self._audit(symbol, 'ghost_balance_mismatch_deferred', {
+                                'db_qty': db_qty,
+                                'exchange_qty': balance_qty,
+                                'ratio': round(_ratio, 6),
+                                'exit_price': exit_price,
+                                'reason': 'no_recent_sell_trade_on_binance',
+                                'confirmation_hours': _ghost_hours,
+                            }, binance_confirmed=True)
+                            continue
+                        self._audit(symbol, 'reconcile_ghost_balance', {
+                            'db_qty': db_qty,
+                            'exchange_qty': balance_qty,
+                            'ratio': round(_ratio, 6),
+                            'exit_price': exit_price,
+                            'reason': 'binance_balance_too_small_vs_db',
+                        }, binance_confirmed=True)
+                        self.close_all_positions_for_symbol(
+                            symbol,
+                            exit_price,
+                            'ghost_balance_mismatch',
+                            get_param(settings, 'binance_commission_rate') if settings else 0.001,
+                        )
+                        continue
                     for _pos in pos_list:
                         try:
                             _meta = dict(getattr(_pos, 'metadata', {}) or {})
@@ -1136,7 +1226,7 @@ class PositionManager:
             'portfolio_rebalancing', 'manual_rebalance',
             'manual_liquidation_idle_capital', 'excluded_symbol_cleanup',
             'manual_b2_stablecoin_cleanup', 'regime_futures_short_spot_cleanup',
-            'balance_sync',
+            'balance_sync', 'manual_close', 'manual_close_ghost',
         }
         real_trades = [
             pos for pos in self._closed_positions

@@ -13,7 +13,7 @@ from signal_store import get_signals, add_signal, mark_signal_as_processed, upda
 from strategy import rank_buy_signals, rank_with_technical, normalize_symbol, rank_for_portfolio_manager
 from analysis_cache import analysis_cache
 from autonomous_signals import AutonomousSignalGenerator
-from trade_utils import align_quantity_to_step, get_symbol_filters, is_quantity_valid, compute_commission
+from trade_utils import align_quantity_to_step, get_symbol_filters, is_quantity_valid, compute_commission, get_binance_sell_qty
 from binance_commission import get_config as _get_commission_config
 import pnl_service
 import json
@@ -3804,94 +3804,126 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 except Exception:
                                     pass
                                 else:
-                                # Partial close for SPOT
+                                # Partial close for SPOT using real Binance balance
                                     try:
                                         _sso_s_filters = get_symbol_filters(client, symbol)
                                         _sso_s_full_qty = float(pos.quantity)
-                                        _sso_s_sell_qty = align_quantity_to_step(
+                                        # Target qty from SSO close_pct, then cap to actual Binance balance
+                                        _sso_s_target_qty = align_quantity_to_step(
                                             _sso_s_full_qty * _sso_s_action.close_pct, _sso_s_filters["step"])
-                                        _sso_s_valid, _ = is_quantity_valid(_sso_s_sell_qty, current_price, _sso_s_filters)
-                                        if _sso_s_valid and _sso_s_sell_qty > 0:
-                                            _sso_s_order = client.create_market_order(symbol=symbol, side="SELL", quantity=_sso_s_sell_qty)
-                                            if not client.verify_order_filled(_sso_s_order, f"SSO/SPOT SELL {symbol}"):
-                                                print(f"[WARN] SSO/SPOT SELL {symbol}: order NOT confirmed filled — skipping")
-                                                continue
-                                            _sso_s_remaining = align_quantity_to_step(
-                                                _sso_s_full_qty - _sso_s_sell_qty, _sso_s_filters["step"])
-                                            # Dust guard: if remaining < min_notional, treat as full close
-                                            if 0 < _sso_s_remaining * current_price < _sso_s_filters.get('min_notional', 1.0):
-                                                print(f"[SSO/SPOT] {symbol}: remaining ${_sso_s_remaining * current_price:.4f} < min_notional — converting to full close")
-                                                _sso_s_sell_qty = _sso_s_full_qty
-                                                _sso_s_remaining = 0.0
-                                            # Persist the partial close in DB via PositionManager so a
-                                            # trades_closed row is created and quantity/commission update atomically.
-                                            _sso_s_closed = position_manager.close_position(
-                                                symbol=symbol,
-                                                exit_price=current_price,
-                                                close_reason='sso_partial_close',
-                                                commission_rate=commission_rate,
-                                                position_id=pos.position_id,
-                                                qty_closed=_sso_s_sell_qty,
-                                                exit_context={'regime_mode': regime, 'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').upper()},
-                                            )
-                                            if _sso_s_closed is None:
-                                                print(f"[WARN] SSO/SPOT {symbol}: position_manager.close_position returned None — falling back to metadata-only update")
-                                                try:
-                                                    position_manager.update_position_quantity(pos.position_id, _sso_s_remaining)
-                                                except Exception:
-                                                    pass
-                                            # Update SSO metadata (level tracking, last trigger) on the residual position
-                                            metadata = getattr(pos, 'metadata', {}) or {}
-                                            if not isinstance(metadata, dict):
-                                                metadata = {}
-                                            metadata['sso_last_trigger'] = _sso_s_action.trigger
-                                            metadata['sso_last_reason'] = _sso_s_action.reason
-                                            metadata['scale_out_done'] = True
-                                            _sso_s_lvl = extract_sso_level_from_reason(_sso_s_action.reason)
-                                            if _sso_s_lvl:
-                                                _sso_s_done = metadata.get('sso_levels_done', [])
-                                                if _sso_s_lvl not in _sso_s_done:
-                                                    _sso_s_done.append(_sso_s_lvl)
-                                                metadata['sso_levels_done'] = _sso_s_done
+                                        _sso_s_sell_check = get_binance_sell_qty(
+                                            client, symbol, _sso_s_target_qty, current_price)
+                                        if _sso_s_sell_check.get('is_ghost'):
+                                            print(f"[GHOST] SSO/SPOT {symbol}: DB qty={_sso_s_full_qty} but Binance balance={_sso_s_sell_check.get('balance_qty')} — closing DB record")
+                                            if position_manager:
+                                                position_manager.close_all_positions_for_symbol(
+                                                    symbol, current_price, 'ghost_balance_mismatch', commission_rate)
+                                            continue
+                                        _sso_s_sell_qty = _sso_s_sell_check.get('qty_to_sell', 0.0)
+                                        if _sso_s_sell_qty <= 0:
+                                            print(f"[SSO/SPOT] {symbol}: computed sell qty is zero (balance={_sso_s_sell_check.get('balance_qty')}) — skipping partial close")
+                                            continue
+                                        _sso_s_valid, _sso_s_reason = is_quantity_valid(_sso_s_sell_qty, current_price, _sso_s_filters)
+                                        if not _sso_s_valid:
+                                            print(f"[SSO/SPOT] {symbol}: invalid sell qty {_sso_s_sell_qty}: {_sso_s_reason}")
+                                            continue
+                                        _sso_s_order = client.create_market_order(symbol=symbol, side="SELL", quantity=_sso_s_sell_qty)
+                                        _sso_s_fill = client.verify_and_fetch_fills(_sso_s_order, f"SSO/SPOT SELL {symbol}")
+                                        if not _sso_s_fill:
+                                            print(f"[WARN] SSO/SPOT SELL {symbol}: order NOT confirmed filled — skipping")
+                                            continue
+                                        _sso_s_qty_sold = float(_sso_s_fill.get('qty', _sso_s_sell_qty))
+                                        _sso_s_remaining = align_quantity_to_step(
+                                            _sso_s_full_qty - _sso_s_qty_sold, _sso_s_filters["step"])
+                                        # Dust guard: if remaining cannot be sold later, convert to full close
+                                        if 0 < _sso_s_remaining * current_price < _sso_s_filters.get('min_notional', 1.0):
+                                            print(f"[SSO/SPOT] {symbol}: remaining ${_sso_s_remaining * current_price:.4f} < min_notional — converting to full close")
+                                            _sso_s_qty_sold = _sso_s_full_qty
+                                            _sso_s_remaining = 0.0
+                                            # Sell the balance we actually have, not DB qty
+                                            _final_sell_check = get_binance_sell_qty(client, symbol, _sso_s_full_qty, current_price)
+                                            _final_qty = _final_sell_check.get('qty_to_sell', _sso_s_qty_sold)
+                                            if _final_qty > 0 and _final_qty != _sso_s_sell_qty:
+                                                _sso_s_order2 = client.create_market_order(symbol=symbol, side="SELL", quantity=_final_qty)
+                                                _sso_s_fill2 = client.verify_and_fetch_fills(_sso_s_order2, f"SSO/SPOT SELL2 {symbol}")
+                                                if _sso_s_fill2:
+                                                    _sso_s_qty_sold = float(_sso_s_fill2.get('qty', _final_qty))
+                                        # Persist the partial close in DB via PositionManager with the EXACT filled qty
+                                        _sso_s_closed = position_manager.close_position(
+                                            symbol=symbol,
+                                            exit_price=current_price,
+                                            close_reason='sso_partial_close',
+                                            commission_rate=commission_rate,
+                                            position_id=pos.position_id,
+                                            qty_closed=_sso_s_qty_sold,
+                                            exit_context={
+                                                'regime_mode': regime,
+                                                'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').upper(),
+                                                'exit_order_id': str(_sso_s_fill.get('order_id', '')),
+                                                'exit_filled_qty': float(_sso_s_qty_sold),
+                                                'exit_avg_price': float(_sso_s_fill.get('avg_price', current_price)),
+                                                'exit_commission': float(_sso_s_fill.get('commission', 0.0)),
+                                                'binance_exit_confirmed': True,
+                                            },
+                                        )
+                                        if _sso_s_closed is None:
+                                            print(f"[WARN] SSO/SPOT {symbol}: position_manager.close_position returned None — falling back to metadata-only update")
                                             try:
-                                                position_manager.update_position_metadata(pos.position_id, metadata)
-                                                if _sso_s_remaining > 0:
-                                                    position_manager.update_position_sl(pos.position_id, round(entry_price, 8))
+                                                position_manager.update_position_quantity(pos.position_id, _sso_s_remaining)
                                             except Exception:
                                                 pass
-                                            print(f"[SSO/SPOT] {symbol}: {_sso_s_action.trigger} "
-                                                  f"SCALE {_sso_s_action.close_pct*100:.0f}% "
-                                                  f"qty={_sso_s_sell_qty} | {_sso_s_action.detail}")
-                                            closed.append({"symbol": symbol, "reason": _sso_s_action.reason,
-                                                           "price": current_price, "order": _sso_s_order,
-                                                           "sso_trigger": _sso_s_action.trigger})
-                                            # s73 E1: trazabilidad SSO partial-close en trades_audit
-                                            try:
-                                                if _db_client_ref:
-                                                    _db_client_ref.execute_update(
-                                                        "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
-                                                        "VALUES (%s, %s, %s, %s, %s)",
-                                                        (
-                                                            symbol, 'spot', 'sso_partial_close',
-                                                            __import__('json').dumps({
-                                                                'trigger': _sso_s_action.trigger,
-                                                                'reason': _sso_s_action.reason,
-                                                                'close_pct': round(_sso_s_action.close_pct, 4),
-                                                                'qty_sold': float(_sso_s_sell_qty),
-                                                                'qty_remaining': float(_sso_s_remaining),
-                                                                'pnl_pct': round(pnl_pct * 100, 4),
-                                                                'pnl_usdt': round(_sso_sym_pnl_usdt, 4),
-                                                                'diagnosis': (_sso_s_action.diagnosis or '')[:500],
-                                                                'regime': regime,
-                                                                'profile': str(getattr(settings, 'current_regime_profile_label', '') or '').upper(),
-                                                                'ts': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
-                                                            }),
-                                                            False,
-                                                        )
+                                        # Update SSO metadata (level tracking, last trigger) on the residual position
+                                        metadata = getattr(pos, 'metadata', {}) or {}
+                                        if not isinstance(metadata, dict):
+                                            metadata = {}
+                                        metadata['sso_last_trigger'] = _sso_s_action.trigger
+                                        metadata['sso_last_reason'] = _sso_s_action.reason
+                                        metadata['scale_out_done'] = True
+                                        _sso_s_lvl = extract_sso_level_from_reason(_sso_s_action.reason)
+                                        if _sso_s_lvl:
+                                            _sso_s_done = metadata.get('sso_levels_done', [])
+                                            if _sso_s_lvl not in _sso_s_done:
+                                                _sso_s_done.append(_sso_s_lvl)
+                                            metadata['sso_levels_done'] = _sso_s_done
+                                        try:
+                                            position_manager.update_position_metadata(pos.position_id, metadata)
+                                            if _sso_s_remaining > 0:
+                                                position_manager.update_position_sl(pos.position_id, round(entry_price, 8))
+                                        except Exception:
+                                            pass
+                                        print(f"[SSO/SPOT] {symbol}: {_sso_s_action.trigger} "
+                                              f"SCALE {_sso_s_action.close_pct*100:.0f}% "
+                                              f"qty={_sso_s_qty_sold} | {_sso_s_action.detail}")
+                                        closed.append({"symbol": symbol, "reason": _sso_s_action.reason,
+                                                       "price": current_price, "order": _sso_s_order,
+                                                       "sso_trigger": _sso_s_action.trigger})
+                                        # s73 E1: trazabilidad SSO partial-close en trades_audit
+                                        try:
+                                            if _db_client_ref:
+                                                _db_client_ref.execute_update(
+                                                    "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                                                    "VALUES (%s, %s, %s, %s, %s)",
+                                                    (
+                                                        symbol, 'spot', 'sso_partial_close',
+                                                        __import__('json').dumps({
+                                                            'trigger': _sso_s_action.trigger,
+                                                            'reason': _sso_s_action.reason,
+                                                            'close_pct': round(_sso_s_action.close_pct, 4),
+                                                            'qty_sold': float(_sso_s_qty_sold),
+                                                            'qty_remaining': float(_sso_s_remaining),
+                                                            'pnl_pct': round(pnl_pct * 100, 4),
+                                                            'pnl_usdt': round(_sso_sym_pnl_usdt, 4),
+                                                            'diagnosis': (_sso_s_action.diagnosis or '')[:500],
+                                                            'regime': regime,
+                                                            'profile': str(getattr(settings, 'current_regime_profile_label', '') or '').upper(),
+                                                            'ts': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
+                                                        }),
+                                                        False,
                                                     )
-                                            except Exception:
-                                                pass
-                                            continue  # partial done, move to next position
+                                                )
+                                        except Exception:
+                                            pass
+                                        continue  # partial done, move to next position
                                     except Exception as _sso_s_err:
                                         print(f"[SSO/SPOT] {symbol} partial close error: {_sso_s_err}")
                     except Exception as _sso_s_exc:
@@ -4125,42 +4157,67 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                     try:
                         filters = get_symbol_filters(client, symbol)
                         full_qty = float(pos.quantity)
-                        sell_qty = align_quantity_to_step(full_qty * supervisor_close_pct, filters["step"])
+                        _prs_target_qty = align_quantity_to_step(full_qty * supervisor_close_pct, filters["step"])
 
-                        # ── Clamp to actual Binance balance so partial close never fails due to -2010
-                        try:
-                            _asset = symbol.replace('USDT', '')
-                            _bal = client.get_account_balance()
-                            _avail = float(_bal.get(_asset, 0))
-                            if _avail < sell_qty:
-                                _clamped = align_quantity_to_step(_avail, filters["step"])
-                                if _clamped > 0:
-                                    print(f"[ProfitRealization/SPOT] {symbol}: clamping partial qty {sell_qty} -> {_clamped} (Binance balance={_avail})")
-                                    sell_qty = _clamped
-                        except Exception as _be:
-                            print(f"[ProfitRealization/SPOT] balance clamp failed for {symbol}: {_be}")
+                        # ── Use real Binance balance as single source of truth for qty
+                        _prs_sell_check = get_binance_sell_qty(client, symbol, _prs_target_qty, current_price)
+                        if _prs_sell_check.get('is_ghost'):
+                            print(f"[GHOST] ProfitRealization/SPOT {symbol}: DB qty={full_qty} but Binance balance={_prs_sell_check.get('balance_qty')} — closing DB record")
+                            if position_manager:
+                                position_manager.close_all_positions_for_symbol(
+                                    symbol, current_price, 'ghost_balance_mismatch', commission_rate)
+                            continue
+                        if _prs_sell_check.get('is_dust'):
+                            print(f"[DUST] ProfitRealization/SPOT {symbol}: balance notional too low — skipping partial close")
+                            close_reason = None
+                            continue
+                        sell_qty = _prs_sell_check.get('qty_to_sell', 0.0)
+                        if sell_qty <= 0:
+                            print(f"[ProfitRealization/SPOT] {symbol}: computed sell qty is zero — skipping partial close")
+                            close_reason = None
+                            continue
+                        if _prs_sell_check.get('reason') == 'balance_capped':
+                            print(f"[ProfitRealization/SPOT] {symbol}: capping sell qty to Binance balance {_prs_sell_check.get('balance_qty')} (DB had {full_qty})")
 
                         valid, reason = is_quantity_valid(sell_qty, current_price, filters)
-                        if not valid or sell_qty <= 0:
+                        if not valid:
                             print(f"[ProfitRealization/SPOT] {symbol}: invalid partial qty {sell_qty} — {reason}")
                             close_reason = None
                             continue
 
                         order = client.create_market_order(symbol=symbol, side="SELL", quantity=sell_qty)
-                        if not client.verify_order_filled(order, f"ProfitRealization SELL {symbol}"):
+                        _prs_fill = client.verify_and_fetch_fills(order, f"ProfitRealization SELL {symbol}")
+                        if not _prs_fill:
                             print(f"[WARN] ProfitRealization SELL {symbol}: order NOT confirmed filled — skipping")
                             close_reason = None
                             continue
+                        _prs_qty_sold = float(_prs_fill.get('qty', sell_qty))
 
-                        remaining_qty = align_quantity_to_step(full_qty - sell_qty, filters["step"])
+                        remaining_qty = align_quantity_to_step(full_qty - _prs_qty_sold, filters["step"])
                         # Dust guard: if remaining < min_notional, treat as full close
                         if 0 < remaining_qty * current_price < filters.get('min_notional', 1.0):
                             print(f"[ProfitRealization] {symbol}: remaining ${remaining_qty * current_price:.4f} < min_notional — converting to full close")
-                            sell_qty = full_qty
+                            _prs_final_check = get_binance_sell_qty(client, symbol, full_qty, current_price)
+                            _prs_final_qty = _prs_final_check.get('qty_to_sell', remaining_qty)
+                            if _prs_final_qty > 0 and _prs_final_qty != _prs_qty_sold:
+                                _prs_order2 = client.create_market_order(symbol=symbol, side="SELL", quantity=_prs_final_qty)
+                                _prs_fill2 = client.verify_and_fetch_fills(_prs_order2, f"ProfitRealization SELL2 {symbol}")
+                                if _prs_fill2:
+                                    _prs_qty_sold = float(_prs_fill2.get('qty', _prs_final_qty))
                             remaining_qty = 0.0
+
                         metadata['profit_realization_last_triggered_at'] = datetime.now(timezone.utc).isoformat()
-                        metadata['profit_realization_partial_qty'] = sell_qty
+                        metadata['profit_realization_partial_qty'] = _prs_qty_sold
                         metadata['profit_realization_partial_reason'] = supervisor_decision.reason if supervisor_decision else 'profit_realization_supervisor_partial'
+                        _exit_ctx = {
+                            'regime_mode': regime,
+                            'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                            'exit_order_id': str(_prs_fill.get('order_id', '')),
+                            'exit_filled_qty': float(_prs_qty_sold),
+                            'exit_avg_price': float(_prs_fill.get('avg_price', current_price)),
+                            'exit_commission': float(_prs_fill.get('commission', 0.0)),
+                            'binance_exit_confirmed': True,
+                        }
                         try:
                             position_manager.update_position_metadata(pos.position_id, metadata)
                             position_manager.close_position(
@@ -4169,12 +4226,12 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 close_reason=metadata['profit_realization_partial_reason'],
                                 commission_rate=commission_rate,
                                 position_id=pos.position_id,
-                                qty_closed=sell_qty,
-                                exit_context={'regime_mode': regime, 'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None},
+                                qty_closed=_prs_qty_sold,
+                                exit_context=_exit_ctx,
                             )
                             position_manager._audit(symbol, 'profit_realization_supervisor_partial', {
                                 'side': 'BUY',
-                                'qty_closed': sell_qty,
+                                'qty_closed': _prs_qty_sold,
                                 'qty_remaining': remaining_qty,
                                 'reason': metadata['profit_realization_partial_reason'],
                                 'detail': supervisor_decision.detail if supervisor_decision else '',
@@ -4182,7 +4239,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             })
                         except Exception:
                             pass
-                        print(f"[ProfitRealization/SPOT] {symbol}: partial close {supervisor_close_pct*100:.0f}% qty={sell_qty} reason={close_reason}")
+                        print(f"[ProfitRealization/SPOT] {symbol}: partial close {supervisor_close_pct*100:.0f}% qty={_prs_qty_sold} reason={close_reason}")
                         add_signal({
                             "symbol": symbol,
                             "action": "SELL",
@@ -4444,35 +4501,37 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                         closed.append({"symbol": symbol, "reason": "smart_tp_scale_out",
                                                        "price": current_price, "order": order})
                                         continue
-                        qty = align_quantity_to_step(full_qty, filters["step"])
-                        # ── Clamp qty to actual Binance balance to prevent -2010 ──────────
-                        try:
-                            _asset = symbol.replace('USDT', '')
-                            _bal = client.get_account_balance()
-                            _avail = float(_bal.get(_asset, 0))
-                            if _avail < qty:
-                                _ratio = _avail / qty if qty > 0 else 0.0
-                                _clamped = align_quantity_to_step(_avail, filters["step"])
-                                print(f"[SL/TP] {symbol}: clamping qty {qty} → {_clamped} (Binance balance={_avail}, ratio={_ratio:.6f})")
-                                # ── Ghost detection: DB qty >> Binance balance (>1000x) ───────────
-                                if _clamped <= 0 and _ratio < 0.001:
-                                    _ghost_msg = (
-                                        f"[GHOST] {symbol}: DB qty={qty:.0f} but Binance balance={_avail} "
-                                        f"(ratio={_ratio:.6f}) — auto-closing ghost position"
+                        # ── Use real Binance balance as single source of truth for qty ─────
+                        _sell_check = get_binance_sell_qty(client, symbol, full_qty, current_price)
+                        if _sell_check.get('is_ghost'):
+                            _ghost_msg = (
+                                f"[GHOST] {symbol}: DB qty={full_qty:.0f} but Binance balance={_sell_check.get('balance_qty')} "
+                                f"(ratio={_sell_check.get('ratio'):.6f}) — auto-closing ghost position"
+                            )
+                            print(_ghost_msg)
+                            ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_ERROR, _ghost_msg)
+                            if position_manager:
+                                try:
+                                    position_manager.close_all_positions_for_symbol(
+                                        symbol, current_price, 'ghost_balance_mismatch', commission_rate
                                     )
-                                    print(_ghost_msg)
-                                    ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_ERROR, _ghost_msg)
-                                    if position_manager:
-                                        try:
-                                            position_manager.close_all_positions_for_symbol(
-                                                symbol, current_price, 'ghost_balance_mismatch', commission_rate
-                                            )
-                                        except Exception as _ghost_err:
-                                            print(f"[GHOST] close failed for {symbol}: {_ghost_err}")
-                                    continue
-                                qty = _clamped
-                        except Exception as _be:
-                            print(f"[SL/TP] balance clamp failed for {symbol}: {_be}")
+                                except Exception as _ghost_err:
+                                    print(f"[GHOST] close failed for {symbol}: {_ghost_err}")
+                            continue
+                        if _sell_check.get('is_dust'):
+                            _dust_msg = (
+                                f"[DUST] {symbol}: balance notional ${_sell_check.get('balance_qty') * current_price:.4f} "
+                                f"below min_notional={_sell_check.get('min_notional')} — skipping SL/TP sell"
+                            )
+                            print(_dust_msg)
+                            ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_WARNING, _dust_msg)
+                            continue
+                        qty = _sell_check.get('qty_to_sell', full_qty)
+                        if qty <= 0:
+                            print(f"[SL/TP] {symbol}: computed sell qty is zero (balance={_sell_check.get('balance_qty')}) — skipping")
+                            continue
+                        if _sell_check.get('reason') == 'balance_capped':
+                            print(f"[SL/TP] {symbol}: capping sell qty to Binance balance {_sell_check.get('balance_qty')} (DB had {full_qty})")
                         valid, reason = is_quantity_valid(qty, current_price, filters)
                         if not valid:
                             print(f"SL/TP: cannot sell {symbol}: {reason}")
@@ -6985,7 +7044,7 @@ def execute_once(monitor_only: bool = False, components=None):
         print(f"[BinanceTruth] pretrade gate failed: {_truth_gate_err}")
 
     try:
-        _spot_truth_status = evaluate_spot_parity(position_manager, client, settings=settings)
+        _spot_truth_status = evaluate_spot_parity(position_manager, client, settings=settings, min_notional_usdt=5.0)
         persist_truth_status_spot(_db_client_ref, _spot_truth_status, source='execute_once_pretrade')
         if (_spot_truth_status.get('mismatch_count') or 0) > 0:
             audit_truth_mismatches(_db_client_ref, _spot_truth_status, source='execute_once_pretrade_spot')
@@ -6993,6 +7052,29 @@ def execute_once(monitor_only: bool = False, components=None):
                 f"[SpotTruth] severity={_spot_truth_status.get('severity')} "
                 f"mismatches={_spot_truth_status.get('mismatch_count')}"
             )
+            # Anti-ghost auto-fix: close DB ghosts and import orphan positions > $5 immediately.
+            for _mm in _spot_truth_status.get('mismatches', []):
+                _mm_code = _mm.get('code')
+                _mm_sym = _mm.get('symbol')
+                if _mm_code == 'SPOT_GHOST_IN_DB':
+                    try:
+                        _mm_price = float(client.get_symbol_price(_mm_sym) or _mm.get('price', 0))
+                        position_manager.close_all_positions_for_symbol(
+                            _mm_sym, _mm_price, 'pretrade_ghost_auto_close',
+                            float(getattr(settings, 'binance_commission_rate', 0.001))
+                        )
+                        print(f"[SpotTruth/AutoFix] Closed ghost DB position {_mm_sym}")
+                    except Exception as _mm_err:
+                        print(f"[SpotTruth/AutoFix] Failed to close ghost {_mm_sym}: {_mm_err}")
+                elif _mm_code == 'SPOT_ORPHAN_IN_BINANCE':
+                    try:
+                        _mm_value = float(_mm.get('value_usdt') or 0.0)
+                        if _mm_value >= 5.0:
+                            _imported = position_manager.sync_with_exchange_balance(client, settings, min_value_usdt=5.0)
+                            if _mm_sym in (_imported or []):
+                                print(f"[SpotTruth/AutoFix] Imported orphan position {_mm_sym} (${_mm_value:.2f})")
+                    except Exception as _mm_err:
+                        print(f"[SpotTruth/AutoFix] Failed to import orphan {_mm_sym}: {_mm_err}")
     except Exception as _spot_truth_err:
         print(f"[SpotTruth] pretrade gate failed: {_spot_truth_err}")
 

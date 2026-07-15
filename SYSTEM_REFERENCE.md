@@ -1,7 +1,30 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 15 2026 | ONDO PnL drop — cierres parciales SSO reconstruidos, persistencia fix y dashboard PnL realizado+no realizado.
+> Última actualización: jul 15 2026 | Anti-ghost redesign: cierres por balance real, partial closes con qty exacta, reconcile preventivo, dust cleanup endpoint, FUTURES_LEVERAGE corregido a 10x.
+
+---
+
+## 🟢 Estado del Sistema — jul 15 2026 — Anti-Ghost Redesign
+
+### Problema
+Ghost positions creados por cierres parciales calculados desde `db_qty × close_pct` sin verificar balance real de Binance, y por persistir cierres FUTURES antes de confirmar `positionAmt=0`.
+
+### Correcciones aplicadas
+- **`.env`**: `FUTURES_LEVERAGE` corregido de 2 → 10 para alinear con `config.py` y baseline run_0812.
+- **`trade_utils.py`**: nuevos helpers `get_binance_sell_qty()` (vende solo balance real, detecta ghost/dust) y `get_min_notional_delta()` (top-up para limpiar dust).
+- **`run_trades.py`**: SL/TP, SSO y PRS/UG partial closes usan balance real y `verify_and_fetch_fills()`; `qty_closed=filled_qty`. Reconcile preventivo al inicio de cada ciclo auto-cierra `SPOT_GHOST_IN_DB` e importa `SPOT_ORPHAN_IN_BINANCE > $5`.
+- **`futures_client.py`**: `close_long/close_short` verifican `positionRisk.positionAmt == 0` antes de persistir cierre; si queda residual, actualizan `pos.qty` y continúan gestión.
+- **`position_manager.py`**: `sync_with_exchange_balance` usa `min_value_usdt=5.0` por defecto.
+- **`binance_truth_guard.py`**: `evaluate_spot_parity` usa `min_notional_usdt=5.0` por defecto.
+- **`app.py`**: endpoints nuevos `POST /reconcile/cleanup-dust` y `GET /metrics/ghosts`.
+- **`config.py` + `config_helpers.py`**: parámetros anti-ghost (`spot_dust_cleanup_min_notional_usdt`, `spot_reconcile_auto_fix_enabled`, `spot_reconcile_min_value_usdt`).
+- **`.windsurf/rules.md`**: reglas duras anti-ghost añadidas.
+
+### Pendiente
+- Tests unitarios `tests/test_anti_ghost_qty.py` y `test_futures_ghost.py`.
+- Ejecutar limpieza de dust en producción: `POST /reconcile/cleanup-dust?dry_run=true` primero.
+- Reiniciar contenedor para cargar `.env` actualizado.
 
 ---
 

@@ -1,0 +1,241 @@
+﻿============================================================================
+  AN├üLISIS MULTI-MODO DE OPORTUNIDADES PERDIDAS
+  Cargando datos de mercado...
+============================================================================
+  BTC Dominance: 56.0%
+  Descargando top movers 24h...
+  Descargando klines 1h (228 barras por s├¡mbolo)...
+    DOGEUSDT... 228 barras
+    RENDERUSDT... 228 barras
+    BNBUSDT... 228 barras
+    SOLUSDT... 228 barras
+    TAOUSDT... 228 barras
+    FETUSDT... 228 barras
+    AVAXUSDT... 228 barras
+    ADAUSDT... 228 barras
+    XRPUSDT... 228 barras
+    DOTUSDT... 228 barras
+    SUIUSDT... 228 barras
+    PEPEUSDT... 228 barras
+    WIFUSDT... 228 barras
+    BTCUSDT... 228 barras
+    ETHUSDT... 228 barras
+    LINKUSDT... 228 barras
+    NEARUSDT... 228 barras
+    WLDUSDT... 228 barras
+    INJUSDT... 228 barras
+    AGIXUSDT... 228 barras
+  BTC 1d... 35 barras
+
+  Calculando se├▒ales y r├®gimen (7 d├¡as)...
+  ÔåÆ 710 se├▒ales BUY generadas en 7 d├¡as
+  Calculando se├▒ales del d├¡a actual (24h)...
+  ÔåÆ 109 se├▒ales BUY generadas hoy
+============================================================================
+  AN├üLISIS DE OPORTUNIDADES PERDIDAS ÔÇö MULTI-MODO
+  2026-07-13 14:50 UTC | BTC.D: 56.0%
+============================================================================
+
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  A. CONTEXTO DEL MERCADO HOY
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+  R├®gimen dominante (24h): RANGE_SCALP
+    RANGE_SCALP      ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûæ 99%
+    SPOT_BULL        ÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæ 1%
+
+  BTC Dominance: 56.0%
+    Config anterior threshold: 56.0%  ÔåÆ filter ACTIVO
+    Config nueva threshold:    64.0%  ÔåÆ filter INACTIVO
+
+  TOP 10 MOVERS DEL D├ìA (todos los pares USDT):
+  S├¡mbolo            Cambio   Vol $M   En sistema
+  ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  CREAMUSDT         +65.35%     0.3M            ÔÇö
+  PNTUSDT           +45.23%     0.3M            ÔÇö
+  DODOUSDT          +39.32%    10.6M            ÔÇö
+  XECUSDT           +31.91%     9.5M            ÔÇö
+  DCRUSDT           +17.89%     6.4M            ÔÇö
+  KDAUSDT           +17.65%     0.3M            ÔÇö
+  UTKUSDT           +16.23%    10.2M            ÔÇö
+  KITEUSDT          +15.30%    10.4M            ÔÇö
+  CLVUSDT           +13.97%     0.3M            ÔÇö
+  MDXUSDT           +13.52%     0.3M            ÔÇö
+
+  Sin ganadores significativos >$20M fuera del sistema hoy.
+
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  B. SE├æALES BUY GENERADAS HOY (├║ltimas 24h)
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+  S├¡mbolo       Cat          Modo             Str   RSI  VolSpk    4h%   Nueva   Antigua  Clasif
+  ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  LINKUSDT      MIDCAP_ALT   RANGE_SCALP     0.70  31.8    0.84   +1.2%  ÔØî VOL_BAJO(0  ÔØî VOL_BAJO(0  ­ƒƒí FALSO
+  SUIUSDT       MIDCAP_ALT   RANGE_SCALP     0.70  20.8    0.66   +0.9%  ÔØî VOL_BAJO(0  ÔØî VOL_BAJO(0  Ô¼£ NEUT
+  ETHUSDT       LARGE_CAP    RANGE_SCALP     0.70  28.6    0.81   +0.6%  ÔØî VOL_BAJO(0  ÔØî VOL_BAJO(0  Ô¼£ NEUT
+  BNBUSDT       LARGE_CAP    RANGE_SCALP     0.70  19.6    0.64   +0.5%  ÔØî VOL_BAJO(0  ÔØî VOL_BAJO(0  Ô¼£ NEUT
+  AVAXUSDT      MIDCAP_ALT   RANGE_SCALP     0.40  69.1    1.98   +0.5%  ÔØî RSI_ALTO(6  ÔØî STRENGTH_B  Ô¼£ NEUT
+  SOLUSDT       MIDCAP_ALT   RANGE_SCALP     0.60  38.9    1.64   +0.3%  ÔØî RANGE_SIN_  ÔØî BTC_DOM(56  Ô¼£ NEUT
+  WIFUSDT       MEME         RANGE_SCALP     0.60  47.7    2.51   +0.1%  ÔØî RSI_ALTO(4  ÔØî BTC_DOM(56  Ô¼£ NEUT
+  DOGEUSDT      MEME         RANGE_SCALP     0.69  33.9    1.90   +0.1%  Ô£à OK      ÔØî BTC_DOM(56  Ô¼£ NEUT
+  NEARUSDT      NARRATIVE    RANGE_SCALP     0.67  45.4    0.86   -0.1%  ÔØî RSI_ALTO(4  ÔØî VOL_BAJO(0  Ô£à CORR
+  AGIXUSDT      NARRATIVE    RANGE_SCALP     0.52  65.2    2.97   -0.1%  ÔØî RSI_ALTO(6  ÔØî BTC_DOM(56  Ô£à CORR
+  XRPUSDT       MIDCAP_ALT   RANGE_SCALP     0.80  29.1    3.29   -0.2%  Ô£à OK      ÔØî BTC_DOM(56  ­ƒöÁ EVIT
+  PEPEUSDT      MEME         RANGE_SCALP     0.60  40.0    2.30   -0.4%  ÔØî RANGE_SIN_  ÔØî BTC_DOM(56  Ô£à CORR
+  TAOUSDT       NARRATIVE    RANGE_SCALP     0.71  39.9    2.01   -0.4%  Ô£à OK      ÔØî BTC_DOM(56  ­ƒöÁ EVIT
+  RENDERUSDT    NARRATIVE    RANGE_SCALP     0.60  36.4    4.49   -0.8%  Ô£à OK      ÔØî BTC_DOM(56  ­ƒöÁ EVIT
+  WLDUSDT       NARRATIVE    RANGE_SCALP     0.75  34.9    0.68   -0.8%  ÔØî VOL_BAJO(0  ÔØî VOL_BAJO(0  Ô£à CORR
+  BTCUSDT       LARGE_CAP    RANGE_SCALP     0.69  32.9    3.60   -0.9%  ÔØî RANGE_SIN_  Ô£à OK        Ô£à CORR
+  FETUSDT       NARRATIVE    RANGE_SCALP     0.60  48.2    3.62   -1.3%  ÔØî RSI_ALTO(4  ÔØî BTC_DOM(56  Ô£à CORR
+
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  C. RESUMEN 7 D├ìAS ÔÇö CLASIFICACI├ôN DE SE├æALES
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+  Total se├▒ales BUY generadas (7d): 710
+    ­ƒƒó OPORTUNIDAD       26  ÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæ  3.7%
+    ­ƒƒí FALSO_RECHAZO     79  ÔûêÔûêÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæ  11.1%
+    Ô£à CORRECTO         247  ÔûêÔûêÔûêÔûêÔûêÔûêÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæ  34.8%
+    ­ƒöÁ EVITADO           89  ÔûêÔûêÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæ  12.5%
+    Ô¼£ NEUTRO           269  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæ  37.9%
+
+  PnL TE├ôRICO (si se hubieran ejecutado con Kelly $20):
+    Oportunidades (26 trades):   $ +10.65 USDT  ($ +189.6 MXN)
+    Falsos rechazos (79 trades): $ +30.35 USDT  ($ +540.2 MXN)
+
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  D. DISTRIBUCI├ôN DE REG├ìMENES (7 d├¡as, se├▒ales BUY generadas)
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+  Modo              N se├▒ales       %  Barras
+  ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  SPOT_BULL               308   43.4%  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæ
+  RANGE_SCALP             402   56.6%  ÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûêÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæ
+  PRESERVATION              0    0.0%  ÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæ
+  FUTURES_SHORT             0    0.0%  ÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæÔûæ
+
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  E. RAZONES DE BLOQUEO ÔÇö Config actual vs anterior (7 d├¡as)
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+  Raz├│n bloqueo                   Config nueva Config anterior   Delta
+  ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  RANGE_SIN_BB_LOWER                        33               0  Ôû▓   33
+  RSI_ALTO(48>40)                           24               0  Ôû▓   24
+  RSI_ALTO(46>40)                           21               0  Ôû▓   21
+  RSI_ALTO(44>40)                           20               0  Ôû▓   20
+  RSI_ALTO(45>40)                           20               0  Ôû▓   20
+  RSI_ALTO(47>40)                           20               0  Ôû▓   20
+  RSI_ALTO(43>40)                           17               0  Ôû▓   17
+  RSI_ALTO(49>40)                           15               0  Ôû▓   15
+  RSI_ALTO(42>40)                           12               0  Ôû▓   12
+  RSI_ALTO(41>40)                           10               0  Ôû▓   10
+  RSI_ALTO(50>40)                           10               0  Ôû▓   10
+  RSI_ALTO(65>40)                           10               0  Ôû▓   10
+  RSI_ALTO(71>40)                            8               0  Ôû▓    8
+  RSI_ALTO(72>70)                            7               5  Ôû▓    2
+  RSI_ALTO(51>40)                            5               0  Ôû▓    5
+
+  Total bloqueadas ÔÇö nueva: 523 | anterior: 641
+  Liberadas por opt (nueva permite, vieja bloqueaba): 153
+  Bloqueadas extra (nueva bloquea, vieja permit├¡a):   35
+
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  F. IMPACTO REAL DEL FIX BTC.D (56% ÔåÆ 64%)
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+  BTC.D actual: 56.0%
+  Config antigua (56%) filtraba altcoins: S├ì
+  Config nueva  (64%) filtra altcoins:   NO
+
+  An├ílisis hipot├®tico (si el mercado fuera SPOT_BULL, sin bear)
+  Se├▒ales altcoin que el fix BTC.D habr├¡a liberado (7d): 17
+    ÔåÆ Ganadoras (ÔëÑ1.0%):  2
+    ÔåÆ Perdedoras (<0%): 11
+    ÔåÆ PnL neto hipot├®tico: $  -2.58 USDT ($  -45.9 MXN)
+    ÔåÆ PnL medio por trade: $ -0.15 USDT
+
+  Ô£à ZONA DE IMPACTO M├üXIMO: BTC.D entre 56.0%-64.0%
+     Config antigua bloqueaba todas las altcoins; config nueva las permite.
+     PERO: en FUTURES_SHORT (modo actual), el r├®gimen ya bloquea no-FUTURES_SYMS.
+     El fix BTC.D importar├í cuando el mercado regrese a SPOT_BULL.
+
+  Se├▒ales liberadas por fix en hipot. SPOT_BULL ÔÇö por categor├¡a:
+    MIDCAP_ALT    :    6 se├▒ales
+    NARRATIVE     :    9 se├▒ales
+    MEME          :    2 se├▒ales
+
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  G. TOP S├ìMBOLOS POR OPORTUNIDADES/RECHAZOS (7 d├¡as)
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+  S├¡mbolo        Cat           Oport  Falso   Corr  PnL te├│rico
+  ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+  PEPEUSDT       MEME              5      6     10 $     +0.95
+  BTCUSDT        LARGE_CAP         3      1     11 $     +0.96
+  BNBUSDT        LARGE_CAP         2      2     13 $     +0.15
+  ETHUSDT        LARGE_CAP         2      6     18 $     +0.72
+  LINKUSDT       MIDCAP_ALT        2      5     12 $     +0.41
+  INJUSDT        NARRATIVE         2      8     13 $     -0.34
+  SUIUSDT        MIDCAP_ALT        2      4     15 $     +0.09
+  AVAXUSDT       MIDCAP_ALT        1      6     17 $     -0.45
+  DOTUSDT        MIDCAP_ALT        1      4      9 $     +0.12
+  WLDUSDT        NARRATIVE         1     14     18 $     -0.55
+  RENDERUSDT     NARRATIVE         1      0     15 $     -1.22
+  NEARUSDT       NARRATIVE         1      5     17 $     -0.06
+  SOLUSDT        MIDCAP_ALT        1      4     10 $     -0.30
+  TAOUSDT        NARRATIVE         1      3     12 $     -0.40
+  FETUSDT        NARRATIVE         1      2     13 $     -0.31
+
+============================================================================
+  H. DIAGN├ôSTICO EXPERTO MULTI-MODO
+============================================================================
+
+  MERCADO (7 d├¡as): BTC.D=56.0% | Modo dominante: RANGE_SCALP
+  BTC 30d=-18.5% ÔåÆ FUTURES_SHORT activo 99%+ del tiempo (correcto)
+  Tasa de acierto en bloqueos: 34.8%
+  Principal raz├│n de bloqueo (config nueva): RANGE_SIN_BB_LOWER (33 casos)
+
+  ÔöîÔöÇ MODO ACTUAL: FUTURES_SHORT (bear estructural) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÉ
+  Ôöé El sistema opera correctamente: NO compra altcoins long en bear -18% Ôöé
+  Ôöé Solo abre shorts en BTC/ETH/SOL/BNB v├¡a futuros                      Ôöé
+  Ôöé Las 185 se├▒ales FALSO_RECHAZO son correctas: en FUTURES_SHORT        Ôöé
+  Ôöé no debes comprar long aunque el precio suba transitoriamente         Ôöé
+  ÔööÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÿ
+
+  OPORTUNIDADES REALES EN MODO ACTUAL (FUTURES_SHORT):
+    26 se├▒ales en FUTURES_SYMS (BTC/ETH/SOL/BNB) aptas para SHORT
+    ÔåÆ Estas son las ├ÜNICAS entradas v├ílidas en el modo actual
+    Ganancia promedio: +2.25% en 4h ÔåÆ $0.45 USDT por trade
+
+  SE├æALES BLOQUEADAS POR EL MODO (FALSO_RECHAZO en perspectiva):
+    79 se├▒ales de altcoins con precio que subi├│ ÔÇö PERO en FUTURES_SHORT
+    comprar estos alts long ser├¡a CONTRA la estrategia del modo.
+    Ejemplo: ADAUSDT sube 2% cuando BTC baja 18% en 30d = rebote temporal
+    El sistema acert├│ en NO entrar en longs de altcoins en bear.
+
+  DECISIONES CORRECTAS:
+    247 se├▒ales bloqueadas donde el precio baj├│ ÔåÆ capital protegido
+    34.8% de bloqueos acertados (el resto son rebotes temporales que el modo ignor├│ correctamente)
+
+  IMPACTO BTC.D FIX (56.0%ÔåÆ64.0%):
+    BTC.D actual 56.0% est├í ENTRE 56.0%-64.0%
+    ÔåÆ El fix es IRRELEVANTE en modo FUTURES_SHORT (el modo ya restringe todo)
+    ÔåÆ El fix IMPORTAR├ü cuando el mercado regrese a SPOT_BULL:
+      En ese momento BTC.D puede estar a├║n en 57-63%, y la config nueva
+      permitir├í altcoins mientras la vieja los seguir├¡a bloqueando.
+    ÔåÆ Impacto hipot├®tico en SPOT_BULL: ver secci├│n F arriba.
+
+  RECOMENDACIONES:
+    1. MODO ACTUAL CORRECTO: no cambiar nada ÔÇö FUTURES_SHORT es la respuesta
+       adecuada al bear -18.5% 30d. El sistema est├í funcionando bien.
+    2. Prioridad: confirmar la activaci├│n de FUTURES_SHORT (1 ciclo pendiente)
+       y abrir shorts en BTC/ETH cuando el r├®gimen se confirme.
+    3. Para SPOT_BULL futuro: el fix BTC.D 56%ÔåÆ64% liberar├í ~11
+       se├▒ales adicionales por d├¡a cuando el mercado regrese al alza.
+    4. NARRATIVE tokens (RENDER/WLD/FET/TAO) muestran 38 rebotes en 7d ÔÇö
+       monitorear con VolSpike override cuando r├®gimen sea PRESERVATION confirmado.
+
+============================================================================
+  An├ílisis completado.
+============================================================================

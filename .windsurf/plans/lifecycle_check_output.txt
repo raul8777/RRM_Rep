@@ -1,0 +1,115 @@
+=== OPEN POSITIONS ===
+
+ONDOUSDT entry=0.3538 qty=610.50000000 SL=0.3538 TP=0.3631 age_h=0.8
+  metadata keys: ['_meta_updated_at', '_meta_version', 'binance_entry_confirmed', 'binance_validated_at', 'binance_validated_qty', 'btc_price_at_entry', 'config_snapshot_id', 'entry_avg_price', 'entry_commission', 'entry_filled_qty', 'entry_order_id', 'entry_pred_pnl', 'entry_pred_prob', 'entry_profile_label', 'entry_regime', 'entry_type', 'es_escalonamiento', 'escalonamiento_index', 'indicators_at_entry', 'last_peak_price', 'order_id', 'override_used', 'peak_pnl_pct_real', 'peak_reconstruction_ts', 'pnl_prediction', 'profile_at_entry', 'profile_label', 'profit_realization_started_at', 'profit_realization_started_pnl_pct', 'reevaluation_count', 'regime_at_entry', 'regime_mode', 'rsi_at_entry', 'scale_out_done', 'signal_id', 'spot_total_at_open', 'sso_last_reason', 'sso_last_trigger', 'sso_pnl_snapshot', 'strength', 'total_escalonamientos', 'trade_type', 'unified_governance_last_decision', 'vol_spike_at_entry']
+  trailing_active=None
+  last_peak_price=0.3622
+  breakeven_done=None
+  scale_out_done=True
+  tp_extensions=None
+  sso_pnl_snapshot={'ts': '2026-07-15T20:35:08.010481+00:00', 'pnl_pct': 0.007914075749010653}
+  unified_governance_last_decision={"action": "hold", "reason": "unified_governance_profit_hold", "regime": "SPOT_BULL", "profile": "A", "updated_at": "2026-07-15T20:45:50.817519+00:00", "trade_state": "profit", "fng_modifier": 0.85}
+  unified_governance_loss_state keys=[]
+  bounce_gate: fired=None, blocked_count=None
+
+XLMUSDT entry=0.1868 qty=1022.00000000 SL=0.1789 TP=0.1901 age_h=2.2
+  metadata keys: ['_meta_updated_at', '_meta_version', 'binance_entry_confirmed', 'binance_validated_at', 'binance_validated_qty', 'btc_price_at_entry', 'config_snapshot_id', 'entry_avg_price', 'entry_commission', 'entry_filled_qty', 'entry_order_id', 'entry_pred_pnl', 'entry_pred_prob', 'entry_profile_label', 'entry_regime', 'entry_type', 'es_escalonamiento', 'escalonamiento_index', 'indicators_at_entry', 'last_peak_price', 'last_pred_pnl', 'last_pred_prob', 'last_pred_time', 'order_id', 'override_used', 'peak_pnl_pct_real', 'peak_reconstruction_ts', 'pnl_prediction', 'profile_at_entry', 'profile_label', 'profit_realization_started_at', 'profit_realization_started_pnl_pct', 'reevaluation_count', 'regime_at_entry', 'regime_mode', 'rsi_at_entry', 'signal_id', 'spot_total_at_open', 'sso_pnl_snapshot', 'strength', 'total_escalonamientos', 'trade_type', 'unified_governance_last_decision', 'vol_spike_at_entry']
+  trailing_active=None
+  last_peak_price=0.1883
+  breakeven_done=None
+  scale_out_done=None
+  tp_extensions=None
+  sso_pnl_snapshot={'ts': '2026-07-15T20:12:49.476989+00:00', 'pnl_pct': 0.0}
+  unified_governance_last_decision={"action": "hold", "reason": "unified_governance_profit_hold", "regime": "SPOT_BULL", "profile": "A", "updated_at": "2026-07-15T21:08:04.370526+00:00", "trade_state": "profit", "fng_modifier": 0.85}
+  unified_governance_loss_state keys=[]
+  bounce_gate: fired=None, blocked_count=None
+
+UNIUSDT entry=3.6280 qty=188.28000000 SL=3.4737 TP=3.6884 age_h=2.4
+  metadata keys: ['_meta_updated_at', '_meta_version', 'binance_entry_confirmed', 'binance_validated_at', 'binance_validated_qty', 'btc_price_at_entry', 'config_snapshot_id', 'entry_avg_price', 'entry_commission', 'entry_filled_qty', 'entry_order_id', 'entry_pred_pnl', 'entry_pred_prob', 'entry_profile_label', 'entry_regime', 'entry_type', 'es_escalonamiento', 'escalonamiento_index', 'indicators_at_entry', 'last_peak_price', 'last_pred_pnl', 'last_pred_prob', 'last_pred_time', 'order_id', 'override_used', 'peak_pnl_pct_real', 'peak_reconstruction_ts', 'pnl_prediction', 'profile_at_entry', 'profile_label', 'reevaluation_count', 'regime_at_entry', 'regime_mode', 'rsi_at_entry', 'signal_id', 'spot_total_at_open', 'sso_pnl_snapshot', 'strength', 'total_escalonamientos', 'trade_type', 'vol_spike_at_entry']
+  trailing_active=None
+  last_peak_price=3.658
+  breakeven_done=None
+  scale_out_done=None
+  tp_extensions=None
+  sso_pnl_snapshot={'ts': '2026-07-15T21:08:03.365767+00:00', 'pnl_pct': -0.0011025358324145544}
+  unified_governance_last_decision=null
+  unified_governance_loss_state keys=[]
+  bounce_gate: fired=None, blocked_count=None
+
+ETHUSDT entry=1932.1400 qty=0.15320000 SL=1849.9564 TP=1953.5036 age_h=2.6
+  metadata keys: ['_meta_updated_at', '_meta_version', 'binance_entry_confirmed', 'binance_validated_at', 'binance_validated_qty', 'btc_price_at_entry', 'config_snapshot_id', 'entry_avg_price', 'entry_commission', 'entry_filled_qty', 'entry_order_id', 'entry_pred_pnl', 'entry_pred_prob', 'entry_profile_label', 'entry_regime', 'entry_type', 'es_escalonamiento', 'escalonamiento_index', 'indicators_at_entry', 'last_peak_price', 'last_pred_pnl', 'last_pred_prob', 'last_pred_time', 'order_id', 'override_used', 'peak_pnl_pct_real', 'peak_reconstruction_ts', 'pnl_prediction', 'profile_at_entry', 'profile_label', 'reevaluation_count', 'regime_at_entry', 'regime_mode', 'rsi_at_entry', 'signal_id', 'spot_total_at_open', 'sso_pnl_snapshot', 'strength', 'total_escalonamientos', 'trade_type', 'vol_spike_at_entry']
+  trailing_active=None
+  last_peak_price=1935.34
+  breakeven_done=None
+  scale_out_done=None
+  tp_extensions=None
+  sso_pnl_snapshot={'ts': '2026-07-15T21:08:00.353064+00:00', 'pnl_pct': -0.0038299502106473086}
+  unified_governance_last_decision=null
+  unified_governance_loss_state keys=[]
+  bounce_gate: fired=None, blocked_count=None
+
+LINKUSDT entry=8.5960 qty=0E-8 SL=8.2951 TP=8.9153 age_h=7.5
+  metadata keys: ['_meta_updated_at', '_meta_version', 'binance_entry_confirmed', 'binance_validated_at', 'binance_validated_qty', 'bounce_entry', 'btc_price_at_entry', 'config_snapshot_id', 'current_profile_label', 'current_regime_mode', 'entry_avg_price', 'entry_commission', 'entry_filled_qty', 'entry_order_id', 'entry_pred_pnl', 'entry_pred_prob', 'entry_regime', 'entry_type', 'es_escalonamiento', 'escalonamiento_index', 'indicators_at_entry', 'last_peak_price', 'last_pred_pnl', 'last_pred_prob', 'last_pred_time', 'last_transition_switch_id', 'order_id', 'override_used', 'partial_close', 'partial_close_time', 'partial_qty_closed', 'partial_qty_remaining', 'peak_pnl_pct_real', 'peak_reconstruction_ts', 'pnl_prediction', 'profile_at_entry', 'reevaluation_count', 'regime_at_entry', 'rsi_at_entry', 'signal_id', 'spot_total_at_open', 'sso_pnl_snapshot', 'strength', 'total_escalonamientos', 'trade_type', 'unified_governance_last_decision', 'unified_governance_loss_state', 'vol_spike_at_entry']
+  trailing_active=None
+  last_peak_price=8.62
+  breakeven_done=None
+  scale_out_done=None
+  tp_extensions=None
+  sso_pnl_snapshot={'ts': '2026-07-15T20:12:45.108234+00:00', 'pnl_pct': -0.010004653327128932}
+  unified_governance_last_decision={"action": "watchdog", "reason": "unified_governance_near_sl_hold", "regime": "SPOT_BULL", "profile": "A", "priority": 45, "updated_at": "2026-07-15T13:55:39.436204+00:00", "trade_state": "loss"}
+  unified_governance_loss_state keys=['last_eval_at', 'peak_loss_pct', 'regime_applied', 'watchdog_level', 'entered_loss_at', 'profile_applied', 'regime_esc_mult', 'regime_min_mult', 'last_eval_reason', 'adverse_signal_cycles']
+  bounce_gate: fired=None, blocked_count=None
+
+=== CLOSED SINCE FIX by reason ===
+('profit_realization_supervisor_full', 1, Decimal('2.46'), Decimal('2.4561'), Decimal('0.3069'))
+('prs_peak_protection', 1, Decimal('2.19'), Decimal('2.1863'), Decimal('0.4882'))
+('unified_governance_loss_defensive_close', 1, Decimal('-11.19'), Decimal('-11.1934'), Decimal('-1.4714'))
+
+=== AUDIT EVENTS SINCE FIX ===
+('commission_rate_change', 'system', 769)
+('bnb_status_snapshot', 'system', 384)
+('health_recheck_run', 'system', 167)
+('signal_decision', 'system', 106)
+('unified_governance_decision', 'spot', 72)
+('regime_profile_selector_decision', 'system', 24)
+('basket_reset_triggered', 'system', 24)
+('smart_total_mode_selector_decision', 'system', 24)
+('soft_supervisor_skip_unconfirmed', 'spot', 24)
+('profile_screener_bridge', 'system', 24)
+('screener_selection', 'system', 24)
+('profit_realization_supervisor_decision', 'spot', 13)
+('signal_decision', 'spot', 12)
+('sso_close', 'spot', 9)
+('bounce_gate_fired', 'spot', 9)
+('profit_predexit_decision', 'spot', 7)
+('open', 'spot', 5)
+('unified_governance_close_triggered', 'spot', 3)
+('close', 'spot', 3)
+('emergency_sl_remediate', 'spot', 3)
+('config_apply', 'system', 2)
+('sso_partial_close', 'spot', 1)
+('regime_params_applied', 'system', 1)
+('bnb_buy_success', 'system', 1)
+('bnb_buy_attempt', 'system', 1)
+('kelly_config_change', 'system', 1)
+('regime_profiles_updated', 'system', 1)
+
+--- sso_close last 3 ---
+2026-07-15 21:08:01.380146+00:00 LINKUSDT sso_close {"ts": "2026-07-15T21:08:01.380013+00:00", "reason": "sso_bounce_rescue", "regime": "SPOT_BULL", "pnl_pct": -0.8492, "profile": "A", "trigger": "SSO-6", "pnl_usdt": 0.0, "close_pct": 1.0, "diagnosis": "SSO-6:FIRE(sso_bounce_rescue)"}
+2026-07-15 20:56:55.621340+00:00 LINKUSDT sso_close {"ts": "2026-07-15T20:56:55.621227+00:00", "reason": "sso_bounce_rescue", "regime": "SPOT_BULL", "pnl_pct": -0.8958, "profile": "A", "trigger": "SSO-6", "pnl_usdt": 0.0, "close_pct": 1.0, "diagnosis": "SSO-6:FIRE(sso_bounce_rescue)"}
+2026-07-15 20:45:48.893837+00:00 LINKUSDT sso_close {"ts": "2026-07-15T20:45:48.893704+00:00", "reason": "sso_bounce_rescue", "regime": "SPOT_BULL", "pnl_pct": -0.7678, "profile": "A", "trigger": "SSO-6", "pnl_usdt": 0.0, "close_pct": 1.0, "diagnosis": "SSO-6:FIRE(sso_bounce_rescue)"}
+
+--- unified_governance_close_triggered last 3 ---
+2026-07-15 20:12:51.782613+00:00 ZECUSDT unified_governance_close_triggered {"side": "BUY", "action": "close", "detail": "held_min=317; min_age=99; esc_age=312; pnl_pct=-1.47; near_sl=False; det=False; adverse_cycles=0/2; regime_scale=(1.10,1.30)", "reason": "unified_governance_loss_defensive_close", "pnl_pct": -0.0147144001
+2026-07-15 19:08:22.627769+00:00 ONDOUSDT unified_governance_close_triggered {"side": "BUY", "action": "close", "detail": "SPOT peak=0.76% dropped to pnl=0.49% (< 70% of peak=0.53%) regime=SPOT_BULL score=56 | F&G=25 fear-urgency modifier=0.85", "reason": "prs_peak_protection", "pnl_pct": 0.004882010012772832, "pnl_usdt": 2.1
+2026-07-15 18:13:53.970442+00:00 AVAXUSDT unified_governance_close_triggered {"side": "BUY", "action": "close", "detail": "SPOT held 247m in profit; pnl=0.31% peak=0.32% giveback=0.01% >= 0.79% | score=63 | F&G=25 fear-urgency modifier=0.85", "reason": "profit_realization_supervisor_full", "pnl_pct": 0.003069419195642469, "pn
+
+--- unified_governance_decision last 3 ---
+2026-07-15 21:08:04.374970+00:00 XLMUSDT unified_governance_decision {"side": "BUY", "action": "hold", "detail": "", "reason": "unified_governance_profit_hold", "pnl_pct": 0.0037792205316023657, "pnl_usdt": 0.7214894799999949, "priority": 30, "close_pct": 0.0, "diagnostics": "sso_advisory=none(close=False,pct=0.00); p
+2026-07-15 21:08:03.375148+00:00 UNIUSDT unified_governance_decision {"side": "BUY", "action": "hold", "detail": "", "reason": "unified_governance_loss_below_min_usdt", "pnl_pct": -0.0016032759508756704, "pnl_usdt": -1.0951654800000008, "priority": 20, "close_pct": 0.0, "diagnostics": "pnl_usdt=-1.0952 < min=7.50", "r
+2026-07-15 21:08:00.361962+00:00 ETHUSDT unified_governance_decision {"side": "BUY", "action": "hold", "detail": "", "reason": "unified_governance_loss_below_min_usdt", "pnl_pct": -0.004329325657955683, "pnl_usdt": -1.2814970540000141, "priority": 20, "close_pct": 0.0, "diagnostics": "pnl_usdt=-1.2815 < min=7.50", "re
+
+--- bounce_gate_fired last 3 ---
+2026-07-15 21:08:01.374674+00:00 LINKUSDT bounce_gate_fired {"side": "BUY", "expired": false, "final_ev": 0.0, "pnl_usdt": 0.0, "final_signal": "SELL", "rescue_reason": "sso_bounce_rescue", "gate_held_minutes": 0, "total_blocks_before": 0}
+2026-07-15 20:56:55.616238+00:00 LINKUSDT bounce_gate_fired {"side": "BUY", "expired": false, "final_ev": 0.0, "pnl_usdt": 0.0, "final_signal": "SELL", "rescue_reason": "sso_bounce_rescue", "gate_held_minutes": 0, "total_blocks_before": 0}
+2026-07-15 20:45:48.888718+00:00 LINKUSDT bounce_gate_fired {"side": "BUY", "expired": false, "final_ev": 0.0, "pnl_usdt": 0.0, "final_signal": "SELL", "rescue_reason": "sso_bounce_rescue", "gate_held_minutes": 0, "total_blocks_before": 0}

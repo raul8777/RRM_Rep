@@ -500,7 +500,8 @@ class AutonomousSignalGenerator:
             regime_mode: Active market regime — adjusts ranking weights:
                 FUTURES_SHORT → rank by RSI (high = overbought = better short) + vol spike
                 RANGE_SCALP   → rank by bb_lower_touch + RSI low
-                default       → rank by strength (original behavior)
+                PRESERVATION  → defensive ranking (quality/confirmation first)
+                SPOT_BULL     → trend-following ranking (strength first)
             settings: Optional settings object — used to read min_signal_strength.
             profile_label: Active profile A/B/C — adjusts effective min_strength:
                 A (aggressive) → -0.05 (more permissive)
@@ -543,6 +544,9 @@ class AutonomousSignalGenerator:
                 s for s in all_signals
                 if s['strength'] >= (min_strength if s['signal'] == 'BUY' else _short_min_strength)
             ]
+            for _sig in buy_signals:
+                _sig['expected_side'] = 'SHORT'
+                _sig['trade_type'] = 'futures'
             logger.info(
                 f"[FUTURES_SHORT] Short candidates: {len(buy_signals)} "
                 f"(BUY+SELL+HOLD with strength>={_short_min_strength})"
@@ -552,29 +556,43 @@ class AutonomousSignalGenerator:
                 s for s in all_signals
                 if s['signal'] == 'BUY' and s['strength'] >= min_strength
             ]
+            for _sig in buy_signals:
+                _sig['expected_side'] = 'LONG'
+                _sig['trade_type'] = 'spot'
         logger.info(f"Buy signals above threshold {min_strength}: {len(buy_signals)}")
 
-        # ── Regime-aware ranking ─────────────────────────────────────────────
-        if regime_mode == 'FUTURES_SHORT':
-            # Rank by RSI descending (overbought = best short candidate)
-            # SELL signals get RSI bonus (+15) to rank above neutral BUY signals
-            def _short_score(s):
-                rsi = float(s.get('rsi', 50) or 50)
-                vol_spike = float(s.get('vol_spike', 1.0) or 1.0)
-                sell_bonus = 15.0 if s.get('signal') == 'SELL' else 0.0
-                return (rsi + sell_bonus) * 0.7 + min(vol_spike, 3.0) * 10 * 0.3
-            buy_signals.sort(key=_short_score, reverse=True)
-            logger.info(f"[Regime] FUTURES_SHORT ranking applied (RSI+SELL-weighted)")
-        elif regime_mode == 'RANGE_SCALP':
-            # s70: rank by bb_lower_touch (strict) > bb_near_lower (wider tolerance), then RSI ascending
-            def _scalp_score(s):
-                bb_touch = 2 if s.get('bb_lower_touch') else (1 if s.get('bb_near_lower') else 0)
-                rsi = float(s.get('rsi', 50) or 50)
-                return bb_touch * 100 + (100 - rsi)
-            buy_signals.sort(key=_scalp_score, reverse=True)
-            logger.info(f"[Regime] RANGE_SCALP ranking applied (BB-lower + low RSI)")
-        else:
-            buy_signals.sort(key=lambda s: s.get('strength', 0), reverse=True)
+        def _regime_signal_score(signal: Dict, regime: str) -> float:
+            _regime = str(regime or 'SPOT_BULL').strip().upper()
+            _strength = float(signal.get('strength', 0.0) or 0.0)
+            _rsi = float(signal.get('rsi', 50.0) or 50.0)
+            _vol_spike = float(signal.get('vol_spike', 1.0) or 1.0)
+            _trend = str(signal.get('higher_tf_trend', 'FLAT') or 'FLAT').strip().upper()
+
+            if _regime == 'FUTURES_SHORT':
+                # Overbought bounces with volume are preferred short setups.
+                _sell_bonus = 15.0 if signal.get('signal') == 'SELL' else 0.0
+                return (_rsi + _sell_bonus) * 0.7 + min(_vol_spike, 3.0) * 10.0 * 0.3
+
+            if _regime == 'RANGE_SCALP':
+                # Preserve historical behavior: BB lower touch priority then low RSI.
+                _bb_touch = 2 if signal.get('bb_lower_touch') else (1 if signal.get('bb_near_lower') else 0)
+                return _bb_touch * 100.0 + (100.0 - _rsi) + min(_vol_spike, 2.0)
+
+            if _regime == 'PRESERVATION':
+                # Defensive ranking: require quality/confirmation over pure strength.
+                _volume_confirmed = 1.0 if signal.get('volume_confirmed') else 0.0
+                _trend_bonus = 1.0 if _trend == 'UP' else (0.3 if _trend == 'FLAT' else -0.8)
+                _rsi_distance = abs(_rsi - 50.0)
+                _rsi_penalty = min(20.0, _rsi_distance) / 50.0
+                return _strength * 2.0 + _volume_confirmed * 1.2 + _trend_bonus - _rsi_penalty
+
+            # SPOT_BULL and unknown: trend-following, strength-first.
+            _trend_bonus = 0.05 if _trend == 'UP' else (-0.05 if _trend == 'DOWN' else 0.0)
+            return _strength * 2.0 + min(_vol_spike, 2.5) * 0.05 + _trend_bonus
+
+        _regime = str(regime_mode or 'SPOT_BULL').strip().upper() or 'SPOT_BULL'
+        buy_signals.sort(key=lambda s: _regime_signal_score(s, _regime), reverse=True)
+        logger.info(f"[Regime] {_regime} ranking applied (contract-v1)")
 
         return buy_signals[:limit]
 

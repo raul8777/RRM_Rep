@@ -64,6 +64,11 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'trailing_stop_activation_pct': 2.0,
     'trailing_stop_distance_pct': 1.0,
 
+    # Anti-ghost / reconciliation
+    'spot_dust_cleanup_min_notional_usdt': 5.0,
+    'spot_reconcile_auto_fix_enabled': True,
+    'spot_reconcile_min_value_usdt': 5.0,
+
     # Kelly position sizing (Wolf Hunter s63)
     'kelly_base_usdt': 150.0,          # concentrated: base digna para $5,100
     'kelly_max_usdt': 1500.0,          # concentrated: cap por posición elevado
@@ -84,6 +89,10 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'entry_quality_min_vol_spike': 1.2,  # concentrated: volumen confirma dirección
     'entry_quality_min_strength': 0.40,
     'entry_quality_max_failures': 0,  # concentrated: todos los gates deben pasar
+    'entry_quality_vol_spike_min_spot_bull': 0.85,
+    'entry_quality_vol_spike_floor_spot_bull': 0.70,
+    'entry_quality_rsi_min_spot_bull': 33.0,
+    'entry_quality_rsi_max_spot_bull': 68.0,
     'entry_quality_vol_spike_min_range_scalp': 0.35,  # s72: lateral = low vol structural; lower floor
     'sso_target_contribution_pct_range_scalp': 0.05,  # s73 C2: 5% of half-target — achievable at TP=1.8%
 
@@ -243,6 +252,9 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'spot_bull_btc_4h_up_required': True,
     'spot_bull_pnl_boost_large_cap': 0.0,
     'spot_bull_pnl_boost_midcap': -0.10,
+    'spot_bull_pnl_boost_prob_large_cap': -0.02,
+    'spot_bull_pnl_boost_prob_midcap': -0.04,
+    'spot_ignore_bnb_when_commission_enabled': True,
     'max_total_exposure_spot_bull_fear_fng_threshold': 40,
     'max_total_exposure_spot_bull_fear': 0.95,
 
@@ -464,6 +476,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'bnb_min_balance_usd': 5.0,
     'bnb_extra_buffer_usd': 10.0,
     'bnb_buffer_days': 7,
+    'bnb_max_reserve_usd': 100.0,
 
     # Trading symbol lists
     'analysis_symbols': [],

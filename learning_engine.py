@@ -259,6 +259,7 @@ class LearningEngine:
     _CORRUPTED_REASONS = frozenset({
         'portfolio_rebalancing', 'manual_rebalance',
         'prediction_reallocation', 'prediction_realloc',
+        'manual_close', 'manual_close_ghost',
     })
 
     def _load_closed_positions(self, lookback_days: int, min_version: str = 'v2.0_current',

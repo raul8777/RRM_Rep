@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-08T19:51:24.802640+00:00",
+  "generated_at": "2026-07-14T22:39:28.096317+00:00",
   "python_executable": "C:\\Users\\raul8\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
   "overall": "PASS",
   "results": [
@@ -7,18 +7,18 @@
       "suite": "tests/test_system_health.py",
       "exit_code": 0,
       "status": "PASS",
-      "started_at": "2026-07-08T19:50:28.148177+00:00",
-      "ended_at": "2026-07-08T19:50:44.314332+00:00",
+      "started_at": "2026-07-14T22:38:30.287558+00:00",
+      "ended_at": "2026-07-14T22:38:46.730602+00:00",
       "output_file": "Dev/validation_system_health_utf8.txt",
       "tail": [
         "============================= test session starts =============================",
         "platform win32 -- Python 3.12.10, pytest-8.4.2, pluggy-1.6.0",
         "rootdir: S:\\Tools\\AI\\crypto-agent",
         "plugins: anyio-4.14.1",
-        "collected 127 items / 12 deselected / 115 selected",
+        "collected 128 items / 12 deselected / 116 selected",
         "",
-        "tests\\test_system_health.py ............................................ [ 38%]",
-        ".......................................................................  [100%]",
+        "tests\\test_system_health.py ............................................ [ 37%]",
+        "........................................................................ [100%]",
         "",
         "============================== warnings summary ===============================",
         "tests/test_system_health.py::TestCat3_FuturesClientCore::test_sl_hit_closes_short",
@@ -26,19 +26,19 @@
         "    import cgi",
         "",
         "tests/test_system_health.py::TestCat6_PositionManager::test_position_summary_values",
-        "  S:\\Tools\\AI\\crypto-agent\\tests\\..\\position_manager.py:966: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).",
+        "  S:\\Tools\\AI\\crypto-agent\\tests\\..\\position_manager.py:1050: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).",
         "    \"timestamp\": datetime.utcnow().isoformat()",
         "",
         "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
-        "=============== 115 passed, 12 deselected, 2 warnings in 15.68s ==============="
+        "=============== 116 passed, 12 deselected, 2 warnings in 15.99s ==============="
       ]
     },
     {
       "suite": "tests/test_futures_smart_exits.py",
       "exit_code": 0,
       "status": "PASS",
-      "started_at": "2026-07-08T19:50:44.315336+00:00",
-      "ended_at": "2026-07-08T19:51:24.144675+00:00",
+      "started_at": "2026-07-14T22:38:46.731106+00:00",
+      "ended_at": "2026-07-14T22:39:27.404184+00:00",
       "output_file": "Dev/validation_futures_smart_exits_utf8.txt",
       "tail": [
         "============================= test session starts =============================",
@@ -56,15 +56,15 @@
         "    import cgi",
         "",
         "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
-        "======================= 98 passed, 1 warning in 39.27s ========================"
+        "======================= 98 passed, 1 warning in 40.15s ========================"
       ]
     },
     {
       "suite": "tests/test_portfolio_manager.py",
       "exit_code": 0,
       "status": "PASS",
-      "started_at": "2026-07-08T19:51:24.145675+00:00",
-      "ended_at": "2026-07-08T19:51:24.801642+00:00",
+      "started_at": "2026-07-14T22:39:27.405150+00:00",
+      "ended_at": "2026-07-14T22:39:28.096317+00:00",
       "output_file": "Dev/validation_portfolio_manager_utf8.txt",
       "tail": [
         "============================= test session starts =============================",
@@ -77,11 +77,11 @@
         "",
         "============================== warnings summary ===============================",
         "tests/test_portfolio_manager.py::TestPortfolioManager::test_get_total_balance_respects_bnb_reserve",
-        "  S:\\Tools\\AI\\crypto-agent\\portfolio_manager.py:144: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).",
+        "  S:\\Tools\\AI\\crypto-agent\\portfolio_manager.py:145: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).",
         "    \"timestamp\": datetime.utcnow().isoformat()",
         "",
         "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
-        "======================== 10 passed, 1 warning in 0.25s ========================"
+        "======================== 10 passed, 1 warning in 0.26s ========================"
       ]
     }
   ]

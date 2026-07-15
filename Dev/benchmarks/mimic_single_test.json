@@ -1,0 +1,15 @@
+{
+  "start": "2026-06-28T00:00:00+00:00",
+  "end": "2026-06-30T00:00:00+00:00",
+  "cycles": 2,
+  "final_balance": {
+    "USDT": 2864.76734253,
+    "BNB": 0.081
+  },
+  "transitions": [],
+  "regime_distribution": {
+    "FUTURES_SHORT": 2
+  },
+  "pnl_pct": -1.55,
+  "pnl_usdt": -45.23
+}

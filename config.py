@@ -278,6 +278,7 @@ class Settings(BaseSettings):
     entry_quality_min_strength: float = Field(default=0.40)  # jul07: 0.35→0.40
     entry_quality_max_failures: int = Field(default=0)  # concentrated: todos los gates deben pasar
     entry_quality_vol_spike_min_spot_bull: float = Field(default=0.85)
+    entry_quality_vol_spike_floor_spot_bull: float = Field(default=0.70)
     entry_quality_rsi_min_spot_bull: float = Field(default=33.0)
     entry_quality_rsi_max_spot_bull: float = Field(default=68.0)
     entry_quality_breakout_min_vol_spot_bull: float = Field(default=1.20)
@@ -614,6 +615,11 @@ class Settings(BaseSettings):
     futures_kelly_max_usdt: float = Field(default=1500.0)    # concentrated: cap por short elevado
     futures_kelly_max_pct_liquid: float = Field(default=0.85)  # concentrated: consistente con SPOT
 
+    # Anti-ghost / reconciliation controls
+    spot_dust_cleanup_min_notional_usdt: float = Field(default=5.0)
+    spot_reconcile_auto_fix_enabled: bool = Field(default=True)
+    spot_reconcile_min_value_usdt: float = Field(default=5.0)
+
     # â”€â”€ Dynamic pair screener â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     screener_enabled: bool = Field(default=True)
     screener_min_vol_usdt: float = Field(default=10_000_000)   # $10M spot min
@@ -711,6 +717,7 @@ class Settings(BaseSettings):
     bnb_buffer_days: int = Field(default=7)
     bnb_min_balance_usd: float = Field(default=5.0)
     bnb_extra_buffer_usd: float = Field(default=10.0)
+    bnb_max_reserve_usd: float = Field(default=100.0)  # max USD worth of BNB to hold as commission reserve; excess is sold to USDT
     futures_max_escalamientos: int = Field(default=2)  # max entries per symbol (escalamiento cap)
 
     # ── Capital Rotator (SSO-6) ──────────────────────────────────────────────

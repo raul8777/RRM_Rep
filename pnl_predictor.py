@@ -70,6 +70,7 @@ class PnLPredictor:
         cycle_duration_minutes: int = 5,
         position_size_usdt: float = 15.0,
         trade_type: str = 'spot',
+        trade_side: str = 'LONG',
         settings = None,
     ) -> Dict:
         """
@@ -82,6 +83,7 @@ class PnLPredictor:
             cycle_duration_minutes: Duration of trading cycle in minutes
             position_size_usdt: Size of position in USDT
             trade_type: 'spot' or 'futures' — used to subtract Binance fees
+            trade_side: 'LONG' or 'SHORT' — direction-aware scoring/EV
             settings: Settings object for commission rates
 
         Returns:
@@ -95,8 +97,12 @@ class PnLPredictor:
             _weight_items  = {k: weights.get(k) for k in _DEFAULT_WEIGHTS}
             is_default = (_weight_items == _default_items)
 
+            _side = str(trade_side or 'LONG').strip().upper()
+            if _side not in ('LONG', 'SHORT'):
+                _side = 'LONG'
+
             # Calculate success probability based on indicators + learned weights
-            success_probability = self._calculate_success_probability(indicators, weights)
+            success_probability = self._calculate_success_probability(indicators, weights, trade_side=_side)
 
             # Estimate price range for the cycle
             price_range = self._estimate_price_range(current_price, indicators, cycle_duration_minutes)
@@ -106,7 +112,8 @@ class PnLPredictor:
                 current_price,
                 price_range,
                 success_probability,
-                position_size_usdt
+                position_size_usdt,
+                trade_side=_side,
             )
 
             # Subtract Binance round-trip commission so expected_pnl is net
@@ -136,6 +143,7 @@ class PnLPredictor:
                 'prediction_time': datetime.utcnow().isoformat(),
                 'cycle_duration_minutes': cycle_duration_minutes,
                 'position_size_usdt': position_size_usdt,
+                'trade_side': _side,
                 'bootstrap_mode': is_default,
             }
             
@@ -161,10 +169,11 @@ class PnLPredictor:
                 'prediction_time': datetime.utcnow().isoformat(),
                 'cycle_duration_minutes': cycle_duration_minutes,
                 'position_size_usdt': position_size_usdt,
+                'trade_side': str(trade_side or 'LONG').strip().upper() or 'LONG',
                 'error': str(e)
             }
     
-    def _calculate_success_probability(self, indicators: Dict, weights: Dict = None) -> float:
+    def _calculate_success_probability(self, indicators: Dict, weights: Dict = None, trade_side: str = 'LONG') -> float:
         """
         Calculate success probability using adaptive indicator weights.
 
@@ -194,19 +203,30 @@ class PnLPredictor:
                 return default
 
         probability = 0.5  # Base probability
+        _is_short = str(trade_side or 'LONG').strip().upper() == 'SHORT'
 
         # ── RSI analysis ────────────────────────────────────────────────────
         rsi = indicators.get('rsi', {})
         if rsi:
             rsi_value = _num(rsi.get('value', 50), 50.0)
-            if rsi_value < 30:
-                probability += w_rsi
-            elif rsi_value < 40:
-                probability += w_rsi * 0.67
-            elif rsi_value > 70:
-                probability -= w_rsi
-            elif rsi_value > 60:
-                probability -= w_rsi * 0.67
+            if _is_short:
+                if rsi_value > 70:
+                    probability += w_rsi
+                elif rsi_value > 60:
+                    probability += w_rsi * 0.67
+                elif rsi_value < 30:
+                    probability -= w_rsi
+                elif rsi_value < 40:
+                    probability -= w_rsi * 0.67
+            else:
+                if rsi_value < 30:
+                    probability += w_rsi
+                elif rsi_value < 40:
+                    probability += w_rsi * 0.67
+                elif rsi_value > 70:
+                    probability -= w_rsi
+                elif rsi_value > 60:
+                    probability -= w_rsi * 0.67
 
         # ── MACD analysis ───────────────────────────────────────────────────
         macd = indicators.get('macd', {})
@@ -214,21 +234,29 @@ class PnLPredictor:
             macd_value = _num(macd.get('macd', 0), 0.0)
             signal_value = _num(macd.get('signal', 0), 0.0)
             histogram = _num(macd.get('histogram', 0), 0.0)
-            if macd_value > signal_value:
-                probability += w_macd
-            if histogram > 0:
-                probability += w_macd * 0.33
-            elif histogram < 0:
-                probability -= w_macd * 0.33
+            if _is_short:
+                if macd_value < signal_value:
+                    probability += w_macd
+                if histogram < 0:
+                    probability += w_macd * 0.33
+                elif histogram > 0:
+                    probability -= w_macd * 0.33
+            else:
+                if macd_value > signal_value:
+                    probability += w_macd
+                if histogram > 0:
+                    probability += w_macd * 0.33
+                elif histogram < 0:
+                    probability -= w_macd * 0.33
 
         # ── EMA vs SMA ──────────────────────────────────────────────────────
         sma = indicators.get('sma', {})
         ema = indicators.get('ema', {})
         if sma and ema:
             if _num(ema.get('value', 0), 0.0) > _num(sma.get('value', 0), 0.0):
-                probability += w_ema
+                probability += (-w_ema if _is_short else w_ema)
             else:
-                probability -= w_ema * 0.5
+                probability += (w_ema if _is_short else -w_ema * 0.5)
 
         # ── Bollinger Bands ─────────────────────────────────────────────────
         bollinger = indicators.get('bollinger_bands', {})
@@ -238,10 +266,16 @@ class PnLPredictor:
             middle = _num(bollinger.get('middle', 0), 0.0)
             if lower > 0 and middle > 0 and upper > lower:
                 position_in_band = (middle - lower) / (upper - lower)
-                if position_in_band < 0.2:
-                    probability += w_bb
-                elif position_in_band > 0.8:
-                    probability -= w_bb
+                if _is_short:
+                    if position_in_band > 0.8:
+                        probability += w_bb
+                    elif position_in_band < 0.2:
+                        probability -= w_bb
+                else:
+                    if position_in_band < 0.2:
+                        probability += w_bb
+                    elif position_in_band > 0.8:
+                        probability -= w_bb
 
         # ── Vol Spike (strongest validated predictor) ───────────────────────
         vol_spike_d = indicators.get('vol_spike', {})
@@ -278,18 +312,24 @@ class PnLPredictor:
                 except Exception:
                     trend = 0.0
             if trend > 0:                        # EMA9 > EMA21 on 4h → bullish
-                probability += w_trend_4h
+                probability += (-w_trend_4h if _is_short else w_trend_4h)
             elif trend < 0:                      # bearish 4h context
-                probability -= w_trend_4h * 0.80
+                probability += (w_trend_4h if _is_short else -w_trend_4h * 0.80)
 
         # ── Weekly range position (buy at support, not resistance) ────────────
         wr_d = indicators.get('weekly_range', {})
         if wr_d:
             wr = _num(wr_d.get('value', 0.5), 0.5)
-            if wr <= 0.30:
-                probability += w_weekly_rng         # near weekly support
-            elif wr >= 0.85:
-                probability -= w_weekly_rng * 0.90  # near weekly resistance
+            if _is_short:
+                if wr >= 0.85:
+                    probability += w_weekly_rng      # near weekly resistance favors short
+                elif wr <= 0.30:
+                    probability -= w_weekly_rng * 0.90
+            else:
+                if wr <= 0.30:
+                    probability += w_weekly_rng         # near weekly support
+                elif wr >= 0.85:
+                    probability -= w_weekly_rng * 0.90  # near weekly resistance
 
         return max(0.0, min(1.0, probability))
     
@@ -346,7 +386,8 @@ class PnLPredictor:
         current_price: float,
         price_range: Dict,
         success_probability: float,
-        position_size_usdt: float
+        position_size_usdt: float,
+        trade_side: str = 'LONG',
     ) -> float:
         """
         Calculate expected PnL.
@@ -362,19 +403,17 @@ class PnLPredictor:
         """
         # Calculate quantity
         quantity = position_size_usdt / current_price
+        _is_short = str(trade_side or 'LONG').strip().upper() == 'SHORT'
         
-        # Expected price if successful (weighted towards max of range)
-        expected_exit_price = current_price + (price_range['max'] - current_price) * success_probability
-        
-        # Expected PnL
-        expected_pnl = (expected_exit_price - current_price) * quantity
-        
-        # Apply success probability
-        expected_pnl = expected_pnl * success_probability
-        
-        # Subtract expected loss (failure case)
-        expected_loss = (current_price - price_range['min']) * quantity * (1 - success_probability)
-        expected_pnl = expected_pnl - expected_loss
+        if _is_short:
+            # SHORT wins when price falls.
+            expected_gain = (current_price - price_range['min']) * quantity * success_probability
+            expected_loss = (price_range['max'] - current_price) * quantity * (1 - success_probability)
+        else:
+            # LONG wins when price rises.
+            expected_gain = (price_range['max'] - current_price) * quantity * success_probability
+            expected_loss = (current_price - price_range['min']) * quantity * (1 - success_probability)
+        expected_pnl = expected_gain - expected_loss
         
         return expected_pnl
     
