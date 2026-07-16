@@ -1,3 +1,28 @@
+2026-07-16 ~05:30 UTC — Predictive Profile Calibration Implementation Phase 1-4 Complete
+==========================================================================================================
+Phase 1: Enrichment & score calibration
+- analyze_signal_peak_outcomes.py computes peak_12h, atr_pct, category_factor, ticker momentum,
+  symbol_quality_score and z-scored peak_quality from peak_quality_stats.json.
+- generate_peak_calibration_tables.py outputs peak_calibration_tables.md + summary.json.
+
+Phase 2: Lifecycle integration
+- lifecycle/base.py: added min_peak_quality to ProfileThresholds and profile_exit_policies.
+- lifecycle/profile_classifier.py: A/B/C/REJECT deterministic classification uses min_peak_quality.
+- lifecycle/runner.py: per-profile exit policy selection.
+- simulation/mimic_lifecycle_adapter.py: z-score peak_quality model; config builders expose
+  A/B/C thresholds, sizing and per-profile exit policies.
+
+Phase 3: Production bridge
+- run_trades.py: added _assign_kelly_profile and tiered Kelly overrides in spot sizing loop.
+
+Phase 4: Validation
+- lifecycle tests 16/16 passed.
+- run_trades import OK.
+- Predictive sweep (100 cycles, 10 workers, 12 windows) completed without errors.
+- Mixed initial results: not yet meeting >80% WR / PF > 1.1; thresholds/exit policies need tuning.
+
+Next: tune A/B/C thresholds and per-profile exits, re-run 1000-cycle sweep.
+
 2026-07-14 05:24 UTC-6 — [s78] FIX: RANGE_SCALP BB gate skip when bb_pos=None + vol_spike floor 0.35→0.20
 ==========================================================================================================
 INICIO MONITOREO s78:

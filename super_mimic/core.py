@@ -22,6 +22,9 @@ class DesignSpec:
     max_cycles: Optional[int] = None
     max_workers: int = 1
     param_grid: Optional[Dict[str, List[Any]]] = None
+    param_grid_file: Optional[str] = None
+    lifecycle: bool = False
+    max_drawdown_stop_pct: Optional[float] = 15.0
     output_dir: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:

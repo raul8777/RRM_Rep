@@ -77,6 +77,7 @@ class SizingPolicy:
     kelly_max_pct: float
     conviction_max_pct: float
     category_caps: Dict[str, float]
+    max_total_positions: int = 10
     fng_capital_multiplier: bool = True
 
 
@@ -118,20 +119,46 @@ class ExitPolicy:
 
 
 @dataclass(frozen=True)
+class ProfileThresholds:
+    """Feature thresholds used by the per-position profile classifier."""
+    min_composite_score: float = 0.0
+    min_success_probability: float = 0.0
+    min_signal_strength: float = 0.0
+    min_expected_pnl: float = 0.0
+    max_rsi_4h: Optional[float] = None
+    min_vol_spike: float = 0.0
+    min_range_score: float = 0.0
+    min_confluence: float = 0.0
+    min_short_term_score: float = 0.0
+    min_peak_quality: float = 0.0
+
+
+@dataclass(frozen=True)
 class LifecycleConfig:
-    """Complete configuration for one regime × profile."""
+    """Complete configuration for one regime × profile.
+
+    When profile_thresholds and profile_sizing_policies are supplied, the kernel
+    classifies each candidate position into the first matching profile (in
+    profile_order) and sizes it with that profile's SizingPolicy.
+    """
     regime: str
     profile: str
     signal_policy: SignalPolicy
     entry_policy: EntryPolicy
     sizing_policy: SizingPolicy
     exit_policy: ExitPolicy
+    profile_order: Tuple[str, ...] = ("A", "B", "C")
+    profile_thresholds: Dict[str, ProfileThresholds] = field(default_factory=dict)
+    profile_sizing_policies: Dict[str, SizingPolicy] = field(default_factory=dict)
+    profile_exit_policies: Dict[str, ExitPolicy] = field(default_factory=dict)
 
     def fingerprint(self) -> str:
         """Stable string fingerprint for Super MIMIC / landscape comparison."""
         from hashlib import sha256
         payload = f"{self.regime}|{self.profile}|" + repr(
-            (self.signal_policy, self.entry_policy, self.sizing_policy, self.exit_policy)
+            (self.signal_policy, self.entry_policy, self.sizing_policy, self.exit_policy,
+             self.profile_order, self.profile_thresholds, self.profile_sizing_policies,
+             self.profile_exit_policies)
         )
         return sha256(payload.encode()).hexdigest()[:16]
 

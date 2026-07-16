@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     kelly_max_usdt: float = Field(default=1500.0)   # concentrated: cap por posición elevado
     kelly_max_pct_cap: float = Field(default=0.30)       # concentrated: ~$1,530/posición con $5,100
     kelly_max_pct_liquid: float = Field(default=0.85)  # concentrated: hasta 85% del líquido en convicción extrema
+    kelly_min_usdt: float = Field(default=0.0)  # min absolute ticket per trade; 0 disables floor
     kelly_dynamic_base_pct: float = Field(default=0.20)  # concentrated: base crece con capital disponible
     # Bear market mode
     bear_market_mode_enabled: bool = Field(default=True)
@@ -614,6 +615,7 @@ class Settings(BaseSettings):
     futures_kelly_base_usdt: float = Field(default=150.0)  # concentrated: base igualada a SPOT
     futures_kelly_max_usdt: float = Field(default=1500.0)    # concentrated: cap por short elevado
     futures_kelly_max_pct_liquid: float = Field(default=0.85)  # concentrated: consistente con SPOT
+    futures_kelly_min_usdt: float = Field(default=0.0)  # min absolute futures margin ticket; 0 disables floor
 
     # Anti-ghost / reconciliation controls
     spot_dust_cleanup_min_notional_usdt: float = Field(default=5.0)

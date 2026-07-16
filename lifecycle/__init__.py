@@ -18,6 +18,7 @@ from lifecycle.base import (
     PartialTake,
     MomentumExitRule,
     StagnationRule,
+    ProfileThresholds,
     MarketContext,
     Signal,
     EntryDecision,
@@ -26,6 +27,7 @@ from lifecycle.base import (
     Position,
     LifecycleKernel,
 )
+from lifecycle.profile_classifier import classify_profile
 
 from lifecycle.regime import RegimeState, RegimeKernel, get_regime_v2
 from lifecycle.signal import SignalPipeline, analysis_to_signal
@@ -54,6 +56,8 @@ __all__ = [
     "PartialTake",
     "MomentumExitRule",
     "StagnationRule",
+    "ProfileThresholds",
+    "classify_profile",
     "MarketContext",
     "Signal",
     "EntryDecision",

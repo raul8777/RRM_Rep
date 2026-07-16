@@ -181,6 +181,7 @@ def _derive_metrics(results: List[Dict[str, Any]], initial_usdt: float) -> Dict[
         "profit_factor": None, "win_rate": None,
         "capital_deployed_ratio": None, "pnl_by_regime": {},
         "transition_cost_pct": None,
+        "profile_entry_counts": {},
     }
     if not results:
         return _empty
@@ -235,6 +236,7 @@ def _derive_metrics(results: List[Dict[str, Any]], initial_usdt: float) -> Dict[
     buys = sells = sl_tp = 0
     gross_wins = gross_losses = 0.0
     winning_trades = total_pnl_trades = 0
+    profile_entry_counts: Dict[str, int] = {}
     for r in results:
         res = r.get("result", {})
         if r.get("lifecycle") or "summary" in r:
@@ -244,6 +246,9 @@ def _derive_metrics(results: List[Dict[str, Any]], initial_usdt: float) -> Dict[
             exits = summary.get("exits", [])
             buys += len(entries)
             sells += len(exits)
+            for e in entries:
+                prof = e.get("profile") or "UNKNOWN"
+                profile_entry_counts[prof] = profile_entry_counts.get(prof, 0) + 1
             # Approximate per-exit PnL from equity change since previous cycle
             idx = results.index(r)
             if idx > 0:
@@ -260,12 +265,11 @@ def _derive_metrics(results: List[Dict[str, Any]], initial_usdt: float) -> Dict[
                     gross_losses += abs(per_exit_pnl)
             continue
         bo = res.get("buy_orders", []) or []
-        so = res.get("sell_orders", []) or []
         st = res.get("sl_tp_closes", []) or []
         buys += len(bo)
-        sells += len(so)
         sl_tp += len(st)
-        for order in so + st:
+        sells = sl_tp
+        for order in st:
             pnl = float(order.get("pnl_usdt", order.get("pnl", 0.0)) or 0.0)
             total_pnl_trades += 1
             if pnl > 0:
@@ -329,6 +333,7 @@ def _derive_metrics(results: List[Dict[str, Any]], initial_usdt: float) -> Dict[
         "capital_deployed_ratio": capital_deployed_ratio,
         "pnl_by_regime": pnl_by_regime,
         "transition_cost_pct": transition_cost_pct,
+        "profile_entry_counts": profile_entry_counts,
     }
 
 
@@ -364,6 +369,9 @@ def _run_single_config(
     max_cycles: Optional[int] = None,
     max_drawdown_stop_pct: float = 15.0,
     lifecycle: bool = False,
+    lifecycle_config_factory: Optional[Callable] = None,
+    peak_signal_mode: bool = False,
+    peak_entry_schedule: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     if _logger is None:
         _configure_logging(_DEFAULT_LOG_PATH)
@@ -377,6 +385,12 @@ def _run_single_config(
         symbols = _all_symbols
     settings = _base_settings(profile, symbols)
     for key, value in params.items():
+        # Lifecycle parameters are applied via spot_bull_config_from_params, not the
+        # global Settings schema, so skip unknown fields there.
+        if lifecycle:
+            if hasattr(settings, key):
+                setattr(settings, key, value)
+            continue
         setattr(settings, key, value)
 
     start = datetime.fromisoformat(window["start"])
@@ -385,7 +399,19 @@ def _run_single_config(
     data_dir = os.path.join(repo_root, "historical_data")
     initial_usdt_val = 2910.0
 
-    if lifecycle:
+    if peak_signal_mode and peak_entry_schedule is not None and profile in ("A", "B", "C"):
+        peak_entry_schedule = [e for e in peak_entry_schedule if e.get("peak_quality_profile") == profile]
+
+    if lifecycle or peak_signal_mode:
+        lifecycle = True
+        if lifecycle_config_factory is not None:
+            lifecycle_config = lifecycle_config_factory(params, profile)
+        elif peak_signal_mode:
+            from simulation.mimic_lifecycle_adapter import predictive_spot_bull_config_from_params
+            lifecycle_config = predictive_spot_bull_config_from_params(params, profile)
+        else:
+            from simulation.mimic_lifecycle_adapter import spot_bull_config_from_params
+            lifecycle_config = spot_bull_config_from_params(params, profile)
         raw_result = run_lifecycle_simulation(
             settings=settings,
             symbols=symbols,
@@ -398,6 +424,8 @@ def _run_single_config(
             forced_profile=profile,
             profile_overrides=profile_overrides,
             max_cycles=max_cycles,
+            lifecycle_config=lifecycle_config,
+            peak_entry_schedule=peak_entry_schedule,
         )
         metrics = _derive_metrics(raw_result.get("results", []), initial_usdt_val)
         return {
@@ -410,6 +438,7 @@ def _run_single_config(
             "early_stopped": False,
             "lifecycle": True,
             **metrics,
+            "lifecycle_raw": raw_result.get("results", []),
         }
 
     runner = SimulationRunner(
@@ -485,6 +514,38 @@ def _run_single_config(
             _logger.info("Early stop at cycle %d: drawdown exceeded %.1f%%", cycle, max_drawdown_stop_pct)
             early_stopped = True
             break
+
+    # Force liquidation at window end to realize PnL and populate sl_tp_closes.
+    # Without this step positions remain open and per-trade metrics are unavailable.
+    try:
+        _components = runner.build_components()
+        _position_manager = getattr(_components, 'position_manager', None)
+        if _position_manager is not None:
+            _commission_rate = getattr(settings, 'binance_spot_commission_rate', 0.001)
+            _liquidation_closes: List[Dict[str, Any]] = []
+            for _symbol in list(_position_manager.get_all_positions().keys()):
+                _price = runner.spot_client.get_symbol_price(_symbol, use_cache=False)
+                if not _price or _price <= 0:
+                    continue
+                _closed_positions = _position_manager.close_all_positions_for_symbol(
+                    _symbol, _price, close_reason='window_end_liquidation',
+                    commission_rate=_commission_rate,
+                    exit_context={'regime_mode': runner._last_mode, 'profile_label': profile},
+                )
+                for _cp in _closed_positions:
+                    _liquidation_closes.append({
+                        'symbol': _cp.symbol,
+                        'reason': _cp.close_reason,
+                        'price': float(_cp.exit_price or 0),
+                        'order': {},
+                        'pnl_usdt': round(float(_cp.pnl or 0), 4),
+                        'pnl_pct': round(float(_cp.pnl_percentage or 0) * 100, 4),
+                    })
+            if _liquidation_closes and runner.results:
+                _last = runner.results[-1]
+                _last.setdefault('result', {}).setdefault('sl_tp_closes', []).extend(_liquidation_closes)
+    except Exception as _liq_err:
+        _logger.warning("Window-end liquidation failed: %s", _liq_err)
 
     raw_result = {
         "cycles": cycle,
@@ -581,6 +642,9 @@ def run_sweep(
     report_path: Optional[str] = None,
     log_path: Optional[str] = None,
     lifecycle: bool = False,
+    param_grid_file: Optional[str] = None,
+    profiles: Optional[List[str]] = None,
+    peak_signal_mode: bool = False,
 ) -> Dict[str, Any]:
     """Run the profile sweep across all configured windows.
 
@@ -615,6 +679,13 @@ def run_sweep(
     elif strategy == "exhaustive":
         grid = PARAM_GRID
         grid = {**grid, "min_signal_strength": [0.45, 0.50, 0.55, 0.60]}
+    elif strategy == "custom_grid":
+        if not param_grid_file:
+            raise ValueError("custom_grid strategy requires --param-grid-file")
+        with open(param_grid_file, "r", encoding="utf-8") as _pgf:
+            grid = json.load(_pgf)
+        if not isinstance(grid, dict) or not grid:
+            raise ValueError("param_grid_file must contain a non-empty JSON object")
     elif strategy == "lifecycle-quick":
         # Focused grid for lifecycle kernel baseline: best SPOT_BULL-A params + neighbors
         grid = {
@@ -632,9 +703,27 @@ def run_sweep(
     param_values = [grid[k] for k in param_keys]
     param_combos = [dict(zip(param_keys, combo)) for combo in itertools.product(*param_values)]
 
+    if peak_signal_mode and profiles is None:
+        active_profiles = ["PEAK"]
+    else:
+        active_profiles = profiles if profiles is not None else PROFILES
+
+    # Cargar schedule de señales peak una sola vez si estamos en modo peak
+    peak_signal_schedule: Optional[Dict[str, List[Dict[str, Any]]]] = None
+    if peak_signal_mode:
+        if max_workers != 1:
+            logger.warning("peak_signal_mode fuerza max_workers=1 para evitar conflictos de estado y memoria")
+            max_workers = 1
+        import peak_signal_source
+        peak_signal_schedule = peak_signal_source.build_peak_signal_schedule(
+            batch_size=200_000,
+            n_jobs=12,
+            include_profiles=("A", "B", "C"),
+        )
+
     jobs = []
     for window in windows:
-        for profile in PROFILES:
+        for profile in active_profiles:
             for params in param_combos:
                 jobs.append({
                     "window": window,
@@ -690,6 +779,7 @@ def run_sweep(
 
             try:
                 profile_overrides = _build_profile_overrides(profile)
+                peak_entry_schedule = peak_signal_schedule.get(window_id, []) if peak_signal_mode else None
                 # Warm-start: check SQLite cache before running simulation
                 _cache_key = _cache.make_key(window_id, profile, params) if _cache else None
                 cached_res = _cache.get(_cache_key) if _cache and _cache_key else None
@@ -705,6 +795,8 @@ def run_sweep(
                         max_cycles=max_cycles_per_sim,
                         max_drawdown_stop_pct=max_drawdown_stop_pct,
                         lifecycle=lifecycle,
+                        peak_signal_mode=peak_signal_mode,
+                        peak_entry_schedule=peak_entry_schedule,
                     )
                     if _cache and _cache_key:
                         _cache.put(_cache_key, res)
@@ -904,10 +996,12 @@ def _build_report(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     by_profile: Dict[str, List[Dict[str, Any]]] = {p: [] for p in PROFILES}
     for r in valid:
-        by_profile[r.get("profile", "B")].append(r)
+        profile = r.get("profile", "B")
+        by_profile.setdefault(profile, [])
+        by_profile[profile].append(r)
 
     recommendations = []
-    for profile in PROFILES:
+    for profile in sorted(by_profile.keys()):
         group = by_profile[profile]
         if not group:
             continue
@@ -971,27 +1065,45 @@ def _build_report(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="MIMIC continuous-window profile sweep")
     parser.add_argument("--windows", default=None, help="Comma-separated window IDs")
-    parser.add_argument("--strategy", choices=["quick", "coarse", "full", "exhaustive", "lifecycle-quick"], default="full")
+    parser.add_argument("--strategy", choices=["quick", "coarse", "full", "exhaustive", "lifecycle-quick", "custom_grid"], default="full")
+    parser.add_argument("--profile", type=str, default=None, help="Profile label to sweep (A/B/C). If omitted, all profiles are run.")
+    parser.add_argument("--param-grid-file", type=str, default=None, help="JSON file with custom parameter grid (required for custom_grid strategy)")
     parser.add_argument("--max-cycles", type=int, default=None)
     parser.add_argument("--max-workers", type=int, default=1, help="Parallel workers for simulations (default 1)")
+    parser.add_argument("--lifecycle", action="store_true", help="Use the lifecycle kernel instead of run_trades.execute_once")
+    parser.add_argument("--peak-signal-mode", action="store_true", help="Use peak_signal_source to inject A/B/C signals into the lifecycle simulation")
     parser.add_argument("--max-dd-stop", type=float, default=15.0, help="Early-stop drawdown threshold %% (default 15.0, 0=disable)")
-    parser.add_argument("--lifecycle", action="store_true", help="Use the new lifecycle kernel instead of run_trades.execute_once")
     parser.add_argument("--clear-results", action="store_true", help="Ignore previous results.jsonl")
+    parser.add_argument("--output-dir", type=str, default=None, help="Isolated output directory for this sweep")
     args = parser.parse_args()
 
-    if args.clear_results and os.path.exists(_DEFAULT_RESULTS_PATH):
-        os.remove(_DEFAULT_RESULTS_PATH)
+    if args.peak_signal_mode:
+        args.lifecycle = True
+
+    if args.clear_results:
+        if args.output_dir:
+            _isolated_results = os.path.join(args.output_dir, "mimic_sweep_results.jsonl")
+            if os.path.exists(_isolated_results):
+                os.remove(_isolated_results)
+        elif os.path.exists(_DEFAULT_RESULTS_PATH):
+            os.remove(_DEFAULT_RESULTS_PATH)
 
     window_ids = [w.strip() for w in args.windows.split(",") if w.strip()] if args.windows else None
     logger = _configure_logging(_DEFAULT_LOG_PATH)
     logger.info("Starting continuous-window sweep (strategy=%s)...", args.strategy)
+    _profiles = [args.profile.upper()] if args.profile else None
     report = run_sweep(
         window_ids=window_ids,
         strategy=args.strategy,
         max_cycles_per_sim=args.max_cycles,
         max_workers=args.max_workers,
         max_drawdown_stop_pct=args.max_dd_stop,
+        use_cache=not args.peak_signal_mode,
         lifecycle=args.lifecycle,
+        param_grid_file=args.param_grid_file,
+        output_dir=args.output_dir,
+        profiles=_profiles,
+        peak_signal_mode=args.peak_signal_mode,
     )
     logger.info("Sweep complete. Report saved to %s", _DEFAULT_REPORT_PATH)
     print(json.dumps(report["summary"], indent=2, ensure_ascii=False))

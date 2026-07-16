@@ -102,6 +102,11 @@ class SignalPipeline:
 
         liquidity = float(analysis.get("liquidity_usdt_24h", analysis.get("quote_volume", 0.0)))
 
+        features: Dict[str, Any] = {k: float(v) for k, v in analysis.items() if isinstance(v, (int, float, bool))}
+        profile_override = analysis.get("peak_quality_profile")
+        if profile_override in ("A", "B", "C"):
+            features["peak_quality_profile"] = profile_override
+
         return Signal(
             symbol=symbol,
             side=side,
@@ -112,7 +117,7 @@ class SignalPipeline:
             signal_strength=strength,
             regime_alignment=regime_alignment,
             liquidity_usdt_24h=liquidity,
-            features={k: float(v) for k, v in analysis.items() if isinstance(v, (int, float, bool))},
+            features=features,
             source=analysis.get("source", "autonomous"),
         )
 

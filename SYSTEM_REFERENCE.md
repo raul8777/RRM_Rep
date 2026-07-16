@@ -1,7 +1,100 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 15 2026 | Anti-ghost redesign: cierres por balance real, partial closes con qty exacta, reconcile preventivo, dust cleanup endpoint, FUTURES_LEVERAGE corregido a 10x.
+> Última actualización: jul 15 2026 | Kelly sizing más agresivo (piso $500, techo $2,500 SPOT; floor y techo ajustados FUTURES) + `kelly_min_usdt` / `futures_kelly_min_usdt`.
+
+---
+
+## 🟢 Estado del Sistema — jul 16 2026 — Peak MIMIC validator + peak_quality lifecycle integration
+
+### Objetivo
+Validar el modelo `peak_quality` en su contexto nativo (eventos de pico de `peaks_all.parquet`) e integrarlo en el lifecycle de MIMIC para simulaciones realistas de apertura/cierre.
+
+### Cambios aplicados
+- **`peak_quality.py`**: fix de `None`-handling en `predict_peak_quality`; predicción vectorizada con imputación por medianas.
+- **`peak_signal_source.py`**: lector por lotes de `peaks_all.parquet` con `n_jobs=12`, generación de schedules A/B/C por `window_id`.
+- **`peak_mimic_validator.py`**: validador directo que abre en `peak_start_ts` y cierra en `peak_end_ts`.
+- **`lifecycle/signal.py` + `lifecycle/profile_classifier.py`**: passthrough y override del perfil `peak_quality_profile` desde `Signal.features`.
+- **`simulation/mimic_lifecycle_adapter.py`**: `run_lifecycle_simulation` acepta `peak_entry_schedule` e inyecta señales pico en cada ciclo.
+- **`Dev/scripts/mimic_mode_profile_sweep.py`**: modo `--peak-signal-mode` que fuerza `lifecycle=True` y pasa el schedule por ventana.
+
+### Resultados
+
+**Validador directo** (`Dev/benchmarks/peak_mimic_report.json`):
+- Capital $4,900 → $774,151.51; PnL 15,699%; 49,597 trades; win rate 75.71%; max DD 3.52%; PF 14.04.
+- Perfil A concentra el PnL ($676,788.84).
+
+**Lifecycle sweep** (`Dev/benchmarks/mimic_sweep_peak_quality_lifecycle/mimic_sweep_report.json`):
+- 12 ventanas; mejor PnL $426.04 (14.64%); peor -$416.91 (-8.52%); promedio 1.58%; PF 1.70; Sharpe 2.43.
+- Win rate por ventana entre 21.5% y 69.2%; el `ExitEngine` actual reduce drásticamente la captura respecto al cierre oracle.
+
+### Hallazgos clave
+- El predictor `peak_quality` tiene poder discriminante real (perfil A con ~76% win rate en cierre oracle).
+- Super MIMIC sin inyección de picos no abría posiciones porque las señales continuas no alinean con eventos discretos de pico.
+- El ciclo de vida realista pierde buena parte del edge porque cierra por SL/TP/ATR y no en `peak_end_ts`.
+
+### Próximos pasos
+1. Calibrar `ExitPolicy` para usar `expected_gain` (o múltiplo) como TP dinámico o añadir `time_stop` basado en `peak_end_dt`.
+2. Si se migra a producción, computar features `s_*` en `analyze_symbol` a partir de `klines` o re-entrenar con features disponibles en live.
+3. Ejecutar sweep más amplio (`lifecycle-quick` / `standard`) con ventanas representativas y validar deploy gate (`drawdown < 15%`, `PnL/día > 0`).
+
+---
+
+## 🟢 Estado del Sistema — jul 15 2026 — Kelly Aggressiveness Upgrade + Backtest/MIMIC
+
+### Objetivo
+Responder a capital subutilizado y tickets pequeños: ninguna posición SPOT < $500; señales fuertes deben llegar fácil a $1,200+; futuros ajustados a margen/nocional comparable.
+
+### Cambios aplicados
+- **`config.py`**: nuevos campos `kelly_min_usdt` (default 0) y `futures_kelly_min_usdt` (default 0).
+- **`config_helpers.py`**: defaults sincronizados en `_PARAM_DEFAULTS`.
+- **`run_trades.py`**: `_kelly_position_size()` aplica piso absoluto por trade type; si liquidez/máximo no lo soporta, devuelve 0.
+- **`app.py`**: `_KELLY_EDITABLE_FIELDS` incluye ambos nuevos campos para hot-config.
+- **`super_mimic/runner.py`**: fix de import faltante `DesignSpec` y manejo de `config` ya como dict en `start_experiment`.
+- **`migrations/019_super_mimic_tables.sql`**: asegurado existencia de tablas para el registro de experimentos.
+- **Persistencia restart-safe**: perfil `SPOT_BULL-A` actualizado en `trading_runtime_state` con los valores agresivos (base/max/piso/dynamic/cap/liquid/concentración/convicción), de modo que sobreviva a reinicios del contenedor.
+- **Hot-config vía `PATCH /config/kelly` / perfil SPOT_BULL-A**:
+  - SPOT: `kelly_base_usdt=500`, `kelly_max_usdt=2500`, `kelly_min_usdt=500`, `kelly_dynamic_base_pct=0.12`, `kelly_max_pct_cap=0.35`, `kelly_max_pct_liquid=0.85`, `portfolio_concentration_min_mult=0.90`, `kelly_conviction_max_pct=0.25`.
+  - FUTURES: `futures_kelly_base_usdt=75`, `futures_kelly_max_usdt=250`, `futures_kelly_min_usdt=50`.
+
+### Datos previos al cambio
+- Capital total ~$4,990, líquido SPOT ~$2,526, exposure 47.6%, régimen SPOT_BULL confirmado.
+- `kelly_sizing_log` mostraba tickets BASE de $40–$200 y FUERTE/ALTA ~$800; el piso y techo eran los cuellos de botella.
+
+### Verificación funcional
+- `docker-compose restart app` exitoso; config carga sin errores.
+- `py_compile` OK para `config.py`, `config_helpers.py`, `run_trades.py`, `app.py`.
+- `GET /config/kelly` confirma valores agresivos activos.
+- `pytest tests/test_system_health.py -k "not Cat7"`: **116 passed, 12 deselected**.
+- `pytest tests/test_system_health.py -k "Cat1 or Cat6"`: **39 passed**.
+- `kelly_sizing_log` en vivo ya muestra piso activo: por ejemplo `RANGE_SCALP` ZECUSDT `base_usdt=505`, `final_usdt=981` con `min_usdt=500`; AAVEUSDT `final_usdt=982` también con piso 500.
+
+### Backtest 90 días / $4,990 (pre-subida SPOT_BULL-A a $500/$2,500)
+Resultados de `backtest_multimode.py --days 90 --capital 4990` (archivo `Dev/benchmarks/backtest_90d_4990.log`):
+
+| Escenario | PnL USDT | Retorno % | Win Rate | Max Drawdown | Profit Factor |
+|---|---|---|---|---|---|
+| Sistema completo (REAL) | +3,926.16 | +78.7% | 60.9% | **47.1%** | **1.02** |
+| REAL + params optimizados | +5,125.32 | +102.7% | 61.7% | **51.5%** | **1.03** |
+| Solo futuros SHORT | +4,441.94 | +89.0% | 56.4% | 24.7% | 1.18 |
+| Recuperación SPOT_BULL | +2,437.66 | +48.9% | 54.4% | **49.2%** | **1.01** |
+| RECOVERY + BTC drift +15% sintético | +4,230.78 | +84.8% | 54.4% | **53.0%** | **1.01** |
+
+**Interpretación**: el sistema ya operaba con drawdowns extremos (47–53%) y profit factor apenas sobre 1.0. Subir el tamaño base/techo de SPOT (base $500, max $2,500, cap 85% líquido) **amplificará** esos drawdowns si el edge/predictor no mejora. Por tanto, un sizing más agresivo **no es gratuito**: requiere validación rigurosa antes de dejarlo en producción.
+
+### ¿Es necesario un Super MIMIC?
+**Sí.** La evidencia indica que se requiere un experimento Super MIMIC (idealmente `standard` o `full`) para:
+1. Buscar una combinación de parámetros que mantenga PnL/día > 0 con **drawdown < 15%** (regla del deploy gate) y **profit factor > 1.1**.
+2. Validar que el aumento de tamaño no convierta los drawdowns de 47–53% en algo inmanejable.
+3. Obtener una config recomendada con auditoría (`super_mimic_deployments`) y rollback automático.
+
+### Próximos pasos recomendados
+1. **Ejecutar Super MIMIC para SPOT_BULL-A** con ventanas representativas (al menos una alcista, una lateral/bajista) y estrategia `standard` (sweep + validation) o `full` si se quiere re-entrenar el predictor.
+2. **NO desplegar** automáticamente la config agresiva actual en otros modos (RANGE_SCALP, PRESERVATION, FUTURES_SHORT) hasta que el Super MIMIC de cada uno pase el deploy gate (`drawdown < 15%`, `PnL/día > 0`, `trades >= 3`, `attractors >= 1`).
+3. **Monitoreo en vivo 48h** con triggers de rollback:
+   - Si `profit_factor` cae > 0.10 o `max_drawdown` sube > 5% respecto al baseline, revertir perfil SPOT_BULL-A a los valores previos.
+   - Revisar `kelly_sizing_log` cada 2–3 ciclos para confirmar tickets SPOT ≥ $500 y señales FUERTE/ALTA ≥ $1,200.
+4. **Investigar** el `kpi_multiplier` 0.88/health warning (`SpotTruth severity=warning mismatches=1`) para eliminar la penalización de sizing.
 
 ---
 

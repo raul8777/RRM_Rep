@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import time
+from collections import defaultdict
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from lifecycle.adapter import ExecutionAdapter
@@ -22,6 +24,28 @@ from lifecycle.base import (
     SizedTrade,
 )
 from lifecycle.signal import _DEFAULT_CATEGORIES
+
+
+# Per-symbol historical quality score loaded from prior peak analysis if available.
+def _load_symbol_quality_map() -> Dict[str, float]:
+    path = Path("Dev/benchmarks/super_mimic/predictive_sweep/signal_peak_outcomes.jsonl")
+    if not path.exists():
+        return {}
+    sym_peaks: Dict[str, List[float]] = defaultdict(list)
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            peak = rec.get("peak_12h") or rec.get("peak_4h")
+            if peak is not None:
+                sym_peaks[rec["symbol"]].append(float(peak))
+    except Exception:
+        return {}
+    return {s: sum(v) / len(v) for s, v in sym_peaks.items()}
+
+
+_SYMBOL_QUALITY_MAP = _load_symbol_quality_map()
 
 
 def _approx_atr(symbol: str, feed: List[Dict[str, Any]], lookback: int = 14) -> Optional[float]:
@@ -91,6 +115,78 @@ def _volume_spike(
     return current_vol / avg_vol
 
 
+def _approx_24h_return(bars: List[Dict[str, Any]]) -> float:
+    """Approximate 24h return percent from 1h bars."""
+    if len(bars) < 25:
+        return 0.0
+    cur = float(bars[-1].get("close", 0))
+    past = float(bars[-25].get("close", 0))
+    if past <= 0 or cur <= 0:
+        return 0.0
+    return (cur - past) / past * 100.0
+
+
+def _load_peak_quality_stats() -> Optional[Dict[str, Any]]:
+    path = Path("Dev/benchmarks/super_mimic/predictive_sweep/peak_quality_stats.json")
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+_PEAK_QUALITY_STATS = _load_peak_quality_stats()
+
+
+def _compute_peak_quality(
+    symbol: str,
+    bars: List[Dict[str, Any]],
+    atr: float,
+    expected_pnl: float,
+    short_term_score: float,
+    regime: str,
+    features: Dict[str, float],
+) -> float:
+    """Predictive z-score for the magnitude of the next 12h peak.
+
+    Uses precomputed per-regime means, stds and weights from historical peak
+    analysis. Falls back to a simple heuristic if no stats are available.
+    """
+    stats = _PEAK_QUALITY_STATS
+    if stats and regime in stats:
+        s = stats[regime]
+        means = s["means"]
+        stds = s["stds"]
+        weights = s["weights"]
+        score = 0.0
+        for f, w in weights.items():
+            v = features.get(f, 0.0)
+            score += w * (v - means.get(f, 0.0)) / stds.get(f, 1.0)
+        return score
+
+    # Fallback heuristic when calibration stats are not present.
+    current = float(bars[-1].get("close", 0)) if bars else 0.0
+    atr_pct = atr / current if current > 0 else 0.0
+    category = _DEFAULT_CATEGORIES.get(symbol, "MIDCAP_ALT")
+    cat_fact = {"NARRATIVE": 0.02, "MIDCAP_ALT": 0.0, "LARGE_CAP": -0.02}.get(category, 0.0)
+    mom = _approx_24h_return(bars)
+    regime_term = 0.0
+    if regime == "SPOT_BULL":
+        regime_term = -0.03 * mom
+    elif regime == "RANGE_SCALP":
+        regime_term = 0.03 * mom
+    sq = (_SYMBOL_QUALITY_MAP.get(symbol, 0.02) - 0.02) * 2.0
+    return (
+        0.35 * atr_pct
+        + 0.30 * expected_pnl
+        + 0.10 * short_term_score
+        + cat_fact
+        + 0.10 * sq
+        + regime_term
+    )
+
+
 def _predicted_pnl_pct(bars: List[Dict[str, Any]], atr: float, horizon: int = 4) -> float:
     """Rough 4h horizon PnL prediction in percent points (mean reversion + momentum)."""
     current = float(bars[-1].get("close", 0))
@@ -103,14 +199,16 @@ def _predicted_pnl_pct(bars: List[Dict[str, Any]], atr: float, horizon: int = 4)
     return expected_move * 100 - 0.4
 
 
-def _build_analyses(symbols: List[str], feed: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+def _build_analyses(
+    symbols: List[str],
+    feed: Dict[str, List[Dict[str, Any]]],
+    regime: str = "SPOT_BULL",
+) -> List[Dict[str, Any]]:
     """Generate analyses for the lifecycle kernel using price-action indicators.
 
-    Mirrors validated expert entry criteria:
-      - Buy in the 20-40% zone of the weekly range (support).
-      - Require volume spike > 1.5x average for conviction.
-      - RSI in 35-55 (neutral-bullish, not overbought).
-      - Predicted 4h PnL must be positive.
+    Regime-aware:
+      - SPOT_BULL: buy pullbacks to support (20-40% range) with volume + RSI 35-55.
+      - RANGE_SCALP: buy near range support / oversold bounce with mean-reversion.
     """
     analyses = []
     for symbol in symbols:
@@ -126,69 +224,140 @@ def _build_analyses(symbols: List[str], feed: Dict[str, List[Dict[str, Any]]]) -
 
         quote_volume = sum(float(b.get("quote_volume", 0)) for b in bars[-24:])
 
-        # Default: no signal
         side = "HOLD"
         strength = 0.0
         success_probability = 0.0
 
-        # Confluence scoring based on validated expert criteria. Each criterion contributes
-        # 0..1; a total score above 0.45 generates a BUY. This produces signals even when the
-        # market is not in the perfect 20-40% / >1.5x volume / 35-55 RSI sweet spot, while still
-        # favouring high-quality setups and explicitly avoiding range-top/overbought entries.
-        range_score = 0.0
-        if range_pos is not None:
-            if 0.20 <= range_pos <= 0.40:
-                range_score = 1.0 - abs(range_pos - 0.30) / 0.10
-            elif 0.15 <= range_pos < 0.20:
-                range_score = 0.25
-            elif range_pos >= 0.75:
-                range_score = -1.0  # avoid buying near range top
+        if regime == "RANGE_SCALP":
+            # Mean-reversion / range-support score
+            range_score = 0.0
+            if range_pos is not None:
+                if 0.15 <= range_pos <= 0.35:
+                    range_score = 1.0 - abs(range_pos - 0.25) / 0.10
+                elif 0.35 < range_pos <= 0.50:
+                    range_score = 0.35
+                elif range_pos >= 0.75:
+                    range_score = -1.0
 
-        vol_score = 0.0
-        if vol_spike is not None:
-            if vol_spike >= 1.5:
-                vol_score = 1.0
-            elif vol_spike >= 1.0:
-                vol_score = 0.5
-            elif vol_spike >= 0.6:
-                vol_score = 0.25
+            vol_score = 0.0
+            if vol_spike is not None:
+                if vol_spike >= 1.3:
+                    vol_score = 1.0
+                elif vol_spike >= 0.9:
+                    vol_score = 0.5
+                elif vol_spike >= 0.5:
+                    vol_score = 0.25
 
-        rsi_score = 0.0
-        if rsi is not None:
-            if 35.0 <= rsi <= 55.0:
-                rsi_score = 1.0 - abs(rsi - 45.0) / 10.0
-            elif 30.0 <= rsi < 35.0 or 55.0 < rsi <= 60.0:
-                rsi_score = 0.35
-            elif rsi > 65.0:
-                rsi_score = -1.0  # avoid overbought
+            rsi_score = 0.0
+            if rsi is not None:
+                if 30.0 <= rsi <= 50.0:
+                    rsi_score = 1.0 - abs(rsi - 40.0) / 10.0
+                elif 50.0 < rsi <= 60.0:
+                    rsi_score = 0.35
+                elif rsi > 70.0 or rsi < 25.0:
+                    rsi_score = -1.0
 
-        pnl_score = 0.0
-        if predicted_pnl > 0.5:
-            pnl_score = 1.0
-        elif predicted_pnl > 0.0:
-            pnl_score = 0.25
+            # Mean reversion is favourable when recent momentum is negative.
+            pnl_score = 0.0
+            if predicted_pnl > 0.3:
+                pnl_score = 1.0
+            elif predicted_pnl > -0.5:
+                pnl_score = 0.35
+            else:
+                pnl_score = -0.5
 
-        # Hard avoid if price is at range top or strongly overbought.
-        avoid_buy = range_score < 0 or rsi_score < 0 or predicted_pnl < -1.0
+            avoid_buy = range_score < 0 or rsi_score < 0
+            confluence = range_score + vol_score + rsi_score + pnl_score
+            if not avoid_buy and confluence >= 1.0:
+                side = "BUY"
+                normalized = min(confluence / 3.5, 1.0)
+                strength = 0.50 + normalized * 0.40
+                success_probability = 0.50 + normalized * 0.25
+        else:
+            # SPOT_BULL default
+            range_score = 0.0
+            if range_pos is not None:
+                if 0.20 <= range_pos <= 0.40:
+                    range_score = 1.0 - abs(range_pos - 0.30) / 0.10
+                elif 0.15 <= range_pos < 0.20:
+                    range_score = 0.25
+                elif range_pos >= 0.75:
+                    range_score = -1.0
 
-        confluence = range_score + vol_score + rsi_score + pnl_score
-        if not avoid_buy and confluence >= 1.5:
-            side = "BUY"
-            normalized = confluence / 4.0
-            strength = 0.55 + min(normalized * 0.25, 0.25)
-            success_probability = 0.55 + min(normalized * 0.12, 0.12)
+            vol_score = 0.0
+            if vol_spike is not None:
+                if vol_spike >= 1.5:
+                    vol_score = 1.0
+                elif vol_spike >= 1.0:
+                    vol_score = 0.5
+                elif vol_spike >= 0.6:
+                    vol_score = 0.25
+
+            rsi_score = 0.0
+            if rsi is not None:
+                if 35.0 <= rsi <= 55.0:
+                    rsi_score = 1.0 - abs(rsi - 45.0) / 10.0
+                elif 30.0 <= rsi < 35.0 or 55.0 < rsi <= 60.0:
+                    rsi_score = 0.35
+                elif rsi > 65.0:
+                    rsi_score = -1.0
+
+            pnl_score = 0.0
+            if predicted_pnl > 0.5:
+                pnl_score = 1.0
+            elif predicted_pnl > 0.0:
+                pnl_score = 0.25
+
+            avoid_buy = range_score < 0 or rsi_score < 0 or predicted_pnl < -1.0
+            confluence = range_score + vol_score + rsi_score + pnl_score
+            if not avoid_buy and confluence >= 1.5:
+                side = "BUY"
+                normalized = confluence / 4.0
+                strength = 0.50 + min(normalized * 0.45, 0.45)
+                success_probability = 0.50 + min(normalized * 0.30, 0.30)
+
+        short_term_score = (
+            confluence
+            * max(0.0, predicted_pnl)
+            * (success_probability if side == "BUY" else 0.5)
+        )
+        current_price = float(bars[-1].get("close", 0)) if bars else 0.0
+        atr_pct = atr / current_price if current_price > 0 else 0.0
+        peak_quality_features = {
+            "atr_pct": atr_pct,
+            "expected_pnl": predicted_pnl,
+            "short_term_score": short_term_score,
+            "pnl_score": pnl_score,
+            "confluence": confluence,
+            "vol_score": vol_score,
+            "range_score": range_score,
+            "range_position": range_pos or 0.5,
+        }
+        peak_quality = _compute_peak_quality(
+            symbol, bars, atr, predicted_pnl, short_term_score, regime, peak_quality_features
+        )
+        symbol_quality_score = (_SYMBOL_QUALITY_MAP.get(symbol, 0.02) - 0.02) * 2.0
 
         analyses.append({
             "symbol": symbol,
             "signal": side,
-            "strength": min(strength, 0.85),
+            "strength": min(strength, 0.95),
             "expected_pnl": predicted_pnl,
-            "success_probability": min(success_probability, 0.70),
+            "success_probability": min(success_probability, 0.80),
             "liquidity_usdt_24h": max(quote_volume, 1_000_000.0),
             "vol_spike": vol_spike or 1.0,
             "rsi_4h": rsi or 50.0,
             "atr": atr,
             "range_position": range_pos or 0.5,
+            "range_score": range_score,
+            "vol_score": vol_score,
+            "rsi_score": rsi_score,
+            "pnl_score": pnl_score,
+            "confluence": confluence,
+            "short_term_score": short_term_score,
+            "symbol_quality_score": symbol_quality_score,
+            "peak_quality": peak_quality,
+            "regime": regime,
         })
     return analyses
 
@@ -393,6 +562,7 @@ def run_lifecycle_simulation(
     profile_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
     max_cycles: Optional[int] = None,
     lifecycle_config: Optional[LifecycleConfig] = None,
+    peak_entry_schedule: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Run a single MIMIC simulation using the lifecycle kernel."""
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
@@ -450,12 +620,21 @@ def run_lifecycle_simulation(
     current = runner.start
     next_cycle_minutes = None
     last_successful_step = None
+    peak_schedule_idx = 0
+    peak_entry_schedule = peak_entry_schedule or []
     while current <= runner.end:
         runner.clock._now = current
         runner._invalidate_caches()
         runner.news_client.update_for_date(current)
         try:
-            analyses = _build_analyses(runner.symbols, runner.price_feed)
+            analyses = _build_analyses(runner.symbols, runner.price_feed, regime=config.regime)
+            # Inyectar señales peak cuyo peak_start_ts cae en este ciclo o antes
+            while (
+                peak_schedule_idx < len(peak_entry_schedule)
+                and peak_entry_schedule[peak_schedule_idx]["peak_start_dt"] <= current
+            ):
+                analyses.append(peak_entry_schedule[peak_schedule_idx])
+                peak_schedule_idx += 1
             total_liquid = float(runner.spot_client.get_account_balance().get("USDT", 0.0))
             summary = lifecycle_runner.run_cycle(analyses, config, total_liquid=total_liquid)
             balance = runner.spot_client.get_account_balance()
@@ -509,35 +688,35 @@ def _spot_bull_config(profile: str = "A") -> LifecycleConfig:
 
 
 def _spot_bull_config_a() -> LifecycleConfig:
-    """Profile A: stricter signal/success thresholds, conservative sizing."""
+    """Profile A: broad favourite — lower signal thresholds, many positions, moderate Kelly."""
     from lifecycle import LifecycleConfig, SignalPolicy, EntryPolicy, SizingPolicy, ExitPolicy, PartialTake, MomentumExitRule, StagnationRule
     return LifecycleConfig(
         regime="SPOT_BULL",
         profile="A",
         signal_policy=SignalPolicy(
-            min_signal_strength=0.55,
-            min_success_probability=0.55,
+            min_signal_strength=0.45,
+            min_success_probability=0.50,
             min_expected_pnl=0.0,
             min_liquidity_usdt=0.0,
             categories_enabled=("LARGE_CAP", "MIDCAP_ALT", "NARRATIVE"),
-            max_candidates=5,
+            max_candidates=10,
             diversification_mode="category",
         ),
         entry_policy=EntryPolicy(
-            min_composite_score=0.55,
+            min_composite_score=0.45,
             min_expected_pnl=0.0,
-            min_success_probability=0.55,
+            min_success_probability=0.50,
             min_liquidity_usdt=0.0,
-            max_total_positions=5,
-            max_category_positions={"LARGE_CAP": 1, "MIDCAP_ALT": 2, "NARRATIVE": 1},
+            max_total_positions=12,
+            max_category_positions={"LARGE_CAP": 2, "MIDCAP_ALT": 4, "NARRATIVE": 2},
         ),
         sizing_policy=SizingPolicy(
             regime_allocation_pct=0.8,
-            max_per_trade_usdt=1000.0,
+            max_per_trade_usdt=1500.0,
             kelly_base_pct=0.18,
-            kelly_max_pct=0.20,
-            conviction_max_pct=0.20,
-            category_caps={"LARGE_CAP": 0.30, "MIDCAP_ALT": 0.35, "NARRATIVE": 0.15},
+            kelly_max_pct=0.22,
+            conviction_max_pct=0.22,
+            category_caps={"LARGE_CAP": 0.25, "MIDCAP_ALT": 0.35, "NARRATIVE": 0.15},
         ),
         exit_policy=ExitPolicy(
             regime="SPOT_BULL",
@@ -555,40 +734,40 @@ def _spot_bull_config_a() -> LifecycleConfig:
 
 
 def _spot_bull_config_b() -> LifecycleConfig:
-    """Profile B: looser signal threshold, larger sizing and more positions."""
+    """Profile B: B-rescue — higher signal thresholds, fewer positions, larger Kelly."""
     from lifecycle import LifecycleConfig, SignalPolicy, EntryPolicy, SizingPolicy, ExitPolicy, PartialTake, MomentumExitRule, StagnationRule
     return LifecycleConfig(
         regime="SPOT_BULL",
         profile="B",
         signal_policy=SignalPolicy(
-            min_signal_strength=0.50,
-            min_success_probability=0.45,
+            min_signal_strength=0.60,
+            min_success_probability=0.62,
             min_expected_pnl=0.0,
             min_liquidity_usdt=0.0,
             categories_enabled=("LARGE_CAP", "MIDCAP_ALT", "NARRATIVE"),
-            max_candidates=8,
+            max_candidates=6,
             diversification_mode="category",
         ),
         entry_policy=EntryPolicy(
-            min_composite_score=0.50,
+            min_composite_score=0.60,
             min_expected_pnl=0.0,
-            min_success_probability=0.45,
+            min_success_probability=0.62,
             min_liquidity_usdt=0.0,
-            max_total_positions=8,
-            max_category_positions={"LARGE_CAP": 2, "MIDCAP_ALT": 3, "NARRATIVE": 1},
+            max_total_positions=6,
+            max_category_positions={"LARGE_CAP": 2, "MIDCAP_ALT": 2, "NARRATIVE": 1},
         ),
         sizing_policy=SizingPolicy(
             regime_allocation_pct=0.8,
-            max_per_trade_usdt=1200.0,
+            max_per_trade_usdt=2500.0,
             kelly_base_pct=0.22,
-            kelly_max_pct=0.25,
-            conviction_max_pct=0.25,
+            kelly_max_pct=0.30,
+            conviction_max_pct=0.30,
             category_caps={"LARGE_CAP": 0.25, "MIDCAP_ALT": 0.40, "NARRATIVE": 0.15},
         ),
         exit_policy=ExitPolicy(
             regime="SPOT_BULL",
             profile="B",
-            hard_sl_atr_mult=3.36,
+            hard_sl_atr_mult=4.5,
             hard_tp_atr_mult=3.5,
             trailing_activation_pct=0.02,
             trailing_atr_mult=1.5,
@@ -601,40 +780,40 @@ def _spot_bull_config_b() -> LifecycleConfig:
 
 
 def _spot_bull_config_c() -> LifecycleConfig:
-    """Profile C: loose signal threshold but stricter success probability."""
+    """Profile C: C-rescue — ultra restrictive, only the highest-certainty setups, largest Kelly."""
     from lifecycle import LifecycleConfig, SignalPolicy, EntryPolicy, SizingPolicy, ExitPolicy, PartialTake, MomentumExitRule, StagnationRule
     return LifecycleConfig(
         regime="SPOT_BULL",
         profile="C",
         signal_policy=SignalPolicy(
-            min_signal_strength=0.45,
-            min_success_probability=0.55,
+            min_signal_strength=0.70,
+            min_success_probability=0.70,
             min_expected_pnl=0.0,
             min_liquidity_usdt=0.0,
             categories_enabled=("LARGE_CAP", "MIDCAP_ALT", "NARRATIVE"),
-            max_candidates=5,
+            max_candidates=4,
             diversification_mode="category",
         ),
         entry_policy=EntryPolicy(
-            min_composite_score=0.45,
+            min_composite_score=0.70,
             min_expected_pnl=0.0,
-            min_success_probability=0.55,
+            min_success_probability=0.70,
             min_liquidity_usdt=0.0,
-            max_total_positions=5,
-            max_category_positions={"LARGE_CAP": 1, "MIDCAP_ALT": 2, "NARRATIVE": 1},
+            max_total_positions=3,
+            max_category_positions={"LARGE_CAP": 1, "MIDCAP_ALT": 1, "NARRATIVE": 1},
         ),
         sizing_policy=SizingPolicy(
             regime_allocation_pct=0.8,
-            max_per_trade_usdt=1000.0,
-            kelly_base_pct=0.18,
-            kelly_max_pct=0.20,
-            conviction_max_pct=0.20,
-            category_caps={"LARGE_CAP": 0.30, "MIDCAP_ALT": 0.35, "NARRATIVE": 0.15},
+            max_per_trade_usdt=3500.0,
+            kelly_base_pct=0.28,
+            kelly_max_pct=0.40,
+            conviction_max_pct=0.40,
+            category_caps={"LARGE_CAP": 0.35, "MIDCAP_ALT": 0.35, "NARRATIVE": 0.15},
         ),
         exit_policy=ExitPolicy(
             regime="SPOT_BULL",
             profile="C",
-            hard_sl_atr_mult=3.36,
+            hard_sl_atr_mult=4.5,
             hard_tp_atr_mult=3.5,
             trailing_activation_pct=0.02,
             trailing_atr_mult=1.5,
@@ -643,4 +822,639 @@ def _spot_bull_config_c() -> LifecycleConfig:
             momentum_exit=MomentumExitRule(70, 30, 80, 20),
             stagnation_rule=StagnationRule(6, 0.05, 0.5),
         ),
+    )
+
+
+def spot_bull_config_from_params(params: Dict[str, Any], profile: str = "A") -> LifecycleConfig:
+    """Build a SPOT_BULL lifecycle config from a flat parameter dict for sweeping.
+
+    Recognised keys:
+      - min_signal_strength, min_success_probability, max_candidates
+      - min_composite_score, max_total_positions
+      - max_per_trade_usdt, kelly_base_pct, kelly_max_pct, conviction_max_pct
+      - hard_sl_atr_mult, hard_tp_atr_mult
+    """
+    from lifecycle import LifecycleConfig, SignalPolicy, EntryPolicy, SizingPolicy, ExitPolicy, PartialTake, MomentumExitRule, StagnationRule
+    _cats = ("LARGE_CAP", "MIDCAP_ALT", "NARRATIVE")
+    _max_total = int(params.get("max_total_positions", 5))
+    _large = max(1, _max_total // 4)
+    _mid = max(1, _max_total // 2)
+    _narr = max(1, _max_total - _large - _mid)
+    return LifecycleConfig(
+        regime="SPOT_BULL",
+        profile=profile,
+        signal_policy=SignalPolicy(
+            min_signal_strength=float(params.get("min_signal_strength", 0.55)),
+            min_success_probability=float(params.get("min_success_probability", 0.55)),
+            min_expected_pnl=0.0,
+            min_liquidity_usdt=0.0,
+            categories_enabled=_cats,
+            max_candidates=int(params.get("max_candidates", 5)),
+            diversification_mode="category",
+        ),
+        entry_policy=EntryPolicy(
+            min_composite_score=float(params.get("min_composite_score", params.get("min_signal_strength", 0.55))),
+            min_expected_pnl=0.0,
+            min_success_probability=float(params.get("min_success_probability", 0.55)),
+            min_liquidity_usdt=0.0,
+            max_total_positions=_max_total,
+            max_category_positions={"LARGE_CAP": _large, "MIDCAP_ALT": _mid, "NARRATIVE": _narr},
+        ),
+        sizing_policy=SizingPolicy(
+            regime_allocation_pct=0.8,
+            max_per_trade_usdt=float(params.get("max_per_trade_usdt", 1000.0)),
+            kelly_base_pct=float(params.get("kelly_base_pct", 0.18)),
+            kelly_max_pct=float(params.get("kelly_max_pct", 0.20)),
+            conviction_max_pct=float(params.get("conviction_max_pct", 0.20)),
+            category_caps={"LARGE_CAP": 0.30, "MIDCAP_ALT": 0.35, "NARRATIVE": 0.15},
+        ),
+        exit_policy=ExitPolicy(
+            regime="SPOT_BULL",
+            profile=profile,
+            hard_sl_atr_mult=float(params.get("hard_sl_atr_mult", 4.5)),
+            hard_tp_atr_mult=float(params.get("hard_tp_atr_mult", 3.5)),
+            trailing_activation_pct=0.02,
+            trailing_atr_mult=1.5,
+            breakeven_activation_pct=0.015,
+            partial_takes=(PartialTake(0.25, 1.5, "tp1"),),
+            momentum_exit=MomentumExitRule(70, 30, 80, 20),
+            stagnation_rule=StagnationRule(6, 0.05, 0.5),
+        ),
+    )
+
+
+def predictive_spot_bull_config_from_params(
+    params: Dict[str, Any], profile: str = "PREDICTIVE"
+) -> LifecycleConfig:
+    """Build a SPOT_BULL config with per-position profile assignment enabled.
+
+    Flat params can override any profile threshold prefixed by the profile key, e.g.
+    ``A_min_composite_score`` or ``B_kelly_max_pct``.  Defaults come from
+    `predictive_spot_bull_config`.
+    """
+    from lifecycle import (
+        LifecycleConfig,
+        SignalPolicy,
+        EntryPolicy,
+        SizingPolicy,
+        ExitPolicy,
+        PartialTake,
+        MomentumExitRule,
+        StagnationRule,
+        ProfileThresholds,
+    )
+
+    base = predictive_spot_bull_config()
+
+    def _p(prof: str, key: str, default):
+        return type(default)(params.get(f"{prof}_{key}", default))
+
+    thresholds = {}
+    for prof in ("A", "B", "C"):
+        t = base.profile_thresholds[prof]
+        thresholds[prof] = ProfileThresholds(
+            min_composite_score=_p(prof, "min_composite_score", t.min_composite_score),
+            min_success_probability=_p(prof, "min_success_probability", t.min_success_probability),
+            min_signal_strength=_p(prof, "min_signal_strength", t.min_signal_strength),
+            min_expected_pnl=_p(prof, "min_expected_pnl", t.min_expected_pnl),
+            max_rsi_4h=_p(prof, "max_rsi_4h", t.max_rsi_4h),
+            min_vol_spike=_p(prof, "min_vol_spike", t.min_vol_spike),
+            min_range_score=_p(prof, "min_range_score", t.min_range_score),
+            min_confluence=_p(prof, "min_confluence", t.min_confluence),
+            min_short_term_score=_p(prof, "min_short_term_score", t.min_short_term_score),
+            min_peak_quality=_p(prof, "min_peak_quality", t.min_peak_quality),
+        )
+
+    sizing = {}
+    for prof in ("A", "B", "C"):
+        s = base.profile_sizing_policies[prof]
+        sizing[prof] = SizingPolicy(
+            regime_allocation_pct=_p(prof, "regime_allocation_pct", s.regime_allocation_pct),
+            max_per_trade_usdt=_p(prof, "max_per_trade_usdt", s.max_per_trade_usdt),
+            kelly_base_pct=_p(prof, "kelly_base_pct", s.kelly_base_pct),
+            kelly_max_pct=_p(prof, "kelly_max_pct", s.kelly_max_pct),
+            conviction_max_pct=_p(prof, "conviction_max_pct", s.conviction_max_pct),
+            category_caps={
+                "LARGE_CAP": _p(prof, "cap_large", s.category_caps.get("LARGE_CAP", 0.25)),
+                "MIDCAP_ALT": _p(prof, "cap_mid", s.category_caps.get("MIDCAP_ALT", 0.35)),
+                "NARRATIVE": _p(prof, "cap_narr", s.category_caps.get("NARRATIVE", 0.15)),
+            },
+            max_total_positions=int(params.get(f"{prof}_max_total_positions", s.max_total_positions)),
+            fng_capital_multiplier=True,
+        )
+
+    signal = base.signal_policy
+    entry = base.entry_policy
+    exitp = base.exit_policy
+
+    return LifecycleConfig(
+        regime="SPOT_BULL",
+        profile=profile,
+        signal_policy=SignalPolicy(
+            min_signal_strength=float(params.get("min_signal_strength", signal.min_signal_strength)),
+            min_success_probability=float(params.get("min_success_probability", signal.min_success_probability)),
+            min_expected_pnl=float(params.get("min_expected_pnl", signal.min_expected_pnl)),
+            min_liquidity_usdt=0.0,
+            categories_enabled=("LARGE_CAP", "MIDCAP_ALT", "NARRATIVE"),
+            max_candidates=int(params.get("max_candidates", signal.max_candidates)),
+            diversification_mode="category",
+        ),
+        entry_policy=EntryPolicy(
+            min_composite_score=float(params.get("min_composite_score", entry.min_composite_score)),
+            min_expected_pnl=float(params.get("min_expected_pnl", entry.min_expected_pnl)),
+            min_success_probability=float(params.get("min_success_probability", entry.min_success_probability)),
+            min_liquidity_usdt=0.0,
+            max_total_positions=int(params.get("max_total_positions", entry.max_total_positions)),
+            max_category_positions=dict(entry.max_category_positions),
+        ),
+        sizing_policy=base.sizing_policy,
+        exit_policy=ExitPolicy(
+            regime="SPOT_BULL",
+            profile=profile,
+            hard_sl_atr_mult=float(params.get("hard_sl_atr_mult", exitp.hard_sl_atr_mult)),
+            hard_tp_atr_mult=float(params.get("hard_tp_atr_mult", exitp.hard_tp_atr_mult)),
+            trailing_activation_pct=exitp.trailing_activation_pct,
+            trailing_atr_mult=exitp.trailing_atr_mult,
+            breakeven_activation_pct=exitp.breakeven_activation_pct,
+            partial_takes=exitp.partial_takes,
+            momentum_exit=exitp.momentum_exit,
+            stagnation_rule=exitp.stagnation_rule,
+        ),
+        profile_order=("A", "B", "C"),
+        profile_thresholds=thresholds,
+        profile_sizing_policies=sizing,
+        profile_exit_policies=base.profile_exit_policies,
+    )
+
+
+def predictive_spot_bull_config() -> LifecycleConfig:
+    """Predictive A/B/C per-position profile assignment for SPOT_BULL.
+
+    Profile assignment is driven primarily by the `peak_quality` score, which
+    estimates the magnitude of the next 12h price peak.  A = ultra-Kelly and
+    fastest exits; B = super-Kelly; C = aggressive-Kelly and wider exits.
+    """
+    from lifecycle import (
+        LifecycleConfig,
+        SignalPolicy,
+        EntryPolicy,
+        SizingPolicy,
+        ExitPolicy,
+        PartialTake,
+        MomentumExitRule,
+        StagnationRule,
+        ProfileThresholds,
+    )
+
+    _cats = ("LARGE_CAP", "MIDCAP_ALT", "NARRATIVE")
+
+    signal_policy = SignalPolicy(
+        min_signal_strength=0.50,
+        min_success_probability=0.50,
+        min_expected_pnl=-0.5,
+        min_liquidity_usdt=0.0,
+        categories_enabled=_cats,
+        max_candidates=20,
+        diversification_mode="category",
+    )
+
+    entry_policy = EntryPolicy(
+        min_composite_score=0.55,
+        min_expected_pnl=-0.5,
+        min_success_probability=0.50,
+        min_liquidity_usdt=0.0,
+        max_total_positions=14,
+        max_category_positions={"LARGE_CAP": 4, "MIDCAP_ALT": 6, "NARRATIVE": 2},
+    )
+
+    # Default fallback exit policy (used when no per-profile policy matches).
+    exit_policy = ExitPolicy(
+        regime="SPOT_BULL",
+        profile="PREDICTIVE",
+        hard_sl_atr_mult=2.5,
+        hard_tp_atr_mult=3.0,
+        trailing_activation_pct=0.02,
+        trailing_atr_mult=1.5,
+        breakeven_activation_pct=0.015,
+        partial_takes=(PartialTake(0.25, 1.5, "tp1"),),
+        momentum_exit=MomentumExitRule(70, 30, 80, 20),
+        stagnation_rule=StagnationRule(6, 0.05, 0.5),
+    )
+
+    # A = top ~10-15% peak-quality candidates, ultra-aggressive Kelly.
+    thresholds_a = ProfileThresholds(
+        min_composite_score=0.55,
+        min_success_probability=0.50,
+        min_signal_strength=0.50,
+        min_expected_pnl=-0.5,
+        max_rsi_4h=70.0,
+        min_vol_spike=0.0,
+        min_range_score=0.0,
+        min_confluence=0.0,
+        min_short_term_score=0.0,
+        min_peak_quality=0.20,
+    )
+    sizing_a = SizingPolicy(
+        regime_allocation_pct=0.8,
+        max_per_trade_usdt=2500.0,
+        kelly_base_pct=0.50,
+        kelly_max_pct=0.65,
+        conviction_max_pct=0.65,
+        category_caps={"LARGE_CAP": 0.50, "MIDCAP_ALT": 0.50, "NARRATIVE": 0.20},
+        max_total_positions=2,
+        fng_capital_multiplier=True,
+    )
+    exit_a = ExitPolicy(
+        regime="SPOT_BULL",
+        profile="A",
+        hard_sl_atr_mult=1.5,
+        hard_tp_atr_mult=2.0,
+        trailing_activation_pct=0.01,
+        trailing_atr_mult=0.5,
+        breakeven_activation_pct=0.005,
+        partial_takes=(),
+        momentum_exit=MomentumExitRule(70, 30, 80, 20),
+        stagnation_rule=StagnationRule(4, 0.03, 0.5),
+    )
+
+    # B = moderate peak-quality candidates, super Kelly.
+    thresholds_b = ProfileThresholds(
+        min_composite_score=0.55,
+        min_success_probability=0.50,
+        min_signal_strength=0.50,
+        min_expected_pnl=-0.5,
+        max_rsi_4h=70.0,
+        min_vol_spike=0.0,
+        min_range_score=0.0,
+        min_confluence=0.0,
+        min_short_term_score=0.0,
+        min_peak_quality=-0.30,
+    )
+    sizing_b = SizingPolicy(
+        regime_allocation_pct=0.8,
+        max_per_trade_usdt=1200.0,
+        kelly_base_pct=0.30,
+        kelly_max_pct=0.45,
+        conviction_max_pct=0.45,
+        category_caps={"LARGE_CAP": 0.40, "MIDCAP_ALT": 0.40, "NARRATIVE": 0.20},
+        max_total_positions=4,
+        fng_capital_multiplier=True,
+    )
+    exit_b = ExitPolicy(
+        regime="SPOT_BULL",
+        profile="B",
+        hard_sl_atr_mult=2.0,
+        hard_tp_atr_mult=2.5,
+        trailing_activation_pct=0.015,
+        trailing_atr_mult=1.0,
+        breakeven_activation_pct=0.01,
+        partial_takes=(PartialTake(0.25, 1.5, "tp1"),),
+        momentum_exit=MomentumExitRule(70, 30, 80, 20),
+        stagnation_rule=StagnationRule(6, 0.04, 0.5),
+    )
+
+    # C = small peak candidates, aggressive Kelly, wider exits.
+    thresholds_c = ProfileThresholds(
+        min_composite_score=0.55,
+        min_success_probability=0.50,
+        min_signal_strength=0.50,
+        min_expected_pnl=-0.5,
+        max_rsi_4h=70.0,
+        min_vol_spike=0.0,
+        min_range_score=0.0,
+        min_confluence=0.0,
+        min_short_term_score=0.0,
+        min_peak_quality=-0.80,
+    )
+    sizing_c = SizingPolicy(
+        regime_allocation_pct=0.8,
+        max_per_trade_usdt=600.0,
+        kelly_base_pct=0.18,
+        kelly_max_pct=0.28,
+        conviction_max_pct=0.28,
+        category_caps={"LARGE_CAP": 0.35, "MIDCAP_ALT": 0.35, "NARRATIVE": 0.15},
+        max_total_positions=8,
+        fng_capital_multiplier=True,
+    )
+    exit_c = ExitPolicy(
+        regime="SPOT_BULL",
+        profile="C",
+        hard_sl_atr_mult=2.5,
+        hard_tp_atr_mult=3.0,
+        trailing_activation_pct=0.02,
+        trailing_atr_mult=1.5,
+        breakeven_activation_pct=0.015,
+        partial_takes=(PartialTake(0.25, 1.5, "tp1"),),
+        momentum_exit=MomentumExitRule(70, 30, 80, 20),
+        stagnation_rule=StagnationRule(8, 0.05, 0.5),
+    )
+
+    return LifecycleConfig(
+        regime="SPOT_BULL",
+        profile="PREDICTIVE",
+        signal_policy=signal_policy,
+        entry_policy=entry_policy,
+        sizing_policy=SizingPolicy(
+            regime_allocation_pct=0.8,
+            max_per_trade_usdt=1200.0,
+            kelly_base_pct=0.18,
+            kelly_max_pct=0.28,
+            conviction_max_pct=0.28,
+            category_caps={"LARGE_CAP": 0.35, "MIDCAP_ALT": 0.35, "NARRATIVE": 0.15},
+            max_total_positions=8,
+        ),
+        exit_policy=exit_policy,
+        profile_order=("A", "B", "C"),
+        profile_thresholds={"A": thresholds_a, "B": thresholds_b, "C": thresholds_c},
+        profile_sizing_policies={"A": sizing_a, "B": sizing_b, "C": sizing_c},
+        profile_exit_policies={"A": exit_a, "B": exit_b, "C": exit_c},
+    )
+
+
+def predictive_range_scalp_config_from_params(
+    params: Dict[str, Any], profile: str = "PREDICTIVE"
+) -> LifecycleConfig:
+    """Build a RANGE_SCALP predictive config from a flat parameter dict."""
+    from lifecycle import (
+        LifecycleConfig,
+        SignalPolicy,
+        EntryPolicy,
+        SizingPolicy,
+        ExitPolicy,
+        PartialTake,
+        MomentumExitRule,
+        StagnationRule,
+        ProfileThresholds,
+    )
+
+    base = predictive_range_scalp_config()
+
+    def _p(prof: str, key: str, default):
+        return type(default)(params.get(f"{prof}_{key}", default))
+
+    thresholds = {}
+    for prof in ("A", "B", "C"):
+        t = base.profile_thresholds[prof]
+        thresholds[prof] = ProfileThresholds(
+            min_composite_score=_p(prof, "min_composite_score", t.min_composite_score),
+            min_success_probability=_p(prof, "min_success_probability", t.min_success_probability),
+            min_signal_strength=_p(prof, "min_signal_strength", t.min_signal_strength),
+            min_expected_pnl=_p(prof, "min_expected_pnl", t.min_expected_pnl),
+            max_rsi_4h=_p(prof, "max_rsi_4h", t.max_rsi_4h),
+            min_vol_spike=_p(prof, "min_vol_spike", t.min_vol_spike),
+            min_range_score=_p(prof, "min_range_score", t.min_range_score),
+            min_confluence=_p(prof, "min_confluence", t.min_confluence),
+            min_short_term_score=_p(prof, "min_short_term_score", t.min_short_term_score),
+            min_peak_quality=_p(prof, "min_peak_quality", t.min_peak_quality),
+        )
+
+    sizing = {}
+    for prof in ("A", "B", "C"):
+        s = base.profile_sizing_policies[prof]
+        sizing[prof] = SizingPolicy(
+            regime_allocation_pct=_p(prof, "regime_allocation_pct", s.regime_allocation_pct),
+            max_per_trade_usdt=_p(prof, "max_per_trade_usdt", s.max_per_trade_usdt),
+            kelly_base_pct=_p(prof, "kelly_base_pct", s.kelly_base_pct),
+            kelly_max_pct=_p(prof, "kelly_max_pct", s.kelly_max_pct),
+            conviction_max_pct=_p(prof, "conviction_max_pct", s.conviction_max_pct),
+            category_caps={
+                "LARGE_CAP": _p(prof, "cap_large", s.category_caps.get("LARGE_CAP", 0.25)),
+                "MIDCAP_ALT": _p(prof, "cap_mid", s.category_caps.get("MIDCAP_ALT", 0.35)),
+                "NARRATIVE": _p(prof, "cap_narr", s.category_caps.get("NARRATIVE", 0.15)),
+            },
+            max_total_positions=int(params.get(f"{prof}_max_total_positions", s.max_total_positions)),
+            fng_capital_multiplier=True,
+        )
+
+    signal = base.signal_policy
+    entry = base.entry_policy
+    exitp = base.exit_policy
+
+    return LifecycleConfig(
+        regime="RANGE_SCALP",
+        profile=profile,
+        signal_policy=SignalPolicy(
+            min_signal_strength=float(params.get("min_signal_strength", signal.min_signal_strength)),
+            min_success_probability=float(params.get("min_success_probability", signal.min_success_probability)),
+            min_expected_pnl=float(params.get("min_expected_pnl", signal.min_expected_pnl)),
+            min_liquidity_usdt=0.0,
+            categories_enabled=("LARGE_CAP", "MIDCAP_ALT", "NARRATIVE"),
+            max_candidates=int(params.get("max_candidates", signal.max_candidates)),
+            diversification_mode="category",
+        ),
+        entry_policy=EntryPolicy(
+            min_composite_score=float(params.get("min_composite_score", entry.min_composite_score)),
+            min_expected_pnl=float(params.get("min_expected_pnl", entry.min_expected_pnl)),
+            min_success_probability=float(params.get("min_success_probability", entry.min_success_probability)),
+            min_liquidity_usdt=0.0,
+            max_total_positions=int(params.get("max_total_positions", entry.max_total_positions)),
+            max_category_positions=dict(entry.max_category_positions),
+        ),
+        sizing_policy=SizingPolicy(
+            regime_allocation_pct=0.8,
+            max_per_trade_usdt=1200.0,
+            kelly_base_pct=0.18,
+            kelly_max_pct=0.28,
+            conviction_max_pct=0.28,
+            category_caps={"LARGE_CAP": 0.35, "MIDCAP_ALT": 0.35, "NARRATIVE": 0.15},
+            max_total_positions=8,
+        ),
+        exit_policy=ExitPolicy(
+            regime="RANGE_SCALP",
+            profile=profile,
+            hard_sl_atr_mult=float(params.get("hard_sl_atr_mult", exitp.hard_sl_atr_mult)),
+            hard_tp_atr_mult=float(params.get("hard_tp_atr_mult", exitp.hard_tp_atr_mult)),
+            trailing_activation_pct=exitp.trailing_activation_pct,
+            trailing_atr_mult=exitp.trailing_atr_mult,
+            breakeven_activation_pct=exitp.breakeven_activation_pct,
+            partial_takes=exitp.partial_takes,
+            momentum_exit=exitp.momentum_exit,
+            stagnation_rule=exitp.stagnation_rule,
+        ),
+        profile_order=("A", "B", "C"),
+        profile_thresholds=thresholds,
+        profile_sizing_policies=sizing,
+        profile_exit_policies=base.profile_exit_policies,
+    )
+
+
+def predictive_range_scalp_config() -> LifecycleConfig:
+    """Predictive A/B/C per-position profile assignment for RANGE_SCALP.
+
+    Profile assignment is driven primarily by the `peak_quality` score.  A gets
+    the tightest exits, C the widest; sizing follows the same hierarchy.
+    """
+    from lifecycle import (
+        LifecycleConfig,
+        SignalPolicy,
+        EntryPolicy,
+        SizingPolicy,
+        ExitPolicy,
+        PartialTake,
+        MomentumExitRule,
+        StagnationRule,
+        ProfileThresholds,
+    )
+
+    _cats = ("LARGE_CAP", "MIDCAP_ALT", "NARRATIVE")
+
+    signal_policy = SignalPolicy(
+        min_signal_strength=0.50,
+        min_success_probability=0.50,
+        min_expected_pnl=-0.5,
+        min_liquidity_usdt=0.0,
+        categories_enabled=_cats,
+        max_candidates=20,
+        diversification_mode="category",
+    )
+
+    entry_policy = EntryPolicy(
+        min_composite_score=0.55,
+        min_expected_pnl=-0.5,
+        min_success_probability=0.50,
+        min_liquidity_usdt=0.0,
+        max_total_positions=14,
+        max_category_positions={"LARGE_CAP": 4, "MIDCAP_ALT": 6, "NARRATIVE": 2},
+    )
+
+    exit_policy = ExitPolicy(
+        regime="RANGE_SCALP",
+        profile="PREDICTIVE",
+        hard_sl_atr_mult=2.5,
+        hard_tp_atr_mult=2.0,
+        trailing_activation_pct=0.01,
+        trailing_atr_mult=1.0,
+        breakeven_activation_pct=0.01,
+        partial_takes=(PartialTake(0.35, 1.0, "tp1"),),
+        momentum_exit=MomentumExitRule(70, 30, 80, 20),
+        stagnation_rule=StagnationRule(4, 0.04, 0.5),
+    )
+
+    # A = top ~10-15% peak-quality candidates, ultra-aggressive Kelly.
+    thresholds_a = ProfileThresholds(
+        min_composite_score=0.55,
+        min_success_probability=0.50,
+        min_signal_strength=0.50,
+        min_expected_pnl=-0.5,
+        max_rsi_4h=70.0,
+        min_vol_spike=0.0,
+        min_range_score=0.0,
+        min_confluence=0.0,
+        min_short_term_score=0.0,
+        min_peak_quality=0.15,
+    )
+    sizing_a = SizingPolicy(
+        regime_allocation_pct=0.8,
+        max_per_trade_usdt=2500.0,
+        kelly_base_pct=0.50,
+        kelly_max_pct=0.65,
+        conviction_max_pct=0.65,
+        category_caps={"LARGE_CAP": 0.50, "MIDCAP_ALT": 0.50, "NARRATIVE": 0.20},
+        max_total_positions=2,
+        fng_capital_multiplier=True,
+    )
+    exit_a = ExitPolicy(
+        regime="RANGE_SCALP",
+        profile="A",
+        hard_sl_atr_mult=1.5,
+        hard_tp_atr_mult=1.5,
+        trailing_activation_pct=0.005,
+        trailing_atr_mult=0.5,
+        breakeven_activation_pct=0.005,
+        partial_takes=(),
+        momentum_exit=MomentumExitRule(70, 30, 80, 20),
+        stagnation_rule=StagnationRule(2, 0.02, 0.5),
+    )
+
+    # B = moderate peak-quality candidates, super Kelly.
+    thresholds_b = ProfileThresholds(
+        min_composite_score=0.55,
+        min_success_probability=0.50,
+        min_signal_strength=0.50,
+        min_expected_pnl=-0.5,
+        max_rsi_4h=70.0,
+        min_vol_spike=0.0,
+        min_range_score=0.0,
+        min_confluence=0.0,
+        min_short_term_score=0.0,
+        min_peak_quality=-0.35,
+    )
+    sizing_b = SizingPolicy(
+        regime_allocation_pct=0.8,
+        max_per_trade_usdt=1200.0,
+        kelly_base_pct=0.30,
+        kelly_max_pct=0.45,
+        conviction_max_pct=0.45,
+        category_caps={"LARGE_CAP": 0.40, "MIDCAP_ALT": 0.40, "NARRATIVE": 0.20},
+        max_total_positions=4,
+        fng_capital_multiplier=True,
+    )
+    exit_b = ExitPolicy(
+        regime="RANGE_SCALP",
+        profile="B",
+        hard_sl_atr_mult=2.0,
+        hard_tp_atr_mult=2.0,
+        trailing_activation_pct=0.01,
+        trailing_atr_mult=1.0,
+        breakeven_activation_pct=0.01,
+        partial_takes=(PartialTake(0.35, 1.0, "tp1"),),
+        momentum_exit=MomentumExitRule(70, 30, 80, 20),
+        stagnation_rule=StagnationRule(4, 0.04, 0.5),
+    )
+
+    # C = small peak candidates, aggressive Kelly, wider exits.
+    thresholds_c = ProfileThresholds(
+        min_composite_score=0.55,
+        min_success_probability=0.50,
+        min_signal_strength=0.50,
+        min_expected_pnl=-0.5,
+        max_rsi_4h=70.0,
+        min_vol_spike=0.0,
+        min_range_score=0.0,
+        min_confluence=0.0,
+        min_short_term_score=0.0,
+        min_peak_quality=-0.80,
+    )
+    sizing_c = SizingPolicy(
+        regime_allocation_pct=0.8,
+        max_per_trade_usdt=600.0,
+        kelly_base_pct=0.18,
+        kelly_max_pct=0.28,
+        conviction_max_pct=0.28,
+        category_caps={"LARGE_CAP": 0.35, "MIDCAP_ALT": 0.35, "NARRATIVE": 0.15},
+        max_total_positions=8,
+        fng_capital_multiplier=True,
+    )
+    exit_c = ExitPolicy(
+        regime="RANGE_SCALP",
+        profile="C",
+        hard_sl_atr_mult=2.5,
+        hard_tp_atr_mult=2.5,
+        trailing_activation_pct=0.015,
+        trailing_atr_mult=1.5,
+        breakeven_activation_pct=0.015,
+        partial_takes=(PartialTake(0.35, 1.0, "tp1"),),
+        momentum_exit=MomentumExitRule(70, 30, 80, 20),
+        stagnation_rule=StagnationRule(6, 0.05, 0.5),
+    )
+
+    return LifecycleConfig(
+        regime="RANGE_SCALP",
+        profile="PREDICTIVE",
+        signal_policy=signal_policy,
+        entry_policy=entry_policy,
+        sizing_policy=SizingPolicy(
+            regime_allocation_pct=0.8,
+            max_per_trade_usdt=600.0,
+            kelly_base_pct=0.18,
+            kelly_max_pct=0.28,
+            conviction_max_pct=0.28,
+            category_caps={"LARGE_CAP": 0.35, "MIDCAP_ALT": 0.35, "NARRATIVE": 0.15},
+            max_total_positions=8,
+        ),
+        exit_policy=exit_policy,
+        profile_order=("A", "B", "C"),
+        profile_thresholds={"A": thresholds_a, "B": thresholds_b, "C": thresholds_c},
+        profile_sizing_policies={"A": sizing_a, "B": sizing_b, "C": sizing_c},
+        profile_exit_policies={"A": exit_a, "B": exit_b, "C": exit_c},
     )

@@ -2061,12 +2061,11 @@ def _get_effective_runtime_selection(summary_mode: Optional[str] = None) -> Dict
         _profile = "A"
         _profile_source = "default"
 
-    try:
-        harmony_apply = getattr(run_trades, '_apply_mode_profile_harmony', None)
-        if callable(harmony_apply):
-            harmony_apply(settings, _mode or _fallback_mode, _profile)
-    except Exception:
-        pass
+    # NOTE: do not apply harmony to the app-level settings singleton here.
+    # The dashboard only needs the effective mode/profile labels; applying the
+    # harmony multipliers in this read-only path would mutate settings and
+    # produce false drift in _get_mode_profile_harmony_drift. The drift check
+    # recomputes expected values from a fresh base settings object when needed.
 
     return {
         "mode": _mode,
@@ -4571,6 +4570,20 @@ def _get_mode_profile_harmony_drift() -> Dict[str, Any]:
         if not isinstance(snapshot, dict):
             snapshot = {}
         effective = _get_effective_runtime_selection(str(snapshot.get("selected_mode") or "SPOT_BULL"))
+        _mode = str(effective.get("mode") or "SPOT_BULL").strip().upper() or "SPOT_BULL"
+        _profile = str(effective.get("profile_label") or "A").strip().upper() or "A"
+
+        # Recompute the expected harmonized values from a fresh base settings object.
+        # This avoids comparing the persisted snapshot against the app-level settings
+        # singleton, which may already be harmonized or even double-harmonized by
+        # the _get_effective_runtime_selection call.
+        _expected_settings = get_settings()
+        _harmony_apply = getattr(run_trades, '_apply_mode_profile_harmony', None)
+        if callable(_harmony_apply):
+            try:
+                _harmony_apply(_expected_settings, _mode, _profile)
+            except Exception:
+                pass
 
         mismatches = []
 
@@ -4589,32 +4602,32 @@ def _get_mode_profile_harmony_drift() -> Dict[str, Any]:
         if str(snapshot.get("selected_profile") or "").strip().upper() != str(effective.get("profile_label") or "").strip().upper():
             mismatches.append({"field": "selected_profile", "expected": snapshot.get("selected_profile"), "actual": effective.get("profile_label")})
 
-        _compare_float("trailing_stop_activation_pct", snapshot.get("harmony_result", {}).get("applied", {}).get("trailing_stop_activation_pct", {}).get("new"), getattr(settings, 'trailing_stop_activation_pct', None))
-        _compare_float("trailing_stop_distance_pct", snapshot.get("harmony_result", {}).get("applied", {}).get("trailing_stop_distance_pct", {}).get("new"), getattr(settings, 'trailing_stop_distance_pct', None))
-        _compare_float("futures_breakeven_activation_pct", snapshot.get("futures_breakeven_activation_pct"), getattr(settings, 'futures_breakeven_activation_pct', None))
-        _compare_float("futures_trailing_activation_pct", snapshot.get("futures_trailing_activation_pct"), getattr(settings, 'futures_trailing_activation_pct', None))
-        _compare_float("futures_trailing_distance_pct", snapshot.get("futures_trailing_distance_pct"), getattr(settings, 'futures_trailing_distance_pct', None))
-        _compare_float("futures_trail_floor_pct", snapshot.get("futures_trail_floor_pct"), getattr(settings, 'futures_trail_floor_pct', None))
-        _compare_float("futures_trail_ceiling_pct", snapshot.get("futures_trail_ceiling_pct"), getattr(settings, 'futures_trail_ceiling_pct', None))
-        _compare_float("futures_trail_atr_multiplier_low", snapshot.get("futures_trail_atr_multiplier_low"), getattr(settings, 'futures_trail_atr_multiplier_low', None))
-        _compare_float("futures_trail_atr_multiplier_mid", snapshot.get("futures_trail_atr_multiplier_mid"), getattr(settings, 'futures_trail_atr_multiplier_mid', None))
-        _compare_float("futures_trail_atr_multiplier_high", snapshot.get("futures_trail_atr_multiplier_high"), getattr(settings, 'futures_trail_atr_multiplier_high', None))
-        _compare_float("futures_trail_atr_multiplier_deep", snapshot.get("futures_trail_atr_multiplier_deep"), getattr(settings, 'futures_trail_atr_multiplier_deep', None))
-        _compare_float("sso_target_daily_usd", snapshot.get("sso_target_daily_usd"), getattr(settings, 'sso_target_daily_usd', None))
-        _compare_float("sso_stagnant_min_hours", snapshot.get("sso_stagnant_min_hours"), getattr(settings, 'sso_stagnant_min_hours', 2.5))
-        _compare_float("sso_slow_velocity_threshold", snapshot.get("sso_slow_velocity_threshold"), getattr(settings, 'sso_slow_velocity_threshold', None))
-        _compare_float("sso_reentry_min_strength_diff", snapshot.get("sso_reentry_min_strength_diff"), getattr(settings, 'sso_reentry_min_strength_diff', None))
-        _compare_float("max_positions_spot_bull", snapshot.get("max_positions_spot_bull"), getattr(settings, 'max_positions_spot_bull', None))
-        _compare_float("max_positions_range_scalp", snapshot.get("max_positions_range_scalp"), getattr(settings, 'max_positions_range_scalp', None))
-        _compare_float("max_positions_preservation", snapshot.get("max_positions_preservation"), getattr(settings, 'max_positions_preservation', None))
-        _compare_float("max_positions_futures_short", snapshot.get("max_positions_futures_short"), getattr(settings, 'max_positions_futures_short', None))
-        _compare_float("futures_max_new_per_cycle", snapshot.get("futures_max_new_per_cycle"), getattr(settings, 'futures_max_new_per_cycle', None))
-        _compare_float("min_hold_minutes", snapshot.get("min_hold_minutes"), getattr(settings, 'min_hold_minutes', None))
-        _compare_float("min_hold_minutes_spot_bull", snapshot.get("min_hold_minutes_spot_bull"), getattr(settings, 'min_hold_minutes_spot_bull', None))
-        _compare_float("min_hold_minutes_range_scalp", snapshot.get("min_hold_minutes_range_scalp"), getattr(settings, 'min_hold_minutes_range_scalp', None))
-        _compare_float("futures_long_sl_pct", snapshot.get("futures_long_sl_pct"), getattr(settings, 'futures_long_sl_pct', None))
-        _compare_float("futures_long_tp_pct", snapshot.get("futures_long_tp_pct"), getattr(settings, 'futures_long_tp_pct', None))
-        _compare_float("max_rebalance_per_cycle", snapshot.get("max_rebalance_per_cycle"), getattr(settings, 'max_rebalance_per_cycle', None))
+        _compare_float("trailing_stop_activation_pct", snapshot.get("harmony_result", {}).get("applied", {}).get("trailing_stop_activation_pct", {}).get("new"), getattr(_expected_settings, 'trailing_stop_activation_pct', None))
+        _compare_float("trailing_stop_distance_pct", snapshot.get("harmony_result", {}).get("applied", {}).get("trailing_stop_distance_pct", {}).get("new"), getattr(_expected_settings, 'trailing_stop_distance_pct', None))
+        _compare_float("futures_breakeven_activation_pct", snapshot.get("futures_breakeven_activation_pct"), getattr(_expected_settings, 'futures_breakeven_activation_pct', None))
+        _compare_float("futures_trailing_activation_pct", snapshot.get("futures_trailing_activation_pct"), getattr(_expected_settings, 'futures_trailing_activation_pct', None))
+        _compare_float("futures_trailing_distance_pct", snapshot.get("futures_trailing_distance_pct"), getattr(_expected_settings, 'futures_trailing_distance_pct', None))
+        _compare_float("futures_trail_floor_pct", snapshot.get("futures_trail_floor_pct"), getattr(_expected_settings, 'futures_trail_floor_pct', None))
+        _compare_float("futures_trail_ceiling_pct", snapshot.get("futures_trail_ceiling_pct"), getattr(_expected_settings, 'futures_trail_ceiling_pct', None))
+        _compare_float("futures_trail_atr_multiplier_low", snapshot.get("futures_trail_atr_multiplier_low"), getattr(_expected_settings, 'futures_trail_atr_multiplier_low', None))
+        _compare_float("futures_trail_atr_multiplier_mid", snapshot.get("futures_trail_atr_multiplier_mid"), getattr(_expected_settings, 'futures_trail_atr_multiplier_mid', None))
+        _compare_float("futures_trail_atr_multiplier_high", snapshot.get("futures_trail_atr_multiplier_high"), getattr(_expected_settings, 'futures_trail_atr_multiplier_high', None))
+        _compare_float("futures_trail_atr_multiplier_deep", snapshot.get("futures_trail_atr_multiplier_deep"), getattr(_expected_settings, 'futures_trail_atr_multiplier_deep', None))
+        _compare_float("sso_target_daily_usd", snapshot.get("sso_target_daily_usd"), getattr(_expected_settings, 'sso_target_daily_usd', None))
+        _compare_float("sso_stagnant_min_hours", snapshot.get("sso_stagnant_min_hours"), getattr(_expected_settings, 'sso_stagnant_min_hours', 2.5))
+        _compare_float("sso_slow_velocity_threshold", snapshot.get("sso_slow_velocity_threshold"), getattr(_expected_settings, 'sso_slow_velocity_threshold', None))
+        _compare_float("sso_reentry_min_strength_diff", snapshot.get("sso_reentry_min_strength_diff"), getattr(_expected_settings, 'sso_reentry_min_strength_diff', None))
+        _compare_float("max_positions_spot_bull", snapshot.get("max_positions_spot_bull"), getattr(_expected_settings, 'max_positions_spot_bull', None))
+        _compare_float("max_positions_range_scalp", snapshot.get("max_positions_range_scalp"), getattr(_expected_settings, 'max_positions_range_scalp', None))
+        _compare_float("max_positions_preservation", snapshot.get("max_positions_preservation"), getattr(_expected_settings, 'max_positions_preservation', None))
+        _compare_float("max_positions_futures_short", snapshot.get("max_positions_futures_short"), getattr(_expected_settings, 'max_positions_futures_short', None))
+        _compare_float("futures_max_new_per_cycle", snapshot.get("futures_max_new_per_cycle"), getattr(_expected_settings, 'futures_max_new_per_cycle', None))
+        _compare_float("min_hold_minutes", snapshot.get("min_hold_minutes"), getattr(_expected_settings, 'min_hold_minutes', None))
+        _compare_float("min_hold_minutes_spot_bull", snapshot.get("min_hold_minutes_spot_bull"), getattr(_expected_settings, 'min_hold_minutes_spot_bull', None))
+        _compare_float("min_hold_minutes_range_scalp", snapshot.get("min_hold_minutes_range_scalp"), getattr(_expected_settings, 'min_hold_minutes_range_scalp', None))
+        _compare_float("futures_long_sl_pct", snapshot.get("futures_long_sl_pct"), getattr(_expected_settings, 'futures_long_sl_pct', None))
+        _compare_float("futures_long_tp_pct", snapshot.get("futures_long_tp_pct"), getattr(_expected_settings, 'futures_long_tp_pct', None))
+        _compare_float("max_rebalance_per_cycle", snapshot.get("max_rebalance_per_cycle"), getattr(_expected_settings, 'max_rebalance_per_cycle', None))
 
         return {
             "ok": True,
@@ -4753,10 +4766,16 @@ def _get_parity_validation_snapshot() -> Dict[str, Any]:
         comparability_status = str(comparability.get('status') or 'not_comparable').lower()
         sample_status = str(comparability.get('sample_status') or 'none').lower()
 
+        coverage_ratio = comparability.get('coverage_ratio')
+        is_under_sampled = coverage_ratio is not None and float(coverage_ratio) < 0.05
+
         if comparability_status in ('not_comparable', 'limited'):
-            status = 'warning'
+            if comparability_status == 'limited' and is_under_sampled:
+                status = 'info'
+            else:
+                status = 'warning'
             reasons.extend([str(r) for r in (comparability.get('reasons') or []) if r])
-            if gap is not None:
+            if gap is not None and not (comparability_status == 'limited' and is_under_sampled):
                 reasons.append(f'active pnl gap observed {gap:.2f}% but comparison is not fully homologable')
         else:
             if gap is None:
@@ -7509,9 +7528,9 @@ async def get_kelly_config(_auth=Depends(_require_api_key)) -> Dict:
 # Whitelist de campos editables via PATCH /config/kelly
 _KELLY_EDITABLE_FIELDS = {
     "kelly_base_usdt", "kelly_max_usdt", "kelly_max_pct_liquid",
-    "kelly_dynamic_base_pct", "kelly_max_pct_cap",
+    "kelly_min_usdt", "kelly_dynamic_base_pct", "kelly_max_pct_cap",
     "futures_kelly_base_usdt", "futures_kelly_max_usdt",
-    "futures_kelly_max_pct_liquid", "futures_kelly_cap_pct",
+    "futures_kelly_max_pct_liquid", "futures_kelly_cap_pct", "futures_kelly_min_usdt",
     "fng_capitulation_threshold", "fng_extreme_fear_threshold",
     "fng_extreme_greed_threshold", "fng_capitulation_multiplier",
     "fng_extreme_fear_multiplier", "fng_extreme_greed_multiplier",

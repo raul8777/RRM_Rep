@@ -789,3 +789,28 @@ Kelly uniforme: $2500 max, KD=0.26, max_pct_liquid=0.90, conviction_max=0.30, MP
 
 **Post-sweep analysis**: Usar `/post_sweep_analysis` workflow después de cada sweep completo.
 
+---
+
+## 6. Peak MIMIC y `peak_quality` (jul 16 2026)
+
+### Componentes
+
+- `peak_quality.py`: carga de modelos `RandomForest` por régimen/dirección, imputación de medianas, asignación A/B/C/discarded.
+- `peak_signal_source.py`: lectura por lotes de `peaks_all.parquet`, predicción vectorizada con `n_jobs=12`, schedule de señales por `window_id`.
+- `peak_mimic_validator.py`: simulación directa (abre en `peak_start_ts`, cierra en `peak_end_ts`).
+- `simulation/mimic_lifecycle_adapter.py`: inyección de `peak_entry_schedule` en `run_lifecycle_simulation`.
+- `lifecycle/signal.py` + `lifecycle/profile_classifier.py`: passthrough de `peak_quality_profile` a `Signal.features` y uso como override del clasificador A/B/C.
+
+### Reglas de uso
+
+- **Perfiles A/B/C vienen del predictor, no del clasificador por thresholds técnicos**, cuando `Signal.features["peak_quality_profile"]` está presente.
+- **Inyección en MIMIC**: `--peak-signal-mode` en `mimic_mode_profile_sweep` fuerza `lifecycle=True` y un solo worker (`max_workers=1`) para evitar problemas de estado.
+- **Memoria**: `peak_signal_source` predice por batches de 100k-200k filas; no cargar todo `peaks_all.parquet` en memoria.
+- **Caveat**: el validador directo cierra en `peak_end_ts`, por lo que sus métricas son un **techo teórico/in-sample**. El lifecycle sweep mide la captura real con `ExitEngine`.
+
+### Decisiones de rollout
+
+1. No activar en producción hasta que el lifecycle sweep pase el deploy gate en ventanas representativas (`drawdown < 15%`, `PnL/día > 0`, `trades ≥ 3`).
+2. Antes de live, computar features `s_*` en `analyze_symbol` o re-entrenar con el subconjunto disponible.
+3. Si se usa, mantener `_check_entry_quality` como piso duro; `peak_quality` actúa como filtro adicional de rentabilidad esperada.
+

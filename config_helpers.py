@@ -29,6 +29,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'kelly_max_usdt': 1500.0,
     'kelly_max_pct_liquid': 0.85,
     'kelly_max_pct_cap': 0.30,
+    'kelly_min_usdt': 0.0,
     'kelly_dynamic_base_pct': 0.20,
     'max_per_trade_usdt': 1500.0,
 
@@ -37,6 +38,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'futures_kelly_max_usdt': 1500.0,
     'futures_kelly_max_pct_liquid': 0.85,
     'futures_kelly_cap_pct': 0.30,
+    'futures_kelly_min_usdt': 0.0,
 
     # FUTURES trading
     'futures_enabled': True,

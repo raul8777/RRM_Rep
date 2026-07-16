@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Optional
 from binance_client import BinanceClient
 from technical_indicators import TechnicalIndicators
+import peak_quality
 import logging
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ class AutonomousSignalGenerator:
             'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
             'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT'
         ]
+        self._btc_1h_klines = None
     
     def get_btc_market_trend(self, interval: str = '4h') -> str:
         """
@@ -431,6 +433,19 @@ class AutonomousSignalGenerator:
                 except Exception:
                     pass
 
+            # ── Peak-quality features (used by peak_quality predictor) ───────
+            try:
+                if self._btc_1h_klines is None:
+                    self._btc_1h_klines = self.fetch_klines('BTCUSDT', '1h', 200) or []
+                analysis['peak_quality_features'] = peak_quality.compute_peak_features(
+                    klines=klines,
+                    signal_meta=analysis,
+                    btc_klines=self._btc_1h_klines,
+                )
+            except Exception as _pq_err:
+                logger.debug(f"peak_quality features failed for {symbol}: {_pq_err}")
+                analysis['peak_quality_features'] = {}
+
             # ── Store in cache ────────────────────────────────────────────────
             AutonomousSignalGenerator._cache_signal(symbol, analysis)
 
@@ -560,6 +575,27 @@ class AutonomousSignalGenerator:
                 _sig['expected_side'] = 'LONG'
                 _sig['trade_type'] = 'spot'
         logger.info(f"Buy signals above threshold {min_strength}: {len(buy_signals)}")
+
+        # ── Peak-quality prediction / A-B-C profile assignment ────────────────
+        _pq_regime = str(regime_mode or 'SPOT_BULL').strip().upper()
+        for _sig in buy_signals:
+            try:
+                _pq = peak_quality.predict_peak_quality(
+                    features=_sig.get('peak_quality_features'),
+                    regime_mode=_pq_regime,
+                    direction=_sig.get('expected_side', 'LONG'),
+                )
+                _sig.update({
+                    'predicted_peak_return': _pq['predicted_peak_return'],
+                    'expected_gain': _pq['expected_gain'],
+                    'peak_quality_profile': _pq['peak_quality_profile'],
+                    'peak_quality_score': _pq['peak_quality_score'],
+                    'peak_quality_thresholds': _pq['thresholds'],
+                })
+            except Exception as _pq_err:
+                logger.warning(f"peak_quality prediction failed for {_sig.get('symbol')}: {_pq_err}")
+                _sig.setdefault('peak_quality_profile', 'C')
+                _sig.setdefault('peak_quality_score', 0.0)
 
         def _regime_signal_score(signal: Dict, regime: str) -> float:
             _regime = str(regime or 'SPOT_BULL').strip().upper()

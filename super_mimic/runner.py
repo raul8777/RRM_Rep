@@ -9,7 +9,7 @@ import traceback
 from concurrent.futures import ProcessPoolExecutor, Future
 from typing import Any, Callable, Dict, Optional
 
-from super_mimic.core import Experiment, ExperimentRegistry, SuperMimicArtifact
+from super_mimic.core import DesignSpec, Experiment, ExperimentRegistry, SuperMimicArtifact
 from super_mimic.engines import (
     run_backtest_experiment,
     run_mimic_sweep_experiment,
@@ -42,7 +42,10 @@ class RoboticExperimentRunner:
         if not row:
             raise ValueError(f"Experiment {experiment_id} not found in registry")
         # Load from disk
-        exp = Experiment(DesignSpec.from_dict(json.loads(row["config"])))
+        _config = row["config"]
+        if not isinstance(_config, dict):
+            _config = json.loads(_config)
+        exp = Experiment(DesignSpec.from_dict(_config))
         exp.experiment_id = experiment_id
         exp.artifact = SuperMimicArtifact.read(row["artifact_path"])
 

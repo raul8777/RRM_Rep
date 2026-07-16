@@ -560,6 +560,7 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'kelly_base_usdt': 'kelly_base_usdt',
             'kelly_max_usdt': 'kelly_max_usdt',
             'kelly_max_pct_liquid': 'kelly_max_pct_liquid',
+            'kelly_min_usdt': 'kelly_min_usdt',
             'kelly_dynamic_base_pct': 'kelly_dynamic_base_pct',
             'kelly_max_pct_cap': 'kelly_max_pct_cap',
             'kelly_conviction_max_pct': 'kelly_conviction_max_pct',
@@ -567,6 +568,7 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'futures_kelly_base_usdt': 'futures_kelly_base_usdt',
             'futures_kelly_max_pct_liquid': 'futures_kelly_max_pct_liquid',
             'futures_kelly_cap_pct': 'futures_kelly_cap_pct',
+            'futures_kelly_min_usdt': 'futures_kelly_min_usdt',
             'fng_capitulation_threshold': 'fng_capitulation_threshold',
             'fng_extreme_fear_threshold': 'fng_extreme_fear_threshold',
             'fng_extreme_greed_threshold': 'fng_extreme_greed_threshold',
@@ -4248,7 +4250,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             "pnl_pct": round(pnl_pct * 100, 4),
                             "source": "profit_realization_supervisor",
                         })
-                        closed.append({"symbol": symbol, "reason": metadata['profit_realization_partial_reason'], "price": current_price, "order": order, "partial": True})
+                        closed.append({"symbol": symbol, "reason": metadata['profit_realization_partial_reason'], "price": current_price, "order": order, "partial": True, "pnl_pct": round(pnl_pct * 100, 4)})
                         continue
                     except Exception as _pr_err:
                         print(f"[ProfitRealization/SPOT] partial close failed for {symbol}: {_pr_err}")
@@ -4499,7 +4501,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                                     "reason": f"smart_tp_scale_out ({pnl_pct*100:.2f}%)",
                                                     "pnl_pct": round(pnl_pct * 100, 4), "source": "smart_tp"})
                                         closed.append({"symbol": symbol, "reason": "smart_tp_scale_out",
-                                                       "price": current_price, "order": order})
+                                                       "price": current_price, "order": order,
+                                                       "pnl_pct": round(pnl_pct * 100, 4)})
                                         continue
                         # ── Use real Binance balance as single source of truth for qty ─────
                         _sell_check = get_binance_sell_qty(client, symbol, full_qty, current_price)
@@ -4592,7 +4595,9 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             "source": close_reason.split("_")[0],
                         })
                         closed.append({"symbol": symbol, "reason": close_reason,
-                                       "price": current_price, "order": order})
+                                       "price": current_price, "order": order,
+                                       "pnl_usdt": round(pnl_usdt_net, 4),
+                                       "pnl_pct": round(pnl_pct_net * 100, 4)})
                     except Exception as exc:
                         import traceback
                         _tb = traceback.format_exc()
@@ -4697,6 +4702,7 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
                          base_override: float = None,
                          max_override: float = None,
                          cap_pct_override: float = None,
+                         min_usdt: float = None,
                          concentration_multiplier: float = 1.0,
                          db_client=None, symbol: str = None,
                          trade_type: str = 'spot', regime: str = None,
@@ -4727,6 +4733,10 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
     max_usdt_pct_cap = _get_param(settings, "kelly_max_pct_cap")
     max_usdt = max(max_usdt_floor, usdt_liquid * max_usdt_pct_cap)
     cap_pct = cap_pct_override if cap_pct_override is not None else _get_param(settings, "kelly_max_pct_liquid")
+
+    # Absolute minimum ticket floor (per-mode); 0 disables it
+    _min_usdt_key = 'futures_kelly_min_usdt' if str(trade_type).strip().lower() == 'futures' else 'kelly_min_usdt'
+    _min_usdt = float(min_usdt if min_usdt is not None else _get_param(settings, _min_usdt_key, 0.0))
 
     prob = float((prediction or {}).get("success_probability", 0.50))
     r = tp_pct / sl_pct if sl_pct > 0 else 1.67
@@ -4770,9 +4780,16 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
     liquid_cap = usdt_liquid * cap_pct
     final = min(sized, liquid_cap, max_usdt)
 
+    # Enforce absolute minimum ticket floor; skip trade if we cannot meet it
+    if _min_usdt > 0 and final < _min_usdt:
+        if liquid_cap >= _min_usdt and max_usdt >= _min_usdt:
+            final = min(_min_usdt, liquid_cap, max_usdt)
+        else:
+            final = 0.0
+
     print(f"Kelly sizing: prob={prob:.2f}, strength={strength:.2f}, kelly_f={kelly_f:.3f} "
           f"ctx={_context_mult:.3f}, conc={_conc_mult:.3f} → tier={tier}, "
-          f"sized=${sized:.2f}, cap=${liquid_cap:.2f} → final=${final:.2f} USDT")
+          f"sized=${sized:.2f}, cap=${liquid_cap:.2f}, min=${_min_usdt:.2f} → final=${final:.2f} USDT")
 
     # C3: Persist kelly decision to kelly_sizing_log for 100% traceability
     if db_client and symbol:
@@ -4782,6 +4799,7 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
             _mults.setdefault('context_multiplier', round(_context_mult, 4))
             _mults.setdefault('kpi_multiplier', round(_kpi_mult, 4))
             _mults.setdefault('concentration_multiplier', round(_conc_mult, 4))
+            _mults.setdefault('min_usdt', round(_min_usdt, 2))
             _mults.setdefault('current_regime_mode', str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None)
             _mults.setdefault('current_regime_profile_label', str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None)
             db_client.execute_update(
@@ -4797,6 +4815,38 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
             pass  # fail-silent — log failure must never block a trade
 
     return final
+
+
+_PROFILE_OVERRIDES = {
+    "A": {"base_usdt": 500.0, "max_usdt": 2500.0, "cap_pct": 0.50},
+    "B": {"base_usdt": 250.0, "max_usdt": 1200.0, "cap_pct": 0.35},
+    "C": {"base_usdt": 100.0, "max_usdt": 600.0, "cap_pct": 0.25},
+}
+
+
+def _assign_kelly_profile(
+    strength: float,
+    prediction: Optional[Dict[str, Any]],
+    signal_meta: Dict[str, Any],
+    symbol: str,
+) -> str:
+    """Map a BUY candidate to A/B/C based on peak_quality profile.
+
+    If `AutonomousSignalGenerator` has already assigned a `peak_quality_profile`
+    (A/B/C/discarded) use it directly.  Otherwise fall back to the existing
+    prob/strength tiers so production keeps working while the predictive
+    pipeline matures.
+    """
+    meta = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
+    profile = str(meta.get("peak_quality_profile", "")).strip().upper()
+    if profile in ("A", "B", "C"):
+        return profile
+    prob = float((prediction or {}).get("success_probability", 0.0))
+    if prob >= 0.65 and strength >= 0.80:
+        return "A"
+    if prob >= 0.60 and strength >= 0.70:
+        return "B"
+    return "C"
 
 
 def _check_entry_quality(
@@ -4944,6 +4994,13 @@ def _filter_buy_candidates(
     passed: List[Any] = []
     for cand in candidates:
         symbol = cand["symbol"] if isinstance(cand, dict) else cand
+
+        # Peak-quality hard discard gate: signals not in A/B/C are dropped.
+        if isinstance(cand, dict) and cand.get("peak_quality_profile") == "discarded":
+            print(f"[FilterBuy] Rejected {symbol}: PEAK_QUALITY_DISCARDED")
+            update_signal_decision(symbol, "rejected", "PEAK_QUALITY_DISCARDED")
+            continue
+
         _ok, _reason = _check_entry_quality(
             symbol, signal_meta, settings, regime_mode, active_profile_label
         )
@@ -6061,12 +6118,24 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             effective_slots=_regime_max,
         )
 
+        # Predictive profile assignment: A = ultra-Kelly, B = super-Kelly, C = aggressive-Kelly
+        _kelly_profile = _assign_kelly_profile(strength, prediction, signal_meta, symbol)
+        _profile_ovr = _PROFILE_OVERRIDES.get(_kelly_profile, _PROFILE_OVERRIDES["C"])
+        print(f"[PredictiveProfile] {symbol}: profile={_kelly_profile}, strength={strength:.2f}, "
+              f"prob={prediction.get('success_probability', 0):.2f}")
+
         trade_allocation = _kelly_position_size(
             settings, strength, prediction, usdt_liquid_now, sl_pct, tp_pct,
+            base_override=_profile_ovr["base_usdt"],
+            max_override=_profile_ovr["max_usdt"],
+            cap_pct_override=_profile_ovr["cap_pct"],
             concentration_multiplier=_spot_conc_mult,
             db_client=_db_client_ref, symbol=symbol,
             trade_type='spot', regime=_regime_mode,
-            extra_multipliers={'portfolio_concentration': _spot_conc_diag},
+            extra_multipliers={
+                'portfolio_concentration': _spot_conc_diag,
+                'predictive_profile': _kelly_profile,
+            },
         )
         # C2: Kelly reducido para prediction_add (segunda entrada en mismo par)
         if position_manager and position_manager.get_positions_count(symbol) >= 1:
