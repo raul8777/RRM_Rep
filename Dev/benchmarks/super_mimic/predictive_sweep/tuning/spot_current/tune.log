@@ -1,0 +1,190 @@
+2026-07-16 07:29:38,006 [INFO] [1/12] Running win_20250116_20250131 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:38,007 [INFO] Running window=win_20250116_20250131 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:38,007 [INFO] Skipping window win_20250525_20250608 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:29:38,008 [INFO] Skipping window win_20250718_20250807 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:29:38,008 [INFO] [4/12] Running win_20260303_20260317 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:38,008 [INFO] [5/12] Running win_20260317_20260331 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:38,008 [INFO] [6/12] Running win_20260401_20260415 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:38,008 [INFO] Running window=win_20260303_20260317 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:38,008 [INFO] [7/12] Running win_20260415_20260430 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:38,009 [INFO] [8/12] Running win_20260501_20260515 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:38,009 [INFO] Running window=win_20260317_20260331 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:38,009 [INFO] Running window=win_20260401_20260415 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:38,009 [INFO] Running window=win_20260415_20260430 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:38,009 [INFO] [9/12] Running win_20260515_20260531 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:38,010 [INFO] Running window=win_20260501_20260515 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:38,010 [INFO] [10/12] Running win_20260601_20260620 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:38,010 [INFO] [11/12] Running win_20260620_20260705 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:38,011 [INFO] [12/12] Running win_20260628_20260630 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:38,011 [INFO] Running window=win_20260515_20260531 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:38,011 [INFO] Running window=win_20260601_20260620 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:38,012 [INFO] Running window=win_20260620_20260705 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:38,012 [INFO] Running window=win_20260628_20260630 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:30:41,394 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 10, 'failed': 0, 'errors': []}
+2026-07-16 07:30:41,404 [INFO] [1/12] Running win_20250116_20250131 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:41,405 [INFO] Running window=win_20250116_20250131 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:30:41,405 [INFO] Skipping window win_20250525_20250608 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:30:41,405 [INFO] Skipping window win_20250718_20250807 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:30:41,405 [INFO] [4/12] Running win_20260303_20260317 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:41,406 [INFO] [5/12] Running win_20260317_20260331 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:41,406 [INFO] [6/12] Running win_20260401_20260415 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:41,406 [INFO] Running window=win_20260303_20260317 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:30:41,406 [INFO] [7/12] Running win_20260415_20260430 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:41,407 [INFO] [8/12] Running win_20260501_20260515 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:41,407 [INFO] Running window=win_20260317_20260331 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:30:41,407 [INFO] [9/12] Running win_20260515_20260531 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:41,407 [INFO] Running window=win_20260401_20260415 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:30:41,407 [INFO] [10/12] Running win_20260601_20260620 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:41,408 [INFO] [11/12] Running win_20260620_20260705 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:41,408 [INFO] Running window=win_20260415_20260430 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:30:41,408 [INFO] [12/12] Running win_20260628_20260630 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:41,408 [INFO] Running window=win_20260501_20260515 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:30:41,410 [INFO] Running window=win_20260515_20260531 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:30:41,423 [INFO] Running window=win_20260601_20260620 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:30:41,425 [INFO] Running window=win_20260620_20260705 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:30:41,440 [INFO] Running window=win_20260628_20260630 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:31:22,445 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 10, 'failed': 0, 'errors': []}
+2026-07-16 07:31:22,452 [INFO] [1/12] Running win_20250116_20250131 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:22,452 [INFO] Running window=win_20250116_20250131 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:31:22,452 [INFO] Skipping window win_20250525_20250608 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:31:22,453 [INFO] Skipping window win_20250718_20250807 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:31:22,453 [INFO] [4/12] Running win_20260303_20260317 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:22,454 [INFO] [5/12] Running win_20260317_20260331 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:22,454 [INFO] [6/12] Running win_20260401_20260415 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:22,466 [INFO] [7/12] Running win_20260415_20260430 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:22,467 [INFO] Running window=win_20260303_20260317 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:31:22,468 [INFO] [8/12] Running win_20260501_20260515 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:22,468 [INFO] Running window=win_20260317_20260331 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:31:22,469 [INFO] Running window=win_20260415_20260430 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:31:22,469 [INFO] Running window=win_20260401_20260415 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:31:22,469 [INFO] [9/12] Running win_20260515_20260531 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:22,470 [INFO] Running window=win_20260501_20260515 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:31:22,470 [INFO] [10/12] Running win_20260601_20260620 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:22,472 [INFO] [11/12] Running win_20260620_20260705 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:22,472 [INFO] [12/12] Running win_20260628_20260630 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:22,474 [INFO] Running window=win_20260515_20260531 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:31:22,475 [INFO] Running window=win_20260601_20260620 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:31:22,482 [INFO] Running window=win_20260620_20260705 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:31:22,528 [INFO] Running window=win_20260628_20260630 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:33:14,922 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 10, 'failed': 0, 'errors': []}
+2026-07-16 07:33:14,943 [INFO] [1/12] Running win_20250116_20250131 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:33:14,943 [INFO] Skipping window win_20250525_20250608 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:33:14,943 [INFO] Running window=win_20250116_20250131 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:33:14,943 [INFO] Skipping window win_20250718_20250807 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:33:14,944 [INFO] [4/12] Running win_20260303_20260317 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:33:14,945 [INFO] [5/12] Running win_20260317_20260331 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:33:14,945 [INFO] [6/12] Running win_20260401_20260415 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:33:14,945 [INFO] Running window=win_20260303_20260317 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:33:14,945 [INFO] [7/12] Running win_20260415_20260430 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:33:14,945 [INFO] Running window=win_20260317_20260331 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:33:14,945 [INFO] Running window=win_20260401_20260415 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:33:14,946 [INFO] [8/12] Running win_20260501_20260515 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:33:14,946 [INFO] [9/12] Running win_20260515_20260531 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:33:14,947 [INFO] Running window=win_20260415_20260430 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:33:14,947 [INFO] [10/12] Running win_20260601_20260620 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:33:14,947 [INFO] [11/12] Running win_20260620_20260705 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:33:14,948 [INFO] [12/12] Running win_20260628_20260630 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:33:14,948 [INFO] Running window=win_20260501_20260515 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:33:14,948 [INFO] Running window=win_20260515_20260531 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:33:14,963 [INFO] Running window=win_20260601_20260620 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:33:14,964 [INFO] Running window=win_20260620_20260705 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:33:14,964 [INFO] Running window=win_20260628_20260630 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:34:25,915 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 10, 'failed': 0, 'errors': []}
+2026-07-16 07:34:25,925 [INFO] [1/12] Running win_20250116_20250131 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:34:25,925 [INFO] Running window=win_20250116_20250131 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:34:25,926 [INFO] Skipping window win_20250525_20250608 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:34:25,926 [INFO] Skipping window win_20250718_20250807 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:34:25,926 [INFO] [4/12] Running win_20260303_20260317 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:34:25,941 [INFO] [5/12] Running win_20260317_20260331 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:34:25,941 [INFO] [6/12] Running win_20260401_20260415 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:34:25,941 [INFO] [7/12] Running win_20260415_20260430 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:34:25,942 [INFO] Running window=win_20260303_20260317 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:34:25,943 [INFO] [8/12] Running win_20260501_20260515 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:34:25,943 [INFO] Running window=win_20260401_20260415 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:34:25,943 [INFO] Running window=win_20260415_20260430 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:34:25,945 [INFO] Running window=win_20260317_20260331 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:34:25,945 [INFO] [9/12] Running win_20260515_20260531 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:34:25,945 [INFO] [10/12] Running win_20260601_20260620 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:34:25,945 [INFO] Running window=win_20260501_20260515 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:34:25,948 [INFO] [11/12] Running win_20260620_20260705 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:34:25,984 [INFO] Running window=win_20260515_20260531 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:34:26,000 [INFO] [12/12] Running win_20260628_20260630 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:34:26,016 [INFO] Running window=win_20260601_20260620 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:34:26,078 [INFO] Running window=win_20260620_20260705 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:34:26,091 [INFO] Running window=win_20260628_20260630 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:35:04,859 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 10, 'failed': 0, 'errors': []}
+2026-07-16 07:35:04,864 [INFO] Skipping window win_20250116_20250131 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:04,865 [INFO] [2/12] Running win_20250525_20250608 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:35:04,865 [INFO] Running window=win_20250525_20250608 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.15, 'B_min_peak_quality': -0.35, 'C_min_peak_quality': -0.8}
+2026-07-16 07:35:04,865 [INFO] [3/12] Running win_20250718_20250807 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:35:04,880 [INFO] Skipping window win_20260303_20260317 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:04,881 [INFO] Running window=win_20250718_20250807 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.15, 'B_min_peak_quality': -0.35, 'C_min_peak_quality': -0.8}
+2026-07-16 07:35:04,882 [INFO] Skipping window win_20260317_20260331 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:04,882 [INFO] Skipping window win_20260401_20260415 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:04,882 [INFO] Skipping window win_20260415_20260430 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:05,165 [INFO] Skipping window win_20260501_20260515 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:05,182 [INFO] Skipping window win_20260515_20260531 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:05,212 [INFO] Skipping window win_20260601_20260620 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:05,228 [INFO] Skipping window win_20260620_20260705 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:05,228 [INFO] Skipping window win_20260628_20260630 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:36,134 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 2, 'failed': 0, 'errors': []}
+2026-07-16 07:35:36,139 [INFO] Skipping window win_20250116_20250131 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:36,139 [INFO] [2/12] Running win_20250525_20250608 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:35:36,140 [INFO] Running window=win_20250525_20250608 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.15, 'B_min_peak_quality': -0.35, 'C_min_peak_quality': 10.0}
+2026-07-16 07:35:36,155 [INFO] [3/12] Running win_20250718_20250807 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:35:36,155 [INFO] Running window=win_20250718_20250807 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.15, 'B_min_peak_quality': -0.35, 'C_min_peak_quality': 10.0}
+2026-07-16 07:35:36,156 [INFO] Skipping window win_20260303_20260317 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:36,157 [INFO] Skipping window win_20260317_20260331 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:36,157 [INFO] Skipping window win_20260401_20260415 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:36,158 [INFO] Skipping window win_20260415_20260430 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:36,158 [INFO] Skipping window win_20260501_20260515 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:36,221 [INFO] Skipping window win_20260515_20260531 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:36,221 [INFO] Skipping window win_20260601_20260620 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:36,222 [INFO] Skipping window win_20260620_20260705 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:36,222 [INFO] Skipping window win_20260628_20260630 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:56,169 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 2, 'failed': 0, 'errors': []}
+2026-07-16 07:35:56,175 [INFO] Skipping window win_20250116_20250131 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:56,175 [INFO] [2/12] Running win_20250525_20250608 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:35:56,175 [INFO] [3/12] Running win_20250718_20250807 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:35:56,175 [INFO] Skipping window win_20260303_20260317 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:56,176 [INFO] Running window=win_20250718_20250807 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.36, 'B_min_peak_quality': -0.57, 'C_min_peak_quality': -0.84}
+2026-07-16 07:35:56,175 [INFO] Running window=win_20250525_20250608 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.36, 'B_min_peak_quality': -0.57, 'C_min_peak_quality': -0.84}
+2026-07-16 07:35:56,176 [INFO] Skipping window win_20260317_20260331 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:56,176 [INFO] Skipping window win_20260401_20260415 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:56,176 [INFO] Skipping window win_20260415_20260430 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:56,190 [INFO] Skipping window win_20260501_20260515 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:56,206 [INFO] Skipping window win_20260515_20260531 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:56,207 [INFO] Skipping window win_20260601_20260620 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:56,207 [INFO] Skipping window win_20260620_20260705 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:35:56,234 [INFO] Skipping window win_20260628_20260630 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:27,458 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 2, 'failed': 0, 'errors': []}
+2026-07-16 07:36:27,464 [INFO] Skipping window win_20250116_20250131 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:27,466 [INFO] [2/12] Running win_20250525_20250608 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:36:27,466 [INFO] [3/12] Running win_20250718_20250807 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:36:27,466 [INFO] Skipping window win_20260303_20260317 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:27,466 [INFO] Running window=win_20250525_20250608 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.05, 'B_min_peak_quality': -0.45, 'C_min_peak_quality': -0.85}
+2026-07-16 07:36:27,466 [INFO] Running window=win_20250718_20250807 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.05, 'B_min_peak_quality': -0.45, 'C_min_peak_quality': -0.85}
+2026-07-16 07:36:27,466 [INFO] Skipping window win_20260317_20260331 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:27,497 [INFO] Skipping window win_20260401_20260415 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:27,497 [INFO] Skipping window win_20260415_20260430 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:27,497 [INFO] Skipping window win_20260501_20260515 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:27,527 [INFO] Skipping window win_20260515_20260531 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:27,527 [INFO] Skipping window win_20260601_20260620 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:27,527 [INFO] Skipping window win_20260620_20260705 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:27,559 [INFO] Skipping window win_20260628_20260630 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:58,720 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 2, 'failed': 0, 'errors': []}
+2026-07-16 07:36:58,725 [INFO] Skipping window win_20250116_20250131 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:58,725 [INFO] [2/12] Running win_20250525_20250608 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:36:58,726 [INFO] [3/12] Running win_20250718_20250807 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:36:58,726 [INFO] Skipping window win_20260303_20260317 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:58,726 [INFO] Running window=win_20250525_20250608 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:36:58,726 [INFO] Skipping window win_20260317_20260331 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:58,726 [INFO] Running window=win_20250718_20250807 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:36:58,726 [INFO] Skipping window win_20260401_20260415 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:58,726 [INFO] Skipping window win_20260415_20260430 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:58,745 [INFO] Skipping window win_20260501_20260515 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:58,745 [INFO] Skipping window win_20260515_20260531 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:58,745 [INFO] Skipping window win_20260601_20260620 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:58,745 [INFO] Skipping window win_20260620_20260705 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:36:58,745 [INFO] Skipping window win_20260628_20260630 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:37:18,983 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 2, 'failed': 0, 'errors': []}

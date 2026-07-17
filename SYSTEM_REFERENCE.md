@@ -1,7 +1,40 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 16 2026 | Super MIMIC ExitPolicy tuning completado: `expected_gain` TP + `time_stop`, 151 configs evaluadas, 12 ventanas.
+> Última actualización: jul 16 2026 (noche) | s79: Peaks-first pipeline — QUBO + profit_score + gates = advisory mode
+
+---
+
+## 🟢 Estado del Sistema — jul 16 2026 (noche) — s79: Peaks-First Pipeline
+
+### Objetivo
+Hacer que `peak_quality_score` y la clasificación A/B/C dominen la selección de candidatos.
+Los demás gates (predictor PnL, entry_quality) pasan a modo **advisory** con flags on/off.
+
+### Cambios implementados
+- **`portfolio_selector.py`**: Fix bug `abs(expected_pnl)` → `max(0.0, p)`. Nuevo campo `peak_quality_score` en `Candidate`. Revenue QUBO: `0.6×peak_quality + 0.4×predictor_pnl`.
+- **`run_trades.py`**: 
+  - `_compute_profit_score`: nueva fórmula `pq_norm×0.40 + ev_norm×0.20 + prob×0.20 + strength×0.10 + regime_bonus×0.10`
+  - `_apply_qubo_selector`: pasa `peak_quality_score` al Candidate
+  - `execute_once`: `_filter_buy_candidates` ANTES de QUBO (no dentro de `_buy_top_symbols`)
+  - `_buy_top_symbols`: predictor gate en modo advisory para Profile A/B; `gate_warnings` en metadata
+- **`config.py`**: Nuevos flags: `peaks_first_enabled`, `predictor_gate_mode` (advisory), `entry_quality_gate_mode` (advisory)
+
+### Feature flags (hot-config via PATCH /config/kelly)
+| Flag | Default | Efecto |
+|---|---|---|
+| `peaks_first_enabled` | True | Peaks profile drives selection priority |
+| `predictor_gate_mode` | "advisory" | Profile A/B bypass predictor veto; C respects blocking |
+| `entry_quality_gate_mode` | "advisory" | Only "discarded" profiles hard-rejected; rest are warnings |
+
+### Rollback inmediato
+```
+PATCH /config/kelly {"predictor_gate_mode":"blocking","entry_quality_gate_mode":"blocking"}
+```
+
+### Verificación
+- `test_entry_quality_gate.py`: 18/19 passed (1 pre-existing unrelated)
+- `test_system_health.py -k "not Cat7"`: 116/116 passed
 
 ---
 
@@ -53,6 +86,61 @@ Validar el modelo `peak_quality` en su contexto nativo (eventos de pico de `peak
 ### Próximos pasos
 1. Si se migra a producción, computar features `s_*` en `analyze_symbol` a partir de `klines` o re-entrenar con el subconjunto disponible en live.
 2. Evaluar si el tuning debe usarse como default en `predictive_spot_bull_config` o aplicarse vía overrides.
+
+---
+
+## 🟢 Estado del Sistema — jul 16 2026 — Dashboard: Perfil/Modo + ExitPolicy `expected_gain`/`time_stop`
+
+### Objetivo
+Mostrar en el dashboard de posiciones (abiertas y cerradas) el perfil (`A/B/C`), el modo de sistema (`SPOT_BULL`, `RANGE_SCALP`, `PRESERVATION`, `FUTURES_SHORT`) y los parámetros Peak MIMIC `expected_gain_mult` / `time_stop_hours` asociados a cada posición.
+
+### Cambios aplicados
+- **`app.py`**:
+  - `_normalize_transaction_context` extrae `peak_quality_profile`/`peak_quality_score` y deriva `entry_profile_label_for_display` para el dashboard.
+  - `_load_profile_exit_policies` / `_exit_policy_for_profile` cargan el mejor `ExitPolicy` por perfil desde `Dev/benchmarks/peak_lifecycle_tuning/best_exit_policy.json`.
+  - Los endpoints `/positions/open`, `/positions/closed` y `/dashboard/summary` enriquecen cada posición con `exit_policy_params` (incluye `expected_gain_mult`, `use_expected_gain_for_tp`, `time_stop_hours`).
+  - `/dashboard/summary` expone `exit_policies` a nivel top-level.
+- **`run_trades.py`**: las posiciones spot/futures heredan `peak_quality_profile` y `peak_quality_score` en su metadata.
+- **`futures_client.py`**: `open_short`/`open_long` reciben y persisten `peak_quality_profile`/`peak_quality_score` en `_smart_meta`.
+- **`position_manager.py`**: `add_position` prefiere `peak_quality_profile` al guardar `profile_at_entry`.
+- **`frontend/dashboard.js`**:
+  - Nuevas columnas `Perfil` y `Modo` (separadas) en tablas de posiciones abiertas y cerradas.
+  - Nuevo filtro por perfil y modo en ambas tablas (`setOpenProfileFilter`, etc.).
+  - Badges `expected_gain` (🎯EG×N) y `time_stop` (⏱TSh) en tabla y modal de detalle.
+  - Sección `🟠 PEAK MIMIC` en el modal de detalle mostrando perfil de señal, perfil activo, `expected_gain` y `time_stop`.
+- **`frontend/styles.css`**: estilos para `.badge-profile`, `.badge-mode`, `.sl-badge.eg`, `.sl-badge.time-stop` y `.pos-filter-bar`.
+
+### Próximos pasos
+1. Refrescar el navegador del dashboard para probar filtros y el nuevo modal.
+2. Verificar en producción que `peak_quality_profile` se propaga desde las señales pico hasta el dashboard.
+
+---
+
+## 🟢 Estado del Sistema — jul 16 2026 (noche) — Fix DB client `None` + rango configurable de posiciones cerradas
+
+### Problema
+- Dashboard solo mostraba operaciones cerradas del día (desde reinicio), como si el sistema hubiese empezado hoy.
+- Log: `DB health check failed: 'NoneType' object has no attribute 'execute_query'`.
+
+### Root cause
+`DatabaseClient` lanzaba una excepción en `__init__` cuando Postgres no estaba listo en el arranque del contenedor `app`. `init_components` la capturaba y dejaba `c.db_client = None`. Como `PositionManager` recibía `None`, caía al fallback en memoria, que solo conserva los cierres desde el reinicio.
+
+### Cambios aplicados
+- **`db_client.py`**:
+  - `DatabaseClient.__init__` ya no rompe al crear el pool; guarda el error y deja `connection_pool = None`.
+  - `get_connection` intenta `_initialize_pool` lazy si no hay pool, reconectando cuando la DB vuelva.
+- **`init_components.py`**: siempre asigna el objeto `DatabaseClient`; el `PositionManager`/`Orchestrator` reciben una instancia que se recupera sola.
+- **`app.py`**:
+  - `/health/status` maneja explícitamente `db_client is None`.
+  - `/dashboard/summary` acepta `days` (1–365, default 7) y devuelve `period_days` según el parámetro; límite interno `1000`.
+- **`frontend/dashboard.js`**:
+  - Variable `_dashboardDays` persistida en `localStorage` (default 7).
+  - `fetchDashboardData` envía `?days=${_dashboardDays}`.
+  - Selector "Rango" en la barra de filtros de posiciones cerradas (`7/14/30/90/365` días).
+
+### Próximos pasos
+1. Reiniciar el contenedor `app` para que `init_components` cree el `DatabaseClient` con lazy reconnect.
+2. Refrescar el dashboard y verificar `/health/status` devuelve `db: ok` y el rango de cerradas muestra histórico.
 
 ---
 

@@ -1,0 +1,110 @@
+{
+  "SPOT_BULL": {
+    "means": {
+      "atr_pct": 0.011693168172694968,
+      "expected_pnl": 0.5105449250806493,
+      "short_term_score": 0.7857569789911922,
+      "pnl_score": 0.5894327538883806,
+      "confluence": 1.9676502586135982,
+      "vol_score": 0.5679894784995425,
+      "range_score": 0.33988059984480423,
+      "range_position": 0.3356219494356742
+    },
+    "stds": {
+      "atr_pct": 0.006984404742392168,
+      "expected_pnl": 0.6610320499581102,
+      "short_term_score": 0.8663301920416476,
+      "pnl_score": 0.4427498165988006,
+      "confluence": 0.3974332792623434,
+      "vol_score": 0.3769513510040656,
+      "range_score": 0.35315853627243665,
+      "range_position": 0.17401117753124293
+    },
+    "weights": {
+      "atr_pct": 0.35,
+      "expected_pnl": 0.25,
+      "short_term_score": 0.2,
+      "pnl_score": 0.15,
+      "confluence": 0.0,
+      "vol_score": -0.05,
+      "range_score": -0.05,
+      "range_position": 0.0
+    },
+    "features": [
+      "atr_pct",
+      "expected_pnl",
+      "short_term_score",
+      "pnl_score",
+      "confluence",
+      "vol_score",
+      "range_score",
+      "range_position"
+    ],
+    "decile_mean_peak_12h": [
+      0.0011,
+      0.0138,
+      0.015,
+      0.0184,
+      0.0212,
+      0.0172,
+      0.0202,
+      0.0213,
+      0.0266,
+      0.0318
+    ]
+  },
+  "RANGE_SCALP": {
+    "means": {
+      "atr_pct": 0.01367961877261323,
+      "expected_pnl": 0.3660730100380659,
+      "short_term_score": 0.5624518227896439,
+      "pnl_score": 0.6633993369769734,
+      "confluence": 1.7931247346840438,
+      "vol_score": 0.42841143266732373,
+      "range_score": 0.315453184562851,
+      "range_position": 0.2858300621133956
+    },
+    "stds": {
+      "atr_pct": 0.006167927209346996,
+      "expected_pnl": 0.5742815694681498,
+      "short_term_score": 0.752240684445506,
+      "pnl_score": 0.3445895027115694,
+      "confluence": 0.5167807510615887,
+      "vol_score": 0.346585445048658,
+      "range_score": 0.29957032875307893,
+      "range_position": 0.16419608455756923
+    },
+    "weights": {
+      "atr_pct": 0.4,
+      "expected_pnl": 0.25,
+      "short_term_score": 0.2,
+      "pnl_score": 0.1,
+      "confluence": 0.05,
+      "vol_score": 0.0,
+      "range_score": -0.05,
+      "range_position": -0.05
+    },
+    "features": [
+      "atr_pct",
+      "expected_pnl",
+      "short_term_score",
+      "pnl_score",
+      "confluence",
+      "vol_score",
+      "range_score",
+      "range_position"
+    ],
+    "decile_mean_peak_12h": [
+      0.0085,
+      0.016,
+      0.0192,
+      0.0212,
+      0.0215,
+      0.0226,
+      0.0223,
+      0.0243,
+      0.0262,
+      0.0417
+    ]
+  }
+}

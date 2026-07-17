@@ -1,0 +1,1254 @@
+{
+  "SPOT_BULL_LONG": {
+    "r2": 0.31818250211506593,
+    "mae": 0.007365410803424952,
+    "rmse": 0.014632272192563701,
+    "sign_accuracy": 0.6980481288753314,
+    "n_train": 200627,
+    "n_test": 50157,
+    "features": [
+      "s_return_1h",
+      "s_return_4h",
+      "s_return_24h",
+      "s_momentum_3h",
+      "s_momentum_6h",
+      "s_momentum_12h",
+      "s_atr",
+      "s_atr_pct",
+      "s_rsi_1h",
+      "s_rsi_4h",
+      "s_bb_position",
+      "s_bb_width",
+      "s_range_position",
+      "s_vol_spike",
+      "s_volatility_24h",
+      "s_volatility_7d",
+      "s_skew_24h",
+      "s_max_run_up_24h",
+      "s_max_drawdown_24h",
+      "s_btc_correlation_24h",
+      "s_btc_7d_pct",
+      "s_btc_30d_pct",
+      "s_btc_day_pct",
+      "s_vol_ratio",
+      "s_bb_bandwidth",
+      "s_confidence",
+      "s_btc_return_1h",
+      "s_btc_return_4h",
+      "s_btc_return_24h",
+      "s_btc_atr_pct",
+      "s_fear_greed_value",
+      "s_market_breadth"
+    ],
+    "medians": {
+      "s_return_1h": -2.1327053593700462e-06,
+      "s_return_4h": -0.00030229746070131736,
+      "s_return_24h": 0.0051148304762869135,
+      "s_momentum_3h": -0.0002814522938362485,
+      "s_momentum_6h": -0.00010002000400077815,
+      "s_momentum_12h": 0.0006686726847209279,
+      "s_atr": 0.034192430002951954,
+      "s_atr_pct": 0.01176763358471131,
+      "s_rsi_1h": 52.05589686452609,
+      "s_rsi_4h": 55.13422150487171,
+      "s_bb_position": 0.5269472712416214,
+      "s_bb_width": 0.04433567217758009,
+      "s_range_position": 0.6442676906198572,
+      "s_vol_spike": 0.8507069002112237,
+      "s_volatility_24h": 0.03525605120020334,
+      "s_volatility_7d": 0.10192810579994022,
+      "s_skew_24h": 0.10144924269484905,
+      "s_max_run_up_24h": 0.018372117259964016,
+      "s_max_drawdown_24h": 0.015305621708160022,
+      "s_btc_correlation_24h": 0.13461707821062058,
+      "s_btc_7d_pct": 3.572190575563386,
+      "s_btc_30d_pct": 3.9475232598195813,
+      "s_btc_day_pct": 0.12061813417035913,
+      "s_vol_ratio": 0.8994714572363276,
+      "s_bb_bandwidth": 0.05404120179725507,
+      "s_confidence": 0.8,
+      "s_btc_return_1h": -7.619678115611261e-05,
+      "s_btc_return_4h": -0.00013252906250205143,
+      "s_btc_return_24h": 0.007416479515943486,
+      "s_btc_atr_pct": 0.005911240132441214,
+      "s_fear_greed_value": 48.0,
+      "s_market_breadth": 0.0062304411467798415
+    },
+    "best_method": "hybrid_0.4",
+    "best_thresholds": {
+      "A": 0.008362788881883033,
+      "B": 0.0069750216347217375,
+      "C": 0.0048933707639797945
+    },
+    "best_coverage": 0.5000099686982874,
+    "best_weighted_mean_gain": 0.017677556005790615,
+    "best_precision_A": 0.9241427432216905,
+    "all_methods": [
+      {
+        "method": "quantile_90_60_30",
+        "thresholds": {
+          "A": 0.011769903271673333,
+          "B": 0.005773344548826026,
+          "C": 0.0032113211375089045
+        },
+        "coverage": 0.7000019937396574,
+        "n_selected": 35110,
+        "mean_actual_gain": 0.00964927236456667,
+        "weighted_mean_gain": 0.015005742923770235,
+        "total_weighted_gain": 1144.0348393596578,
+        "precision_A": 0.9519537480063796,
+        "score": 0.015005742923770235
+      },
+      {
+        "method": "quantile_85_55_25",
+        "thresholds": {
+          "A": 0.009658280789853478,
+          "B": 0.005311344579432863,
+          "C": 0.0027442858334728103
+        },
+        "coverage": 0.7500049843491436,
+        "n_selected": 37618,
+        "mean_actual_gain": 0.009025296781840721,
+        "weighted_mean_gain": 0.014284031716560062,
+        "total_weighted_gain": 1268.133478989859,
+        "precision_A": 0.9393939393939394,
+        "score": 0.014284031716560062
+      },
+      {
+        "method": "quantile_80_50_20",
+        "thresholds": {
+          "A": 0.008362788881883033,
+          "B": 0.0048933707639797945,
+          "C": 0.0022235830679849457
+        },
+        "coverage": 0.7999880375620552,
+        "n_selected": 40125,
+        "mean_actual_gain": 0.008420945211014292,
+        "weighted_mean_gain": 0.013425702819536147,
+        "total_weighted_gain": 1360.2760988320188,
+        "precision_A": 0.9241427432216905,
+        "score": 0.013425702819536147
+      },
+      {
+        "method": "quantile_75_45_15",
+        "thresholds": {
+          "A": 0.007481474057580165,
+          "B": 0.004501838056388332,
+          "C": 0.0016655508063783628
+        },
+        "coverage": 0.8499910281715414,
+        "n_selected": 42633,
+        "mean_actual_gain": 0.00786481058769476,
+        "weighted_mean_gain": 0.012596457473331706,
+        "total_weighted_gain": 1434.1998971241173,
+        "precision_A": 0.908133971291866,
+        "score": 0.012596457473331706
+      },
+      {
+        "method": "quantile_90_50_10",
+        "thresholds": {
+          "A": 0.011769903271673333,
+          "B": 0.0048933707639797945,
+          "C": 0.001042885491368538
+        },
+        "coverage": 0.8999940187810276,
+        "n_selected": 45141,
+        "mean_actual_gain": 0.007331732846724706,
+        "weighted_mean_gain": 0.012491833085130119,
+        "total_weighted_gain": 1165.4030823776611,
+        "precision_A": 0.9519537480063796,
+        "score": 0.012491833085130119
+      },
+      {
+        "method": "quantile_80_60_40",
+        "thresholds": {
+          "A": 0.008362788881883033,
+          "B": 0.005773344548826026,
+          "C": 0.0040922695428010115
+        },
+        "coverage": 0.599996012520685,
+        "n_selected": 30094,
+        "mean_actual_gain": 0.011081530272817369,
+        "weighted_mean_gain": 0.01574407527842147,
+        "total_weighted_gain": 1326.6808009662964,
+        "precision_A": 0.9241427432216905,
+        "score": 0.01574407527842147
+      },
+      {
+        "method": "fixed_A0.0030_B0.0015_C0.0008",
+        "thresholds": {
+          "A": 0.003,
+          "B": 0.0015,
+          "C": 0.00075
+        },
+        "coverage": 0.9166816197140978,
+        "n_selected": 45978,
+        "mean_actual_gain": 0.007148858253747705,
+        "weighted_mean_gain": 0.00835329129147992,
+        "total_weighted_gain": 1678.774316114786,
+        "precision_A": 0.7689486889630263,
+        "score": 0.00835329129147992
+      },
+      {
+        "method": "fixed_A0.0040_B0.0020_C0.0010",
+        "thresholds": {
+          "A": 0.004,
+          "B": 0.002,
+          "C": 0.001
+        },
+        "coverage": 0.9029248160775166,
+        "n_selected": 45288,
+        "mean_actual_gain": 0.007298502210889478,
+        "weighted_mean_gain": 0.009145276153724903,
+        "total_weighted_gain": 1671.240687325842,
+        "precision_A": 0.8030569678008083,
+        "score": 0.009145276153724903
+      },
+      {
+        "method": "fixed_A0.0050_B0.0025_C0.0013",
+        "thresholds": {
+          "A": 0.005,
+          "B": 0.0025,
+          "C": 0.00125
+        },
+        "coverage": 0.8850609087465359,
+        "n_selected": 44392,
+        "mean_actual_gain": 0.00748816775462305,
+        "weighted_mean_gain": 0.010092887843205289,
+        "total_weighted_gain": 1635.3223571485917,
+        "precision_A": 0.8423340304260467,
+        "score": 0.010092887843205289
+      },
+      {
+        "method": "fixed_A0.0060_B0.0030_C0.0015",
+        "thresholds": {
+          "A": 0.006,
+          "B": 0.003,
+          "C": 0.0015
+        },
+        "coverage": 0.8643459537053652,
+        "n_selected": 43353,
+        "mean_actual_gain": 0.007705560860382403,
+        "weighted_mean_gain": 0.01099022815858408,
+        "total_weighted_gain": 1572.4796468845782,
+        "precision_A": 0.8742763053062091,
+        "score": 0.01099022815858408
+      },
+      {
+        "method": "fixed_A0.0080_B0.0040_C0.0020",
+        "thresholds": {
+          "A": 0.008,
+          "B": 0.004,
+          "C": 0.002
+        },
+        "coverage": 0.8213808640867676,
+        "n_selected": 41198,
+        "mean_actual_gain": 0.008170463618658932,
+        "weighted_mean_gain": 0.012462072503038856,
+        "total_weighted_gain": 1404.0668151143793,
+        "precision_A": 0.9189312420207916,
+        "score": 0.012462072503038856
+      },
+      {
+        "method": "fixed_A0.0100_B0.0050_C0.0025",
+        "thresholds": {
+          "A": 0.01,
+          "B": 0.005,
+          "C": 0.0025
+        },
+        "coverage": 0.7722750563231453,
+        "n_selected": 38735,
+        "mean_actual_gain": 0.008740815684910483,
+        "weighted_mean_gain": 0.013808755382448837,
+        "total_weighted_gain": 1257.5854466882276,
+        "precision_A": 0.9422692197770791,
+        "score": 0.013808755382448837
+      },
+      {
+        "method": "hybrid_0.4",
+        "thresholds": {
+          "A": 0.008362788881883033,
+          "B": 0.0069750216347217375,
+          "C": 0.0048933707639797945
+        },
+        "coverage": 0.5000099686982874,
+        "n_selected": 25079,
+        "mean_actual_gain": 0.012797559185966438,
+        "weighted_mean_gain": 0.017677556005790615,
+        "total_weighted_gain": 1263.6235228947235,
+        "precision_A": 0.9241427432216905,
+        "score": 0.017677556005790615
+      },
+      {
+        "method": "hybrid_0.5",
+        "thresholds": {
+          "A": 0.008362788881883033,
+          "B": 0.006628079822931414,
+          "C": 0.0048933707639797945
+        },
+        "coverage": 0.5000099686982874,
+        "n_selected": 25079,
+        "mean_actual_gain": 0.012797559185966438,
+        "weighted_mean_gain": 0.017407454818397318,
+        "total_weighted_gain": 1278.4591857185178,
+        "precision_A": 0.9241427432216905,
+        "score": 0.017407454818397318
+      },
+      {
+        "method": "hybrid_0.6",
+        "thresholds": {
+          "A": 0.008362788881883033,
+          "B": 0.00628113801114109,
+          "C": 0.0048933707639797945
+        },
+        "coverage": 0.5000099686982874,
+        "n_selected": 25079,
+        "mean_actual_gain": 0.012797559185966438,
+        "weighted_mean_gain": 0.01709539543294709,
+        "total_weighted_gain": 1293.3316270050923,
+        "precision_A": 0.9241427432216905,
+        "score": 0.01709539543294709
+      }
+    ]
+  },
+  "RANGE_SCALP_LONG": {
+    "r2": 0.3544404774008504,
+    "mae": 0.007086419104185527,
+    "rmse": 0.012643590241745257,
+    "sign_accuracy": 0.6869991924964284,
+    "n_train": 321977,
+    "n_test": 80495,
+    "features": [
+      "s_return_1h",
+      "s_return_4h",
+      "s_return_24h",
+      "s_momentum_3h",
+      "s_momentum_6h",
+      "s_momentum_12h",
+      "s_atr",
+      "s_atr_pct",
+      "s_rsi_1h",
+      "s_rsi_4h",
+      "s_bb_position",
+      "s_bb_width",
+      "s_range_position",
+      "s_vol_spike",
+      "s_volatility_24h",
+      "s_volatility_7d",
+      "s_skew_24h",
+      "s_max_run_up_24h",
+      "s_max_drawdown_24h",
+      "s_btc_correlation_24h",
+      "s_btc_7d_pct",
+      "s_btc_30d_pct",
+      "s_btc_day_pct",
+      "s_vol_ratio",
+      "s_bb_bandwidth",
+      "s_confidence",
+      "s_btc_return_1h",
+      "s_btc_return_4h",
+      "s_btc_return_24h",
+      "s_btc_atr_pct",
+      "s_fear_greed_value",
+      "s_market_breadth"
+    ],
+    "medians": {
+      "s_return_1h": 0.0,
+      "s_return_4h": 0.0,
+      "s_return_24h": -0.003412118473739234,
+      "s_momentum_3h": 0.0,
+      "s_momentum_6h": -0.00010001000100012813,
+      "s_momentum_12h": -0.000760589749590368,
+      "s_atr": 0.03525253261771113,
+      "s_atr_pct": 0.011510049974248421,
+      "s_rsi_1h": 48.109185692569184,
+      "s_rsi_4h": 45.52592250975033,
+      "s_bb_position": 0.46436744528135687,
+      "s_bb_width": 0.042240078028263156,
+      "s_range_position": 0.3542116630669551,
+      "s_vol_spike": 0.7371067112250251,
+      "s_volatility_24h": 0.03501954955772326,
+      "s_volatility_7d": 0.10527402672627684,
+      "s_skew_24h": -0.018974340302867054,
+      "s_max_run_up_24h": 0.014365522745411141,
+      "s_max_drawdown_24h": 0.018106995884773713,
+      "s_btc_correlation_24h": 0.13799766375561884,
+      "s_btc_7d_pct": -0.7389195616931835,
+      "s_btc_30d_pct": 0.21075690618636295,
+      "s_btc_day_pct": -0.002605795288722118,
+      "s_vol_ratio": 0.7220605386267194,
+      "s_bb_bandwidth": 0.04208390797156643,
+      "s_confidence": 0.8,
+      "s_btc_return_1h": 2.055947064105723e-05,
+      "s_btc_return_4h": 8.52413813550168e-05,
+      "s_btc_return_24h": -0.0016024977871728074,
+      "s_btc_atr_pct": 0.005183905310521249,
+      "s_fear_greed_value": 42.0,
+      "s_market_breadth": -0.0034586416018370647
+    },
+    "best_method": "hybrid_0.4",
+    "best_thresholds": {
+      "A": 0.007554038415825119,
+      "B": 0.0063593632900125945,
+      "C": 0.004567350601293808
+    },
+    "best_coverage": 0.5000186346978073,
+    "best_weighted_mean_gain": 0.016019592558667063,
+    "best_precision_A": 0.9003043667308529,
+    "all_methods": [
+      {
+        "method": "quantile_90_60_30",
+        "thresholds": {
+          "A": 0.010340254912749765,
+          "B": 0.005330576585829116,
+          "C": 0.0031422854916397873
+        },
+        "coverage": 0.6999937884340642,
+        "n_selected": 56346,
+        "mean_actual_gain": 0.008841457003376978,
+        "weighted_mean_gain": 0.01378503556651221,
+        "total_weighted_gain": 1686.6432136765814,
+        "precision_A": 0.9402484472049689,
+        "score": 0.01378503556651221
+      },
+      {
+        "method": "quantile_85_55_25",
+        "thresholds": {
+          "A": 0.008590320086101956,
+          "B": 0.004938978210073115,
+          "C": 0.002783493351925666
+        },
+        "coverage": 0.7499968942170321,
+        "n_selected": 60371,
+        "mean_actual_gain": 0.008305984542646649,
+        "weighted_mean_gain": 0.013034836139989734,
+        "total_weighted_gain": 1857.1799905206851,
+        "precision_A": 0.9204140786749483,
+        "score": 0.013034836139989734
+      },
+      {
+        "method": "quantile_80_50_20",
+        "thresholds": {
+          "A": 0.007554038415825119,
+          "B": 0.004567350601293808,
+          "C": 0.0023874556514633153
+        },
+        "coverage": 0.8,
+        "n_selected": 64396,
+        "mean_actual_gain": 0.0077878891049274835,
+        "weighted_mean_gain": 0.012234690527569387,
+        "total_weighted_gain": 1989.385149163837,
+        "precision_A": 0.9003043667308529,
+        "score": 0.012234690527569387
+      },
+      {
+        "method": "quantile_75_45_15",
+        "thresholds": {
+          "A": 0.006793855071080776,
+          "B": 0.004212470586293111,
+          "C": 0.0019501804315854624
+        },
+        "coverage": 0.8499906826510963,
+        "n_selected": 68420,
+        "mean_actual_gain": 0.007323731575461483,
+        "weighted_mean_gain": 0.011476836455806345,
+        "total_weighted_gain": 2097.0842830815936,
+        "precision_A": 0.8826774001192605,
+        "score": 0.011476836455806345
+      },
+      {
+        "method": "quantile_90_50_10",
+        "thresholds": {
+          "A": 0.010340254912749765,
+          "B": 0.004567350601293808,
+          "C": 0.0014809850265618061
+        },
+        "coverage": 0.8999937884340642,
+        "n_selected": 72445,
+        "mean_actual_gain": 0.00687840030501911,
+        "weighted_mean_gain": 0.011568864331465997,
+        "total_weighted_gain": 1732.132015618682,
+        "precision_A": 0.9402484472049689,
+        "score": 0.011568864331465997
+      },
+      {
+        "method": "quantile_80_60_40",
+        "thresholds": {
+          "A": 0.007554038415825119,
+          "B": 0.005330576585829116,
+          "C": 0.0038447060729819064
+        },
+        "coverage": 0.6,
+        "n_selected": 48297,
+        "mean_actual_gain": 0.010067895247391772,
+        "weighted_mean_gain": 0.014262654224078814,
+        "total_weighted_gain": 1928.7615509689367,
+        "precision_A": 0.9003043667308529,
+        "score": 0.014262654224078814
+      },
+      {
+        "method": "fixed_A0.0030_B0.0015_C0.0008",
+        "thresholds": {
+          "A": 0.003,
+          "B": 0.0015,
+          "C": 0.00075
+        },
+        "coverage": 0.9492390831728679,
+        "n_selected": 76409,
+        "mean_actual_gain": 0.006448347657007015,
+        "weighted_mean_gain": 0.00758561217626512,
+        "total_weighted_gain": 2490.297309692864,
+        "precision_A": 0.749939594767181,
+        "score": 0.00758561217626512
+      },
+      {
+        "method": "fixed_A0.0040_B0.0020_C0.0010",
+        "thresholds": {
+          "A": 0.004,
+          "B": 0.002,
+          "C": 0.001
+        },
+        "coverage": 0.9366544505869929,
+        "n_selected": 75396,
+        "mean_actual_gain": 0.006561428479446843,
+        "weighted_mean_gain": 0.008403715174854137,
+        "total_weighted_gain": 2451.521706350239,
+        "precision_A": 0.7862629817183074,
+        "score": 0.008403715174854137
+      },
+      {
+        "method": "fixed_A0.0050_B0.0025_C0.0013",
+        "thresholds": {
+          "A": 0.005,
+          "B": 0.0025,
+          "C": 0.00125
+        },
+        "coverage": 0.919895645692279,
+        "n_selected": 74047,
+        "mean_actual_gain": 0.006702342780725672,
+        "weighted_mean_gain": 0.009258023410744352,
+        "total_weighted_gain": 2361.7773202213484,
+        "precision_A": 0.8224672329414412,
+        "score": 0.009258023410744352
+      },
+      {
+        "method": "fixed_A0.0060_B0.0030_C0.0015",
+        "thresholds": {
+          "A": 0.006,
+          "B": 0.003,
+          "C": 0.0015
+        },
+        "coverage": 0.8983166656314057,
+        "n_selected": 72310,
+        "mean_actual_gain": 0.00689271660030829,
+        "weighted_mean_gain": 0.010130452420686692,
+        "total_weighted_gain": 2236.4351460195085,
+        "precision_A": 0.8603367055371071,
+        "score": 0.010130452420686692
+      },
+      {
+        "method": "fixed_A0.0080_B0.0040_C0.0020",
+        "thresholds": {
+          "A": 0.008,
+          "B": 0.004,
+          "C": 0.002
+        },
+        "coverage": 0.844350580781415,
+        "n_selected": 67966,
+        "mean_actual_gain": 0.007372556707984126,
+        "weighted_mean_gain": 0.011539829603950452,
+        "total_weighted_gain": 1961.6994857280322,
+        "precision_A": 0.9084611578426521,
+        "score": 0.011539829603950452
+      },
+      {
+        "method": "fixed_A0.0100_B0.0050_C0.0025",
+        "thresholds": {
+          "A": 0.01,
+          "B": 0.005,
+          "C": 0.0025
+        },
+        "coverage": 0.7863718243369153,
+        "n_selected": 63299,
+        "mean_actual_gain": 0.007927844676181671,
+        "weighted_mean_gain": 0.012796003087928429,
+        "total_weighted_gain": 1735.383701982383,
+        "precision_A": 0.9362241955945104,
+        "score": 0.012796003087928429
+      },
+      {
+        "method": "hybrid_0.4",
+        "thresholds": {
+          "A": 0.007554038415825119,
+          "B": 0.0063593632900125945,
+          "C": 0.004567350601293808
+        },
+        "coverage": 0.5000186346978073,
+        "n_selected": 40249,
+        "mean_actual_gain": 0.01155985041688603,
+        "weighted_mean_gain": 0.016019592558667063,
+        "total_weighted_gain": 1833.1604235104128,
+        "precision_A": 0.9003043667308529,
+        "score": 0.016019592558667063
+      },
+      {
+        "method": "hybrid_0.5",
+        "thresholds": {
+          "A": 0.007554038415825119,
+          "B": 0.006060694508559464,
+          "C": 0.004567350601293808
+        },
+        "coverage": 0.5000186346978073,
+        "n_selected": 40249,
+        "mean_actual_gain": 0.01155985041688603,
+        "weighted_mean_gain": 0.015769220090791274,
+        "total_weighted_gain": 1855.6839741560993,
+        "precision_A": 0.9003043667308529,
+        "score": 0.015769220090791274
+      },
+      {
+        "method": "hybrid_0.6",
+        "thresholds": {
+          "A": 0.007554038415825119,
+          "B": 0.005762025727106332,
+          "C": 0.004567350601293808
+        },
+        "coverage": 0.5000186346978073,
+        "n_selected": 40249,
+        "mean_actual_gain": 0.01155985041688603,
+        "weighted_mean_gain": 0.015475944478913067,
+        "total_weighted_gain": 1877.8511030713116,
+        "precision_A": 0.9003043667308529,
+        "score": 0.015475944478913067
+      }
+    ]
+  },
+  "PRESERVATION_LONG": {
+    "r2": 0.397522780401931,
+    "mae": 0.007931791979171501,
+    "rmse": 0.015448474997634583,
+    "sign_accuracy": 0.7128739718598415,
+    "n_train": 132762,
+    "n_test": 33191,
+    "features": [
+      "s_return_1h",
+      "s_return_4h",
+      "s_return_24h",
+      "s_momentum_3h",
+      "s_momentum_6h",
+      "s_momentum_12h",
+      "s_atr",
+      "s_atr_pct",
+      "s_rsi_1h",
+      "s_rsi_4h",
+      "s_bb_position",
+      "s_bb_width",
+      "s_range_position",
+      "s_vol_spike",
+      "s_volatility_24h",
+      "s_volatility_7d",
+      "s_skew_24h",
+      "s_max_run_up_24h",
+      "s_max_drawdown_24h",
+      "s_btc_correlation_24h",
+      "s_btc_7d_pct",
+      "s_btc_30d_pct",
+      "s_btc_day_pct",
+      "s_vol_ratio",
+      "s_bb_bandwidth",
+      "s_confidence",
+      "s_btc_return_1h",
+      "s_btc_return_4h",
+      "s_btc_return_24h",
+      "s_btc_atr_pct",
+      "s_fear_greed_value",
+      "s_market_breadth",
+      "s_ticker_price_change_percent"
+    ],
+    "medians": {
+      "s_return_1h": -0.0002622606871229838,
+      "s_return_4h": -0.001052398360474105,
+      "s_return_24h": -0.007905138339920903,
+      "s_momentum_3h": -0.0007052186177715081,
+      "s_momentum_6h": -0.0016764459346186866,
+      "s_momentum_12h": -0.0037688442211055717,
+      "s_atr": 0.028008215458494978,
+      "s_atr_pct": 0.014515043830104086,
+      "s_rsi_1h": 46.83768036900071,
+      "s_rsi_4h": 43.720551266008805,
+      "s_bb_position": 0.41449107422901726,
+      "s_bb_width": 0.054752853423320993,
+      "s_range_position": 0.31491712707182323,
+      "s_vol_spike": 0.78171207833188,
+      "s_volatility_24h": 0.043581048110364465,
+      "s_volatility_7d": 0.1280401249671076,
+      "s_skew_24h": 0.0004301541290505808,
+      "s_max_run_up_24h": 0.016688061617458505,
+      "s_max_drawdown_24h": 0.025206524041516798,
+      "s_btc_correlation_24h": 0.13371939572350539,
+      "s_btc_7d_pct": -6.551188603030196,
+      "s_btc_30d_pct": -18.595208509807836,
+      "s_btc_day_pct": -0.23974804980405381,
+      "s_vol_ratio": 0.8063875850108359,
+      "s_bb_bandwidth": 0.07154179591033825,
+      "s_confidence": 0.6,
+      "s_btc_return_1h": -0.00031515272147775164,
+      "s_btc_return_4h": -0.0010479220223829078,
+      "s_btc_return_24h": -0.007027207238832767,
+      "s_btc_atr_pct": 0.008155611440229108,
+      "s_fear_greed_value": 15.0,
+      "s_market_breadth": -0.008813412612528604,
+      "s_ticker_price_change_percent": 0.263
+    },
+    "best_method": "hybrid_0.4",
+    "best_thresholds": {
+      "A": 0.010130156525396011,
+      "B": 0.007867406280320384,
+      "C": 0.0044732809127069435
+    },
+    "best_coverage": 0.5000150643246664,
+    "best_weighted_mean_gain": 0.021271215170020903,
+    "best_precision_A": 0.9326807228915662,
+    "all_methods": [
+      {
+        "method": "quantile_90_60_30",
+        "thresholds": {
+          "A": 0.015740109918222316,
+          "B": 0.00583878732326965,
+          "C": 0.002389166579588893
+        },
+        "coverage": 0.7000090385947998,
+        "n_selected": 23234,
+        "mean_actual_gain": 0.011118555674456812,
+        "weighted_mean_gain": 0.017850386650774326,
+        "total_weighted_gain": 900.6198380008376,
+        "precision_A": 0.9635542168674699,
+        "score": 0.017850386650774326
+      },
+      {
+        "method": "quantile_85_55_25",
+        "thresholds": {
+          "A": 0.012186179014593134,
+          "B": 0.005116886351314233,
+          "C": 0.0018653839992064502
+        },
+        "coverage": 0.7499924678376668,
+        "n_selected": 24893,
+        "mean_actual_gain": 0.01034672088022888,
+        "weighted_mean_gain": 0.0169050975349804,
+        "total_weighted_gain": 993.1541940630565,
+        "precision_A": 0.9453705563366138,
+        "score": 0.0169050975349804
+      },
+      {
+        "method": "quantile_80_50_20",
+        "thresholds": {
+          "A": 0.010130156525396011,
+          "B": 0.0044732809127069435,
+          "C": 0.001369798745196034
+        },
+        "coverage": 0.8000361543791992,
+        "n_selected": 26554,
+        "mean_actual_gain": 0.009650208205790834,
+        "weighted_mean_gain": 0.0158932025968884,
+        "total_weighted_gain": 1065.6773778075994,
+        "precision_A": 0.9326807228915662,
+        "score": 0.0158932025968884
+      },
+      {
+        "method": "quantile_75_45_15",
+        "thresholds": {
+          "A": 0.008671847379074324,
+          "B": 0.003919463431030484,
+          "C": 0.0009030800464650793
+        },
+        "coverage": 0.8500195836220662,
+        "n_selected": 28213,
+        "mean_actual_gain": 0.009001282732304359,
+        "weighted_mean_gain": 0.01486848159759014,
+        "total_weighted_gain": 1120.2627722741095,
+        "precision_A": 0.9187756085803808,
+        "score": 0.01486848159759014
+      },
+      {
+        "method": "quantile_90_50_10",
+        "thresholds": {
+          "A": 0.015740109918222316,
+          "B": 0.0044732809127069435,
+          "C": 7.013212594314425e-05
+        },
+        "coverage": 0.9000030128649332,
+        "n_selected": 29872,
+        "mean_actual_gain": 0.008335806537864204,
+        "weighted_mean_gain": 0.014738077865038467,
+        "total_weighted_gain": 909.9053464628907,
+        "precision_A": 0.9635542168674699,
+        "score": 0.014738077865038467
+      },
+      {
+        "method": "quantile_80_60_40",
+        "thresholds": {
+          "A": 0.010130156525396011,
+          "B": 0.00583878732326965,
+          "C": 0.0034157663096375484
+        },
+        "coverage": 0.600012051459733,
+        "n_selected": 19915,
+        "mean_actual_gain": 0.012892724279971852,
+        "weighted_mean_gain": 0.018784967669713267,
+        "total_weighted_gain": 1047.577535043366,
+        "precision_A": 0.9326807228915662,
+        "score": 0.018784967669713267
+      },
+      {
+        "method": "fixed_A0.0030_B0.0015_C0.0008",
+        "thresholds": {
+          "A": 0.003,
+          "B": 0.0015,
+          "C": 0.00075
+        },
+        "coverage": 0.861498599017806,
+        "n_selected": 28594,
+        "mean_actual_gain": 0.00884240997060128,
+        "weighted_mean_gain": 0.010652268763239952,
+        "total_weighted_gain": 1281.9984152021755,
+        "precision_A": 0.7972597579923725,
+        "score": 0.010652268763239952
+      },
+      {
+        "method": "fixed_A0.0040_B0.0020_C0.0010",
+        "thresholds": {
+          "A": 0.004,
+          "B": 0.002,
+          "C": 0.001
+        },
+        "coverage": 0.8409207315236058,
+        "n_selected": 27911,
+        "mean_actual_gain": 0.009124133045456437,
+        "weighted_mean_gain": 0.011693743425138979,
+        "total_weighted_gain": 1273.2872853383676,
+        "precision_A": 0.8316561961416579,
+        "score": 0.011693743425138979
+      },
+      {
+        "method": "fixed_A0.0050_B0.0025_C0.0013",
+        "thresholds": {
+          "A": 0.005,
+          "B": 0.0025,
+          "C": 0.00125
+        },
+        "coverage": 0.8132325027869001,
+        "n_selected": 26992,
+        "mean_actual_gain": 0.009478977089657557,
+        "weighted_mean_gain": 0.012706634991215573,
+        "total_weighted_gain": 1252.9453672898062,
+        "precision_A": 0.857630904671178,
+        "score": 0.012706634991215573
+      },
+      {
+        "method": "fixed_A0.0060_B0.0030_C0.0015",
+        "thresholds": {
+          "A": 0.006,
+          "B": 0.003,
+          "C": 0.0015
+        },
+        "coverage": 0.7862372329848453,
+        "n_selected": 26096,
+        "mean_actual_gain": 0.009826725696732885,
+        "weighted_mean_gain": 0.013690317086201264,
+        "total_weighted_gain": 1224.437317619086,
+        "precision_A": 0.8783846510908246,
+        "score": 0.013690317086201264
+      },
+      {
+        "method": "fixed_A0.0080_B0.0040_C0.0020",
+        "thresholds": {
+          "A": 0.008,
+          "B": 0.004,
+          "C": 0.002
+        },
+        "coverage": 0.7361935464433129,
+        "n_selected": 24435,
+        "mean_actual_gain": 0.010554014364461392,
+        "weighted_mean_gain": 0.015600133206782593,
+        "total_weighted_gain": 1147.7922807955947,
+        "precision_A": 0.9111231687466088,
+        "score": 0.015600133206782593
+      },
+      {
+        "method": "fixed_A0.0100_B0.0050_C0.0025",
+        "thresholds": {
+          "A": 0.01,
+          "B": 0.005,
+          "C": 0.0025
+        },
+        "coverage": 0.6894941399777048,
+        "n_selected": 22885,
+        "mean_actual_gain": 0.01128375337572678,
+        "weighted_mean_gain": 0.017253292456547244,
+        "total_weighted_gain": 1065.5184835559708,
+        "precision_A": 0.9319022945965951,
+        "score": 0.017253292456547244
+      },
+      {
+        "method": "hybrid_0.4",
+        "thresholds": {
+          "A": 0.010130156525396011,
+          "B": 0.007867406280320384,
+          "C": 0.0044732809127069435
+        },
+        "coverage": 0.5000150643246664,
+        "n_selected": 16596,
+        "mean_actual_gain": 0.015004074247657139,
+        "weighted_mean_gain": 0.021271215170020903,
+        "total_weighted_gain": 1001.4530644476181,
+        "precision_A": 0.9326807228915662,
+        "score": 0.021271215170020903
+      },
+      {
+        "method": "hybrid_0.5",
+        "thresholds": {
+          "A": 0.010130156525396011,
+          "B": 0.007301718719051477,
+          "C": 0.0044732809127069435
+        },
+        "coverage": 0.5000150643246664,
+        "n_selected": 16596,
+        "mean_actual_gain": 0.015004074247657139,
+        "weighted_mean_gain": 0.02093333208201527,
+        "total_weighted_gain": 1012.4489794795012,
+        "precision_A": 0.9326807228915662,
+        "score": 0.02093333208201527
+      },
+      {
+        "method": "hybrid_0.6",
+        "thresholds": {
+          "A": 0.010130156525396011,
+          "B": 0.00673603115778257,
+          "C": 0.0044732809127069435
+        },
+        "coverage": 0.5000150643246664,
+        "n_selected": 16596,
+        "mean_actual_gain": 0.015004074247657139,
+        "weighted_mean_gain": 0.020550794643051633,
+        "total_weighted_gain": 1023.0349979668247,
+        "precision_A": 0.9326807228915662,
+        "score": 0.020550794643051633
+      }
+    ]
+  },
+  "FUTURES_SHORT_SHORT": {
+    "r2": 0.4877428476212363,
+    "mae": 0.007971600489699072,
+    "rmse": 0.014006397344751304,
+    "sign_accuracy": 0.7541645329397235,
+    "n_train": 132786,
+    "n_test": 33197,
+    "features": [
+      "s_return_1h",
+      "s_return_4h",
+      "s_return_24h",
+      "s_momentum_3h",
+      "s_momentum_6h",
+      "s_momentum_12h",
+      "s_atr",
+      "s_atr_pct",
+      "s_rsi_1h",
+      "s_rsi_4h",
+      "s_bb_position",
+      "s_bb_width",
+      "s_range_position",
+      "s_vol_spike",
+      "s_volatility_24h",
+      "s_volatility_7d",
+      "s_skew_24h",
+      "s_max_run_up_24h",
+      "s_max_drawdown_24h",
+      "s_btc_correlation_24h",
+      "s_btc_7d_pct",
+      "s_btc_30d_pct",
+      "s_btc_day_pct",
+      "s_vol_ratio",
+      "s_bb_bandwidth",
+      "s_confidence",
+      "s_btc_return_1h",
+      "s_btc_return_4h",
+      "s_btc_return_24h",
+      "s_btc_atr_pct",
+      "s_fear_greed_value",
+      "s_market_breadth",
+      "s_ticker_price_change_percent"
+    ],
+    "medians": {
+      "s_return_1h": 0.0,
+      "s_return_4h": -0.0002597999540353557,
+      "s_return_24h": -0.007010834926705067,
+      "s_momentum_3h": -9.996301368497829e-05,
+      "s_momentum_6h": -0.0007049700387734559,
+      "s_momentum_12h": -0.0028828828828829645,
+      "s_atr": 0.02804298003343549,
+      "s_atr_pct": 0.01449114005733475,
+      "s_rsi_1h": 47.336528578081825,
+      "s_rsi_4h": 43.86900915115607,
+      "s_bb_position": 0.434843796033001,
+      "s_bb_width": 0.05465877592732822,
+      "s_range_position": 0.3198380566801619,
+      "s_vol_spike": 0.7795089614086128,
+      "s_volatility_24h": 0.043586233437792145,
+      "s_volatility_7d": 0.1280369557655013,
+      "s_skew_24h": 0.002722627005777572,
+      "s_max_run_up_24h": 0.017692852087756394,
+      "s_max_drawdown_24h": 0.02425196850393696,
+      "s_btc_correlation_24h": 0.1327552871067457,
+      "s_btc_7d_pct": -6.551188603030196,
+      "s_btc_30d_pct": -18.595208509807836,
+      "s_btc_day_pct": -0.2035827336791254,
+      "s_vol_ratio": 0.8002450454151577,
+      "s_bb_bandwidth": 0.07154179591033825,
+      "s_confidence": 0.6,
+      "s_btc_return_1h": -0.00016882727111844353,
+      "s_btc_return_4h": -0.0006811377000042196,
+      "s_btc_return_24h": -0.006571081966871062,
+      "s_btc_atr_pct": 0.008150661554314887,
+      "s_fear_greed_value": 15.0,
+      "s_market_breadth": -0.008241758241758212,
+      "s_ticker_price_change_percent": 0.263
+    },
+    "best_method": "hybrid_0.4",
+    "best_thresholds": {
+      "A": 0.012069586701783533,
+      "B": 0.009556190579915831,
+      "C": 0.005786096397114279
+    },
+    "best_coverage": 0.500015061601952,
+    "best_weighted_mean_gain": 0.02373913104356075,
+    "best_precision_A": 0.9579819277108433,
+    "all_methods": [
+      {
+        "method": "quantile_90_60_30",
+        "thresholds": {
+          "A": 0.017879463927501484,
+          "B": 0.007222978535003159,
+          "C": 0.0034731974465709065
+        },
+        "coverage": 0.7000030123203904,
+        "n_selected": 23238,
+        "mean_actual_gain": 0.013075920720753803,
+        "weighted_mean_gain": 0.020023672137174858,
+        "total_weighted_gain": 1010.4585717926823,
+        "precision_A": 0.9732008431195424,
+        "score": 0.020023672137174858
+      },
+      {
+        "method": "quantile_85_55_25",
+        "thresholds": {
+          "A": 0.014220042002821918,
+          "B": 0.006455925181749479,
+          "C": 0.0027925080721544473
+        },
+        "coverage": 0.750007530800976,
+        "n_selected": 24898,
+        "mean_actual_gain": 0.012229661895890186,
+        "weighted_mean_gain": 0.019075474067340416,
+        "total_weighted_gain": 1120.886301481363,
+        "precision_A": 0.963855421686747,
+        "score": 0.019075474067340416
+      },
+      {
+        "method": "quantile_80_50_20",
+        "thresholds": {
+          "A": 0.012069586701783533,
+          "B": 0.005786096397114279,
+          "C": 0.002028766209812394
+        },
+        "coverage": 0.7999819260776576,
+        "n_selected": 26557,
+        "mean_actual_gain": 0.011431766861692096,
+        "weighted_mean_gain": 0.01802805037304986,
+        "total_weighted_gain": 1208.9538467965745,
+        "precision_A": 0.9579819277108433,
+        "score": 0.01802805037304986
+      },
+      {
+        "method": "quantile_75_45_15",
+        "thresholds": {
+          "A": 0.010424374637614833,
+          "B": 0.005176185786870269,
+          "C": 0.001214177573635768
+        },
+        "coverage": 0.8499864445582432,
+        "n_selected": 28217,
+        "mean_actual_gain": 0.0106544304042475,
+        "weighted_mean_gain": 0.016959105488588578,
+        "total_weighted_gain": 1278.0076632301557,
+        "precision_A": 0.9507228915662651,
+        "score": 0.016959105488588578
+      },
+      {
+        "method": "quantile_90_50_10",
+        "thresholds": {
+          "A": 0.017879463927501484,
+          "B": 0.005786096397114279,
+          "C": 0.00017117048574166253
+        },
+        "coverage": 0.9000210862427328,
+        "n_selected": 29878,
+        "mean_actual_gain": 0.009914134839192948,
+        "weighted_mean_gain": 0.01667006709359097,
+        "total_weighted_gain": 1029.3966471097547,
+        "precision_A": 0.9732008431195424,
+        "score": 0.01667006709359097
+      },
+      {
+        "method": "quantile_80_60_40",
+        "thresholds": {
+          "A": 0.012069586701783533,
+          "B": 0.007222978535003159,
+          "C": 0.004614691918162327
+        },
+        "coverage": 0.5999939753592192,
+        "n_selected": 19918,
+        "mean_actual_gain": 0.015014765530189678,
+        "weighted_mean_gain": 0.021118662457557884,
+        "total_weighted_gain": 1177.8427137803928,
+        "precision_A": 0.9579819277108433,
+        "score": 0.021118662457557884
+      },
+      {
+        "method": "fixed_A0.0030_B0.0015_C0.0008",
+        "thresholds": {
+          "A": 0.003,
+          "B": 0.0015,
+          "C": 0.00075
+        },
+        "coverage": 0.8758622767117511,
+        "n_selected": 29076,
+        "mean_actual_gain": 0.010270717116833358,
+        "weighted_mean_gain": 0.011523100088560556,
+        "total_weighted_gain": 1512.7710165863716,
+        "precision_A": 0.8232306684141546,
+        "score": 0.011523100088560556
+      },
+      {
+        "method": "fixed_A0.0040_B0.0020_C0.0010",
+        "thresholds": {
+          "A": 0.004,
+          "B": 0.002,
+          "C": 0.001
+        },
+        "coverage": 0.8619453565081182,
+        "n_selected": 28614,
+        "mean_actual_gain": 0.010479828744175631,
+        "weighted_mean_gain": 0.012341213165982735,
+        "total_weighted_gain": 1511.0754177413583,
+        "precision_A": 0.8491658624017648,
+        "score": 0.012341213165982735
+      },
+      {
+        "method": "fixed_A0.0050_B0.0025_C0.0013",
+        "thresholds": {
+          "A": 0.005,
+          "B": 0.0025,
+          "C": 0.00125
+        },
+        "coverage": 0.8480284363044853,
+        "n_selected": 28152,
+        "mean_actual_gain": 0.010681469503122452,
+        "weighted_mean_gain": 0.013258378674572071,
+        "total_weighted_gain": 1495.3886656233694,
+        "precision_A": 0.8760251357972095,
+        "score": 0.013258378674572071
+      },
+      {
+        "method": "fixed_A0.0060_B0.0030_C0.0015",
+        "thresholds": {
+          "A": 0.006,
+          "B": 0.003,
+          "C": 0.0015
+        },
+        "coverage": 0.8332078199837335,
+        "n_selected": 27660,
+        "mean_actual_gain": 0.010905536887106248,
+        "weighted_mean_gain": 0.014178928552964992,
+        "total_weighted_gain": 1468.9880422299636,
+        "precision_A": 0.8980824305814967,
+        "score": 0.014178928552964992
+      },
+      {
+        "method": "fixed_A0.0080_B0.0040_C0.0020",
+        "thresholds": {
+          "A": 0.008,
+          "B": 0.004,
+          "C": 0.002
+        },
+        "coverage": 0.8015784558845679,
+        "n_selected": 26610,
+        "mean_actual_gain": 0.01140611132147575,
+        "weighted_mean_gain": 0.01587788424486286,
+        "total_weighted_gain": 1392.0871500146532,
+        "precision_A": 0.9322005097706032,
+        "score": 0.01587788424486286
+      },
+      {
+        "method": "fixed_A0.0100_B0.0050_C0.0025",
+        "thresholds": {
+          "A": 0.01,
+          "B": 0.005,
+          "C": 0.0025
+        },
+        "coverage": 0.7705816790673856,
+        "n_selected": 25581,
+        "mean_actual_gain": 0.011893783319416254,
+        "weighted_mean_gain": 0.017420949095340164,
+        "total_weighted_gain": 1300.770006101764,
+        "precision_A": 0.9499315693430657,
+        "score": 0.017420949095340164
+      },
+      {
+        "method": "hybrid_0.4",
+        "thresholds": {
+          "A": 0.012069586701783533,
+          "B": 0.009556190579915831,
+          "C": 0.005786096397114279
+        },
+        "coverage": 0.500015061601952,
+        "n_selected": 16599,
+        "mean_actual_gain": 0.017317990841784568,
+        "weighted_mean_gain": 0.02373913104356075,
+        "total_weighted_gain": 1114.02519378601,
+        "precision_A": 0.9579819277108433,
+        "score": 0.02373913104356075
+      },
+      {
+        "method": "hybrid_0.5",
+        "thresholds": {
+          "A": 0.012069586701783533,
+          "B": 0.008927841549448905,
+          "C": 0.005786096397114279
+        },
+        "coverage": 0.500015061601952,
+        "n_selected": 16599,
+        "mean_actual_gain": 0.017317990841784568,
+        "weighted_mean_gain": 0.023425310594224372,
+        "total_weighted_gain": 1127.9942959815673,
+        "precision_A": 0.9579819277108433,
+        "score": 0.023425310594224372
+      },
+      {
+        "method": "hybrid_0.6",
+        "thresholds": {
+          "A": 0.012069586701783533,
+          "B": 0.008299492518981981,
+          "C": 0.005786096397114279
+        },
+        "coverage": 0.500015061601952,
+        "n_selected": 16599,
+        "mean_actual_gain": 0.017317990841784568,
+        "weighted_mean_gain": 0.02305234275743718,
+        "total_weighted_gain": 1142.9213225080807,
+        "precision_A": 0.9579819277108433,
+        "score": 0.02305234275743718
+      }
+    ]
+  }
+}

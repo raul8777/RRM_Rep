@@ -1,5 +1,6 @@
 import time
 import types
+import uuid
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -72,6 +73,7 @@ _futures_client: FuturesClient = None
 
 # Cycle-scoped spot price cache to collapse duplicate lookups within one loop.
 _cycle_price_cache: Dict[str, float] = {}
+_selection_context: Dict[str, Any] = {}
 
 # BUG-E2: Cycle-scoped ASG instance — reset each execute_once() call so all
 # consumers (BTC trend check, futures inject, pnl_service) share one instance
@@ -155,10 +157,128 @@ def _audit_signal_decision(symbol: str, decision: str, reason: str, signal_id: O
             )
     except Exception as _audit_err:
         print(f"[Audit/Decision] failed for {symbol}: {_audit_err}")
+    _selection_record_decision(symbol, decision, reason, inferred_trade_type)
     _store_update_signal_decision(symbol, decision, reason, signal_id=signal_id)
 
 
 update_signal_decision = _audit_signal_decision
+
+
+def _selection_begin_cycle(db_client, regime_mode: str, profile_label: Optional[str]) -> str:
+    global _selection_context
+    cycle_id = str(uuid.uuid4())
+    _selection_context = {
+        "cycle_id": cycle_id,
+        "db_client": db_client,
+        "regime_mode": regime_mode,
+        "profile_label": profile_label,
+        "candidate_count": 0,
+        "selected_count": 0,
+        "executed_count": 0,
+    }
+    if db_client:
+        try:
+            db_client.execute_update(
+                "INSERT INTO entry_selection_cycles (cycle_id, regime_mode, profile_label) VALUES (%s, %s, %s)",
+                (cycle_id, regime_mode, profile_label),
+            )
+        except Exception as exc:
+            print(f"[Selection] cycle persistence failed: {exc}")
+    return cycle_id
+
+
+def _selection_capture_candidates(candidates: List[Any], predictions: Dict[str, Dict], stage: str) -> None:
+    context = _selection_context
+    db_client = context.get("db_client")
+    cycle_id = context.get("cycle_id")
+    if not cycle_id:
+        return
+    for candidate in candidates:
+        signal = candidate if isinstance(candidate, dict) else {"symbol": candidate}
+        symbol = signal.get("symbol")
+        if not symbol:
+            continue
+        prediction = predictions.get(symbol, {}) or {}
+        trade_type = str(signal.get("trade_type") or ("futures" if context.get("regime_mode") == "FUTURES_SHORT" else "spot"))
+        payload = {
+            "strength": signal.get("strength"),
+            "score": signal.get("score"),
+            "profit_score": signal.get("profit_score"),
+            "profit_score_components": signal.get("profit_score_components"),
+            "vol_spike": signal.get("vol_spike"),
+            "rsi": signal.get("rsi"),
+            "higher_tf_trend": signal.get("higher_tf_trend"),
+            "expected_pnl": prediction.get("expected_pnl"),
+            "success_probability": prediction.get("success_probability"),
+            "peak_quality_profile": signal.get("peak_quality_profile"),
+        }
+        if db_client:
+            try:
+                db_client.execute_update(
+                    "INSERT INTO entry_selection_candidates (cycle_id, symbol, trade_type, stage, decision, data) "
+                    "VALUES (%s, %s, %s, %s, %s, %s::jsonb) "
+                    "ON CONFLICT (cycle_id, symbol) DO UPDATE SET trade_type=EXCLUDED.trade_type, "
+                    "stage=EXCLUDED.stage, data=entry_selection_candidates.data || EXCLUDED.data, updated_at=NOW()",
+                    (cycle_id, symbol, trade_type, stage, "pending", json.dumps(payload)),
+                )
+            except Exception as exc:
+                print(f"[Selection] candidate persistence failed for {symbol}: {exc}")
+    context["candidate_count"] = max(context.get("candidate_count", 0), len(candidates))
+
+
+def _selection_mark_stage(symbol: str, stage: str, reason: Optional[str] = None) -> None:
+    context = _selection_context
+    db_client = context.get("db_client")
+    cycle_id = context.get("cycle_id")
+    if not db_client or not cycle_id:
+        return
+    try:
+        db_client.execute_update(
+            "UPDATE entry_selection_candidates SET stage=%s, reason=%s, updated_at=NOW() WHERE cycle_id=%s AND symbol=%s",
+            (stage, reason, cycle_id, symbol),
+        )
+    except Exception as exc:
+        print(f"[Selection] stage persistence failed for {symbol}: {exc}")
+
+
+def _selection_record_decision(symbol: str, decision: str, reason: str, trade_type: str) -> None:
+    context = _selection_context
+    db_client = context.get("db_client")
+    cycle_id = context.get("cycle_id")
+    if not db_client or not cycle_id:
+        return
+    stage = "executed" if decision == "executed" else "rejected"
+    try:
+        db_client.execute_update(
+            "UPDATE entry_selection_candidates SET decision=%s, reason=%s, stage=%s, updated_at=NOW() "
+            "WHERE cycle_id=%s AND symbol=%s",
+            (decision, reason, stage, cycle_id, symbol),
+        )
+        if decision == "executed":
+            context["executed_count"] = int(context.get("executed_count", 0)) + 1
+    except Exception as exc:
+        print(f"[Selection] decision persistence failed for {symbol}: {exc}")
+
+
+def _selection_complete_cycle(summary: Optional[Dict[str, Any]] = None) -> None:
+    global _selection_context
+    context = _selection_context
+    db_client = context.get("db_client")
+    cycle_id = context.get("cycle_id")
+    if db_client and cycle_id:
+        payload = dict(summary or {})
+        payload.setdefault("candidate_count", context.get("candidate_count", 0))
+        payload.setdefault("selected_count", context.get("selected_count", 0))
+        payload.setdefault("executed_count", context.get("executed_count", 0))
+        try:
+            db_client.execute_update(
+                "UPDATE entry_selection_cycles SET completed_at=NOW(), candidate_count=%s, selected_count=%s, "
+                "executed_count=%s, summary=%s::jsonb WHERE cycle_id=%s",
+                (payload["candidate_count"], payload["selected_count"], payload["executed_count"], json.dumps(payload), cycle_id),
+            )
+        except Exception as exc:
+            print(f"[Selection] cycle completion persistence failed: {exc}")
+    _selection_context = {}
 
 
 def _audit_screener_selection(db_client, regime_mode: str, screened: dict, profile_label: Optional[str] = None) -> None:
@@ -5063,12 +5183,20 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             pass
 
     # ── Behavior-first candidate filter ───────────────────────────────────────
-    # Reject assets whose current price behavior does not match the short-term
-    # profit objective of the active regime/profile.  This is a hard pre-filter
-    # before predictor, sizing, and execution.
-    top_signals_with_meta = _filter_buy_candidates(
-        top_signals_with_meta, signal_meta, settings, _regime_mode, _active_profile_label
-    )
+    # NOTE: Primary filtering now runs in execute_once() BEFORE QUBO.
+    # This secondary pass only applies when _buy_top_symbols is called directly
+    # (e.g., from tests or alternative paths) and entry_quality_gate_mode is blocking.
+    _eq_mode_bts = str(getattr(settings, 'entry_quality_gate_mode', 'blocking')).lower()
+    if _eq_mode_bts == "blocking":
+        top_signals_with_meta = _filter_buy_candidates(
+            top_signals_with_meta, signal_meta, settings, _regime_mode, _active_profile_label
+        )
+    else:
+        # Advisory/disabled: only hard-reject peak_quality_profile == "discarded"
+        top_signals_with_meta = [
+            c for c in top_signals_with_meta
+            if not (isinstance(c, dict) and str(c.get('peak_quality_profile', '')).lower() == 'discarded')
+        ]
     if top_signals_with_meta and isinstance(top_signals_with_meta[0], dict):
         top_symbols = [s['symbol'] for s in top_signals_with_meta]
     else:
@@ -5509,10 +5637,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     update_signal_decision(symbol, 'rejected', 'STAGGER_LIMIT')
                     continue
                 print(f"[Futures] FUTURES_SHORT mode: opening short {symbol} margin=${_f_usdt}")
+                _f_peak_profile = str(_f_sig_meta.get('peak_quality_profile', '') or '').strip().upper()
+                _f_peak_quality = _f_sig_meta.get('peak_quality')
                 _pos = _fc.open_short(symbol, usdt_amount=_f_usdt,
                                       sl_pct=_f_sl, tp_pct=_f_tp, leverage=_f_lev,
                                       pnl_prediction=_f_prediction, indicators_at_entry=_f_indicators,
-                                      signal_id=_signal_id)
+                                      signal_id=_signal_id,
+                                      peak_quality_profile=_f_peak_profile if _f_peak_profile in ('A','B','C') else None,
+                                      peak_quality_score=_f_peak_quality)
                 if _pos:
                     _pb_new_shorts_this_cycle += 1
                     orders.append({"symbol": symbol, "side": "SHORT_FUTURES",
@@ -5774,9 +5906,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         _l_tp   = getattr(settings, 'futures_long_tp_pct', 5.0)
                         _l_lev  = getattr(settings, 'futures_leverage', 10)
                         print(f"[Futures] RANGE_SCALP BB-lower: opening LONG {symbol} margin=${_l_usdt}")
+                        _l_sig_meta = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
+                        _l_peak_profile = str(_l_sig_meta.get('peak_quality_profile', '') or '').strip().upper()
+                        _l_peak_quality = _l_sig_meta.get('peak_quality')
                         _lpos = _fc_l.open_long(symbol, usdt_amount=_l_usdt,
                                                 sl_pct=_l_sl, tp_pct=_l_tp, leverage=_l_lev,
-                                                signal_id=_signal_id)
+                                                signal_id=_signal_id,
+                                                peak_quality_profile=_l_peak_profile if _l_peak_profile in ('A','B','C') else None,
+                                                peak_quality_score=_l_peak_quality)
                         if _lpos:
                             orders.append({"symbol": symbol, "side": "LONG_FUTURES",
                                            "qty": _lpos.qty, "entry_price": _lpos.entry_price,
@@ -5871,9 +6008,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     )
                     _l_usdt = min(_l_usdt, _l_usdt_cap)
                     print(f"[Futures] SPOT_BULL oversold LONG {symbol}: RSI={_l_rsi_val:.1f}<{_l_rsi_thresh}, BTC={btc_trend}, margin=${_l_usdt:.2f}")
+                    _l_sig_meta = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
+                    _l_peak_profile = str(_l_sig_meta.get('peak_quality_profile', '') or '').strip().upper()
+                    _l_peak_quality = _l_sig_meta.get('peak_quality')
                     _lpos_sb = _fc_sb.open_long(symbol, usdt_amount=_l_usdt,
                                                 sl_pct=_l_sl, tp_pct=_l_tp, leverage=_l_lev,
-                                                signal_id=_signal_id)
+                                                signal_id=_signal_id,
+                                                peak_quality_profile=_l_peak_profile if _l_peak_profile in ('A','B','C') else None,
+                                                peak_quality_score=_l_peak_quality)
                     if _lpos_sb:
                         orders.append({"symbol": symbol, "side": "LONG_FUTURES",
                                        "qty": _lpos_sb.qty, "entry_price": _lpos_sb.entry_price,
@@ -5955,7 +6097,28 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     f"(BTC 4h={btc_4h_chg_pct:+.2f}%)"
                 )
         is_valid, reason = pnl_service.validate(prediction, _pnl_boosted_settings, symbol=symbol, news_client=news_client)
-        if not is_valid:
+        # ── Peaks-first advisory mode: Profile A/B bypass predictor gate ──────
+        _predictor_gate_mode = str(getattr(settings, 'predictor_gate_mode', 'blocking')).lower()
+        _sig_peak_profile = str(signal_meta.get(symbol, {}).get('peak_quality_profile', '')).upper()
+        _peaks_bypass = False
+        if not is_valid and _predictor_gate_mode == "advisory" and _sig_peak_profile in ("A", "B"):
+            _peaks_bypass = True
+            _gate_warning = {
+                "gate": "predictor_pnl",
+                "reason": reason,
+                "expected_pnl": float((prediction or {}).get('expected_pnl', 0)),
+                "success_probability": float((prediction or {}).get('success_probability', 0)),
+                "peak_profile": _sig_peak_profile,
+                "action": "advisory_bypass",
+            }
+            # Collect warning in signal_meta for later DB persistence
+            if symbol in signal_meta and isinstance(signal_meta[symbol], dict):
+                signal_meta[symbol].setdefault('gate_warnings', []).append(_gate_warning)
+            print(f"[PeaksFirst] {symbol}: predictor VETOED ({reason}) but Profile={_sig_peak_profile} → ADVISORY BYPASS")
+        elif not is_valid and _predictor_gate_mode == "disabled":
+            _peaks_bypass = True
+            print(f"[PeaksFirst] {symbol}: predictor gate DISABLED → bypass")
+        if not is_valid and not _peaks_bypass:
             ep = prediction.get('expected_pnl', 0) if prediction else 0
             sp = prediction.get('success_probability', 0) if prediction else 0
             # ── VolSpike override for narrative tokens ─────────────────────
@@ -6070,8 +6233,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 print(f"Skipping buy {symbol}: {reason} (pred={ep:.2f} USDT, prob={sp:.2f})")
                 update_signal_decision(symbol, "rejected", "PNL_BAJO")
                 continue
-        if prediction and is_valid:
-            print(f"Prediction OK for {symbol}: {prediction['expected_pnl']:.2f} USDT, prob={prediction['success_probability']:.2f}")
+        if prediction and (is_valid or _peaks_bypass):
+            print(f"Prediction {'OK' if is_valid else 'BYPASSED(Peaks)'} for {symbol}: {prediction['expected_pnl']:.2f} USDT, prob={prediction['success_probability']:.2f}")
 
         # ── CoinGecko Trending boost ────────────────────────────────────
         if news_client:
@@ -6307,14 +6470,23 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     # Prepare metadata with prediction
                     # C5: Enriquecer con entry_regime + entry_pred_pnl para re-evaluación y prediction_add
                     _is_pred_add = (position_manager.get_positions_count(symbol) >= 1) if position_manager else False
+                    _signal_for_symbol = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
+                    _peak_quality_profile = str(_signal_for_symbol.get('peak_quality_profile', '') or '').strip().upper()
+                    _peak_quality_score = _signal_for_symbol.get('peak_quality')
+                    try:
+                        _peak_quality_score = float(_peak_quality_score) if _peak_quality_score is not None else None
+                    except Exception:
+                        _peak_quality_score = None
                     metadata = {
                         "order_id": order.get("orderId"),
                         "signal_id": _signal_id,
                         "indicators_at_entry": _indicators_to_save,
-                        "rsi_at_entry": float(signal_meta.get(symbol, {}).get('rsi', 50.0)),
-                        "vol_spike_at_entry": float(signal_meta.get(symbol, {}).get('vol_spike', 0.0)),
+                        "rsi_at_entry": float(_signal_for_symbol.get('rsi', 50.0)),
+                        "vol_spike_at_entry": float(_signal_for_symbol.get('vol_spike', 0.0)),
                         "override_used": volspike_override,
-                        "strength": float(signal_meta.get(symbol, {}).get('strength', strength)),
+                        "strength": float(_signal_for_symbol.get('strength', strength)),
+                        "peak_quality_profile": _peak_quality_profile if _peak_quality_profile in ('A', 'B', 'C') else None,
+                        "peak_quality": _peak_quality_score,
                         "entry_regime": _regime_mode,
                         "entry_profile_label": _active_profile_label,
                         "regime_mode": _regime_mode,
@@ -6332,6 +6504,10 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "entry_commission": float(_fill.get('commission', entry_commission)),
                         "binance_entry_confirmed": bool(_fill.get('binance_confirmed', False)),
                     }
+                    # Persist gate_warnings collected during advisory mode
+                    _gate_warnings_for_sym = _signal_for_symbol.get('gate_warnings', [])
+                    if _gate_warnings_for_sym:
+                        metadata['gate_warnings'] = _gate_warnings_for_sym
                     if prediction:
                         metadata['pnl_prediction'] = prediction
 
@@ -6407,6 +6583,12 @@ def _compute_profit_score(
     _ev_max = max(ev_values) if ev_values else 1.0
     _ev_range = (_ev_max - _ev_min) if (_ev_max - _ev_min) > 1e-9 else 1.0
 
+    # Peak quality scores for normalization
+    _pq_values = [float(s.get('peak_quality_score', 0.0) or 0.0) for s in top_signals]
+    _pq_min = min(_pq_values) if _pq_values else 0.0
+    _pq_max = max(_pq_values) if _pq_values else 1.0
+    _pq_range = (_pq_max - _pq_min) if (_pq_max - _pq_min) > 1e-9 else 1.0
+
     scored = []
     for sig in top_signals:
         sym = sig.get('symbol', '')
@@ -6414,8 +6596,10 @@ def _compute_profit_score(
         ev_raw  = float(pred.get('expected_pnl', 0.0) or 0.0)
         prob    = float(pred.get('success_probability', sig.get('strength', 0.5)) or 0.5)
         strength = float(sig.get('strength', 0.5))
+        pq_raw  = float(sig.get('peak_quality_score', 0.0) or 0.0)
 
         ev_norm = (ev_raw - _ev_min) / _ev_range
+        pq_norm = (pq_raw - _pq_min) / _pq_range
 
         if _regime == 'SPOT_BULL':
             _tf = sig.get('higher_tf_trend', 'FLAT')
@@ -6430,18 +6614,21 @@ def _compute_profit_score(
         else:
             regime_bonus = 0.5
 
+        # Peaks-first formula: peak_quality dominates ranking
         profit_score = round(
-            ev_norm  * 0.40
-            + prob   * 0.30
-            + strength * 0.20
+            pq_norm  * 0.40
+            + ev_norm  * 0.20
+            + prob   * 0.20
+            + strength * 0.10
             + regime_bonus * 0.10,
             4,
         )
         sig = dict(sig)
         sig['profit_score'] = profit_score
         sig['profit_score_components'] = {
-            'ev_norm': round(ev_norm, 4), 'prob': round(prob, 4),
-            'strength': round(strength, 4), 'regime_bonus': round(regime_bonus, 4),
+            'pq_norm': round(pq_norm, 4), 'ev_norm': round(ev_norm, 4),
+            'prob': round(prob, 4), 'strength': round(strength, 4),
+            'regime_bonus': round(regime_bonus, 4),
         }
         scored.append(sig)
 
@@ -6452,7 +6639,8 @@ def _compute_profit_score(
         f"[ProfitScore/{_regime}] top-5: "
         + " | ".join(
             f"{s['symbol']} ps={s['profit_score']:.3f}"
-            f"(ev={s['profit_score_components']['ev_norm']:.2f}"
+            f"(pq={s['profit_score_components']['pq_norm']:.2f}"
+            f" ev={s['profit_score_components']['ev_norm']:.2f}"
             f" p={s['profit_score_components']['prob']:.2f}"
             f" s={s['profit_score_components']['strength']:.2f}"
             f" r={s['profit_score_components']['regime_bonus']:.2f})"
@@ -6513,6 +6701,7 @@ def _apply_qubo_selector(
             success_probability=success_prob,
             risk_score=risk_score,
             atr_pct=atr_pct,
+            peak_quality_score=float(sig.get('peak_quality_score', 0.0) or 0.0),
             metadata={'signal': sig, 'prediction': pred},
         ))
 
@@ -7869,6 +8058,11 @@ def execute_once(monitor_only: bool = False, components=None):
         print(f"[BasketReset] decision error: {_reset_err}")
 
     # ── Step 1: Determine top symbols ─────────────────────────────────────────
+    _selection_begin_cycle(
+        comp.db_client,
+        _regime_mode,
+        _get_active_profile_label(comp.db_client, _regime_mode),
+    )
     top_signals = _select_symbols(settings, news_client, client, portfolio_manager, regime=_regime_mode, db_client=comp.db_client)
 
     # FUTURES_SHORT mode: always ensure futures_symbols are in the pool.
@@ -7964,6 +8158,7 @@ def execute_once(monitor_only: bool = False, components=None):
 
     if not top_signals:
         print("No buy signals available; skipping new buys this cycle.")
+        _selection_complete_cycle({"outcome": "no_signals", "reason": "NO_SIGNALS"})
         return {"top_symbols": [], "sell_orders": [], "buy_orders": [], "sl_tp_closes": sl_tp_closes}
 
     # Normalize: _select_symbols may return dicts or strings
@@ -7985,6 +8180,46 @@ def execute_once(monitor_only: bool = False, components=None):
         trade_type=_prediction_trade_type,
         regime_mode=_regime_mode,
     )
+    _selection_capture_candidates(top_signals, predictions, "predicted")
+
+    # ── Peaks-first: pre-filter before QUBO (hard-reject discarded, advisory for entry_quality) ─
+    _eq_gate_mode = str(getattr(settings, 'entry_quality_gate_mode', 'blocking')).lower()
+    _active_profile_label_exec = _get_active_profile_label(_db_client_ref, _regime_mode)
+    if _eq_gate_mode == "blocking":
+        # Full blocking mode — filter as before
+        top_signals = _filter_buy_candidates(
+            top_signals, _step2_signal_meta, settings, _regime_mode, _active_profile_label_exec
+        )
+    elif _eq_gate_mode == "advisory":
+        # Advisory mode: only hard-reject "discarded" profiles; log other rejections as warnings
+        _filtered = []
+        for _sig in top_signals:
+            _sym = _sig['symbol'] if isinstance(_sig, dict) else _sig
+            _pq_prof = str((_sig if isinstance(_sig, dict) else {}).get('peak_quality_profile', '')).lower()
+            if _pq_prof == 'discarded':
+                print(f"[FilterBuy/Advisory] Hard-rejected {_sym}: PEAK_QUALITY_DISCARDED")
+                update_signal_decision(_sym, "rejected", "PEAK_QUALITY_DISCARDED")
+                continue
+            _ok, _reason = _check_entry_quality(_sym, _step2_signal_meta, settings, _regime_mode, _active_profile_label_exec)
+            if not _ok:
+                # Advisory: log warning but keep the candidate
+                if isinstance(_sig, dict):
+                    _sig.setdefault('gate_warnings', []).append({
+                        "gate": "entry_quality", "reason": _reason, "action": "advisory_pass",
+                    })
+                print(f"[FilterBuy/Advisory] {_sym}: WOULD_REJECT ({_reason}) → kept (Peaks advisory mode)")
+            _filtered.append(_sig)
+        top_signals = _filtered
+    # else: "disabled" — skip entry_quality filter entirely
+
+    if top_signals and isinstance(top_signals[0], dict):
+        top_symbols = [s['symbol'] for s in top_signals]
+    else:
+        top_symbols = list(top_signals)
+    if not top_signals:
+        print("[FilterBuy] All candidates filtered — no entries this cycle.")
+        _selection_complete_cycle({"outcome": "all_filtered", "reason": "ENTRY_QUALITY_GATE"})
+        return {"top_symbols": [], "sell_orders": [], "buy_orders": [], "sl_tp_closes": sl_tp_closes}
 
     # ── GAP-B: Profit-potential scoring — rank by EV+prob+strength+regime ───────
     try:
@@ -7995,6 +8230,7 @@ def execute_once(monitor_only: bool = False, components=None):
     # ── QUBO: combinatorial portfolio selection ─────────────────────────────
     # Replaces simple EV-sort with an explicit K-best orthogonal selector.
     # Uses correlation matrix + predicted PnL to maximize risk-adjusted return.
+    _pre_qubo_symbols = set(top_symbols)
     try:
         top_signals, predictions = _apply_qubo_selector(
             settings, client, top_signals, predictions, _regime_mode,
@@ -8007,6 +8243,10 @@ def execute_once(monitor_only: bool = False, components=None):
         top_symbols = [s['symbol'] for s in top_signals]
     else:
         top_symbols = list(top_signals)
+    _selection_capture_candidates(top_signals, predictions, "qubo_selected")
+    for _qubo_excluded_symbol in _pre_qubo_symbols - set(top_symbols):
+        _selection_mark_stage(_qubo_excluded_symbol, "qubo_excluded", "QUBO_EXCLUDED")
+    _selection_context["selected_count"] = len(top_symbols)
 
     # ── SSO-7: Populate best candidate cache for next cycle's monitoring ────────
     try:
@@ -8062,6 +8302,11 @@ def execute_once(monitor_only: bool = False, components=None):
     }
     _next_cycle = _cycle_by_regime.get(_regime_mode, getattr(settings, 'trade_cycle_minutes', 5))
     print(f"Completed cycle. Next cycle in {_next_cycle} min (regime={_regime_mode})")
+    _selection_complete_cycle({
+        "outcome": "executed" if buy_orders else "no_entry",
+        "selected_symbols": top_symbols,
+        "buy_order_count": len(buy_orders),
+    })
 
     # Persist volatile state to DB for restart safety
     if _db_client_ref:

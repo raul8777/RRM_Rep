@@ -1,0 +1,6430 @@
+{
+  "generated_at": "2026-07-16T01:09:20.527066+00:00",
+  "summary": {
+    "total_runs": 96,
+    "best_pnl_usdt": 44.18,
+    "best_pnl_pct": 1.5183,
+    "worst_pnl_pct": 0.3304,
+    "avg_pnl_pct": 1.0725,
+    "best_sharpe": 11.9,
+    "avg_sharpe": 7.3412,
+    "best_profit_factor": 23.988,
+    "avg_profit_factor": 9.8276,
+    "btc_benchmark_pct": null,
+    "alpha_vs_btc_avg": null
+  },
+  "recommendations": [
+    {
+      "profile": "A",
+      "best_window": "win_20260501_20260515",
+      "best_params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "best_profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "best_pnl_usdt": 44.18,
+      "best_pnl_per_day_usdt": 7.07,
+      "best_drawdown_pct": 0.526,
+      "best_trades": 30,
+      "best_win_rate": 0.9545,
+      "best_profit_factor": 23.988,
+      "best_sharpe": 11.9,
+      "best_capital_deployed": 0.107,
+      "best_pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "alpha_vs_btc": null,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe_best_params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "sharpe_best_value": 11.9,
+      "sharpe_best_pnl_pct": 1.5183,
+      "sharpe_best_drawdown_pct": 0.526,
+      "pf_best_params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "pf_best_value": 23.988,
+      "pf_best_pnl_pct": 1.5183
+    }
+  ],
+  "results": [
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260303_20260317",
+      "window_start": "2026-03-03T00:00:00+00:00",
+      "window_end": "2026-03-17T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 39.83,
+      "pnl_pct": 1.3689,
+      "max_drawdown_pct": 1.196,
+      "trades": 41,
+      "buys": 12,
+      "sells": 29,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 6.37,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 5.1276,
+      "sortino": 14.2108,
+      "calmar": 1.1445,
+      "profit_factor": 2.8567,
+      "win_rate": 0.5862,
+      "capital_deployed_ratio": 0.0671,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 39.83,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "window_start": "2026-04-01T00:00:00+00:00",
+      "window_end": "2026-04-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 9.61,
+      "pnl_pct": 0.3304,
+      "max_drawdown_pct": 0.5428,
+      "trades": 51,
+      "buys": 3,
+      "sells": 48,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 1.54,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 4.9959,
+      "sortino": 5.052,
+      "calmar": 0.6087,
+      "profit_factor": 2.638,
+      "win_rate": 0.6667,
+      "capital_deployed_ratio": 0.0486,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 9.61,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.45,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.5,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 10,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 1500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.22
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "window_start": "2026-05-01T00:00:00+00:00",
+      "window_end": "2026-05-15T00:00:00+00:00",
+      "profile": "A",
+      "params": {
+        "min_signal_strength": 0.5,
+        "min_success_probability": 0.54,
+        "max_total_positions": 12,
+        "max_per_trade_usdt": 2500,
+        "kelly_max_pct": 0.25
+      },
+      "profile_overrides": {
+        "SPOT_BULL_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "RANGE_SCALP_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "PRESERVATION_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        },
+        "FUTURES_SHORT_A": {
+          "cycle_spot_bull": 8,
+          "cycle_range_scalp": 2,
+          "cycle_preservation": 36,
+          "cycle_futures_short": 3
+        }
+      },
+      "early_stopped": false,
+      "lifecycle": true,
+      "pnl_usdt": 44.18,
+      "pnl_pct": 1.5183,
+      "max_drawdown_pct": 0.526,
+      "trades": 30,
+      "buys": 8,
+      "sells": 22,
+      "sl_tp": 0,
+      "cycles": 150,
+      "pnl_per_day_usdt": 7.07,
+      "regime_distribution": {
+        "SPOT_BULL": 150
+      },
+      "sharpe": 11.9,
+      "sortino": 14.5634,
+      "calmar": 2.8864,
+      "profit_factor": 23.988,
+      "win_rate": 0.9545,
+      "capital_deployed_ratio": 0.107,
+      "pnl_by_regime": {
+        "SPOT_BULL": {
+          "pnl_usdt": 44.18,
+          "cycles": 149
+        }
+      },
+      "transition_cost_pct": null
+    }
+  ]
+}

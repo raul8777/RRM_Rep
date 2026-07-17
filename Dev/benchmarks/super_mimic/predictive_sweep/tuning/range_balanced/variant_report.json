@@ -1,0 +1,59 @@
+{
+  "generated_at": "2026-07-16T13:36:58.719371+00:00",
+  "max_cycles": 2000,
+  "regime_filter": "RANGE_SCALP",
+  "summary": {
+    "total_windows": 12,
+    "ok": 2,
+    "failed": 0,
+    "errors": []
+  },
+  "windows": [
+    {
+      "window_id": "win_20250525_20250608",
+      "regime": "RANGE_SCALP",
+      "pnl_usdt": -174.57,
+      "pnl_pct": -5.9988,
+      "win_rate": 0.199,
+      "profit_factor": 0.7241,
+      "total_trades": null,
+      "max_drawdown_pct": 7.8533,
+      "profile": "PREDICTIVE",
+      "profile_entry_counts": {
+        "A": 144,
+        "C": 221
+      },
+      "cycles": 337,
+      "trades": 752,
+      "buys": 365,
+      "sells": 387
+    },
+    {
+      "window_id": "win_20250718_20250807",
+      "regime": "RANGE_SCALP",
+      "pnl_usdt": -432.01,
+      "pnl_pct": -14.8458,
+      "win_rate": 0.0844,
+      "profit_factor": 0.453,
+      "total_trades": null,
+      "max_drawdown_pct": 16.2463,
+      "profile": "PREDICTIVE",
+      "profile_entry_counts": {
+        "A": 381,
+        "C": 377
+      },
+      "cycles": 481,
+      "trades": 1564,
+      "buys": 758,
+      "sells": 806
+    }
+  ],
+  "variant": "range_balanced",
+  "regime": "RANGE_SCALP",
+  "params": {
+    "A_min_peak_quality": 0.05,
+    "B_min_peak_quality": -0.45,
+    "C_min_peak_quality": -0.85
+  },
+  "elapsed_min": 0.52
+}

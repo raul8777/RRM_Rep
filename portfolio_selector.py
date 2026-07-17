@@ -32,6 +32,7 @@ class Candidate:
     success_probability: float    # 0..1
     risk_score: float             # 0..100 (higher = riskier)
     atr_pct: float = 0.0          # ATR as % of price; used for risk scaling
+    peak_quality_score: float = 0.0  # expected_gain from peak_quality predictor
     metadata: Dict = None        # optional extra data (signal, category, etc.)
 
     def __post_init__(self):
@@ -86,8 +87,12 @@ def _build_qubo_evaluator(
     pnls = [c.expected_pnl for c in candidates]
     risks = [c.risk_score for c in candidates]
 
-    pnl_norm = _normalize([abs(p) if p is not None else 0.0 for p in pnls])
+    pnl_norm = _normalize([max(0.0, p) if p is not None else 0.0 for p in pnls])
     risk_norm = _normalize(risks)
+
+    # Peak quality scores — strongest predictor (precision_A 92-96%)
+    peak_scores = [c.peak_quality_score for c in candidates]
+    peak_norm = _normalize([max(0.0, p) for p in peak_scores])
 
     # Pre-compute correlation pairs
     corr_pairs: List[Tuple[int, int, float]] = []
@@ -104,8 +109,8 @@ def _build_qubo_evaluator(
 
         selected_count = sum(x)
 
-        # Revenue term: reward high expected |PnL|
-        revenue = sum(pnl_norm[i] * x[i] for i in range(n)) * min_pnl_scale
+        # Revenue term: Peaks dominates (60%) + predictor PnL (40%)
+        revenue = sum((0.6 * peak_norm[i] + 0.4 * pnl_norm[i]) * x[i] for i in range(n)) * min_pnl_scale
 
         # Correlation penalty: penalize selected highly-correlated pairs
         corr_penalty = 0.0

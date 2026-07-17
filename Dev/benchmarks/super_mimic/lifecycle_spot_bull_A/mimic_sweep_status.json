@@ -1,0 +1,11 @@
+{
+  "state": "completed",
+  "started_at": "2026-07-16T01:08:30.295085+00:00",
+  "total_jobs": 96,
+  "completed_jobs": 96,
+  "failed_jobs": 0,
+  "errors": [],
+  "eta_seconds": 0,
+  "current_job": null,
+  "completed_at": "2026-07-16T01:09:20.546117+00:00"
+}

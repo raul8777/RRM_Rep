@@ -1,0 +1,22 @@
+{
+  "state": "running",
+  "started_at": "2026-07-15T23:29:34.895364+00:00",
+  "total_jobs": 576,
+  "completed_jobs": 7,
+  "failed_jobs": 0,
+  "errors": [],
+  "eta_seconds": 641538,
+  "current_job": {
+    "index": 10,
+    "window_id": "win_20260515_20260531",
+    "profile": "A",
+    "params": {
+      "min_signal_strength": 0.45,
+      "min_success_probability": 0.45,
+      "stop_loss_pct": 4.5,
+      "kelly_max_usdt": 800.0,
+      "kelly_dynamic_base_pct": 0.18,
+      "max_positions_spot_bull": 8
+    }
+  }
+}

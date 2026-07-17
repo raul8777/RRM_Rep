@@ -1,0 +1,211 @@
+[2026-07-16T13:29:03.723966+00:00] Starting spot_current -> S:\Tools\AI\crypto-agent\Dev\benchmarks\super_mimic\predictive_sweep\tuning\spot_current
+2026-07-16 07:29:03,725 [INFO] [1/12] Running win_20250116_20250131 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:03,726 [INFO] Skipping window win_20250525_20250608 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:29:03,726 [INFO] Skipping window win_20250718_20250807 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:29:03,732 [INFO] [12/12] Running win_20260628_20260630 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:03,726 [INFO] [4/12] Running win_20260303_20260317 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:03,734 [INFO] Running window=win_20260303_20260317 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:03,727 [INFO] [7/12] Running win_20260415_20260430 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:03,727 [INFO] [8/12] Running win_20260501_20260515 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:03,727 [INFO] [9/12] Running win_20260515_20260531 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:03,727 [INFO] [10/12] Running win_20260601_20260620 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:03,732 [INFO] Running window=win_20250116_20250131 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:03,732 [INFO] [11/12] Running win_20260620_20260705 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:03,727 [INFO] [5/12] Running win_20260317_20260331 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:03,734 [INFO] Running window=win_20260628_20260630 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:03,727 [INFO] [6/12] Running win_20260401_20260415 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:03,734 [INFO] Running window=win_20260415_20260430 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:03,734 [INFO] Running window=win_20260501_20260515 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:03,735 [INFO] Running window=win_20260515_20260531 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:03,735 [INFO] Running window=win_20260601_20260620 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:03,735 [INFO] Running window=win_20260620_20260705 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:03,736 [INFO] Running window=win_20260317_20260331 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:03,736 [INFO] Running window=win_20260401_20260415 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': -0.8}
+2026-07-16 07:29:47,624 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 10, 'failed': 0, 'errors': []}
+[2026-07-16T13:29:47.632681+00:00] Finished spot_current in 0.73 min
+[2026-07-16T13:29:47.634189+00:00] Starting spot_reject_c -> S:\Tools\AI\crypto-agent\Dev\benchmarks\super_mimic\predictive_sweep\tuning\spot_reject_c
+2026-07-16 07:29:47,635 [INFO] [1/12] Running win_20250116_20250131 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:47,635 [INFO] Skipping window win_20250525_20250608 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:29:47,635 [INFO] Running window=win_20250116_20250131 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:29:47,635 [INFO] Skipping window win_20250718_20250807 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:29:47,635 [INFO] [4/12] Running win_20260303_20260317 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:47,635 [INFO] [5/12] Running win_20260317_20260331 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:47,637 [INFO] [6/12] Running win_20260401_20260415 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:47,637 [INFO] [7/12] Running win_20260415_20260430 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:47,637 [INFO] Running window=win_20260303_20260317 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:29:47,637 [INFO] [8/12] Running win_20260501_20260515 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:47,637 [INFO] Running window=win_20260317_20260331 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:29:47,637 [INFO] [9/12] Running win_20260515_20260531 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:47,637 [INFO] Running window=win_20260401_20260415 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:29:47,638 [INFO] [10/12] Running win_20260601_20260620 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:47,638 [INFO] Running window=win_20260415_20260430 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:29:47,638 [INFO] [11/12] Running win_20260620_20260705 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:47,638 [INFO] [12/12] Running win_20260628_20260630 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:29:47,638 [INFO] Running window=win_20260501_20260515 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:29:47,647 [INFO] Running window=win_20260515_20260531 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:29:47,647 [INFO] Running window=win_20260601_20260620 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:29:47,647 [INFO] Running window=win_20260620_20260705 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:29:47,649 [INFO] Running window=win_20260628_20260630 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.2, 'B_min_peak_quality': -0.3, 'C_min_peak_quality': 10.0}
+2026-07-16 07:30:11,072 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 10, 'failed': 0, 'errors': []}
+[2026-07-16T13:30:11.074218+00:00] Finished spot_reject_c in 0.39 min
+[2026-07-16T13:30:11.075079+00:00] Starting spot_top_decile -> S:\Tools\AI\crypto-agent\Dev\benchmarks\super_mimic\predictive_sweep\tuning\spot_top_decile
+2026-07-16 07:30:11,076 [INFO] [1/12] Running win_20250116_20250131 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:11,076 [INFO] Skipping window win_20250525_20250608 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:30:11,076 [INFO] Skipping window win_20250718_20250807 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:30:11,076 [INFO] Running window=win_20250116_20250131 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:30:11,076 [INFO] [4/12] Running win_20260303_20260317 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:11,076 [INFO] [5/12] Running win_20260317_20260331 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:11,076 [INFO] [6/12] Running win_20260401_20260415 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:11,077 [INFO] [7/12] Running win_20260415_20260430 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:11,077 [INFO] [8/12] Running win_20260501_20260515 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:11,077 [INFO] Running window=win_20260303_20260317 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:30:11,077 [INFO] [9/12] Running win_20260515_20260531 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:11,077 [INFO] Running window=win_20260317_20260331 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:30:11,077 [INFO] [10/12] Running win_20260601_20260620 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:11,077 [INFO] Running window=win_20260401_20260415 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:30:11,078 [INFO] Running window=win_20260415_20260430 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:30:11,078 [INFO] [11/12] Running win_20260620_20260705 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:11,078 [INFO] Running window=win_20260501_20260515 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:30:11,078 [INFO] [12/12] Running win_20260628_20260630 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:30:11,078 [INFO] Running window=win_20260515_20260531 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:30:11,078 [INFO] Running window=win_20260601_20260620 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:30:11,082 [INFO] Running window=win_20260620_20260705 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:30:11,091 [INFO] Running window=win_20260628_20260630 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.46, 'B_min_peak_quality': -0.6, 'C_min_peak_quality': -0.95}
+2026-07-16 07:31:20,620 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 10, 'failed': 0, 'errors': []}
+[2026-07-16T13:31:20.636907+00:00] Finished spot_top_decile in 1.16 min
+[2026-07-16T13:31:20.637421+00:00] Starting spot_balanced -> S:\Tools\AI\crypto-agent\Dev\benchmarks\super_mimic\predictive_sweep\tuning\spot_balanced
+2026-07-16 07:31:20,638 [INFO] [1/12] Running win_20250116_20250131 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:20,638 [INFO] Skipping window win_20250525_20250608 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:31:20,638 [INFO] Running window=win_20250116_20250131 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:31:20,638 [INFO] Skipping window win_20250718_20250807 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:31:20,639 [INFO] [4/12] Running win_20260303_20260317 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:20,639 [INFO] [5/12] Running win_20260317_20260331 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:20,639 [INFO] [6/12] Running win_20260401_20260415 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:20,639 [INFO] Running window=win_20260303_20260317 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:31:20,639 [INFO] [7/12] Running win_20260415_20260430 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:20,639 [INFO] [8/12] Running win_20260501_20260515 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:20,640 [INFO] Running window=win_20260317_20260331 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:31:20,641 [INFO] [9/12] Running win_20260515_20260531 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:20,641 [INFO] Running window=win_20260401_20260415 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:31:20,642 [INFO] [10/12] Running win_20260601_20260620 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:20,642 [INFO] [11/12] Running win_20260620_20260705 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:20,642 [INFO] Running window=win_20260415_20260430 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:31:20,642 [INFO] [12/12] Running win_20260628_20260630 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:31:20,642 [INFO] Running window=win_20260501_20260515 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:31:20,661 [INFO] Running window=win_20260515_20260531 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:31:20,661 [INFO] Running window=win_20260601_20260620 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:31:20,663 [INFO] Running window=win_20260620_20260705 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:31:20,672 [INFO] Running window=win_20260628_20260630 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.1, 'B_min_peak_quality': -0.4, 'C_min_peak_quality': -0.85}
+2026-07-16 07:32:01,794 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 10, 'failed': 0, 'errors': []}
+[2026-07-16T13:32:01.802684+00:00] Finished spot_balanced in 0.69 min
+[2026-07-16T13:32:01.804699+00:00] Starting spot_a_mostly -> S:\Tools\AI\crypto-agent\Dev\benchmarks\super_mimic\predictive_sweep\tuning\spot_a_mostly
+2026-07-16 07:32:01,805 [INFO] [1/12] Running win_20250116_20250131 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:32:01,805 [INFO] Running window=win_20250116_20250131 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:32:01,805 [INFO] Skipping window win_20250525_20250608 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:32:01,806 [INFO] Skipping window win_20250718_20250807 (regime=RANGE_SCALP, filter=SPOT_BULL)
+2026-07-16 07:32:01,806 [INFO] [4/12] Running win_20260303_20260317 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:32:01,806 [INFO] [5/12] Running win_20260317_20260331 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:32:01,806 [INFO] [6/12] Running win_20260401_20260415 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:32:01,806 [INFO] [7/12] Running win_20260415_20260430 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:32:01,806 [INFO] [8/12] Running win_20260501_20260515 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:32:01,806 [INFO] Running window=win_20260303_20260317 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:32:01,806 [INFO] [9/12] Running win_20260515_20260531 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:32:01,806 [INFO] Running window=win_20260317_20260331 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:32:01,808 [INFO] [10/12] Running win_20260601_20260620 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:32:01,808 [INFO] [11/12] Running win_20260620_20260705 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:32:01,808 [INFO] Running window=win_20260401_20260415 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:32:01,808 [INFO] [12/12] Running win_20260628_20260630 with predictive config (regime=SPOT_BULL)
+2026-07-16 07:32:01,808 [INFO] Running window=win_20260415_20260430 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:32:01,809 [INFO] Running window=win_20260501_20260515 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:32:01,809 [INFO] Running window=win_20260515_20260531 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:32:01,818 [INFO] Running window=win_20260601_20260620 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:32:01,818 [INFO] Running window=win_20260620_20260705 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:32:01,819 [INFO] Running window=win_20260628_20260630 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:32:23,470 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 10, 'failed': 0, 'errors': []}
+[2026-07-16T13:32:23.472998+00:00] Finished spot_a_mostly in 0.36 min
+[2026-07-16T13:32:23.474505+00:00] Starting range_current -> S:\Tools\AI\crypto-agent\Dev\benchmarks\super_mimic\predictive_sweep\tuning\range_current
+2026-07-16 07:32:23,475 [INFO] Skipping window win_20250116_20250131 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:23,476 [INFO] [2/12] Running win_20250525_20250608 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:32:23,476 [INFO] Running window=win_20250525_20250608 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.15, 'B_min_peak_quality': -0.35, 'C_min_peak_quality': -0.8}
+2026-07-16 07:32:23,476 [INFO] [3/12] Running win_20250718_20250807 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:32:23,477 [INFO] Skipping window win_20260303_20260317 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:23,477 [INFO] Skipping window win_20260317_20260331 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:23,477 [INFO] Running window=win_20250718_20250807 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.15, 'B_min_peak_quality': -0.35, 'C_min_peak_quality': -0.8}
+2026-07-16 07:32:23,477 [INFO] Skipping window win_20260401_20260415 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:23,478 [INFO] Skipping window win_20260415_20260430 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:23,478 [INFO] Skipping window win_20260501_20260515 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:23,478 [INFO] Skipping window win_20260515_20260531 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:23,478 [INFO] Skipping window win_20260601_20260620 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:23,478 [INFO] Skipping window win_20260620_20260705 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:23,478 [INFO] Skipping window win_20260628_20260630 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:41,872 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 2, 'failed': 0, 'errors': []}
+[2026-07-16T13:32:41.882660+00:00] Finished range_current in 0.31 min
+[2026-07-16T13:32:41.882660+00:00] Starting range_reject_c -> S:\Tools\AI\crypto-agent\Dev\benchmarks\super_mimic\predictive_sweep\tuning\range_reject_c
+2026-07-16 07:32:41,884 [INFO] Skipping window win_20250116_20250131 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:41,885 [INFO] [2/12] Running win_20250525_20250608 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:32:41,885 [INFO] [3/12] Running win_20250718_20250807 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:32:41,885 [INFO] Skipping window win_20260303_20260317 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:41,885 [INFO] Skipping window win_20260317_20260331 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:41,885 [INFO] Running window=win_20250525_20250608 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.15, 'B_min_peak_quality': -0.35, 'C_min_peak_quality': 10.0}
+2026-07-16 07:32:41,885 [INFO] Running window=win_20250718_20250807 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.15, 'B_min_peak_quality': -0.35, 'C_min_peak_quality': 10.0}
+2026-07-16 07:32:41,885 [INFO] Skipping window win_20260401_20260415 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:41,885 [INFO] Skipping window win_20260415_20260430 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:41,885 [INFO] Skipping window win_20260501_20260515 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:41,885 [INFO] Skipping window win_20260515_20260531 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:41,885 [INFO] Skipping window win_20260601_20260620 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:41,885 [INFO] Skipping window win_20260620_20260705 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:41,886 [INFO] Skipping window win_20260628_20260630 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:53,231 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 2, 'failed': 0, 'errors': []}
+[2026-07-16T13:32:53.241695+00:00] Finished range_reject_c in 0.19 min
+[2026-07-16T13:32:53.243353+00:00] Starting range_top_decile -> S:\Tools\AI\crypto-agent\Dev\benchmarks\super_mimic\predictive_sweep\tuning\range_top_decile
+2026-07-16 07:32:53,244 [INFO] Skipping window win_20250116_20250131 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:53,244 [INFO] [2/12] Running win_20250525_20250608 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:32:53,244 [INFO] [3/12] Running win_20250718_20250807 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:32:53,244 [INFO] Running window=win_20250525_20250608 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.36, 'B_min_peak_quality': -0.57, 'C_min_peak_quality': -0.84}
+2026-07-16 07:32:53,244 [INFO] Running window=win_20250718_20250807 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.36, 'B_min_peak_quality': -0.57, 'C_min_peak_quality': -0.84}
+2026-07-16 07:32:53,244 [INFO] Skipping window win_20260303_20260317 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:53,244 [INFO] Skipping window win_20260317_20260331 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:53,245 [INFO] Skipping window win_20260401_20260415 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:53,245 [INFO] Skipping window win_20260415_20260430 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:53,245 [INFO] Skipping window win_20260501_20260515 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:53,245 [INFO] Skipping window win_20260515_20260531 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:53,245 [INFO] Skipping window win_20260601_20260620 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:53,245 [INFO] Skipping window win_20260620_20260705 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:32:53,254 [INFO] Skipping window win_20260628_20260630 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:11,594 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 2, 'failed': 0, 'errors': []}
+[2026-07-16T13:33:11.605461+00:00] Finished range_top_decile in 0.31 min
+[2026-07-16T13:33:11.606466+00:00] Starting range_balanced -> S:\Tools\AI\crypto-agent\Dev\benchmarks\super_mimic\predictive_sweep\tuning\range_balanced
+2026-07-16 07:33:11,607 [INFO] Skipping window win_20250116_20250131 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:11,608 [INFO] [2/12] Running win_20250525_20250608 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:33:11,608 [INFO] Running window=win_20250525_20250608 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.05, 'B_min_peak_quality': -0.45, 'C_min_peak_quality': -0.85}
+2026-07-16 07:33:11,608 [INFO] [3/12] Running win_20250718_20250807 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:33:11,608 [INFO] Skipping window win_20260303_20260317 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:11,609 [INFO] Running window=win_20250718_20250807 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.05, 'B_min_peak_quality': -0.45, 'C_min_peak_quality': -0.85}
+2026-07-16 07:33:11,609 [INFO] Skipping window win_20260317_20260331 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:11,609 [INFO] Skipping window win_20260401_20260415 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:11,609 [INFO] Skipping window win_20260415_20260430 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:11,609 [INFO] Skipping window win_20260501_20260515 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:11,609 [INFO] Skipping window win_20260515_20260531 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:11,610 [INFO] Skipping window win_20260601_20260620 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:11,610 [INFO] Skipping window win_20260620_20260705 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:11,610 [INFO] Skipping window win_20260628_20260630 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:29,692 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 2, 'failed': 0, 'errors': []}
+[2026-07-16T13:33:29.702394+00:00] Finished range_balanced in 0.3 min
+[2026-07-16T13:33:29.703992+00:00] Starting range_a_mostly -> S:\Tools\AI\crypto-agent\Dev\benchmarks\super_mimic\predictive_sweep\tuning\range_a_mostly
+2026-07-16 07:33:29,705 [INFO] Skipping window win_20250116_20250131 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:29,705 [INFO] [2/12] Running win_20250525_20250608 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:33:29,705 [INFO] Running window=win_20250525_20250608 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:33:29,705 [INFO] [3/12] Running win_20250718_20250807 with predictive config (regime=RANGE_SCALP)
+2026-07-16 07:33:29,705 [INFO] Skipping window win_20260303_20260317 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:29,705 [INFO] Running window=win_20250718_20250807 profile=PREDICTIVE lifecycle=True params={'A_min_peak_quality': 0.0, 'B_min_peak_quality': 10.0, 'C_min_peak_quality': 10.0}
+2026-07-16 07:33:29,705 [INFO] Skipping window win_20260317_20260331 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:29,705 [INFO] Skipping window win_20260401_20260415 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:29,707 [INFO] Skipping window win_20260415_20260430 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:29,707 [INFO] Skipping window win_20260501_20260515 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:29,707 [INFO] Skipping window win_20260515_20260531 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:29,707 [INFO] Skipping window win_20260601_20260620 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:29,707 [INFO] Skipping window win_20260620_20260705 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:29,707 [INFO] Skipping window win_20260628_20260630 (regime=SPOT_BULL, filter=RANGE_SCALP)
+2026-07-16 07:33:41,229 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 2, 'failed': 0, 'errors': []}
+[2026-07-16T13:33:41.241122+00:00] Finished range_a_mostly in 0.19 min
+All variants done. Summary: S:\Tools\AI\crypto-agent\Dev\benchmarks\super_mimic\predictive_sweep\tuning\summary.json

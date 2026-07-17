@@ -1,0 +1,13 @@
+{
+  "status": "completed",
+  "progress_pct": 100.0,
+  "tasks_done": 444,
+  "tasks_total": 444,
+  "signals_analyzed": 15533,
+  "errors_count": 0,
+  "last_errors": [],
+  "output_files": {
+    "jsonl": "Dev\\benchmarks\\super_mimic\\predictive_sweep\\signal_peak_outcomes.jsonl",
+    "log": "Dev\\benchmarks\\super_mimic\\predictive_sweep\\peak_analysis.log"
+  }
+}

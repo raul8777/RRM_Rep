@@ -393,6 +393,10 @@ class Settings(BaseSettings):
     qubo_seed: int = Field(default=42)                 # random seed
     qubo_min_candidates: int = Field(default=2)          # min candidates to activate QUBO selector
     qubo_include_open_positions: bool = Field(default=True)  # include open positions in correlation matrix
+    # Peaks-first pipeline feature flags (s79)
+    peaks_first_enabled: bool = Field(default=True)          # Peaks profile drives selection priority
+    predictor_gate_mode: str = Field(default="advisory")     # "blocking" | "advisory" | "disabled"
+    entry_quality_gate_mode: str = Field(default="advisory") # "blocking" | "advisory" | "disabled"
     # Active replacement: swap weakest open position for a better new signal
     replace_only_losing: bool = Field(default=True)  # only replace positions in loss/flat
     replace_ev_min_ratio: float = Field(default=1.1)  # MEJO-1: 1.3â†’1.1 â€” more permissive given small EV values

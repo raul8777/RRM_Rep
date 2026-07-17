@@ -1,0 +1,51 @@
+{
+  "experiment_id": "sm_20260715_231945_2dd954",
+  "phase": "execution",
+  "status": "running",
+  "design": {
+    "mode": "SPOT_BULL",
+    "profile": "A",
+    "windows": [
+      "win_20260515_20260531",
+      "win_20260601_20260620",
+      "win_20260620_20260705"
+    ],
+    "engine": "mimic_sweep",
+    "strategy": "standard",
+    "max_cycles": null,
+    "max_workers": 1,
+    "param_grid": null,
+    "output_dir": "/app/Dev/benchmarks/super_mimic/sm_20260715_231945_2dd954"
+  },
+  "engine_results": {
+    "engine": "",
+    "summary": {},
+    "recommendations": [],
+    "results": [],
+    "report_path": null,
+    "results_path": null,
+    "status_path": null
+  },
+  "metrics": {},
+  "fingerprint": {
+    "mode": "SPOT_BULL",
+    "values": {
+      "fng_index": 0.2,
+      "btc_dominance": 0.5,
+      "avg_vol_spike": 0.2,
+      "win_rate_7d": 0.5,
+      "btc_rsi_4h": 0.5,
+      "btc_trend_1d": 0.0,
+      "btc_trend_4h": 0.0,
+      "btc_trend_1h": 0.0
+    },
+    "captured_at": "2026-07-15T23:26:12.201353+00:00"
+  },
+  "landscape": {},
+  "recommended_config": {},
+  "deploy_gate": {},
+  "created_at": "2026-07-15T23:19:45.671799+00:00",
+  "completed_at": null,
+  "error": null,
+  "log_tail": []
+}

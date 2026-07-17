@@ -1,0 +1,1274 @@
+{
+  "started_at": "2026-07-16T13:29:33.533257+00:00",
+  "max_cycles": 2000,
+  "max_workers": 10,
+  "variants": [
+    {
+      "generated_at": "2026-07-16T13:30:41.393747+00:00",
+      "max_cycles": 2000,
+      "regime_filter": "SPOT_BULL",
+      "summary": {
+        "total_windows": 12,
+        "ok": 10,
+        "failed": 0,
+        "errors": []
+      },
+      "windows": [
+        {
+          "window_id": "win_20250116_20250131",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -416.45,
+          "pnl_pct": -14.311,
+          "win_rate": 0.0802,
+          "profit_factor": 0.3377,
+          "total_trades": null,
+          "max_drawdown_pct": 15.0662,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "A": 291,
+            "C": 308
+          },
+          "cycles": 361,
+          "trades": 1210,
+          "buys": 599,
+          "sells": 611
+        },
+        {
+          "window_id": "win_20260303_20260317",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 24.0,
+          "pnl_pct": 0.8246,
+          "win_rate": 0.3432,
+          "profit_factor": 1.33,
+          "total_trades": null,
+          "max_drawdown_pct": 1.9361,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 79
+          },
+          "cycles": 337,
+          "trades": 248,
+          "buys": 79,
+          "sells": 169
+        },
+        {
+          "window_id": "win_20260317_20260331",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -144.26,
+          "pnl_pct": -4.9575,
+          "win_rate": 0.0,
+          "profit_factor": 0.0,
+          "total_trades": null,
+          "max_drawdown_pct": 4.952,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 130
+          },
+          "cycles": 337,
+          "trades": 259,
+          "buys": 130,
+          "sells": 129
+        },
+        {
+          "window_id": "win_20260401_20260415",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.31,
+          "pnl_pct": 0.0107,
+          "win_rate": 0.4897,
+          "profit_factor": 1.3682,
+          "total_trades": null,
+          "max_drawdown_pct": 0.5832,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 22
+          },
+          "cycles": 337,
+          "trades": 167,
+          "buys": 22,
+          "sells": 145
+        },
+        {
+          "window_id": "win_20260415_20260430",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 33.34,
+          "pnl_pct": 1.1458,
+          "win_rate": 0.5521,
+          "profit_factor": 6.6385,
+          "total_trades": null,
+          "max_drawdown_pct": 0.4734,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 4
+          },
+          "cycles": 361,
+          "trades": 100,
+          "buys": 4,
+          "sells": 96
+        },
+        {
+          "window_id": "win_20260501_20260515",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 58.54,
+          "pnl_pct": 2.0117,
+          "win_rate": 0.3978,
+          "profit_factor": 4.2785,
+          "total_trades": null,
+          "max_drawdown_pct": 0.5261,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 42
+          },
+          "cycles": 337,
+          "trades": 135,
+          "buys": 42,
+          "sells": 93
+        },
+        {
+          "window_id": "win_20260515_20260531",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -81.44,
+          "pnl_pct": -2.7987,
+          "win_rate": 0.0707,
+          "profit_factor": 0.4145,
+          "total_trades": null,
+          "max_drawdown_pct": 2.8153,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 256
+          },
+          "cycles": 385,
+          "trades": 539,
+          "buys": 256,
+          "sells": 283
+        },
+        {
+          "window_id": "win_20260601_20260620",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -162.28,
+          "pnl_pct": -5.5765,
+          "win_rate": 0.0678,
+          "profit_factor": 0.4452,
+          "total_trades": null,
+          "max_drawdown_pct": 6.5531,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 345
+          },
+          "cycles": 457,
+          "trades": 714,
+          "buys": 345,
+          "sells": 369
+        },
+        {
+          "window_id": "win_20260620_20260705",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -129.98,
+          "pnl_pct": -4.4668,
+          "win_rate": 0.0917,
+          "profit_factor": 0.2136,
+          "total_trades": null,
+          "max_drawdown_pct": 4.8323,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 212
+          },
+          "cycles": 361,
+          "trades": 452,
+          "buys": 212,
+          "sells": 240
+        },
+        {
+          "window_id": "win_20260628_20260630",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 49,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        }
+      ],
+      "variant": "spot_current",
+      "regime": "SPOT_BULL",
+      "params": {
+        "A_min_peak_quality": 0.2,
+        "B_min_peak_quality": -0.3,
+        "C_min_peak_quality": -0.8
+      },
+      "elapsed_min": 1.13
+    },
+    {
+      "generated_at": "2026-07-16T13:31:22.443997+00:00",
+      "max_cycles": 2000,
+      "regime_filter": "SPOT_BULL",
+      "summary": {
+        "total_windows": 12,
+        "ok": 10,
+        "failed": 0,
+        "errors": []
+      },
+      "windows": [
+        {
+          "window_id": "win_20250116_20250131",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -311.46,
+          "pnl_pct": -10.703,
+          "win_rate": 0.0344,
+          "profit_factor": 0.2346,
+          "total_trades": null,
+          "max_drawdown_pct": 11.647,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "A": 291
+          },
+          "cycles": 361,
+          "trades": 582,
+          "buys": 291,
+          "sells": 291
+        },
+        {
+          "window_id": "win_20260303_20260317",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 337,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260317_20260331",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 337,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260401_20260415",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 337,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260415_20260430",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 361,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260501_20260515",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 337,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260515_20260531",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 385,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260601_20260620",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 457,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260620_20260705",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 361,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260628_20260630",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 49,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        }
+      ],
+      "variant": "spot_reject_c",
+      "regime": "SPOT_BULL",
+      "params": {
+        "A_min_peak_quality": 0.2,
+        "B_min_peak_quality": -0.3,
+        "C_min_peak_quality": 10.0
+      },
+      "elapsed_min": 0.68
+    },
+    {
+      "generated_at": "2026-07-16T13:33:14.921022+00:00",
+      "max_cycles": 2000,
+      "regime_filter": "SPOT_BULL",
+      "summary": {
+        "total_windows": 12,
+        "ok": 10,
+        "failed": 0,
+        "errors": []
+      },
+      "windows": [
+        {
+          "window_id": "win_20250116_20250131",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -472.22,
+          "pnl_pct": -16.2274,
+          "win_rate": 0.1467,
+          "profit_factor": 0.3368,
+          "total_trades": null,
+          "max_drawdown_pct": 16.822,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "B": 591,
+            "C": 247
+          },
+          "cycles": 361,
+          "trades": 1738,
+          "buys": 838,
+          "sells": 900
+        },
+        {
+          "window_id": "win_20260303_20260317",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -75.3,
+          "pnl_pct": -2.5876,
+          "win_rate": 0.2052,
+          "profit_factor": 0.8079,
+          "total_trades": null,
+          "max_drawdown_pct": 5.5651,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "B": 146,
+            "C": 235
+          },
+          "cycles": 337,
+          "trades": 844,
+          "buys": 381,
+          "sells": 463
+        },
+        {
+          "window_id": "win_20260317_20260331",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -294.1,
+          "pnl_pct": -10.1066,
+          "win_rate": 0.1035,
+          "profit_factor": 0.2895,
+          "total_trades": null,
+          "max_drawdown_pct": 10.0917,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "B": 158,
+            "C": 217
+          },
+          "cycles": 337,
+          "trades": 771,
+          "buys": 375,
+          "sells": 396
+        },
+        {
+          "window_id": "win_20260401_20260415",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -27.81,
+          "pnl_pct": -0.9557,
+          "win_rate": 0.2911,
+          "profit_factor": 0.7399,
+          "total_trades": null,
+          "max_drawdown_pct": 1.8527,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "B": 32,
+            "C": 161
+          },
+          "cycles": 337,
+          "trades": 509,
+          "buys": 193,
+          "sells": 316
+        },
+        {
+          "window_id": "win_20260415_20260430",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -81.84,
+          "pnl_pct": -2.8124,
+          "win_rate": 0.2772,
+          "profit_factor": 0.4849,
+          "total_trades": null,
+          "max_drawdown_pct": 3.8408,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "B": 14,
+            "C": 157
+          },
+          "cycles": 361,
+          "trades": 438,
+          "buys": 171,
+          "sells": 267
+        },
+        {
+          "window_id": "win_20260501_20260515",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -17.42,
+          "pnl_pct": -0.5985,
+          "win_rate": 0.4397,
+          "profit_factor": 1.1817,
+          "total_trades": null,
+          "max_drawdown_pct": 1.6749,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "B": 76,
+            "C": 110
+          },
+          "cycles": 337,
+          "trades": 493,
+          "buys": 186,
+          "sells": 307
+        },
+        {
+          "window_id": "win_20260515_20260531",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -243.94,
+          "pnl_pct": -8.3828,
+          "win_rate": 0.1649,
+          "profit_factor": 0.2893,
+          "total_trades": null,
+          "max_drawdown_pct": 8.3676,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "B": 271,
+            "C": 173
+          },
+          "cycles": 385,
+          "trades": 917,
+          "buys": 444,
+          "sells": 473
+        },
+        {
+          "window_id": "win_20260601_20260620",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -355.64,
+          "pnl_pct": -12.2214,
+          "win_rate": 0.1175,
+          "profit_factor": 0.3714,
+          "total_trades": null,
+          "max_drawdown_pct": 13.0489,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "B": 367,
+            "C": 259
+          },
+          "cycles": 457,
+          "trades": 1273,
+          "buys": 626,
+          "sells": 647
+        },
+        {
+          "window_id": "win_20260620_20260705",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -238.03,
+          "pnl_pct": -8.1797,
+          "win_rate": 0.1919,
+          "profit_factor": 0.4571,
+          "total_trades": null,
+          "max_drawdown_pct": 9.0722,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "B": 271,
+            "C": 162
+          },
+          "cycles": 361,
+          "trades": 928,
+          "buys": 433,
+          "sells": 495
+        },
+        {
+          "window_id": "win_20260628_20260630",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 15.35,
+          "pnl_pct": 0.5276,
+          "win_rate": 0.4286,
+          "profit_factor": 5.9786,
+          "total_trades": null,
+          "max_drawdown_pct": 0.3111,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 2
+          },
+          "cycles": 49,
+          "trades": 9,
+          "buys": 2,
+          "sells": 7
+        }
+      ],
+      "variant": "spot_top_decile",
+      "regime": "SPOT_BULL",
+      "params": {
+        "A_min_peak_quality": 0.46,
+        "B_min_peak_quality": -0.6,
+        "C_min_peak_quality": -0.95
+      },
+      "elapsed_min": 1.87
+    },
+    {
+      "generated_at": "2026-07-16T13:34:25.914862+00:00",
+      "max_cycles": 2000,
+      "regime_filter": "SPOT_BULL",
+      "summary": {
+        "total_windows": 12,
+        "ok": 10,
+        "failed": 0,
+        "errors": []
+      },
+      "windows": [
+        {
+          "window_id": "win_20250116_20250131",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -416.45,
+          "pnl_pct": -14.311,
+          "win_rate": 0.0802,
+          "profit_factor": 0.3377,
+          "total_trades": null,
+          "max_drawdown_pct": 15.0662,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "A": 291,
+            "C": 308
+          },
+          "cycles": 361,
+          "trades": 1210,
+          "buys": 599,
+          "sells": 611
+        },
+        {
+          "window_id": "win_20260303_20260317",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 24.0,
+          "pnl_pct": 0.8246,
+          "win_rate": 0.3432,
+          "profit_factor": 1.33,
+          "total_trades": null,
+          "max_drawdown_pct": 1.9361,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 79
+          },
+          "cycles": 337,
+          "trades": 248,
+          "buys": 79,
+          "sells": 169
+        },
+        {
+          "window_id": "win_20260317_20260331",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -144.26,
+          "pnl_pct": -4.9575,
+          "win_rate": 0.0,
+          "profit_factor": 0.0,
+          "total_trades": null,
+          "max_drawdown_pct": 4.952,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 130
+          },
+          "cycles": 337,
+          "trades": 259,
+          "buys": 130,
+          "sells": 129
+        },
+        {
+          "window_id": "win_20260401_20260415",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.31,
+          "pnl_pct": 0.0107,
+          "win_rate": 0.4897,
+          "profit_factor": 1.3682,
+          "total_trades": null,
+          "max_drawdown_pct": 0.5832,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 22
+          },
+          "cycles": 337,
+          "trades": 167,
+          "buys": 22,
+          "sells": 145
+        },
+        {
+          "window_id": "win_20260415_20260430",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 33.34,
+          "pnl_pct": 1.1458,
+          "win_rate": 0.5521,
+          "profit_factor": 6.6385,
+          "total_trades": null,
+          "max_drawdown_pct": 0.4734,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 4
+          },
+          "cycles": 361,
+          "trades": 100,
+          "buys": 4,
+          "sells": 96
+        },
+        {
+          "window_id": "win_20260501_20260515",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 58.54,
+          "pnl_pct": 2.0117,
+          "win_rate": 0.3978,
+          "profit_factor": 4.2785,
+          "total_trades": null,
+          "max_drawdown_pct": 0.5261,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 42
+          },
+          "cycles": 337,
+          "trades": 135,
+          "buys": 42,
+          "sells": 93
+        },
+        {
+          "window_id": "win_20260515_20260531",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -81.44,
+          "pnl_pct": -2.7987,
+          "win_rate": 0.0707,
+          "profit_factor": 0.4145,
+          "total_trades": null,
+          "max_drawdown_pct": 2.8153,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 256
+          },
+          "cycles": 385,
+          "trades": 539,
+          "buys": 256,
+          "sells": 283
+        },
+        {
+          "window_id": "win_20260601_20260620",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -162.28,
+          "pnl_pct": -5.5765,
+          "win_rate": 0.0678,
+          "profit_factor": 0.4452,
+          "total_trades": null,
+          "max_drawdown_pct": 6.5531,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 345
+          },
+          "cycles": 457,
+          "trades": 714,
+          "buys": 345,
+          "sells": 369
+        },
+        {
+          "window_id": "win_20260620_20260705",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -129.98,
+          "pnl_pct": -4.4668,
+          "win_rate": 0.0917,
+          "profit_factor": 0.2136,
+          "total_trades": null,
+          "max_drawdown_pct": 4.8323,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "C": 212
+          },
+          "cycles": 361,
+          "trades": 452,
+          "buys": 212,
+          "sells": 240
+        },
+        {
+          "window_id": "win_20260628_20260630",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 49,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        }
+      ],
+      "variant": "spot_balanced",
+      "regime": "SPOT_BULL",
+      "params": {
+        "A_min_peak_quality": 0.1,
+        "B_min_peak_quality": -0.4,
+        "C_min_peak_quality": -0.85
+      },
+      "elapsed_min": 1.18
+    },
+    {
+      "generated_at": "2026-07-16T13:35:04.858830+00:00",
+      "max_cycles": 2000,
+      "regime_filter": "SPOT_BULL",
+      "summary": {
+        "total_windows": 12,
+        "ok": 10,
+        "failed": 0,
+        "errors": []
+      },
+      "windows": [
+        {
+          "window_id": "win_20250116_20250131",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": -311.46,
+          "pnl_pct": -10.703,
+          "win_rate": 0.0344,
+          "profit_factor": 0.2346,
+          "total_trades": null,
+          "max_drawdown_pct": 11.647,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "A": 291
+          },
+          "cycles": 361,
+          "trades": 582,
+          "buys": 291,
+          "sells": 291
+        },
+        {
+          "window_id": "win_20260303_20260317",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 337,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260317_20260331",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 337,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260401_20260415",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 337,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260415_20260430",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 361,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260501_20260515",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 337,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260515_20260531",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 385,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260601_20260620",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 457,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260620_20260705",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 361,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        },
+        {
+          "window_id": "win_20260628_20260630",
+          "regime": "SPOT_BULL",
+          "pnl_usdt": 0.0,
+          "pnl_pct": 0.0,
+          "win_rate": null,
+          "profit_factor": null,
+          "total_trades": null,
+          "max_drawdown_pct": 0.0,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {},
+          "cycles": 49,
+          "trades": 0,
+          "buys": 0,
+          "sells": 0
+        }
+      ],
+      "variant": "spot_a_mostly",
+      "regime": "SPOT_BULL",
+      "params": {
+        "A_min_peak_quality": 0.0,
+        "B_min_peak_quality": 10.0,
+        "C_min_peak_quality": 10.0
+      },
+      "elapsed_min": 0.65
+    },
+    {
+      "generated_at": "2026-07-16T13:35:36.132724+00:00",
+      "max_cycles": 2000,
+      "regime_filter": "RANGE_SCALP",
+      "summary": {
+        "total_windows": 12,
+        "ok": 2,
+        "failed": 0,
+        "errors": []
+      },
+      "windows": [
+        {
+          "window_id": "win_20250525_20250608",
+          "regime": "RANGE_SCALP",
+          "pnl_usdt": -174.57,
+          "pnl_pct": -5.9988,
+          "win_rate": 0.199,
+          "profit_factor": 0.7241,
+          "total_trades": null,
+          "max_drawdown_pct": 7.8533,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "A": 144,
+            "C": 221
+          },
+          "cycles": 337,
+          "trades": 752,
+          "buys": 365,
+          "sells": 387
+        },
+        {
+          "window_id": "win_20250718_20250807",
+          "regime": "RANGE_SCALP",
+          "pnl_usdt": -432.01,
+          "pnl_pct": -14.8458,
+          "win_rate": 0.0844,
+          "profit_factor": 0.453,
+          "total_trades": null,
+          "max_drawdown_pct": 16.2463,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "A": 381,
+            "C": 377
+          },
+          "cycles": 481,
+          "trades": 1564,
+          "buys": 758,
+          "sells": 806
+        }
+      ],
+      "variant": "range_current",
+      "regime": "RANGE_SCALP",
+      "params": {
+        "A_min_peak_quality": 0.15,
+        "B_min_peak_quality": -0.35,
+        "C_min_peak_quality": -0.8
+      },
+      "elapsed_min": 0.52
+    },
+    {
+      "generated_at": "2026-07-16T13:35:56.169335+00:00",
+      "max_cycles": 2000,
+      "regime_filter": "RANGE_SCALP",
+      "summary": {
+        "total_windows": 12,
+        "ok": 2,
+        "failed": 0,
+        "errors": []
+      },
+      "windows": [
+        {
+          "window_id": "win_20250525_20250608",
+          "regime": "RANGE_SCALP",
+          "pnl_usdt": -130.82,
+          "pnl_pct": -4.4956,
+          "win_rate": 0.1071,
+          "profit_factor": 0.5261,
+          "total_trades": null,
+          "max_drawdown_pct": 5.9887,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "A": 141
+          },
+          "cycles": 337,
+          "trades": 281,
+          "buys": 141,
+          "sells": 140
+        },
+        {
+          "window_id": "win_20250718_20250807",
+          "regime": "RANGE_SCALP",
+          "pnl_usdt": -332.29,
+          "pnl_pct": -11.419,
+          "win_rate": 0.0289,
+          "profit_factor": 0.3716,
+          "total_trades": null,
+          "max_drawdown_pct": 12.5703,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "A": 380
+          },
+          "cycles": 481,
+          "trades": 760,
+          "buys": 380,
+          "sells": 380
+        }
+      ],
+      "variant": "range_reject_c",
+      "regime": "RANGE_SCALP",
+      "params": {
+        "A_min_peak_quality": 0.15,
+        "B_min_peak_quality": -0.35,
+        "C_min_peak_quality": 10.0
+      },
+      "elapsed_min": 0.33
+    },
+    {
+      "generated_at": "2026-07-16T13:36:27.457209+00:00",
+      "max_cycles": 2000,
+      "regime_filter": "RANGE_SCALP",
+      "summary": {
+        "total_windows": 12,
+        "ok": 2,
+        "failed": 0,
+        "errors": []
+      },
+      "windows": [
+        {
+          "window_id": "win_20250525_20250608",
+          "regime": "RANGE_SCALP",
+          "pnl_usdt": -172.7,
+          "pnl_pct": -5.9347,
+          "win_rate": 0.1968,
+          "profit_factor": 0.564,
+          "total_trades": null,
+          "max_drawdown_pct": 7.1823,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "B": 371
+          },
+          "cycles": 337,
+          "trades": 803,
+          "buys": 371,
+          "sells": 432
+        },
+        {
+          "window_id": "win_20250718_20250807",
+          "regime": "RANGE_SCALP",
+          "pnl_usdt": -376.79,
+          "pnl_pct": -12.948,
+          "win_rate": 0.1087,
+          "profit_factor": 0.4198,
+          "total_trades": null,
+          "max_drawdown_pct": 13.6876,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "B": 743
+          },
+          "cycles": 481,
+          "trades": 1543,
+          "buys": 743,
+          "sells": 800
+        }
+      ],
+      "variant": "range_top_decile",
+      "regime": "RANGE_SCALP",
+      "params": {
+        "A_min_peak_quality": 0.36,
+        "B_min_peak_quality": -0.57,
+        "C_min_peak_quality": -0.84
+      },
+      "elapsed_min": 0.52
+    },
+    {
+      "generated_at": "2026-07-16T13:36:58.719371+00:00",
+      "max_cycles": 2000,
+      "regime_filter": "RANGE_SCALP",
+      "summary": {
+        "total_windows": 12,
+        "ok": 2,
+        "failed": 0,
+        "errors": []
+      },
+      "windows": [
+        {
+          "window_id": "win_20250525_20250608",
+          "regime": "RANGE_SCALP",
+          "pnl_usdt": -174.57,
+          "pnl_pct": -5.9988,
+          "win_rate": 0.199,
+          "profit_factor": 0.7241,
+          "total_trades": null,
+          "max_drawdown_pct": 7.8533,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "A": 144,
+            "C": 221
+          },
+          "cycles": 337,
+          "trades": 752,
+          "buys": 365,
+          "sells": 387
+        },
+        {
+          "window_id": "win_20250718_20250807",
+          "regime": "RANGE_SCALP",
+          "pnl_usdt": -432.01,
+          "pnl_pct": -14.8458,
+          "win_rate": 0.0844,
+          "profit_factor": 0.453,
+          "total_trades": null,
+          "max_drawdown_pct": 16.2463,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "A": 381,
+            "C": 377
+          },
+          "cycles": 481,
+          "trades": 1564,
+          "buys": 758,
+          "sells": 806
+        }
+      ],
+      "variant": "range_balanced",
+      "regime": "RANGE_SCALP",
+      "params": {
+        "A_min_peak_quality": 0.05,
+        "B_min_peak_quality": -0.45,
+        "C_min_peak_quality": -0.85
+      },
+      "elapsed_min": 0.52
+    },
+    {
+      "generated_at": "2026-07-16T13:37:18.983977+00:00",
+      "max_cycles": 2000,
+      "regime_filter": "RANGE_SCALP",
+      "summary": {
+        "total_windows": 12,
+        "ok": 2,
+        "failed": 0,
+        "errors": []
+      },
+      "windows": [
+        {
+          "window_id": "win_20250525_20250608",
+          "regime": "RANGE_SCALP",
+          "pnl_usdt": -130.82,
+          "pnl_pct": -4.4956,
+          "win_rate": 0.1071,
+          "profit_factor": 0.5261,
+          "total_trades": null,
+          "max_drawdown_pct": 5.9887,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "A": 141
+          },
+          "cycles": 337,
+          "trades": 281,
+          "buys": 141,
+          "sells": 140
+        },
+        {
+          "window_id": "win_20250718_20250807",
+          "regime": "RANGE_SCALP",
+          "pnl_usdt": -332.29,
+          "pnl_pct": -11.419,
+          "win_rate": 0.0289,
+          "profit_factor": 0.3716,
+          "total_trades": null,
+          "max_drawdown_pct": 12.5703,
+          "profile": "PREDICTIVE",
+          "profile_entry_counts": {
+            "A": 380
+          },
+          "cycles": 481,
+          "trades": 760,
+          "buys": 380,
+          "sells": 380
+        }
+      ],
+      "variant": "range_a_mostly",
+      "regime": "RANGE_SCALP",
+      "params": {
+        "A_min_peak_quality": 0.0,
+        "B_min_peak_quality": 10.0,
+        "C_min_peak_quality": 10.0
+      },
+      "elapsed_min": 0.34
+    }
+  ],
+  "updated_at": "2026-07-16T13:37:18.987419+00:00",
+  "finished_at": "2026-07-16T13:37:18.988648+00:00"
+}

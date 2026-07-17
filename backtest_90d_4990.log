@@ -1,0 +1,207 @@
+============================================================================
+  SIMULADOR FIDELIDAD TOTAL v4.0 — Sistema Crypto Multi-Modal
+  Capital: $4,990.00 USDT  |  Intervalo: 4h  |  90d
+  F&G: 15 (Capitulación) → Kelly boost: ×1.50
+  Predictor: statistical_model + real si disponible
+============================================================================
+
+Cargando módulos del sistema...
+  [✓] TechnicalIndicators.analyze_signal() REAL cargado
+  [✓] PnLPredictor REAL cargado (pesos aprendidos de DB)
+
+Descargando klines de 29 símbolos (90d + warmup)...
+  BTCUSDT... 600 velas ✓
+  ETHUSDT... 600 velas ✓
+  BNBUSDT... 600 velas ✓
+  SOLUSDT... 600 velas ✓
+  XRPUSDT... 600 velas ✓
+  ADAUSDT... 600 velas ✓
+  AVAXUSDT... 600 velas ✓
+  DOTUSDT... 600 velas ✓
+  LINKUSDT... 600 velas ✓
+  TRXUSDT... 600 velas ✓
+  TONUSDT... 600 velas ✓
+  SUIUSDT... 600 velas ✓
+  HBARUSDT... 600 velas ✓
+  ARBUSDT... 600 velas ✓
+  MATICUSDT... 600 velas ✓
+  ATOMUSDT... 600 velas ✓
+  SEIUSDT... 600 velas ✓
+  AAVEUSDT... 600 velas ✓
+  FETUSDT... 600 velas ✓
+  NEARUSDT... 600 velas ✓
+  RENDERUSDT... 600 velas ✓
+  TAOUSDT... 600 velas ✓
+  WLDUSDT... 600 velas ✓
+  INJUSDT... 600 velas ✓
+  OPUSDT... 600 velas ✓
+  GRTUSDT... 600 velas ✓
+  ONDOUSDT... 600 velas ✓
+  DOGEUSDT... 600 velas ✓
+  PEPEUSDT... 600 velas ✓
+
+  BTC período: $74,202 → $64,914 (-12.5%) — BEAR CON REBOTES
+
+  [REAL] Sistema completo (predictor+SmartTP+anti-wick+futuros)...
+    → $8,916.16 | PnL:+3926.16 | Trades:442 | SPOT WR:47% FUT WR:44% | MaxDD:47.1% | PF:1.02
+  [REAL_OPT] REAL + params optimizados (str≥0.58)...
+    → $8,200.04 | PnL:+3210.04 | Trades:365 | SPOT WR:45% FUT WR:44% | MaxDD:53.4% | PF:1.09
+  [FUT_ONLY] Solo futuros SHORT (FUTURES_SHORT forzado)...
+    → $4,741.11 | PnL:-248.89 | Trades:525 |  FUT WR:40% | MaxDD:15.8% | PF:0.78
+  [SPOT_BULL_SIM] Recuperación SPOT_BULL (régimen forzado)...
+    → $15,382.57 | PnL:+10392.57 | Trades:386 | SPOT WR:46%  | MaxDD:48.7% | PF:0.97
+  [RECOVERY_SIM] RECOVERY: SPOT_BULL + BTC drift +15% sintético...
+    → $15,758.69 | PnL:+10768.69 | Trades:396 | SPOT WR:49%  | MaxDD:46.5% | PF:1.13
+
+============================================================================
+  RESULTADOS COMPARATIVOS
+============================================================================
+  Escenario                               Capital       PnL   Ret%    WR  SpWR  FutWR   MaxDD    PF
+  ──────────────────────────────────────────────────────────────────────────
+  Sistema completo (predictor+SmartTP+anti-wick+futuros) $ 8,916.16  +3926.16 +78.7%   45%   47%    44%   47.1% 1.02
+  REAL + params optimizados (str≥0.58) $ 8,200.04  +3210.04 +64.3%   45%   45%    44%   53.4% 1.09
+  Solo futuros SHORT (FUTURES_SHORT forzado) $ 4,741.11   -248.89  -5.0%   40%     —    40%   15.8% 0.78
+  Recuperación SPOT_BULL (régimen forzado) $15,382.57 +10392.57 +208.3%   46%   46%      —   48.7% 0.97
+  RECOVERY: SPOT_BULL + BTC drift +15% sintético $15,758.69 +10768.69 +215.8%   49%   49%      —   46.5% 1.13 ◀
+  ──────────────────────────────────────────────────────────────────────────
+  HODL BTC                             $ 4,365.41   -624.59 -12.5%   —     —      —       —     —
+  HODL USDT (sin riesgo)               $ 4,990.00     +0.00  +0.0%   —     —      —       —     —
+
+  DISTRIBUCIÓN DE REGÍMENES — REAL
+    RANGE_SCALP      ██████████████████                     37.5%
+    FUTURES_SHORT    ████████████████                       33.5%
+    SPOT_BULL        ██████████████                         29.1%
+    PRESERVATION                                            0.0%
+
+  ESTADÍSTICAS SISTEMA — REAL
+    Predictor bloqueó:     1303 señales (89% del total evaluado)
+    Predictor aprobó:       164 entradas
+    Anti-wick saves:        217 SL/TS ignorados (wick detectado)
+    SmartTP extend:          97 veces TP extendido
+    SmartTP scale-out:       34 veces scale-out 50%
+    SmartTP close:           42 cierres normales en TP
+    Trailing fired (SPOT):    10 trailing stops spot ejecutados
+    PredExit (deterioro):      0 cierres anticipados
+    FUT trailing fired:      106 trailing stops futuros ejecutados
+    FUT SmartTP extend:        4 TP extendido en futuros SHORT
+    FUT SmartTP close:         0 cierres normales en futuros TP
+
+  BREAKDOWN MENSUAL — RECOVERY_SIM: RECOVERY: SPOT_BULL + BTC drift +15% sintético
+  Mes    Trades  Wins   WR%    PnL mes  Capital fin
+  ────────────────────────────────────────────────────
+  Mes 1      126    70   56%    +794.83 $   5,784.83
+  Mes 2      141    66   47%   +3432.82 $   9,217.65
+  Mes 3      115    50   43%   +4711.10 $  13,928.75
+  Mes 4        2     2  100%   +1829.94 $  15,758.69
+
+  CURVAS DE EQUITY
+
+  REAL — Sistema completo (predictor+SmartTP+anti-wick+futuros)  ($8,916.16 | +78.7%)
+                                █                             
+                               ██████████████████ █████    █  
+                       ██   ██ ████████████████████████    █  
+                     ██████ ███████████████████████████ █ ███ 
+                  ████████████████████████████████████████████
+  █   █           ████████████████████████████████████████████
+  █  ██     ███  █████████████████████████████████████████████
+  █ ███ █  ████ ██████████████████████████████████████████████
+  ────────────────────────────────────────────────────────────
+
+  REAL_OPT — REAL + params optimizados (str≥0.58)  ($8,200.04 | +64.3%)
+                                                           █  
+                               ███  ██                     █  
+                      ███  ████████████████████████████ █ ████
+                  █  ████████████████████████████████████ ████
+                  ████████████████████████████████████████████
+  █   █           ████████████████████████████████████████████
+  █  ██    ████   ████████████████████████████████████████████
+  █████ ██ ████  █████████████████████████████████████████████
+  ────────────────────────────────────────────────────────────
+
+  FUT_ONLY — Solo futuros SHORT (FUTURES_SHORT forzado)  ($4,741.11 | -5.0%)
+  █                                                           
+  █                                                           
+  █                                                           
+  █                                                           
+  █                                 █                         
+  █  █      ███                     ██                        
+  ██ ██    ████ ███     █ ██   █    █████ █    █              
+  █████ ████████████  ██████   █████████████ ████ ███ ███     
+  ────────────────────────────────────────────────────────────
+
+  SPOT_BULL_SIM — Recuperación SPOT_BULL (régimen forzado)  ($15,382.57 | +208.3%)
+                                                           █  
+                                                   ████ █ ███ 
+                                    ███ █    █████████████████
+                               ██   ██████   █████████████████
+                               ███████████ ███████████████████
+                     █ ██   █ ████████████████████████████████
+                    ███████ ██████████████████████████████████
+  █  ██    ███  ██████████████████████████████████████████████
+  ────────────────────────────────────────────────────────────
+
+  RECOVERY_SIM — RECOVERY: SPOT_BULL + BTC drift +15% sintético  ($15,758.69 | +215.8%)
+                                                           █  
+                                                   ██ █ █ ██  
+                                    ███ █    █████████████████
+                                    █████   ██████████████████
+                               ███████████████████████████████
+                            █  ███████████████████████████████
+                    ██████  ██████████████████████████████████
+  █  ██     ██   █████████████████████████████████████████████
+  ────────────────────────────────────────────────────────────
+
+  MONTE CARLO — RECOVERY_SIM (5,000 simulaciones, 3 meses forward)
+    Capital base:    $ 15,758.69
+    Peor caso  P5:   $ 15,668.42  (-0.6%)
+    Mediana   P50:   $ 15,937.24  (+1.1%)
+    Media:           $ 15,931.79  (+1.1%)
+    Mejor caso P95:  $ 16,206.06  (+2.8%)
+    Proyección mediana 3m: $ +178.55 USDT = $  +3,482 MXN
+
+============================================================================
+  ANÁLISIS EXPERTO MULTI-ROL
+============================================================================
+
+  ROL QUANT — MÉTRICAS CLAVE (REAL):
+    Profit Factor: 1.024  (>1.5 = bueno, >2.0 = excelente)
+    Avg Win:  $ +8.0848  |  Avg Loss: $ -6.5836
+    Ratio W/L: 1.23×
+    Predictor filtró: 89% de señales BUY → calidad > cantidad
+    Anti-wick: 217 SL salvados → reduce slippage real estimado
+
+  ROL TRADING EXPERT — ESTRATEGIA ACTUAL:
+    Período simulado: BEAR CON REBOTES (BTC -12.5%)
+    Régimen correcto: PRESERVATION + futuros oportunistas — bear con rebotes
+    Acción recomendada: Máx 4 SHORTs + NARRATIVE spot selectivo
+
+    PnL FUTUROS SHORT (en régimen FUTURES_SHORT): $-71.27 USDT
+    PnL SPOT LONG (resto del tiempo):             $+109.65 USDT
+    Upside si recuperación SPOT_BULL (+13%):   $+10392.57 USDT
+    Velocidad recuperación proyectada:             $164.96 USDT/día
+
+  ROL BEHAVIORAL FINANCE — F&G = 15 (Capitulación):
+    Kelly boost activo: ×1.50 → más agresivo en el peor miedo
+    Históricamente: F&G<20 → reversión promedio +28% en 60d (Bitcoin)
+    Señal: acumular SPOT en soporte, mantener SHORTs hasta TP
+
+  ROL ACTUARIO — RIESGO:
+    MaxDD REAL: 47.1%  |  MaxDD OPT: 53.4%
+    Riesgo mensual P5 (MC): $-90.27 USDT (-0.6%)
+    Capital en riesgo por trade: $40–$350 USDT
+    Max exposición: 75% del portfolio
+
+============================================================================
+  RECOMENDACIONES PRIORIZADAS (por MXN/día adicional)
+============================================================================
+  [P1] ✅ sl_confirmation_candles=1 activo — 217 SL falsos evitados en sim
+  [P2] ⚠️  Futuros WR=44% bajo — reducir a MAX_SHORTS=4 o subir SL a 2.0%
+  [P2] ⚠️  SmartTP extendiendo frecuentemente — verificar que extensiones no devuelven ganancias
+
+  USD/día proyectado (mediana MC 3m): $1.98 USDT/día = $39 MXN/día
+
+============================================================================
+  Módulo real TechnicalIndicators: ✅ ACTIVO
+  Módulo real PnLPredictor:        ✅ ACTIVO
+============================================================================
+

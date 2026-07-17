@@ -96,37 +96,37 @@ def build_components(
 
     # ── Database client (if not injected) ────────────────────────────────────
     if c.db_client is None:
-        try:
-            db_url = getattr(settings, "db_url", None)
-            if not db_url:
-                db_url = (
-                    f"postgresql://{settings.db_user}:{settings.db_password}"
-                    f"@{settings.db_host}:{settings.db_port}/{settings.db_name}"
-                )
-            if db_url:
-                from db_client import get_db_client
-                c.db_client = get_db_client(db_url)
+        db_url = getattr(settings, "db_url", None)
+        if not db_url:
+            db_url = (
+                f"postgresql://{settings.db_user}:{settings.db_password}"
+                f"@{settings.db_host}:{settings.db_port}/{settings.db_name}"
+            )
+        if db_url:
+            from db_client import get_db_client
+            c.db_client = get_db_client(db_url)
+            if c.db_client.connection_pool:
                 logger.info("DatabaseClient initialised")
-                try:
-                    from config_helpers import load_runtime_overrides_from_db
-                    _restore = load_runtime_overrides_from_db(settings, c.db_client)
-                    if _restore.get("applied_scalars") or _restore.get("applied_thresholds"):
-                        logger.info(
-                            "Runtime overrides restored: scalars=%s thresholds=%s",
-                            _restore.get("applied_scalars"),
-                            _restore.get("applied_thresholds"),
-                        )
-                except Exception as _re:
-                    logger.warning("Runtime override restore skipped: %s", _re)
+            else:
+                logger.warning("DatabaseClient created but pool not ready; will retry on first query")
+            try:
+                from config_helpers import load_runtime_overrides_from_db
+                _restore = load_runtime_overrides_from_db(settings, c.db_client)
+                if _restore.get("applied_scalars") or _restore.get("applied_thresholds"):
+                    logger.info(
+                        "Runtime overrides restored: scalars=%s thresholds=%s",
+                        _restore.get("applied_scalars"),
+                        _restore.get("applied_thresholds"),
+                    )
+            except Exception as _re:
+                logger.warning("Runtime override restore skipped: %s", _re)
 
-                try:
-                    from analysis_cache import analysis_cache as _analysis_cache
-                    _analysis_cache.set_db_client(c.db_client)
-                    logger.info("AnalysisCache wired to DatabaseClient")
-                except Exception as _ac_err:
-                    logger.warning("AnalysisCache DB wiring skipped: %s", _ac_err)
-        except Exception as e:
-            logger.error(f"DatabaseClient init failed: {e}")
+            try:
+                from analysis_cache import analysis_cache as _analysis_cache
+                _analysis_cache.set_db_client(c.db_client)
+                logger.info("AnalysisCache wired to DatabaseClient")
+            except Exception as _ac_err:
+                logger.warning("AnalysisCache DB wiring skipped: %s", _ac_err)
 
     # ── Position Manager (if not injected) ───────────────────────────────────
     if c.position_manager is None:

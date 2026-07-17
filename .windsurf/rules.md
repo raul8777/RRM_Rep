@@ -28,7 +28,7 @@ Si una propuesta no responde estos 6 puntos, no está lista para rollout.
 
 Bot de trading algorítmico Python/FastAPI corriendo en Docker, operando en Binance SPOT y FUTURES USDM. El orquestador central es `run_trades.py` con función `execute_once()` que conecta todos los módulos en cada ciclo.
 
-**Flujo de datos por ciclo:**
+**Flujo de datos por ciclo (Peaks-first pipeline s79):**
 ```
 market_regime.py              → detecta régimen (SPOT_BULL/RANGE_SCALP/PRESERVATION/FUTURES_SHORT)
     ↓
@@ -36,21 +36,24 @@ _apply_regime_params()        → carga overrides del modo activo desde DB → a
 _apply_mode_profile_harmony() → aplica multiplicadores de perfil A/B/C sobre el resultado anterior
     ↓
 pair_screener.py              → candidatos técnicos del universo de análisis
-autonomous_signals.py         → genera señales con indicadores técnicos por símbolo
-                                 (boosts escalados por pesos del learning_engine — regime-aware)
+autonomous_signals.py         → genera señales + peak_quality_profile (A/B/C/discarded)
+                                 + peak_quality_score (expected_gain from peak model)
 learning_engine.py            → pesos por indicador (symbol, regime) → escala boosts en autonomous_signals
     ↓
-_compute_profit_score()       → profit_score = ev_norm×0.40 + prob×0.30 + strength×0.20 + regime_bonus×0.10
+_filter_buy_candidates()      → ANTES de QUBO (s79): hard-reject "discarded"; advisory mode for rest
+                                 entry_quality_gate_mode: "advisory"|"blocking"|"disabled"
     ↓
-_check_entry_quality()        → regime/profile-aware behavior gate: trend, RSI, vol_spike, BB position, strength
-_filter_buy_candidates()       → hard pre-filter before predictor; rejects mismatched behavior
+_compute_profit_score()       → pq_norm×0.40 + ev_norm×0.20 + prob×0.20 + strength×0.10 + regime_bonus×0.10
     ↓
-portfolio_selector.py         → QUBO: elige K señales ortogonales (maximiza EV, minimiza correlación)
+portfolio_selector.py         → QUBO: revenue = 0.6×peak_quality + 0.4×predictor_pnl (Peaks dominates)
+                                 Correlation penalty + cardinality + risk unchanged
     ↓
-_kelly_position_size()        → sizing: base × regime_mult × profile_mult × conviction × concentration × F&G
-pnl_service.validate()         → NO bootstrap bypass: predictions must satisfy thresholds regardless of history
+_buy_top_symbols():
+  pnl_service.validate()      → predictor_gate_mode: "advisory" (Profile A/B bypass) | "blocking" | "disabled"
+                                 gate_warnings persisted in trades_open metadata
+  _kelly_position_size()      → sizing: base × regime_mult × profile_mult × conviction × concentration × F&G
     ↓
-BinanceClient / FuturesClient → ejecuta orden → _verify_entry_filled() → persiste en DB
+BinanceClient / FuturesClient → ejecuta orden → _verify_entry_filled() → persiste en DB (+ gate_warnings)
     ↓
 [cada ciclo, sobre posiciones abiertas]
 smart_scale_out.py            → SSO-1..7: partial/full exit por 7 triggers adaptativos
@@ -58,6 +61,12 @@ profit_realization_supervisor.py → PRS: timing de exit escalado por régimen y
 peak_capture_engine.py        → PredExit: advisory de captura de peak (solo en ganancia)
 unified_governance_supervisor.py → UG: árbitro final — consolida advisories en acción única
 ```
+
+**Feature flags (s79) — hot-config via PATCH /config/kelly:**
+- `peaks_first_enabled`: bool (default True) — Peaks profile drives selection priority
+- `predictor_gate_mode`: "advisory"|"blocking"|"disabled" (default "advisory")
+- `entry_quality_gate_mode`: "advisory"|"blocking"|"disabled" (default "advisory")
+- Rollback inmediato: `PATCH /config/kelly {"predictor_gate_mode":"blocking","entry_quality_gate_mode":"blocking"}`
 
 **Tablas DB clave** (SQLite `trades.db`):
 - `trades_open` — posiciones activas + metadata JSON (`_smart_meta`: trailing, breakeven, SSO state)
@@ -822,3 +831,41 @@ Kelly uniforme: $2500 max, KD=0.26, max_pct_liquid=0.90, conviction_max=0.30, MP
 2. Antes de live, computar features `s_*` en `analyze_symbol` o re-entrenar con el subconjunto disponible.
 3. Si se usa, mantener `_check_entry_quality` como piso duro; `peak_quality` actúa como filtro adicional de rentabilidad esperada.
 
+---
+
+## 7. Dashboard UI — Perfil, Modo y Peak MIMIC ExitPolicy (jul 16 2026)
+
+### Columnas en posiciones abiertas y cerradas
+- **Perfil**: badge visual (`A`/`B`/`C`) derivado de `entry_profile_label_for_display` → usa `peak_quality_profile` si existe, sino `profile_at_entry`. A=verde, B=azul, C=rojo.
+- **Modo**: badge/texto del modo al abrir (`SPOT_BULL`, `RANGE_SCALP`, `PRESERVATION`, `FUTURES_SHORT`) con icono y color.
+- **Peak MIMIC**: badges `expected_gain` (🎯EG×N) y `time_stop` (⏱TSh). Muestran si el `ExitPolicy` del perfil los usa (`use_expected_gain_for_tp`).
+
+### Filtros
+- Cada tabla (abiertas/cerradas) tiene filtros desplegables por **Perfil** (`All`, `A`, `B`, `C`) y **Modo** (`All`, `SPOT_BULL`, `RANGE_SCALP`, `PRESERVATION`, `FUTURES_SHORT`).
+- Estado de filtros vive en `_openProfileFilter`, `_openModeFilter`, `_closedProfileFilter`, `_closedModeFilter` y se re-renderiza desde `_lastOpenData` / `_lastClosedData`.
+
+### Modal de detalle
+- Muestra Perfil, Modo, Contexto en sección "📍 Entrada".
+- Sección "🟠 Peak MIMIC":
+  - Perfil de la señal `entry_peak_quality_profile` + score.
+  - Perfil activo usado por el trade (`entry_profile_label_for_display`).
+  - `expected_gain` multiplier y si es TP activo.
+  - `time_stop_hours`.
+
+### Backend asociado
+- `app.py` enriquece posiciones con `exit_policy_params` y expone `exit_policies` top-level en `/dashboard/summary`.
+- `position_manager.py`, `run_trades.py`, `futures_client.py` persisten `peak_quality_profile`/`peak_quality_score` en metadata.
+
+---
+
+## 8. DB client lazy init + rango de posiciones cerradas (jul 16 2026)
+
+### Reglas
+- **`DatabaseClient`** no debe romper en `__init__` si Postgres aún no responde. Debe crear el objeto, guardar el error e intentar `_initialize_pool` lazy en `get_connection`.
+- **`init_components`** no debe dejar `c.db_client = None` por un fallo transitorio de conexión. Asigna siempre el `DatabaseClient`; `PositionManager`/`Orchestrator` lo reciben y se recuperan cuando la DB vuelva.
+- **`/health/status`** debe manejar `db_client is None` explícitamente sin propagar `AttributeError`.
+- **Dashboard**: `/dashboard/summary` acepta `days` (1–365, default 7) para cerradas. El frontend persiste la selección en `localStorage` y la envía en cada fetch.
+
+### Checks operativos
+- Si `db_client` es `None`, reiniciar el contenedor `app` después de confirmar que Postgres está healthy.
+- Si las posiciones cerradas no cargan, verificar que `PositionManager` tenga `db_client` con pool (no `None`) y que `get_closed_positions_since` use `exit_time >= since`.

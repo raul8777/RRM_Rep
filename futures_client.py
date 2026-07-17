@@ -1777,6 +1777,8 @@ class FuturesClient:
         pnl_prediction: Optional[Dict] = None,      # FIX-P2: predictor output at entry
         indicators_at_entry: Optional[Dict] = None, # FIX-P2: technical indicators at entry
         signal_id: Optional[str] = None,
+        peak_quality_profile: Optional[str] = None,
+        peak_quality_score: Optional[float] = None,
     ) -> Optional[FuturesPosition]:
         """
         Open a SHORT position with mandatory SL and TP orders.
@@ -1930,7 +1932,13 @@ class FuturesClient:
                     print(f"[Futures/WARN] SHORT {symbol}: cleanup close also failed: {_ce}")
                 return None
             pos._smart_meta['regime_at_entry'] = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
-            pos._smart_meta['profile_at_entry'] = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
+            pos._smart_meta['profile_at_entry'] = str(peak_quality_profile or getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
+            pos._smart_meta['peak_quality_profile'] = str(peak_quality_profile or '').strip().upper() or None
+            if peak_quality_score is not None:
+                try:
+                    pos._smart_meta['peak_quality'] = float(peak_quality_score)
+                except Exception:
+                    pass
             if signal_id:
                 pos._smart_meta['signal_id'] = signal_id
             self._open_positions[self._pos_key(symbol, "SHORT")] = pos
@@ -1952,6 +1960,8 @@ class FuturesClient:
         tp_pct: float = 5.0,   # % above entry — take profit
         leverage: int = None,
         signal_id: Optional[str] = None,
+        peak_quality_profile: Optional[str] = None,
+        peak_quality_score: Optional[float] = None,
     ) -> Optional[FuturesPosition]:
         """
         Open a LONG position with mandatory SL and TP orders.
@@ -2099,7 +2109,13 @@ class FuturesClient:
                     print(f"[Futures/WARN] LONG {symbol}: cleanup close also failed: {_ce}")
                 return None
             pos._smart_meta['regime_at_entry'] = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
-            pos._smart_meta['profile_at_entry'] = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
+            pos._smart_meta['profile_at_entry'] = str(peak_quality_profile or getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
+            pos._smart_meta['peak_quality_profile'] = str(peak_quality_profile or '').strip().upper() or None
+            if peak_quality_score is not None:
+                try:
+                    pos._smart_meta['peak_quality'] = float(peak_quality_score)
+                except Exception:
+                    pass
             if signal_id:
                 pos._smart_meta['signal_id'] = signal_id
             self._open_positions[self._pos_key(symbol, "LONG")] = pos

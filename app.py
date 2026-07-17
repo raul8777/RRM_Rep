@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Depends
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Depends, Query
 from fastapi import status as http_status
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +11,7 @@ import os
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from config import get_settings
 from config_helpers import get_param as _cfg_param, dump_active_config, _PARAM_DEFAULTS
@@ -1375,7 +1376,8 @@ async def get_open_positions() -> Dict:
                     "trail_stop_price": trail_stop_price,
                     **_normalize_transaction_context(getattr(position, 'metadata', {}) or {}, _runtime_ctx),
                 })
-        
+                _enrich_position_with_exit_policy(positions_data[-1])
+
         _context_counts = {
             "legacy": sum(1 for _p in positions_data if _p.get('config_context_state') == 'legacy'),
             "partial": sum(1 for _p in positions_data if _p.get('config_context_state') == 'partial'),
@@ -1519,6 +1521,7 @@ async def get_closed_positions(limit: int = 20) -> Dict:
                 "bounce_entry": (getattr(pos, 'metadata', None) or {}).get('bounce_entry', False),
                 **_normalize_transaction_context(getattr(pos, 'metadata', {}) or {}, _runtime_ctx),
             })
+            _enrich_position_with_exit_policy(positions_data[-1])
         
         _context_counts = {
             "legacy": sum(1 for _p in positions_data if _p.get('config_context_state') == 'legacy'),
@@ -1839,6 +1842,81 @@ _PROFILE_ALIAS = {
     "B": "Balance",
     "C": "Defensa",
 }
+
+# Per-profile ExitPolicy from Super MIMIC peak lifecycle tuning
+_PROFILE_EXIT_POLICIES: Dict[str, Dict[str, Any]] = {}
+_EXIT_POLICY_LOADED_AT: float = 0.0
+_EXIT_POLICY_TTL_SECONDS: float = 60.0
+
+
+def _load_profile_exit_policies() -> Dict[str, Dict[str, Any]]:
+    """Load per-profile best ExitPolicy from tuning deliverable. Cached with TTL."""
+    global _PROFILE_EXIT_POLICIES, _EXIT_POLICY_LOADED_AT
+    _now = time.time()
+    if _PROFILE_EXIT_POLICIES and (_now - _EXIT_POLICY_LOADED_AT) < _EXIT_POLICY_TTL_SECONDS:
+        return _PROFILE_EXIT_POLICIES
+    _path = Path("Dev/benchmarks/peak_lifecycle_tuning/best_exit_policy.json")
+    _policies: Dict[str, Dict[str, Any]] = {}
+    try:
+        if _path.exists():
+            _raw = json.loads(_path.read_text(encoding="utf-8"))
+            _per_profile = _raw.get("per_profile_exit_policy") or {}
+            if not _per_profile and _raw.get("params"):
+                # Fallback: build per-profile from prefixed flat params
+                _params = _raw["params"]
+                for _p in ("A", "B", "C"):
+                    _policies[_p] = {
+                        k.replace(f"{_p}_", ""): v
+                        for k, v in _params.items()
+                        if k.startswith(f"{_p}_")
+                    }
+            else:
+                _policies = _per_profile
+    except Exception as _e:
+        print(f"[Dashboard/ExitPolicy] failed to load best_exit_policy.json: {_e}")
+        _policies = _PROFILE_EXIT_POLICIES or {}
+    _PROFILE_EXIT_POLICIES = _policies
+    _EXIT_POLICY_LOADED_AT = _now
+    return _PROFILE_EXIT_POLICIES
+
+
+def _exit_policy_for_profile(profile: Optional[str]) -> Dict[str, Any]:
+    """Return best ExitPolicy parameters for a profile label, or empty dict."""
+    _p = str(profile or "").strip().upper()
+    return _load_profile_exit_policies().get(_p, {}) if _p in ("A", "B", "C") else {}
+
+
+def _enrich_position_with_exit_policy(position: Dict[str, Any]) -> None:
+    """Attach the per-profile ExitPolicy params to a position dict for the dashboard."""
+    _profile = (
+        position.get('entry_profile_label_for_display')
+        or position.get('entry_peak_quality_profile')
+        or position.get('entry_profile_label')
+        or 'B'
+    )
+    position['exit_policy_params'] = _exit_policy_for_profile(_profile)
+
+
+def _enrich_entry_expectation(position: Dict[str, Any]) -> None:
+    prediction = position.get('pnl_prediction') or {}
+    expected = prediction.get('expected_pnl') if isinstance(prediction, dict) else None
+    actual = float(position.get('unrealized_pnl', 0.0) or 0.0)
+    try:
+        expected = float(expected)
+    except (TypeError, ValueError):
+        expected = None
+    position['entry_expected_pnl'] = expected
+    position['entry_actual_unrealized_pnl'] = round(actual, 4)
+    if expected is None or expected <= 0:
+        position['entry_expectation_progress_pct'] = None
+        position['entry_expectation_status'] = 'unavailable'
+        return
+    progress = actual / expected * 100.0
+    position['entry_expectation_progress_pct'] = round(progress, 2)
+    position['entry_expectation_gap'] = round(actual - expected, 4)
+    position['entry_expectation_status'] = (
+        'met' if progress >= 100 else 'progress' if progress >= 50 else 'below'
+    )
 
 
 def _decode_runtime_state_value(value: Any) -> Any:
@@ -2434,6 +2512,17 @@ def _normalize_transaction_context(meta: Any, current_ctx: Optional[Dict[str, An
 
     entry_mode = _pick(('regime_at_entry', 'regime_mode', 'current_regime_mode', 'entry_regime_mode'))
     entry_profile = _pick(('profile_at_entry', 'profile_label', 'current_profile_label', 'entry_profile_label'))
+    entry_peak_profile = _pick(('peak_quality_profile', 'entry_peak_quality_profile'))
+    entry_peak_score = None
+    for _pk in ('peak_quality', 'peak_quality_score', 'entry_peak_quality_score'):
+        _pv = meta.get(_pk)
+        if _pv is not None:
+            try:
+                entry_peak_score = float(_pv)
+                break
+            except Exception:
+                continue
+    entry_profile_for_display = entry_peak_profile if entry_peak_profile in ('A', 'B', 'C') else entry_profile
     entry_snapshot_id = _pick(('config_snapshot_id', 'snapshot_id', 'applied_snapshot_id', 'runtime_snapshot_id', 'effective_runtime_snapshot_id'), upper=False)
     current_mode = str(current_ctx.get('mode') or '').strip().upper() or None
     current_profile = str(current_ctx.get('profile') or '').strip().upper() or None
@@ -2484,6 +2573,9 @@ def _normalize_transaction_context(meta: Any, current_ctx: Optional[Dict[str, An
         'config_context_reason': reason,
         'entry_regime_mode': entry_mode,
         'entry_profile_label': entry_profile,
+        'entry_profile_label_for_display': entry_profile_for_display,
+        'entry_peak_quality_profile': entry_peak_profile,
+        'entry_peak_quality_score': entry_peak_score,
         'entry_snapshot_id': entry_snapshot_id,
         'current_regime_mode': current_mode,
         'current_regime_profile_label': current_profile,
@@ -2510,7 +2602,7 @@ async def get_dashboard_config(request: Request) -> Dict:
 
 
 @app.get("/dashboard/summary")
-async def get_dashboard_summary() -> Dict:
+async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
     """Single endpoint that returns all dashboard data to minimize API calls."""
     comp = get_components()
     _snapshot_started_at = datetime.now(timezone.utc)
@@ -3072,6 +3164,8 @@ async def get_dashboard_summary() -> Dict:
                 "metadata": _sp_meta_last,
                 **_normalize_transaction_context(_sp_meta_last, _runtime_ctx),
             })
+            _enrich_position_with_exit_policy(open_list[-1])
+            _enrich_entry_expectation(open_list[-1])
         # Add futures positions to the dashboard
         try:
             from run_trades import _get_futures_client
@@ -3250,6 +3344,8 @@ async def get_dashboard_summary() -> Dict:
                     "entries": _enrich_entries(_dash_esc_map.get(fp["symbol"], []), fp["current_price"], fp["side"]),
                     **_normalize_transaction_context(fp.get('_smart_meta') or fp.get('metadata') or {}, _runtime_ctx),
                 })
+                _enrich_position_with_exit_policy(open_list[-1])
+                _enrich_entry_expectation(open_list[-1])
         except Exception as e:
             # If futures client fails, continue with spot positions only
             print(f"Warning: Could not fetch futures positions for dashboard: {e}")
@@ -3282,10 +3378,10 @@ async def get_dashboard_summary() -> Dict:
     except Exception as e:
         result["open_positions"] = {"positions": [], "count": 0, "error": str(e)}
 
-    # Closed Positions (with pnl_prediction & prediction_accuracy) - Last 7 days
+    # Closed Positions (with pnl_prediction & prediction_accuracy) - configurable range (default 7 days)
     try:
-        seven_days_ago = datetime.utcnow() - timedelta(days=7)
-        closed_positions = position_manager.get_closed_positions_since(since=seven_days_ago, limit=100)
+        since_dt = datetime.utcnow() - timedelta(days=days)
+        closed_positions = position_manager.get_closed_positions_since(since=since_dt, limit=1000)
         _cat_map_cl = getattr(settings, "token_categories", {})
         # Build flat list first
         _cl_flat = []
@@ -3348,7 +3444,7 @@ async def get_dashboard_summary() -> Dict:
             _g_meta = dict(_grp[-1]['metadata'])  # use most recent metadata
             _g_meta['total_escalonamientos'] = len(_grp)
             _g_meta['close_group_id'] = _cgid
-            closed_list.append({
+            _g_closed = {
                 **_grp[0],
                 "quantity": round(_g_total_qty, 8),
                 "entry_price": round(_g_wap, 8),
@@ -3360,7 +3456,11 @@ async def get_dashboard_summary() -> Dict:
                 "exit_time": _g_exit_time,
                 "metadata": _g_meta,
                 **_normalize_transaction_context(_g_meta, _runtime_ctx),
-            })
+            }
+            _enrich_position_with_exit_policy(_g_closed)
+            closed_list.append(_g_closed)
+        for _cl in _cl_no_group:
+            _enrich_position_with_exit_policy(_cl)
         # Strip internal tracking field before exposing
         for _cl in closed_list:
             _cl.pop('_close_group_id', None)
@@ -3377,14 +3477,14 @@ async def get_dashboard_summary() -> Dict:
             "count": len(closed_list),
             "spot_count": _cl_spot,
             "futures_count": _cl_fut,
-            "period_days": 7,
+            "period_days": days,
             "legacy_count": _closed_context_counts["legacy"],
             "partial_context_count": _closed_context_counts["partial"],
             "current_context_count": _closed_context_counts["current"],
             "unknown_context_count": _closed_context_counts["unknown"],
         }
     except Exception as e:
-        result["closed_positions"] = {"positions": [], "count": 0, "error": str(e), "period_days": 7}
+        result["closed_positions"] = {"positions": [], "count": 0, "error": str(e), "period_days": days}
 
     # PnL by close reason (today + 7d)
     try:
@@ -3720,6 +3820,11 @@ async def get_dashboard_summary() -> Dict:
     except Exception as _se:
         result["pair_screener"] = {"regime_mode": "SPOT_BULL", "candidates": []}
 
+    try:
+        result["selection_observability"] = _build_selection_observability(comp.db_client)
+    except Exception as _selection_error:
+        result["selection_observability"] = {"available": False, "error": str(_selection_error), "candidates": []}
+
     # Expectativa vs Realidad — build from closed positions with predictions
     try:
         _evr_closed = position_manager.get_closed_positions(limit=200)
@@ -3760,6 +3865,7 @@ async def get_dashboard_summary() -> Dict:
         "binance_truth_spot_severity": _truth_spot_sev,
         "tactical_decision_blocked": _truth_sev in ("critical",) or _truth_spot_sev in ("high",),
     }
+    result["exit_policies"] = _load_profile_exit_policies()
     result["timestamp"] = to_mexico_time(datetime.utcnow()).isoformat()
     return result
 
@@ -6704,16 +6810,21 @@ async def get_health_status() -> Dict:
     overall = "ok"
 
     # DB check
-    try:
-        import time as _time
-        t0 = _time.monotonic()
-        db_client.execute_query("SELECT 1")
-        latency_ms = round((_time.monotonic() - t0) * 1000, 1)
-        checks["db"] = {"status": "ok", "latency_ms": latency_ms}
-    except Exception as e:
-        checks["db"] = {"status": "error", "detail": str(e)}
-        ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"DB health check failed: {e}")
+    if db_client is None:
+        checks["db"] = {"status": "error", "detail": "db_client not initialized"}
+        ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, "DB health check failed: db_client is None")
         overall = "error"
+    else:
+        try:
+            import time as _time
+            t0 = _time.monotonic()
+            db_client.execute_query("SELECT 1")
+            latency_ms = round((_time.monotonic() - t0) * 1000, 1)
+            checks["db"] = {"status": "ok", "latency_ms": latency_ms}
+        except Exception as e:
+            checks["db"] = {"status": "error", "detail": str(e)}
+            ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"DB health check failed: {e}")
+            overall = "error"
 
     # Binance check
     if bool(getattr(settings, 'dry_run', False)):
@@ -8415,6 +8526,80 @@ async def get_dashboard_screener(_auth=Depends(_require_api_key)) -> Dict:
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def _build_selection_observability(db, limit: int = 100) -> Dict[str, Any]:
+    if not db:
+        return {"available": False, "reason": "database_unavailable", "candidates": []}
+    safe_limit = max(1, min(int(limit), 500))
+    cycles = db.execute_query(
+        "SELECT cycle_id, started_at, completed_at, regime_mode, profile_label, candidate_count, selected_count, executed_count, summary "
+        "FROM entry_selection_cycles ORDER BY started_at DESC LIMIT 30"
+    )
+    candidate_rows = db.execute_query(
+        "SELECT c.cycle_id, c.symbol, c.trade_type, c.stage, c.decision, c.reason, c.data, c.updated_at, "
+        "cy.started_at, cy.regime_mode, cy.profile_label "
+        "FROM entry_selection_candidates c JOIN entry_selection_cycles cy ON cy.cycle_id=c.cycle_id "
+        "ORDER BY c.updated_at DESC LIMIT %s",
+        (safe_limit,),
+    )
+    candidates = []
+    reason_counts: Dict[str, int] = {}
+    stage_counts: Dict[str, int] = {}
+    for row in candidate_rows:
+        data = row.get("data") or {}
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = {}
+        reason = row.get("reason") or "PENDING"
+        stage = row.get("stage") or "unknown"
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        candidates.append({
+            "cycle_id": row.get("cycle_id"),
+            "timestamp": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+            "cycle_started_at": row.get("started_at").isoformat() if row.get("started_at") else None,
+            "symbol": row.get("symbol"),
+            "trade_type": row.get("trade_type"),
+            "regime_mode": row.get("regime_mode"),
+            "profile_label": row.get("profile_label"),
+            "stage": stage,
+            "decision": row.get("decision"),
+            "reason": row.get("reason"),
+            **data,
+        })
+    latest_cycle = cycles[0] if cycles else None
+    if latest_cycle and isinstance(latest_cycle.get("summary"), str):
+        try:
+            latest_cycle["summary"] = json.loads(latest_cycle["summary"])
+        except Exception:
+            latest_cycle["summary"] = {}
+    for cycle in cycles:
+        for key in ("started_at", "completed_at"):
+            if cycle.get(key) and hasattr(cycle[key], "isoformat"):
+                cycle[key] = cycle[key].isoformat()
+    last_executed = next((c for c in candidates if c.get("decision") == "executed"), None)
+    dominant_reason = max(reason_counts, key=reason_counts.get) if reason_counts else None
+    return {
+        "available": True,
+        "latest_cycle": latest_cycle,
+        "cycles": cycles,
+        "candidates": candidates,
+        "stage_counts": stage_counts,
+        "reason_counts": reason_counts,
+        "dominant_reason": dominant_reason,
+        "last_entry_at": last_executed.get("timestamp") if last_executed else None,
+    }
+
+
+@app.get("/dashboard/selection-observability")
+async def get_selection_observability(limit: int = 100, _auth=Depends(_require_api_key)) -> Dict:
+    try:
+        return _build_selection_observability(get_components().db_client, limit=limit)
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "candidates": []}
 
 
 @app.get("/screener/decisions")

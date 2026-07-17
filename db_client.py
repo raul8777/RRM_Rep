@@ -23,7 +23,7 @@ class DatabaseClient:
                  statement_timeout_ms: int = 5000):
         """
         Initialize database client with connection pool.
-        
+
         Args:
             db_url: PostgreSQL connection URL
             min_connections: Minimum connections to keep open
@@ -35,26 +35,30 @@ class DatabaseClient:
         self.max_connections = max_connections
         self.statement_timeout_ms = statement_timeout_ms
         self.connection_pool = None
-        
-        self._initialize_pool()
-    
+        self._init_error: Optional[Exception] = None
+
+        try:
+            self._initialize_pool()
+        except Exception as e:
+            # Allow the client object to exist so later queries can retry when
+            # the database comes back online (e.g. container started before DB).
+            self._init_error = e
+            logger.error(f"Database connection pool not ready at startup: {e}")
+
     def _initialize_pool(self):
         """Initialize the threaded connection pool."""
-        try:
-            self.connection_pool = pool.ThreadedConnectionPool(
-                self.min_connections,
-                self.max_connections,
-                self.db_url,
-                options=f"-c statement_timeout={self.statement_timeout_ms}",
-            )
-            logger.info(
-                f"DB ThreadedConnectionPool initialized "
-                f"(min={self.min_connections}, max={self.max_connections}, "
-                f"timeout={self.statement_timeout_ms}ms)"
-            )
-        except Exception as e:
-            logger.error(f"Failed to initialize database connection pool: {e}")
-            raise
+        self.connection_pool = pool.ThreadedConnectionPool(
+            self.min_connections,
+            self.max_connections,
+            self.db_url,
+            options=f"-c statement_timeout={self.statement_timeout_ms}",
+        )
+        self._init_error = None
+        logger.info(
+            f"DB ThreadedConnectionPool initialized "
+            f"(min={self.min_connections}, max={self.max_connections}, "
+            f"timeout={self.statement_timeout_ms}ms)"
+        )
     
     @contextmanager
     def get_connection(self):
@@ -65,8 +69,12 @@ class DatabaseClient:
             psycopg2 connection object
         """
         if not self.connection_pool:
-            raise RuntimeError("Connection pool not initialized")
-        
+            # Retry pool initialization if it failed at startup or was closed.
+            try:
+                self._initialize_pool()
+            except Exception as e:
+                raise RuntimeError(f"Connection pool not initialized: {e}")
+
         conn = None
         try:
             conn = self.connection_pool.getconn()

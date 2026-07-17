@@ -1,0 +1,7 @@
+{
+  "min_signal_strength": [0.45, 0.50],
+  "min_success_probability": [0.50, 0.54],
+  "max_total_positions": [10, 12],
+  "max_per_trade_usdt": [1500, 2500],
+  "kelly_max_pct": [0.22, 0.25]
+}

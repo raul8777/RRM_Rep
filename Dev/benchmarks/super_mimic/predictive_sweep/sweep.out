@@ -1,0 +1,25 @@
+2026-07-16 02:17:25,875 [INFO] [1/12] Running win_20250116_20250131 with predictive config (regime=SPOT_BULL)
+2026-07-16 02:17:25,876 [INFO] Running window=win_20250116_20250131 profile=PREDICTIVE lifecycle=True params={}
+2026-07-16 02:17:29,483 [INFO] [2/12] Running win_20250525_20250608 with predictive config (regime=RANGE_SCALP)
+2026-07-16 02:17:29,484 [INFO] Running window=win_20250525_20250608 profile=PREDICTIVE lifecycle=True params={}
+2026-07-16 02:17:32,660 [INFO] [3/12] Running win_20250718_20250807 with predictive config (regime=RANGE_SCALP)
+2026-07-16 02:17:32,661 [INFO] Running window=win_20250718_20250807 profile=PREDICTIVE lifecycle=True params={}
+2026-07-16 02:17:35,778 [INFO] [4/12] Running win_20260303_20260317 with predictive config (regime=SPOT_BULL)
+2026-07-16 02:17:35,779 [INFO] Running window=win_20260303_20260317 profile=PREDICTIVE lifecycle=True params={}
+2026-07-16 02:17:37,789 [INFO] [5/12] Running win_20260317_20260331 with predictive config (regime=SPOT_BULL)
+2026-07-16 02:17:37,790 [INFO] Running window=win_20260317_20260331 profile=PREDICTIVE lifecycle=True params={}
+2026-07-16 02:17:39,671 [INFO] [6/12] Running win_20260401_20260415 with predictive config (regime=SPOT_BULL)
+2026-07-16 02:17:39,673 [INFO] Running window=win_20260401_20260415 profile=PREDICTIVE lifecycle=True params={}
+2026-07-16 02:17:41,386 [INFO] [7/12] Running win_20260415_20260430 with predictive config (regime=SPOT_BULL)
+2026-07-16 02:17:41,387 [INFO] Running window=win_20260415_20260430 profile=PREDICTIVE lifecycle=True params={}
+2026-07-16 02:17:43,129 [INFO] [8/12] Running win_20260501_20260515 with predictive config (regime=SPOT_BULL)
+2026-07-16 02:17:43,130 [INFO] Running window=win_20260501_20260515 profile=PREDICTIVE lifecycle=True params={}
+2026-07-16 02:17:44,767 [INFO] [9/12] Running win_20260515_20260531 with predictive config (regime=SPOT_BULL)
+2026-07-16 02:17:44,768 [INFO] Running window=win_20260515_20260531 profile=PREDICTIVE lifecycle=True params={}
+2026-07-16 02:17:46,382 [INFO] [10/12] Running win_20260601_20260620 with predictive config (regime=SPOT_BULL)
+2026-07-16 02:17:46,383 [INFO] Running window=win_20260601_20260620 profile=PREDICTIVE lifecycle=True params={}
+2026-07-16 02:17:48,328 [INFO] [11/12] Running win_20260620_20260705 with predictive config (regime=SPOT_BULL)
+2026-07-16 02:17:48,329 [INFO] Running window=win_20260620_20260705 profile=PREDICTIVE lifecycle=True params={}
+2026-07-16 02:17:50,323 [INFO] [12/12] Running win_20260628_20260630 with predictive config (regime=SPOT_BULL)
+2026-07-16 02:17:50,324 [INFO] Running window=win_20260628_20260630 profile=PREDICTIVE lifecycle=True params={}
+2026-07-16 02:17:50,947 [INFO] Predictive sweep complete: {'total_windows': 12, 'ok': 12, 'failed': 0, 'errors': []}

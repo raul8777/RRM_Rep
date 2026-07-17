@@ -34,7 +34,7 @@ async function fetchDashboardData() {
     if (_cachedData && (now - _lastFetch) < CACHE_TTL_MS) return _cachedData;
     _fetchInProgress = true;
     try {
-        const res = await fetch(`${API_BASE}/dashboard/summary`);
+        const res = await fetch(`${API_BASE}/dashboard/summary?days=${_dashboardDays}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         _cachedData = await res.json();
         _lastFetch = Date.now();
@@ -219,13 +219,45 @@ function fmtCloseReason(r) {
     return `<span class="close-reason reason-neutral">${r}</span>`;
 }
 
+function fmtProfileBadge(p) {
+    const profile = p.entry_profile_label_for_display || p.entry_peak_quality_profile || p.entry_profile_label || '—';
+    const alias = PROFILE_ALIAS[profile] || profile;
+    const fromPeak = !!p.entry_peak_quality_profile;
+    const cls = profile === 'A' ? 'profile-a' : profile === 'B' ? 'profile-b' : profile === 'C' ? 'profile-c' : 'profile-none';
+    const title = fromPeak
+        ? `Perfil: ${profile} (${alias}) — peak_quality_profile`
+        : `Perfil: ${profile} (${alias})`;
+    return `<span class="badge-profile ${cls}" title="${title}">${fromPeak ? '★' : ''}${profile}</span>`;
+}
+
+function fmtModeBadge(p) {
+    const mode = p.entry_regime_mode || '—';
+    const cfg = MODE_CFG[mode] || {};
+    const title = `Modo al abrir: ${mode}`;
+    return `<span class="badge-mode" style="color:${cfg.color || '#ccc'}" title="${title}">${cfg.icon || ''} ${cfg.label || mode}</span>`;
+}
+
+function fmtPeakTuningBadges(p) {
+    const ep = p.exit_policy_params || {};
+    let badges = '';
+    if (ep.expected_gain_mult != null) {
+        const active = ep.use_expected_gain_for_tp;
+        const tip = active ? `Take-Profit basado en expected_gain (×${fmt(ep.expected_gain_mult, 2)})` : `expected_gain multiplier: ${fmt(ep.expected_gain_mult, 2)}`;
+        badges += `<span class="sl-badge eg${active ? ' active' : ''}" title="${tip}">🎯EG×${fmt(ep.expected_gain_mult, 2)}</span>`;
+    }
+    if (ep.time_stop_hours != null) {
+        badges += `<span class="sl-badge time-stop" title="Time-stop: ${fmt(ep.time_stop_hours, 1)}h">⏱TS ${fmt(ep.time_stop_hours, 1)}h</span>`;
+    }
+    return badges;
+}
+
 function fmtContextBadge(p) {
     if (!p) return '<span class="badge-context ctx-unknown" title="Sin contexto">SIN CONTEXTO</span>';
     const state = (p.config_context_state || p.context_state || '').toString().toLowerCase();
     const label = p.config_context_label || (state === 'legacy' ? 'LEGACY' : state === 'current' ? 'ACTUAL' : state === 'partial' ? 'PARCIAL' : 'SIN CONTEXTO');
     const cls = state === 'legacy' ? 'ctx-legacy' : state === 'current' ? 'ctx-current' : state === 'partial' ? 'ctx-partial' : 'ctx-unknown';
     const entryMode = p.entry_regime_mode || '—';
-    const entryProfile = p.entry_profile_label || '—';
+    const entryProfile = p.entry_profile_label_for_display || p.entry_peak_quality_profile || p.entry_profile_label || '—';
     const currentMode = p.current_regime_mode || '—';
     const currentProfile = p.current_regime_profile_label || '—';
     const reason = p.config_context_reason || 'no_context';
@@ -599,6 +631,11 @@ let _lastClosedData = null;
 let _opsMainTab = 'open';  // 'open' | 'closed'
 let _opsSubFilter = 'all'; // 'all' | 'spot' | 'fut'
 let _openSortMode = localStorage.getItem('ops_open_sort') || 'entry_desc'; // 'entry_desc' | 'entry_asc' | 'pnl_desc' | 'pnl_asc'
+let _openProfileFilter = 'all';   // 'all' | 'A' | 'B' | 'C'
+let _openModeFilter = 'all';      // 'all' | 'SPOT_BULL' | 'RANGE_SCALP' | 'PRESERVATION' | 'FUTURES_SHORT'
+let _closedProfileFilter = 'all';
+let _closedModeFilter = 'all';
+let _dashboardDays = Math.min(365, Math.max(1, parseInt(localStorage.getItem('dashboard_closed_days'), 10) || 7));
 
 function switchOpsMainTab(main) {
     _opsMainTab = main;
@@ -636,6 +673,29 @@ function switchOpsSubTab(sub) {
 function switchInnerTab(card, filter) {
     if (card === 'open')   { _opsMainTab = 'open';   switchOpsSubTab(filter); }
     else                   { _opsMainTab = 'closed';  switchOpsSubTab(filter); }
+}
+
+function setOpenProfileFilter(v) { _openProfileFilter = v; if (_lastOpenData) renderOpenPositions(_lastOpenData); }
+function setOpenModeFilter(v)    { _openModeFilter = v;    if (_lastOpenData) renderOpenPositions(_lastOpenData); }
+function setClosedProfileFilter(v) { _closedProfileFilter = v; if (_lastClosedData) renderClosedPositions(_lastClosedData); }
+function setClosedModeFilter(v)    { _closedModeFilter = v;    if (_lastClosedData) renderClosedPositions(_lastClosedData); }
+function setDashboardDays(v) {
+    const n = parseInt(v, 10) || 7;
+    _dashboardDays = Math.min(365, Math.max(1, n));
+    localStorage.setItem('dashboard_closed_days', _dashboardDays);
+    _cachedData = null; _lastFetch = 0; fetchDashboardData();
+}
+
+function _positionMatchesProfileMode(p, profileFilter, modeFilter) {
+    if (profileFilter !== 'all') {
+        const profile = (p.entry_profile_label_for_display || p.entry_peak_quality_profile || p.entry_profile_label || '').toString().toUpperCase();
+        if (profile !== profileFilter) return false;
+    }
+    if (modeFilter !== 'all') {
+        const mode = (p.entry_regime_mode || '').toString().toUpperCase();
+        if (mode !== modeFilter) return false;
+    }
+    return true;
 }
 
 // ── Render functions (pure – no fetch) ───────────────────────────────────────
@@ -1072,6 +1132,8 @@ function renderOpenPositions(d) {
     let visiblePositions = _allPos;
     if (_filter === 'spot') visiblePositions = _allPos.filter(p => p.trade_type !== 'futures');
     else if (_filter === 'fut') visiblePositions = _allPos.filter(p => p.trade_type === 'futures');
+    // Filter by profile and mode
+    visiblePositions = visiblePositions.filter(p => _positionMatchesProfileMode(p, _openProfileFilter, _openModeFilter));
 
     // Sort by selected mode (default: newest entry first)
     function _entryTs(p) {
@@ -1094,8 +1156,6 @@ function renderOpenPositions(d) {
     }
 
     const totalUnreal = visiblePositions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
-    const totalRealized = visiblePositions.reduce((s, p) => s + parseFloat(p.realized_pnl || 0), 0);
-    const totalPnl = totalUnreal + totalRealized;
     const totalInvested = visiblePositions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
 
     const predPositions = visiblePositions.filter(p => p.pnl_prediction && p.pnl_prediction.expected_pnl);
@@ -1170,6 +1230,9 @@ function renderOpenPositions(d) {
             ? ` <span class="badge-partial" title="${_partialTooltip}">✂️PARCIAL</span>`
             : '';
         const contextBadge = fmtContextBadge(p);
+        const profileBadge = fmtProfileBadge(p);
+        const modeBadge = fmtModeBadge(p);
+        const peakTuningBadges = fmtPeakTuningBadges(p);
         const entryMode = p.entry_regime_mode || p.metadata?.regime_at_entry || '—';
 
         const tp = parseFloat(p.take_profit || 0);
@@ -1191,18 +1254,16 @@ function renderOpenPositions(d) {
         rows.push(`
         <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'open')" style="cursor:pointer" data-symbol="${p.symbol}">
             <td>${typeBadge} <strong>${p.symbol}</strong>${contextBadge}${overflowBadge}${escBadge}${partialBadge}${bounceBadge}</td>
+            <td class="profile-cell">${profileBadge}</td>
+            <td class="mode-cell">${modeBadge}</td>
             <td>$${fmt(entryP)}<br><small class="entry-time">${entryTimeStr}</small></td>
             <td>$${fmt(curP)}</td>
-            <td>${entryMode}</td>
             <td class="inv-cell" title="${p.trade_type === 'futures' ? 'Notional invertido' : 'Costo total'}">$${fmt(invVal)} USDT${invMargin}</td>
             <td class="sl-tp-cell">${fmtSlTpCell(p)}</td>
             <td class="sl-tp-badges">${fmtSlTpBadges(p)}</td>
+            <td class="peak-tuning-badges">${peakTuningBadges || '<span class="sl-badge none">—</span>'}</td>
             <td>${progressHtml}</td>
-            <td class="${pnlClass(p.unrealized_pnl + (p.realized_pnl || 0))}">
-                <div class="${pnlClass(p.unrealized_pnl)}">No Real: ${fmt(p.unrealized_pnl)} USDT</div>
-                ${parseFloat(p.realized_pnl || 0) !== 0 ? `<div class="${pnlClass(p.realized_pnl)}">Real: ${fmt(p.realized_pnl)} USDT</div>` : ''}
-                <div class="${pnlClass((p.unrealized_pnl || 0) + (p.realized_pnl || 0))}"><strong>Total: ${fmt((p.unrealized_pnl || 0) + (p.realized_pnl || 0))} USDT</strong></div>
-            </td>
+            <td class="${pnlClass(p.unrealized_pnl)}"><strong>${parseFloat(p.unrealized_pnl || 0) >= 0 ? '+' : ''}${fmt(p.unrealized_pnl)} USDT</strong></td>
             <td class="${ageCls}">${ageStr}</td>
         </tr>`);
 
@@ -1220,7 +1281,7 @@ function renderOpenPositions(d) {
                 <span style="color:#888;font-weight:600">Esc${_idx}</span>
                 <small style="color:#555;font-style:italic">&nbsp;(entrada anterior — no disponible tras reinicio)</small>
             </td>
-            <td colspan="9" style="color:#555;font-size:11px;font-style:italic">Datos no recuperables: posición promediada por Binance al sincronizar</td>
+            <td colspan="11" style="color:#555;font-size:11px;font-style:italic">Datos no recuperables: posición promediada por Binance al sincronizar</td>
         </tr>`);
                 }
             }
@@ -1243,6 +1304,8 @@ function renderOpenPositions(d) {
             <td></td>
             <td></td>
             <td></td>
+            <td></td>
+            <td></td>
             <td colspan="3" style="color:#888;font-size:12px">
                 PnL entrada: <span class="${escPnl>=0?'positive':'negative'}" style="font-weight:600">${escPnl>=0?'+':''}${fmt(escPnl)} USDT (${escPct>=0?'+':''}${fmt(escPct)}%)</span>
             </td>
@@ -1253,20 +1316,29 @@ function renderOpenPositions(d) {
         }
     }
 
+    const _profileOpts = [{v:'all',l:'Todos'},{v:'A',l:'A — Agresivo'},{v:'B',l:'B — Balance'},{v:'C',l:'C — Defensa'}];
+    const _modeOpts = [{v:'all',l:'Todos'},{v:'SPOT_BULL',l:'SPOT BULL'},{v:'RANGE_SCALP',l:'LATERAL'},{v:'PRESERVATION',l:'PRESERVAR'},{v:'FUTURES_SHORT',l:'SHORT 2×'}];
+    const _optSel = (opts, sel) => opts.map(o => `<option value="${o.v}" ${o.v === sel ? 'selected' : ''}>${o.l}</option>`).join('');
     el.innerHTML = `
+        <div class="pos-filter-bar">
+            <label>Perfil: <select onchange="setOpenProfileFilter(this.value)">${_optSel(_profileOpts, _openProfileFilter)}</select></label>
+            <label>Modo: <select onchange="setOpenModeFilter(this.value)">${_optSel(_modeOpts, _openModeFilter)}</select></label>
+        </div>
         <div class="table-scroll-10">
         <table class="positions-table">
             <thead>
                 <tr>
                     <th>Símbolo</th>
+                    <th class="profile-col">Perfil</th>
+                    <th class="mode-col">Modo</th>
                     <th>Entrada</th>
                     <th>Precio actual</th>
-                    <th>Modo al abrir</th>
                     <th>Invertido</th>
                     <th>SL / TP</th>
                     <th>Estado SL/TP</th>
+                    <th class="peak-col">Peak MIMIC</th>
                     <th>Progreso</th>
-                    <th>PnL (No Real / Real / Total)</th>
+                    <th>PnL actual</th>
                     <th>Edad</th>
                 </tr>
             </thead>
@@ -1283,14 +1355,6 @@ function renderOpenPositions(d) {
             PnL No Realizado:
             <span class="${pnlClass(totalUnreal)}">
                 <strong>${totalUnreal >= 0 ? '+' : ''}${fmt(totalUnreal)} USDT</strong>
-            </span>
-            &nbsp;|&nbsp; Realizado:
-            <span class="${pnlClass(totalRealized)}">
-                <strong>${totalRealized >= 0 ? '+' : ''}${fmt(totalRealized)} USDT</strong>
-            </span>
-            &nbsp;|&nbsp; Total:
-            <span class="${pnlClass(totalPnl)}">
-                <strong>${totalPnl >= 0 ? '+' : ''}${fmt(totalPnl)} USDT</strong>
             </span>
             ${predPositions.length > 0 ? `&nbsp;|&nbsp;Precisión Pred. Promedio: <strong>${(avgAccuracy * 100).toFixed(0)}%</strong>` : ''}
             &nbsp;|&nbsp;SL Global:
@@ -1325,6 +1389,8 @@ function renderClosedPositions(d) {
     let filteredClosed = _allClosed;
     if (_clFilter === 'spot') filteredClosed = _allClosed.filter(p => p.trade_type !== 'futures');
     else if (_clFilter === 'fut') filteredClosed = _allClosed.filter(p => p.trade_type === 'futures');
+    // Filter by profile and mode
+    filteredClosed = filteredClosed.filter(p => _positionMatchesProfileMode(p, _closedProfileFilter, _closedModeFilter));
 
     if (filteredClosed.length === 0) {
         el.innerHTML = _allClosed.length === 0
@@ -1369,17 +1435,28 @@ function renderClosedPositions(d) {
         : 0;
     const totalInvestedClosed = sortedPositions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
 
+    const _profileOptsCl = [{v:'all',l:'Todos'},{v:'A',l:'A — Agresivo'},{v:'B',l:'B — Balance'},{v:'C',l:'C — Defensa'}];
+    const _modeOptsCl = [{v:'all',l:'Todos'},{v:'SPOT_BULL',l:'SPOT BULL'},{v:'RANGE_SCALP',l:'LATERAL'},{v:'PRESERVATION',l:'PRESERVAR'},{v:'FUTURES_SHORT',l:'SHORT 2×'}];
+    const _daysOptsCl = [7,14,30,90,365].map(n => ({v: String(n), l: `Últimos ${n} días`}));
+    const _optSelCl = (opts, sel) => opts.map(o => `<option value="${o.v}" ${o.v === sel ? 'selected' : ''}>${o.l}</option>`).join('');
     el.innerHTML = `
+        <div class="pos-filter-bar">
+            <label>Perfil: <select onchange="setClosedProfileFilter(this.value)">${_optSelCl(_profileOptsCl, _closedProfileFilter)}</select></label>
+            <label>Modo: <select onchange="setClosedModeFilter(this.value)">${_optSelCl(_modeOptsCl, _closedModeFilter)}</select></label>
+            <label>Rango: <select onchange="setDashboardDays(this.value)">${_optSelCl(_daysOptsCl, String(_dashboardDays))}</select></label>
+        </div>
         <div class="table-scroll-10">
         <table class="positions-table">
             <thead>
                 <tr>
                     <th>Símbolo</th>
+                    <th class="profile-col">Perfil</th>
+                    <th class="mode-col">Modo</th>
                     <th>Entrada → Salida</th>
-                    <th>Modo al abrir</th>
                     <th>Invertido</th>
                     <th>Resultado</th>
                     <th>Razón</th>
+                    <th class="peak-col">Peak MIMIC</th>
                     <th>SL/TP Lifecycle</th>
                     <th>Cerrado</th>
                 </tr>
@@ -1396,6 +1473,9 @@ function renderClosedPositions(d) {
                     ].filter(Boolean).join(' ');
                     const typeBadge = tradeTypeBadge(p.trade_type);
                     const contextBadge = fmtContextBadge(p);
+                    const profileBadge = fmtProfileBadge(p);
+                    const modeBadge = fmtModeBadge(p);
+                    const peakTuningBadges = fmtPeakTuningBadges(p);
                     const entryMode = p.entry_regime_mode || p.metadata?.regime_at_entry || '—';
                     const exitTimeFmt = fmtDateLocal(p.exit_time);
 
@@ -1432,11 +1512,13 @@ function renderClosedPositions(d) {
                     return `
                     <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'closed')" style="cursor:pointer">
                         <td>${typeBadge} ${catIcon(p.category || 'MIDCAP_ALT')} <strong>${p.symbol}</strong>${contextBadge}</td>
+                        <td class="profile-cell">${profileBadge}</td>
+                        <td class="mode-cell">${modeBadge}</td>
                         <td>$${fmt(p.entry_price)} → $${fmt(p.exit_price)}</td>
-                        <td>${entryMode}</td>
                         <td class="inv-cell" title="${p.trade_type === 'futures' ? 'Notional invertido' : 'Costo total'}">$${fmt(p.invested_usdt || 0)} USDT</td>
                         <td class="${pnlClass(actualPnl)}">${actualPnl >= 0 ? '+' : ''}${fmt(actualPnl)} USDT<br><small>${fmt(p.pnl_percentage)}%</small></td>
                         <td>${fmtCloseReason(p.close_reason)}</td>
+                        <td class="peak-tuning-badges">${peakTuningBadges || '<span class="sl-badge none">—</span>'}</td>
                         <td class="sl-tp-badges">${lifecycleBadges}</td>
                         <td>${exitTimeFmt}</td>
                     </tr>`;
@@ -1462,12 +1544,7 @@ function renderExpectativaVsRealidad(data) {
     if (!el) return;
     
     const openPos = data?.open_positions?.positions || [];
-    const closedPos = data?.closed_positions?.positions || [];
-    
-    // Combinar últimas posiciones (abiertas + cerradas recientes)
-    const recentOpen = openPos.slice(0, 5).map(p => ({...p, status: 'open'}));
-    const recentClosed = closedPos.slice(0, 5).map(p => ({...p, status: 'closed'}));
-    const allPositions = [...recentOpen, ...recentClosed].slice(0, 6);
+    const allPositions = openPos.map(p => ({...p, status: 'open'}));
     
     if (allPositions.length === 0) {
         el.innerHTML = '<p class="loading">Sin datos de trades recientes</p>';
@@ -1475,10 +1552,10 @@ function renderExpectativaVsRealidad(data) {
     }
     
     // Calcular métricas consolidadas
-    const withPred = allPositions.filter(p => p.pnl_prediction);
-    const totalExpected = withPred.reduce((s, p) => s + parseFloat(p.pnl_prediction?.expected_pnl || 0), 0);
-    const totalActual = allPositions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || p.pnl || 0), 0);
-    const accuracy = withPred.length > 0 ? (totalActual / totalExpected) * 100 : 0;
+    const withPred = allPositions.filter(p => p.entry_expected_pnl > 0);
+    const totalExpected = withPred.reduce((s, p) => s + parseFloat(p.entry_expected_pnl || 0), 0);
+    const totalActual = withPred.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
+    const accuracy = totalExpected > 0 ? (totalActual / totalExpected) * 100 : 0;
     
     el.innerHTML = `
         <div class="expectativa-stats">
@@ -1516,22 +1593,14 @@ function renderExpectativaVsRealidad(data) {
                 </thead>
                 <tbody>
                     ${allPositions.map(p => {
-                        const expected = parseFloat(p.pnl_prediction?.expected_pnl || 0);
-                        const actual = parseFloat(p.unrealized_pnl || p.pnl || 0);
+                        const expected = parseFloat(p.entry_expected_pnl || 0);
+                        const actual = parseFloat(p.unrealized_pnl || 0);
                         const diff = expected !== 0 ? actual - expected : 0;
-                        const diffPct = expected !== 0 ? (diff / Math.abs(expected)) * 100 : 0;
-                        
-                        // Progreso visual
-                        let progressBar = '';
-                        if (p.status === 'open' && p.take_profit && p.entry_price) {
-                            const tp = parseFloat(p.take_profit);
-                            const entry = parseFloat(p.entry_price);
-                            const cur = parseFloat(p.current_price || entry);
-                            const pct = Math.min(100, Math.max(0, ((cur - entry) / (tp - entry)) * 100));
-                            progressBar = `<div class="mini-progress"><div class="mini-fill" style="width:${pct}%"></div></div>`;
-                        } else if (p.status === 'closed') {
-                            progressBar = '<span class="badge-closed">✓ Cerrado</span>';
-                        }
+                        const progress = p.entry_expectation_progress_pct;
+                        const width = progress == null ? 0 : Math.min(100, Math.max(0, progress));
+                        const progressBar = progress == null
+                            ? '<span class="accuracy-none">Sin expectativa</span>'
+                            : `<div class="mini-progress" title="${progress.toFixed(0)}% del PnL esperado"><div class="mini-fill" style="width:${width}%"></div></div><small>${progress.toFixed(0)}%</small>`;
                         
                         const _evMeta = p.metadata || {};
                         const _evEscIdx = _evMeta.escalonamiento_index;
@@ -1540,7 +1609,7 @@ function renderExpectativaVsRealidad(data) {
                             ? ` <span class="badge-esc" title="Escalamiento ${_evEscIdx}/${_evEscTotal || _evEscIdx}">+${_evEscIdx}</span>`
                             : '';
                         return `<tr>
-                            <td><strong>${p.symbol}</strong>${_evEscBadge} <small class="status-${p.status}">${p.status === 'open' ? '🟢' : '⚫'}</small></td>
+                            <td><strong>${p.symbol}</strong>${_evEscBadge} <small class="status-open">🟢</small></td>
                             <td class="${expected >= 0 ? 'positive' : 'negative'}">${expected >= 0 ? '+' : ''}${fmt(expected)}</td>
                             <td>${progressBar}</td>
                             <td class="${actual >= 0 ? 'positive' : 'negative'}">${actual >= 0 ? '+' : ''}${fmt(actual)}</td>
@@ -1551,12 +1620,48 @@ function renderExpectativaVsRealidad(data) {
             </table>
         </div>
         <div class="expectativa-explain">
-            <small>🧠 <strong>¿Qué es "PnL Pred."?</strong> Es lo que el modelo de IA esperaba ganar/perder al momento de comprar, basado en indicadores técnicos. Compara con el resultado real para medir precisión.</small>
+            <small>🧠 <strong>¿Qué es "PnL Pred."?</strong> Es lo que el modelo esperaba al abrir. Esta vista usa exclusivamente el PnL no realizado actual de cada posición abierta.</small>
         </div>
     `;
 }
 
-// ── Card: Auditoría VolSpike Override ─────────────────────────────────────────
+function renderSelectionObservability(data) {
+    const el = document.getElementById('selectionObservabilityData');
+    if (!el) return;
+    if (!data?.available) {
+        el.innerHTML = '<p class="loading">La observabilidad estará disponible después de la próxima migración y ciclo.</p>';
+        return;
+    }
+    const latest = data.latest_cycle || {};
+    const candidates = data.candidates || [];
+    const stages = data.stage_counts || {};
+    const reasons = data.reason_counts || {};
+    const reasonRows = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    const formatTime = value => value ? new Date(value).toLocaleString('es-MX', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' }) : '—';
+    const stageText = { predicted: 'Predicho', qubo_selected: 'QUBO', qubo_excluded: 'QUBO excluyó', rejected: 'Bloqueado', executed: 'Abierto' };
+    el.innerHTML = `
+        <div class="selection-summary">
+            <div><span>Último ciclo</span><strong>${formatTime(latest.started_at)}</strong></div>
+            <div><span>Modo / Perfil</span><strong>${latest.regime_mode || '—'} ${latest.profile_label ? `· ${latest.profile_label}` : ''}</strong></div>
+            <div><span>Candidatos</span><strong>${latest.candidate_count ?? 0} → ${latest.selected_count ?? 0} → ${latest.executed_count ?? 0}</strong></div>
+            <div><span>Bloqueo principal</span><strong>${data.dominant_reason || 'Sin bloqueos'}</strong></div>
+        </div>
+        <div class="selection-stages">
+            ${Object.entries(stages).map(([stage, count]) => `<span class="selection-stage stage-${stage}">${stageText[stage] || stage}: ${count}</span>`).join('') || '<span class="selection-stage">Sin candidatos en este periodo</span>'}
+        </div>
+        ${reasonRows.length ? `<div class="selection-reasons">${reasonRows.map(([reason, count]) => `<span title="${reason}">${reason}: <b>${count}</b></span>`).join('')}</div>` : ''}
+        <div class="selection-history">
+            ${candidates.slice(0, 8).map(candidate => `
+                <div class="selection-row">
+                    <strong>${candidate.symbol || '—'}</strong>
+                    <span>${candidate.trade_type === 'futures' ? 'FUT' : 'SPOT'}</span>
+                    <span>${stageText[candidate.stage] || candidate.stage || '—'}</span>
+                    <span class="${parseFloat(candidate.expected_pnl || 0) >= 0 ? 'positive' : 'negative'}">${candidate.expected_pnl == null ? 'EV —' : `EV ${parseFloat(candidate.expected_pnl).toFixed(2)}`}</span>
+                    <span title="${candidate.reason || ''}">${candidate.reason || 'Pendiente'}</span>
+                </div>`).join('') || '<p class="loading">Sin candidatos persistidos aún.</p>'}
+        </div>`;
+}
+
 async function renderVolSpikeAudit() {
     const el = document.getElementById('volSpikeAuditData');
     if (!el) return;
@@ -1698,6 +1803,10 @@ function showPositionDetailModal(symbol, positionId, status) {
         ? Math.max(..._modalEntries.map(e => e.escalonamiento_index || 1)) : 1;
     const _showEscTable = _modalEntries.length > 1 || _modalMaxIdx >= 2;
     const _contextBadge = fmtContextBadge(position);
+    const _profileBadge = fmtProfileBadge(position);
+    const _modeBadge = fmtModeBadge(position);
+    const _peakTuningBadges = fmtPeakTuningBadges(position);
+    const _ep = position.exit_policy_params || {};
     const _escTableHtml = _showEscTable ? (() => {
         const _knownModalIdx = new Set(_modalEntries.map(e => e.escalonamiento_index || 1));
         const totalCost = _modalEntries.reduce((s, e) => s + parseFloat(e.entry_price||0)*parseFloat(e.qty||0), 0);
@@ -1771,7 +1880,18 @@ function showPositionDetailModal(symbol, positionId, status) {
                             <div><label>Cantidad:</label><span>${fmt(position.quantity, 4)}</span></div>
                             <div><label>Invertido:</label><span>$${fmt(position.invested_usdt || (position.entry_price * position.quantity))} USDT</span></div>
                             <div><label>Apertura:</label><span>${fmtModalDate(position.entry_time)}</span></div>
+                            <div><label>Perfil:</label><span>${_profileBadge}</span></div>
+                            <div><label>Modo:</label><span>${_modeBadge}</span></div>
                             <div><label>Contexto:</label><span>${_contextBadge}</span></div>
+                        </div>
+                    </div>
+                    <div class="modal-section">
+                        <h4>🟠 PEAK MIMIC</h4>
+                        <div class="detail-grid">
+                            <div><label>Perfil señal:</label><span>${position.entry_peak_quality_profile || '—'} ${position.entry_peak_quality_score != null ? '(' + fmt(position.entry_peak_quality_score, 3) + ')' : ''}</span></div>
+                            <div><label>Perfil activo:</label><span>${position.entry_profile_label_for_display || position.entry_profile_label || '—'} ${position.entry_profile_label_for_display ? '(peak_quality_profile)' : ''}</span></div>
+                            <div><label>expected_gain:</label><span>${_ep.expected_gain_mult != null ? '×' + fmt(_ep.expected_gain_mult, 2) + (_ep.use_expected_gain_for_tp ? ' (TP activo)' : '') : '—'}</span></div>
+                            <div><label>time_stop:</label><span>${_ep.time_stop_hours != null ? fmt(_ep.time_stop_hours, 1) + 'h' : '—'}</span></div>
                         </div>
                     </div>
                     ${_escTableHtml}
@@ -2430,6 +2550,10 @@ function showFuturesDetailModal(symbol, side) {
         ? '<span style="color:#9b59b6;font-weight:700">▼ SHORT</span>'
         : '<span style="color:#27ae60;font-weight:700">▲ LONG</span>';
     const contextBadge = fmtContextBadge(pos);
+    const profileBadge = fmtProfileBadge(pos);
+    const modeBadge = fmtModeBadge(pos);
+    const peakTuningBadges = fmtPeakTuningBadges(pos);
+    const _ep = pos.exit_policy_params || {};
     modal.innerHTML = `
         <div class="modal-overlay" onclick="closePositionDetailModal()">
             <div class="modal-content" onclick="event.stopPropagation()">
@@ -2445,7 +2569,16 @@ function showFuturesDetailModal(symbol, side) {
                             <div><label>Lado:</label><span>${sideLabel}</span></div>
                             <div><label>Cantidad:</label><span>${parseFloat(pos.qty || 0).toFixed(4)}</span></div>
                             <div><label>Abierto:</label><span>${pos.opened_at ? relativeTime(pos.opened_at) : '—'}</span></div>
+                            <div><label>Perfil:</label><span>${profileBadge}</span></div>
+                            <div><label>Modo:</label><span>${modeBadge}</span></div>
                             <div><label>Contexto:</label><span>${contextBadge}</span></div>
+                        </div>
+                    </div>
+                    <div class="modal-section">
+                        <h4>🟠 PEAK MIMIC</h4>
+                        <div class="detail-grid">
+                            <div><label>expected_gain:</label><span>${_ep.expected_gain_mult != null ? '×' + fmt(_ep.expected_gain_mult, 2) + (_ep.use_expected_gain_for_tp ? ' (TP activo)' : '') : '—'}</span></div>
+                            <div><label>time_stop:</label><span>${_ep.time_stop_hours != null ? fmt(_ep.time_stop_hours, 1) + 'h' : '—'}</span></div>
                         </div>
                     </div>
                     <div class="modal-section">
@@ -4386,6 +4519,7 @@ async function updateDashboard() {
     renderProfitTracker(data.pnl_by_close_reason);
     renderOpenPositions(data.open_positions);
     renderExpectativaVsRealidad(data);
+    renderSelectionObservability(data.selection_observability);
     renderVolSpikeAudit();  // Auditoría VolSpike Override
     _syncFuturesUnrealPnl();  // Keep _futuresUnrealPnl fresh for KPI (no separate card)
     renderClosedPositions(data.closed_positions);

@@ -1,0 +1,38 @@
+{
+  "experiment_id": "sm_20260715_231743_b039a5",
+  "phase": "design",
+  "status": "designing",
+  "design": {
+    "mode": "SPOT_BULL",
+    "profile": "A",
+    "windows": [
+      "win_20260515_20260531",
+      "win_20260601_20260620",
+      "win_20260620_20260705"
+    ],
+    "engine": "mimic_sweep",
+    "strategy": "standard",
+    "max_cycles": null,
+    "max_workers": 1,
+    "param_grid": null,
+    "output_dir": "/app/Dev/benchmarks/super_mimic/sm_20260715_231743_b039a5"
+  },
+  "engine_results": {
+    "engine": "",
+    "summary": {},
+    "recommendations": [],
+    "results": [],
+    "report_path": null,
+    "results_path": null,
+    "status_path": null
+  },
+  "metrics": {},
+  "fingerprint": {},
+  "landscape": {},
+  "recommended_config": {},
+  "deploy_gate": {},
+  "created_at": "2026-07-15T23:17:43.385898+00:00",
+  "completed_at": null,
+  "error": null,
+  "log_tail": []
+}

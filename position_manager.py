@@ -27,6 +27,9 @@ def _parse_exit_time(t) -> datetime:
 
 logger = logging.getLogger(__name__)
 
+# Treat residual quantities below this threshold as zero / full close.
+_QTY_EPS = 1e-9
+
 
 @dataclass
 class Position:
@@ -144,6 +147,19 @@ class PositionManager:
                     indicators_at_entry=row.get('indicators_at_entry'),
                     db_id=row.get('id')
                 )
+                # Ignore and clean up stale rows left by partial closes with zero residual qty.
+                if float(position.quantity or 0) <= _QTY_EPS:
+                    logger.warning(
+                        f"Removing stale zero-quantity open position {position.symbol} (id={row.get('id')})"
+                    )
+                    if self.db_client and row.get('id'):
+                        try:
+                            self.db_client.execute_update(
+                                "DELETE FROM trades_open WHERE id = %s", (row['id'],)
+                            )
+                        except Exception as _del_err:
+                            logger.warning(f"Could not delete stale row {row.get('id')}: {_del_err}")
+                    continue
                 if position.symbol not in self._open_positions:
                     self._open_positions[position.symbol] = []
                 self._open_positions[position.symbol].append(position)
@@ -230,7 +246,8 @@ class PositionManager:
             )
             position.metadata.setdefault(
                 'profile_at_entry',
-                position.metadata.get('entry_profile_label')
+                position.metadata.get('peak_quality_profile')
+                or position.metadata.get('entry_profile_label')
                 or position.metadata.get('profile_label')
                 or position.metadata.get('current_profile_label'),
             )
@@ -369,6 +386,20 @@ class PositionManager:
                         indicators_at_entry=row.get('indicators_at_entry'),
                         db_id=row.get('id')
                     )
+                    # Ignore and clean up stale rows where a partial close left
+                    # an effectively zero quantity still marked as OPEN.
+                    if float(position.quantity or 0) <= _QTY_EPS:
+                        logger.warning(
+                            f"Removing stale zero-quantity open position {position.symbol} (id={row.get('id')})"
+                        )
+                        if self.db_client and row.get('id'):
+                            try:
+                                self.db_client.execute_update(
+                                    "DELETE FROM trades_open WHERE id = %s", (row['id'],)
+                                )
+                            except Exception as _del_err:
+                                logger.warning(f"Could not delete stale row {row.get('id')}: {_del_err}")
+                        continue
                     if position.symbol not in self._open_positions:
                         self._open_positions[position.symbol] = []
                     self._open_positions[position.symbol].append(position)
@@ -747,6 +778,11 @@ class PositionManager:
         _closed_qty = float(qty_closed) if qty_closed is not None else full_qty
         _closed_qty = min(_closed_qty, full_qty)
         _is_partial = _closed_qty < full_qty
+
+        # Floating-point residuals that round to zero must not remain as OPEN rows.
+        if _is_partial and (full_qty - _closed_qty) <= max(_QTY_EPS, full_qty * _QTY_EPS):
+            _closed_qty = full_qty
+            _is_partial = False
 
         # Allocate entry commission proportionally for partial closes
         _entry_comm_total = float(target.entry_commission or 0)

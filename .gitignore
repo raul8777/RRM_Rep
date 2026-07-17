@@ -11,3 +11,11 @@ Dev/benchmarks/mimic_schedule.json
 Dev/benchmarks/mimic_universe_queue.json
 Dev/benchmarks/mimic_data_audit.json
 Dev/benchmarks/mimic_download_report.json
+# Large files (>100MB) — excluded from GitHub
+Dev/benchmarks/peaks_dataset/peaks_all.jsonl
+Dev/benchmarks/peaks_dataset/peaks_all.parquet
+Dev/benchmarks/peaks_dataset/peaks_all_old.jsonl
+Dev/benchmarks/peaks_dataset/peak_quality_model/*.pkl
+Dev/benchmarks/peaks_dataset/sample_phase1.parquet
+Dev/benchmarks/mimic_sweep_peak_quality_full.log
+*.log.gz

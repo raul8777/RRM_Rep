@@ -1,0 +1,6 @@
+{
+  "min_signal_strength": [0.65, 0.70],
+  "min_success_probability": [0.66, 0.70],
+  "kelly_max_usdt": [3000, 3500],
+  "max_positions_spot_bull": [3, 5]
+}

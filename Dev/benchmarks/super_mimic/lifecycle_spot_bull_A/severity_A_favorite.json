@@ -1,0 +1,98 @@
+{
+  "mode": "SPOT_BULL",
+  "profile": "A",
+  "phase": "A-favorite",
+  "thresholds": {
+    "min_profit_factor": 1.05,
+    "min_win_rate": 0.45,
+    "max_drawdown_pct": 15.0,
+    "max_sl_rate": 0.4,
+    "min_pnl_per_day_usdt": 0.0,
+    "min_trades": 3
+  },
+  "summary": {
+    "total_windows": 3,
+    "passed": 3,
+    "failed": 0
+  },
+  "passed_windows": [
+    "win_20260303_20260317",
+    "win_20260401_20260415",
+    "win_20260501_20260515"
+  ],
+  "failed_windows": [],
+  "window_details": [
+    {
+      "window_id": "win_20260303_20260317",
+      "passed": true,
+      "reasons": [],
+      "sl_rate": 0.0,
+      "best": {
+        "window_id": "win_20260303_20260317",
+        "profile": "A",
+        "params": {
+          "min_signal_strength": 0.45,
+          "min_success_probability": 0.5,
+          "max_total_positions": 12,
+          "max_per_trade_usdt": 1500,
+          "kelly_max_pct": 0.22
+        },
+        "profit_factor": 2.8567,
+        "win_rate": 0.5862,
+        "max_drawdown_pct": 1.196,
+        "pnl_per_day_usdt": 6.37,
+        "trades": 41,
+        "pnl_usdt": 39.83,
+        "sharpe": 5.1276
+      }
+    },
+    {
+      "window_id": "win_20260401_20260415",
+      "passed": true,
+      "reasons": [],
+      "sl_rate": 0.0,
+      "best": {
+        "window_id": "win_20260401_20260415",
+        "profile": "A",
+        "params": {
+          "min_signal_strength": 0.45,
+          "min_success_probability": 0.5,
+          "max_total_positions": 10,
+          "max_per_trade_usdt": 1500,
+          "kelly_max_pct": 0.22
+        },
+        "profit_factor": 2.638,
+        "win_rate": 0.6667,
+        "max_drawdown_pct": 0.5428,
+        "pnl_per_day_usdt": 1.54,
+        "trades": 51,
+        "pnl_usdt": 9.61,
+        "sharpe": 4.9959
+      }
+    },
+    {
+      "window_id": "win_20260501_20260515",
+      "passed": true,
+      "reasons": [],
+      "sl_rate": 0.0,
+      "best": {
+        "window_id": "win_20260501_20260515",
+        "profile": "A",
+        "params": {
+          "min_signal_strength": 0.45,
+          "min_success_probability": 0.5,
+          "max_total_positions": 12,
+          "max_per_trade_usdt": 1500,
+          "kelly_max_pct": 0.22
+        },
+        "profit_factor": 23.988,
+        "win_rate": 0.9545,
+        "max_drawdown_pct": 0.526,
+        "pnl_per_day_usdt": 7.07,
+        "trades": 30,
+        "pnl_usdt": 44.18,
+        "sharpe": 11.9
+      }
+    }
+  ]
+}

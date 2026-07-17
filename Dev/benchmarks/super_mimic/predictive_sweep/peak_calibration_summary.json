@@ -1,0 +1,50 @@
+{
+  "total_signals": 15533,
+  "classification_rule": "A>=0.05 B>=0.025 C>=0.01 else REJECT",
+  "regimes": {
+    "RANGE_SCALP": {
+      "counts": {
+        "A": 993,
+        "B": 2803,
+        "C": 3719,
+        "REJECT": 3646
+      }
+    },
+    "SPOT_BULL": {
+      "counts": {
+        "A": 315,
+        "B": 849,
+        "C": 1281,
+        "REJECT": 1927
+      }
+    }
+  },
+  "proposed_thresholds": {
+    "RANGE_SCALP": {
+      "peak_quality": {
+        "A_min": -0.0556,
+        "B_min": -0.4272,
+        "C_min": -0.92
+      },
+      "percentile_recommendation": {
+        "A": "score >= p85",
+        "B": "score p50-p85",
+        "C": "score p15-p50",
+        "REJECT": "score < p15"
+      }
+    },
+    "SPOT_BULL": {
+      "peak_quality": {
+        "A_min": -0.2123,
+        "B_min": -0.3742,
+        "C_min": -0.8444
+      },
+      "percentile_recommendation": {
+        "A": "score >= p85",
+        "B": "score p50-p85",
+        "C": "score p15-p50",
+        "REJECT": "score < p15"
+      }
+    }
+  }
+}

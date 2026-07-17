@@ -90,8 +90,9 @@ def test_spot_bull_allows_moderate_volume_with_tuned_floor():
 
 
 def test_spot_bull_rejects_overbought():
+    # vol_spike below breakout threshold (1.20) to avoid breakout bypass
     ok, reason = _check_entry_quality(
-        "TESTUSDT", _meta(rsi=75.0), SETTINGS, "SPOT_BULL", "B"
+        "TESTUSDT", _meta(rsi=75.0, vol_spike=0.90), SETTINGS, "SPOT_BULL", "B"
     )
     assert ok is False
     assert "SPOT_BULL_RSI" in reason
@@ -272,7 +273,8 @@ def test_quality_score_for_regime_changes_with_mode():
 
     fs_down = _quality_score_for_regime("FUTURES_SHORT", 0.05, -0.05, 0.50)
     fs_up = _quality_score_for_regime("FUTURES_SHORT", 0.05, 0.05, 0.50)
-    assert fs_down > fs_up
+    # FUTURES_SHORT prefers overbought bounces (positive signed) as short targets
+    assert fs_up > fs_down
 
 
 def test_filter_by_quality_is_mode_aware_across_four_modes():

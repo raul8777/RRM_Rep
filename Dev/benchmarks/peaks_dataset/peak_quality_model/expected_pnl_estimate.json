@@ -1,0 +1,142 @@
+{
+  "SPOT_BULL_LONG": {
+    "total_rows": 250784,
+    "selected_rows": 123057,
+    "coverage": 0.49068919867296157,
+    "weighted_peak_gain_pct": 1.866,
+    "avg_usd_selected": 1484.8,
+    "avg_net_gain_per_trade_pct": 0.74,
+    "avg_net_usd_per_trade": 10.98,
+    "buckets": {
+      "A": {
+        "n": 50588,
+        "mean_peak_gain_pct": 2.368,
+        "median_peak_gain_pct": 1.793,
+        "mean_net_gain_pct": 0.966,
+        "mean_net_usd": 24.14,
+        "precision_positive": 0.956
+      },
+      "B": {
+        "n": 21272,
+        "mean_peak_gain_pct": 0.984,
+        "median_peak_gain_pct": 0.906,
+        "mean_net_gain_pct": 0.343,
+        "mean_net_usd": 4.11,
+        "precision_positive": 0.881
+      },
+      "C": {
+        "n": 51197,
+        "mean_peak_gain_pct": 0.532,
+        "median_peak_gain_pct": 0.51,
+        "mean_net_gain_pct": 0.139,
+        "mean_net_usd": 0.84,
+        "precision_positive": 0.777
+      }
+    }
+  },
+  "RANGE_SCALP_LONG": {
+    "total_rows": 402472,
+    "selected_rows": 196632,
+    "coverage": 0.4885606949054841,
+    "weighted_peak_gain_pct": 1.709,
+    "avg_usd_selected": 1474.95,
+    "avg_net_gain_per_trade_pct": 0.669,
+    "avg_net_usd_per_trade": 9.87,
+    "buckets": {
+      "A": {
+        "n": 79959,
+        "mean_peak_gain_pct": 2.194,
+        "median_peak_gain_pct": 1.644,
+        "mean_net_gain_pct": 0.887,
+        "mean_net_usd": 22.18,
+        "precision_positive": 0.936
+      },
+      "B": {
+        "n": 33536,
+        "mean_peak_gain_pct": 0.842,
+        "median_peak_gain_pct": 0.768,
+        "mean_net_gain_pct": 0.279,
+        "mean_net_usd": 3.34,
+        "precision_positive": 0.833
+      },
+      "C": {
+        "n": 83137,
+        "mean_peak_gain_pct": 0.469,
+        "median_peak_gain_pct": 0.449,
+        "mean_net_gain_pct": 0.111,
+        "mean_net_usd": 0.67,
+        "precision_positive": 0.737
+      }
+    }
+  },
+  "PRESERVATION_LONG": {
+    "total_rows": 165953,
+    "selected_rows": 82066,
+    "coverage": 0.49451350683627293,
+    "weighted_peak_gain_pct": 2.217,
+    "avg_usd_selected": 1475.03,
+    "avg_net_gain_per_trade_pct": 0.897,
+    "avg_net_usd_per_trade": 13.24,
+    "buckets": {
+      "A": {
+        "n": 33540,
+        "mean_peak_gain_pct": 2.84,
+        "median_peak_gain_pct": 2.231,
+        "mean_net_gain_pct": 1.178,
+        "mean_net_usd": 29.45,
+        "precision_positive": 0.962
+      },
+      "B": {
+        "n": 13474,
+        "mean_peak_gain_pct": 1.117,
+        "median_peak_gain_pct": 1.096,
+        "mean_net_gain_pct": 0.403,
+        "mean_net_usd": 4.83,
+        "precision_positive": 0.889
+      },
+      "C": {
+        "n": 35052,
+        "mean_peak_gain_pct": 0.576,
+        "median_peak_gain_pct": 0.587,
+        "mean_net_gain_pct": 0.159,
+        "mean_net_usd": 0.96,
+        "precision_positive": 0.791
+      }
+    }
+  },
+  "FUTURES_SHORT_SHORT": {
+    "total_rows": 165983,
+    "selected_rows": 81285,
+    "coverage": 0.48971882662682326,
+    "weighted_peak_gain_pct": 2.446,
+    "avg_usd_selected": 1482.08,
+    "avg_net_gain_per_trade_pct": 1.061,
+    "avg_net_usd_per_trade": 15.72,
+    "buckets": {
+      "A": {
+        "n": 33598,
+        "mean_peak_gain_pct": 3.064,
+        "median_peak_gain_pct": 2.484,
+        "mean_net_gain_pct": 1.339,
+        "mean_net_usd": 33.47,
+        "precision_positive": 0.975
+      },
+      "B": {
+        "n": 13106,
+        "mean_peak_gain_pct": 1.366,
+        "median_peak_gain_pct": 1.329,
+        "mean_net_gain_pct": 0.575,
+        "mean_net_usd": 6.9,
+        "precision_positive": 0.941
+      },
+      "C": {
+        "n": 34581,
+        "mean_peak_gain_pct": 0.762,
+        "median_peak_gain_pct": 0.743,
+        "mean_net_gain_pct": 0.303,
+        "mean_net_usd": 1.82,
+        "precision_positive": 0.853
+      }
+    }
+  }
+}
