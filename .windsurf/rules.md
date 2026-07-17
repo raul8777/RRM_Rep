@@ -808,6 +808,14 @@ Kelly uniforme: $2500 max, KD=0.26, max_pct_liquid=0.90, conviction_max=0.30, MP
 - **Memoria**: `peak_signal_source` predice por batches de 100k-200k filas; no cargar todo `peaks_all.parquet` en memoria.
 - **Caveat**: el validador directo cierra en `peak_end_ts`, por lo que sus métricas son un **techo teórico/in-sample**. El lifecycle sweep mide la captura real con `ExitEngine`.
 
+### Tuning de `ExitPolicy` (resultado final jul 16 2026)
+
+- Config recomendada en `Dev/benchmarks/peak_lifecycle_tuning/best_exit_policy.json`.
+- Métrica objetivo: `pnl_per_day_usdt` medio sobre 12 ventanas, con deploy gate (`max_drawdown_pct < 15%`, `trades ≥ 3`, `profit_factor ≥ 1.0`).
+- Mejor config (fingerprint `1befaf86143c8295`): **PnL/día $20.18**, retorno **10.08%**, max DD **6.32%**, PF **1.33**.
+- Reglas nuevas implementadas: `use_expected_gain_for_tp` y `time_stop_hours` (perfil C lo usa; A y B principalmente confían en hard TP/trailing).
+- En `tune_peak_exit_policy.py`: default `--max-workers 10`; modo `--refine-from` para perturbaciones locales desde `tuning_report.json`.
+
 ### Decisiones de rollout
 
 1. No activar en producción hasta que el lifecycle sweep pase el deploy gate en ventanas representativas (`drawdown < 15%`, `PnL/día > 0`, `trades ≥ 3`).

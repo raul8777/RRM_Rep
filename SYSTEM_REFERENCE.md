@@ -1,7 +1,7 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 15 2026 | Kelly sizing más agresivo (piso $500, techo $2,500 SPOT; floor y techo ajustados FUTURES) + `kelly_min_usdt` / `futures_kelly_min_usdt`.
+> Última actualización: jul 16 2026 | Super MIMIC ExitPolicy tuning completado: `expected_gain` TP + `time_stop`, 151 configs evaluadas, 12 ventanas.
 
 ---
 
@@ -33,10 +33,26 @@ Validar el modelo `peak_quality` en su contexto nativo (eventos de pico de `peak
 - Super MIMIC sin inyección de picos no abría posiciones porque las señales continuas no alinean con eventos discretos de pico.
 - El ciclo de vida realista pierde buena parte del edge porque cierra por SL/TP/ATR y no en `peak_end_ts`.
 
+### Resultados del tuning de `ExitPolicy` (jul 16 2026)
+
+**Archivos generados**:
+- `Dev/scripts/tune_peak_exit_policy.py`: sweep principal + modo `--refine-from` para perturbaciones locales.
+- `Dev/scripts/analyze_peak_exit_tuning.py`: agregación y comparación vs `peak_mimic_report.json`.
+- `Dev/benchmarks/peak_lifecycle_tuning/tuning_results.jsonl`, `tuning_report.json`, `best_exit_policy.json`, `tuning_report.md`.
+
+**Métricas del mejor config (fingerprint `1befaf86143c8295`)**:
+- 151 configs evaluadas, 12 ventanas, sin fallos.
+- PnL/día medio: **$20.18**; retorno medio: **10.08%**; max DD medio: **6.32%**; PF: **1.33**; captura vs oracle: **0.46%**.
+- Pasó el deploy gate (`drawdown < 15%`, `PnL/día > 0`, `trades ≥ 3`, `PF ≥ 1.0`).
+
+**Mejor `ExitPolicy` por perfil (deliverable)**:
+- **A**: `hard_sl_atr_mult=3.69`, `hard_tp_atr_mult=6.75`, `trailing_activation_pct=1.87%`, `trailing_atr_mult=2.41`, `breakeven_activation_pct=1.34%`, `stagnation_min_hours=1`, `stagnation_max_drawdown_from_peak_pct=5.15%`, `momentum_rsi_overbought=85`, `momentum_rsi_oversold=16`, `momentum_fng_extreme_greed=80`, `momentum_fng_extreme_fear=21`, `partial_take_mode=none`, `use_expected_gain_for_tp=False`, `expected_gain_mult=0.50`, `time_stop_hours=22.97`.
+- **B**: `hard_sl_atr_mult=2.38`, `hard_tp_atr_mult=1.05`, `trailing_activation_pct=0.33%`, `trailing_atr_mult=2.01`, `breakeven_activation_pct=2.32%`, `stagnation_min_hours=11`, `stagnation_max_drawdown_from_peak_pct=6.94%`, `momentum_rsi_overbought=68`, `momentum_rsi_oversold=16`, `momentum_fng_extreme_greed=87`, `momentum_fng_extreme_fear=27`, `partial_take_mode=tp1_25_at_1.5_tp2_25_at_2.5`, `use_expected_gain_for_tp=False`, `expected_gain_mult=1.43`, `time_stop_hours=18.05`.
+- **C**: `hard_sl_atr_mult=1.04`, `hard_tp_atr_mult=4.21`, `trailing_activation_pct=1.66%`, `trailing_atr_mult=0.26`, `breakeven_activation_pct=0.16%`, `stagnation_min_hours=5`, `stagnation_max_drawdown_from_peak_pct=8.81%`, `momentum_rsi_overbought=83`, `momentum_rsi_oversold=17`, `momentum_fng_extreme_greed=78`, `momentum_fng_extreme_fear=18`, `partial_take_mode=tp1_25_at_1.5_tp2_25_at_2.5`, `use_expected_gain_for_tp=True`, `expected_gain_mult=0.79`, `time_stop_hours=7.94`.
+
 ### Próximos pasos
-1. Calibrar `ExitPolicy` para usar `expected_gain` (o múltiplo) como TP dinámico o añadir `time_stop` basado en `peak_end_dt`.
-2. Si se migra a producción, computar features `s_*` en `analyze_symbol` a partir de `klines` o re-entrenar con features disponibles en live.
-3. Ejecutar sweep más amplio (`lifecycle-quick` / `standard`) con ventanas representativas y validar deploy gate (`drawdown < 15%`, `PnL/día > 0`).
+1. Si se migra a producción, computar features `s_*` en `analyze_symbol` a partir de `klines` o re-entrenar con el subconjunto disponible en live.
+2. Evaluar si el tuning debe usarse como default en `predictive_spot_bull_config` o aplicarse vía overrides.
 
 ---
 

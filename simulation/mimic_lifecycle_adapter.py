@@ -382,6 +382,7 @@ class SimulationLifecycleAdapter:
         self.btc_feed = btc_feed or {}
         self.db_client = db_client
         self.category_resolver = category_resolver or (lambda s: _DEFAULT_CATEGORIES.get(s, "MIDCAP_ALT"))
+        self.entry_metadata: Dict[str, Dict[str, Any]] = {}
 
     def _current_price(self, symbol: str) -> Optional[float]:
         try:
@@ -460,7 +461,7 @@ class SimulationLifecycleAdapter:
                 category=self.category_resolver(symbol),
                 regime_at_entry=config.regime,
                 profile_at_entry=config.profile,
-                metadata={"trade_type": "spot"},
+                metadata={"trade_type": "spot", **self.entry_metadata.get(symbol, {})},
             ))
         return positions
 
@@ -471,6 +472,10 @@ class SimulationLifecycleAdapter:
         side = "BUY" if entry.signal.side == Side.LONG else "SELL"
         qty = trade.quantity
         result = self.spot_client.create_market_order(symbol=symbol, side=side, quantity=qty)
+        expected_peak_return = entry.signal.features.get("peak_quality", entry.signal.expected_pnl / 100.0 if entry.signal.expected_pnl else 0.0)
+        self.entry_metadata[symbol] = {
+            "expected_peak_return": float(expected_peak_return) if expected_peak_return is not None else 0.0,
+        }
         return {"filled": True, "price": price, "raw": result}
 
     def execute_exit(self, decision: ExitDecision, position: Position, config: LifecycleConfig) -> Dict:

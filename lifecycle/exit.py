@@ -62,11 +62,13 @@ class ExitEngine:
 
             candidates = []
             candidates.extend(self._hard_sl_tp(pos, price, atr, policy, now))
+            candidates.extend(self._expected_gain_tp(pos, price, policy, now))
             candidates.extend(self._trailing_stop(pos, price, atr, policy, now))
             candidates.extend(self._breakeven_stop(pos, price, atr, policy, now))
             candidates.extend(self._partial_takes(pos, price, atr, policy, now))
             candidates.extend(self._momentum_exit(pos, price, rsi, ctx, policy, now))
             candidates.extend(self._stagnation(pos, price, policy, now))
+            candidates.extend(self._time_stop(pos, policy, now))
 
             if not candidates:
                 decisions.append(ExitDecision.hold(pos.symbol))
@@ -102,6 +104,38 @@ class ExitEngine:
 
     def _hours_held(self, pos: Position, now: float) -> float:
         return (now - pos.entry_time) / 3600.0
+
+    def _expected_gain_tp(
+        self,
+        pos: Position,
+        price: float,
+        policy: ExitPolicy,
+        now: float,
+    ) -> List[ExitDecision]:
+        """Close when the position reaches the predicted peak return."""
+        if not policy.use_expected_gain_for_tp:
+            return []
+        expected = pos.metadata.get("expected_peak_return")
+        if expected is None or float(expected) <= 0:
+            return []
+        target = float(expected) * float(policy.expected_gain_mult)
+        pnl_pct = self._pnl_pct(pos, price)
+        if pnl_pct >= target:
+            return [ExitDecision.close_all(pos.symbol, "expected gain TP", 92)]
+        return []
+
+    def _time_stop(
+        self,
+        pos: Position,
+        policy: ExitPolicy,
+        now: float,
+    ) -> List[ExitDecision]:
+        """Hard maximum holding-time stop."""
+        if policy.time_stop_hours is None or policy.time_stop_hours <= 0:
+            return []
+        if self._hours_held(pos, now) >= policy.time_stop_hours:
+            return [ExitDecision.close_all(pos.symbol, "time stop", 94)]
+        return []
 
     def _hard_sl_tp(
         self,

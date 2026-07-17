@@ -116,6 +116,9 @@ class ExitPolicy:
     partial_takes: Tuple[PartialTake, ...]
     momentum_exit: MomentumExitRule
     stagnation_rule: StagnationRule
+    use_expected_gain_for_tp: bool = False
+    expected_gain_mult: float = 1.0
+    time_stop_hours: Optional[float] = None
 
 
 @dataclass(frozen=True)
