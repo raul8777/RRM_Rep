@@ -98,6 +98,18 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'entry_quality_vol_spike_min_range_scalp': 0.35,  # s72: lateral = low vol structural; lower floor
     'sso_target_contribution_pct_range_scalp': 0.05,  # s73 C2: 5% of half-target — achievable at TP=1.8%
 
+    # Bayesian evidence gate (calibrated by shadow-log sweep; enabled 2026-07-18)
+    'evidence_gate_enabled': True,
+    'evidence_gate_min_posterior': 0.65,
+    'evidence_gate_prior': 0.50,
+    # Calibrated thresholds from the shadow-log sweep (2026-07-18).
+    'evidence_gate_min_posterior_per_regime': {
+        'SPOT_BULL': 0.60,
+        'FUTURES_SHORT': 0.80,
+        'RANGE_SCALP': 0.52,
+        'PRESERVATION': 0.80,
+    },
+
     # Exposure / regime
     'max_total_exposure_pct': 0.90,
     'max_positions_spot_bull': 5,

@@ -12,6 +12,7 @@ import argparse
 import itertools
 import json
 import logging
+import fcntl
 import os
 import sys
 import traceback
@@ -24,6 +25,7 @@ repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 sys.path.insert(0, repo_root)
 
 from config import get_settings
+from market_regime import MarketRegime
 from simulation.mimic_runner import SimulationRunner
 from simulation.mimic_lifecycle_adapter import run_lifecycle_simulation
 from simulation.mimic_cache import get_cache as _get_sweep_cache
@@ -35,6 +37,9 @@ _DEFAULT_WINDOWS_DIR = os.path.join(repo_root, "Dev", "benchmarks", "windows")
 _DEFAULT_STATUS_PATH = os.path.join(repo_root, "Dev", "benchmarks", "mimic_sweep_status.json")
 _DEFAULT_REPORT_PATH = os.path.join(repo_root, "Dev", "benchmarks", "mimic_sweep_report.json")
 _DEFAULT_RESULTS_PATH = os.path.join(repo_root, "Dev", "benchmarks", "mimic_sweep_results.jsonl")
+_DEFAULT_SHADOW_LOG_PATH = os.path.join(repo_root, "Dev", "benchmarks", "evidence_gate_shadow_log.jsonl")
+
+SHADOW_LOG_PATH = _DEFAULT_SHADOW_LOG_PATH
 
 _logger: Optional[logging.Logger] = None
 
@@ -361,6 +366,231 @@ def _check_early_stop(
     return False
 
 
+# Local copy of the calibrated posterior model path (kept in sync with run_trades.py).
+_EVIDENCE_GATE_CALIBRATION_PATH = os.path.join(
+    repo_root, "Dev", "benchmarks", "forced_regime_sweep", "calibration", "evidence_gate_calibration.json"
+)
+_calibrated_posterior_model: Optional[Dict[str, Any]] = None
+
+
+def _load_calibrated_posterior_model() -> Dict[str, Any]:
+    """Load (and cache) the per-regime logistic posterior calibration."""
+    global _calibrated_posterior_model
+    if _calibrated_posterior_model is None:
+        try:
+            with open(_EVIDENCE_GATE_CALIBRATION_PATH, "r") as _f:
+                _calibrated_posterior_model = json.load(_f).get("posterior_model", {})
+        except Exception:
+            _calibrated_posterior_model = {}
+    return _calibrated_posterior_model or {}
+
+
+def _evidence_gate_posterior(
+    cand: Dict[str, Any],
+    signal_meta: Dict[str, Any],
+    settings,
+    regime_mode: str,
+    active_profile_label: Optional[str] = None,
+) -> float:
+    """Local copy of the calibrated Bayesian posterior used for shadow logging.
+
+    Keep in sync with run_trades.py::_evidence_gate_posterior.
+    """
+    import math
+
+    prior = float(getattr(settings, "evidence_gate_prior", 0.50))
+    symbol = cand.get("symbol", "")
+    meta = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
+
+    prob = float(
+        cand.get("predictor_prob")
+        or cand.get("success_probability")
+        or meta.get("predictor_prob")
+        or meta.get("success_probability")
+        or prior
+    )
+    prob = max(0.001, min(0.999, prob))
+
+    calibration = _load_calibrated_posterior_model().get(regime_mode)
+    if calibration:
+        ev = float(
+            cand.get("predictor_ev")
+            or cand.get("expected_pnl")
+            or meta.get("predictor_ev")
+            or meta.get("expected_pnl")
+            or 0.0
+        )
+        logit = math.log(prob / (1.0 - prob))
+        z = (
+            calibration["intercept"]
+            + calibration["logit_coef"] * logit
+            + calibration["ev_coef"] * ev
+        )
+        z = max(-20.0, min(20.0, z))
+        posterior = 1.0 / (1.0 + math.exp(-z))
+        return max(0.0, min(1.0, posterior))
+
+    pq_profile = cand.get("peak_quality_profile") or meta.get("peak_quality_profile")
+    pq_mult = {"A": 1.25, "B": 1.0, "C": 0.85, "discarded": 0.0}.get(pq_profile, 1.0)
+
+    strength = float(cand.get("signal_strength") or meta.get("signal_strength") or 0.5)
+    strength_mult = 0.5 + strength
+
+    log_odds = math.log(prob / (1.0 - prob)) - math.log(prior / (1.0 - prior))
+    log_likelihood = math.log(max(0.01, pq_mult * strength_mult))
+    posterior_log_odds = math.log(prior / (1.0 - prior)) + log_odds + log_likelihood
+    posterior = 1.0 / (1.0 + math.exp(-posterior_log_odds))
+    return max(0.0, min(1.0, posterior))
+
+
+def _pop_matching_entry(open_entries: Dict[str, List[Dict[str, Any]]], symbol: str, side: str) -> Optional[Dict[str, Any]]:
+    """Pop the earliest unmatched entry for a symbol and side (fallback to any side)."""
+    entries = open_entries.get(symbol, [])
+    for i, e in enumerate(entries):
+        if e.get("side") == side:
+            return entries.pop(i)
+    # If only one entry exists, use it regardless of side (legacy/single-position cases).
+    if len(entries) == 1:
+        return entries.pop(0)
+    return None
+
+
+def _unrealized_pnl(entry_rec: Dict[str, Any], spot_client, futures_client) -> float:
+    """Compute unrealized PnL for a leftover open entry at current market price."""
+    meta = entry_rec.get("entry_metadata", {})
+    symbol = entry_rec.get("symbol")
+    side = entry_rec.get("side", "BUY")
+    entry_price = meta.get("entry_price")
+    qty = meta.get("qty") or meta.get("quantity")
+    if not symbol or entry_price is None or qty is None:
+        return 0.0
+    try:
+        if side in ("SHORT_FUTURES", "LONG_FUTURES"):
+            current_price = futures_client.get_symbol_price(symbol)
+        else:
+            current_price = spot_client.get_symbol_price(symbol)
+    except Exception:
+        current_price = 0.0
+    if current_price <= 0:
+        return 0.0
+    if side == "SHORT_FUTURES":
+        return float(qty) * (float(entry_price) - float(current_price))
+    return float(qty) * (float(current_price) - float(entry_price))
+
+
+def _build_shadow_records(
+    raw_result: Dict[str, Any],
+    runner: "SimulationRunner",
+    settings,
+    window_id: str,
+    profile: str,
+    forced_regime: Optional[str],
+    threshold: float,
+) -> List[Dict[str, Any]]:
+    """Build per-operation shadow records linking entry posterior to realized/unrealized PnL."""
+    records: List[Dict[str, Any]] = []
+    open_entries: Dict[str, List[Dict[str, Any]]] = {}
+    for cycle_idx, r in enumerate(raw_result.get("results", [])):
+        res = r.get("result", {})
+        # Record new entries with their posterior.
+        for bo in res.get("buy_orders", []) or []:
+            meta = bo.get("entry_metadata")
+            if not meta:
+                continue
+            side = bo.get("side", "BUY")
+            # Capture entry price/qty from the order for end-of-window PnL.
+            qty = bo.get("qty") or bo.get("quantity")
+            entry_price = bo.get("entry_price")
+            # For simulated spot orders the fill price is inside order["fills"].
+            if not entry_price and side == "BUY":
+                order = bo.get("order", {}) or {}
+                fills = order.get("fills") or []
+                if fills:
+                    total_qty = sum(float(f.get("qty", 0)) for f in fills)
+                    if total_qty > 0:
+                        entry_price = sum(float(f.get("price", 0)) * float(f.get("qty", 0)) for f in fills) / total_qty
+                if not entry_price:
+                    entry_price = order.get("price")
+            meta["entry_price"] = entry_price or meta.get("entry_price")
+            meta["qty"] = qty or meta.get("qty")
+            regime = forced_regime or meta.get("regime_mode", "UNKNOWN")
+            active_profile = meta.get("profile_label") or profile
+            try:
+                posterior = _evidence_gate_posterior(meta, {}, settings, regime, active_profile)
+            except Exception:
+                posterior = None
+            entry_rec = {
+                "window_id": window_id,
+                "profile": profile,
+                "forced_regime": forced_regime,
+                "threshold": threshold,
+                "symbol": bo.get("symbol"),
+                "side": side,
+                "entry_cycle": cycle_idx,
+                "posterior": posterior,
+                "entry_metadata": meta,
+            }
+            open_entries.setdefault(bo.get("symbol"), []).append(entry_rec)
+        # Spot closes
+        for close in res.get("sl_tp_closes", []) or []:
+            symbol = close.get("symbol")
+            entry = _pop_matching_entry(open_entries, symbol, "BUY")
+            if entry:
+                rec = dict(entry)
+                rec.update({
+                    "exit_cycle": cycle_idx,
+                    "exit_reason": close.get("reason", close.get("close_reason", "sl_tp")),
+                    "pnl_usdt": close.get("pnl_usdt", close.get("pnl", 0.0)),
+                    "pnl_pct": close.get("pnl_pct", None),
+                })
+                records.append(rec)
+        # Futures closes
+        for fc in res.get("futures_closes", []) or []:
+            symbol = fc.get("symbol")
+            entry = (
+                _pop_matching_entry(open_entries, symbol, "SHORT_FUTURES")
+                or _pop_matching_entry(open_entries, symbol, "LONG_FUTURES")
+            )
+            if entry:
+                rec = dict(entry)
+                pnl = 0.0
+                if isinstance(fc.get("result"), dict):
+                    pnl = fc["result"].get("pnl_usdt", fc["result"].get("pnl", 0.0))
+                else:
+                    pnl = fc.get("pnl_usdt", fc.get("pnl", 0.0))
+                rec.update({
+                    "exit_cycle": cycle_idx,
+                    "exit_reason": fc.get("reason", "futures_close"),
+                    "pnl_usdt": pnl,
+                    "pnl_pct": None,
+                })
+                records.append(rec)
+    # End-of-window unrealized PnL for positions still open.
+    for symbol, entries in open_entries.items():
+        for entry in entries:
+            rec = dict(entry)
+            rec.update({
+                "exit_cycle": len(raw_result.get("results", [])),
+                "exit_reason": "window_end_unrealized",
+                "pnl_usdt": _unrealized_pnl(entry, runner.spot_client, runner.futures_client),
+                "pnl_pct": None,
+            })
+            records.append(rec)
+    return records
+
+
+def _append_shadow_log(records: List[Dict[str, Any]], shadow_log_path: str) -> None:
+    """Append shadow records to a shared JSONL file with an exclusive lock."""
+    if not records:
+        return
+    os.makedirs(os.path.dirname(shadow_log_path), exist_ok=True)
+    with open(shadow_log_path, "a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        for rec in records:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def _run_single_config(
     window: Dict[str, Any],
     profile: str,
@@ -372,11 +602,38 @@ def _run_single_config(
     lifecycle_config_factory: Optional[Callable] = None,
     peak_signal_mode: bool = False,
     peak_entry_schedule: Optional[List[Dict[str, Any]]] = None,
+    forced_regime: Optional[str] = None,
+    shadow_log: bool = False,
 ) -> Dict[str, Any]:
     if _logger is None:
         _configure_logging(_DEFAULT_LOG_PATH)
-    _logger.info("Running window=%s profile=%s lifecycle=%s params=%s", window.get("window_id"), profile, lifecycle, params)
+    _logger.info("Running window=%s profile=%s lifecycle=%s forced_regime=%s params=%s", window.get("window_id"), profile, lifecycle, forced_regime, params)
     _clear_global_caches()
+
+    # Force a specific regime for calibration by overriding market_regime.get_regime.
+    _orig_get_regime = None
+    if forced_regime:
+        import market_regime as _mr_module
+        _orig_get_regime = _mr_module.get_regime
+        _mr_module._cache = {"regime": None, "ts": 0.0, "pending_mode": None, "pending_count": 0}
+
+        def _forced_get_regime(*args, **kwargs):
+            return MarketRegime(
+                mode=forced_regime,
+                regime="FORZADO",
+                color="#888888",
+                btc_7d_pct=0.0,
+                btc_30d_pct=0.0,
+                btc_day_pct=0.0,
+                vol_ratio=1.0,
+                bb_bandwidth=0.05,
+                ema9_vs_ema21="FLAT",
+                confirmed=True,
+                reason=f"forced regime for sweep ({forced_regime})",
+                confidence=1.0,
+            )
+
+        _mr_module.get_regime = _forced_get_regime
 
     _all_symbols = window.get("symbols", []) or window.get("baseline_symbols", [])
     _data_dir = os.path.join(repo_root, "historical_data")
@@ -428,6 +685,12 @@ def _run_single_config(
             peak_entry_schedule=peak_entry_schedule,
         )
         metrics = _derive_metrics(raw_result.get("results", []), initial_usdt_val)
+        if shadow_log:
+            threshold = (params.get("evidence_gate_min_posterior_per_regime") or {}).get(forced_regime, params.get("evidence_gate_min_posterior", 0.0))
+            shadow_records = _build_shadow_records(
+                raw_result, runner, settings, window.get("window_id"), profile, forced_regime, threshold
+            )
+            _append_shadow_log(shadow_records, SHADOW_LOG_PATH)
         return {
             "window_id": window.get("window_id"),
             "window_start": window["start"],
@@ -437,6 +700,7 @@ def _run_single_config(
             "profile_overrides": profile_overrides,
             "early_stopped": False,
             "lifecycle": True,
+            "forced_regime": forced_regime,
             **metrics,
             "lifecycle_raw": raw_result.get("results", []),
         }
@@ -556,6 +820,12 @@ def _run_single_config(
         "transitions": runner._transition_log,
     }
     metrics = _derive_metrics(raw_result.get("results", []), initial_usdt_val)
+    if shadow_log:
+        threshold = (params.get("evidence_gate_min_posterior_per_regime") or {}).get(forced_regime, params.get("evidence_gate_min_posterior", 0.0))
+        shadow_records = _build_shadow_records(
+            raw_result, runner, settings, window.get("window_id"), profile, forced_regime, threshold
+        )
+        _append_shadow_log(shadow_records, SHADOW_LOG_PATH)
     return {
         "window_id": window.get("window_id"),
         "window_start": window["start"],
@@ -564,6 +834,7 @@ def _run_single_config(
         "params": params,
         "profile_overrides": profile_overrides,
         "early_stopped": early_stopped,
+        "forced_regime": forced_regime,
         **metrics,
         "transitions": raw_result.get("transitions", []),
     }

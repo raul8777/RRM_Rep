@@ -300,6 +300,8 @@ Fix: `auto_reconcile_spot()` / `auto_reconcile_futures()` o endpoint `/reconcile
 
 - **🔴 Posición fantasma (ghost) por divergencia balance/qty > 1000×**: si `binance_balance / db_qty < 0.001`, la posición es candidata a ghost — el SL/TP se bloqueará para siempre porque el clamp deja `qty=0`. Detectar en dos puntos: (1) `position_manager.py` durante `sync_with_exchange_balance` → loguear CRITICAL; (2) `run_trades.py` en SL/TP clamp → auto-close del registro DB con `close_reason='ghost_balance_mismatch'`. Sin esta detección, el ciclo imprime `cannot sell` silenciosamente durante horas y el UG queda bloqueado con `watchdog_level` creciente.
 
+- **🟢 Evidence gate calibrado y habilitado (s79, jul 18 2026)**: `_evidence_gate_posterior` en `run_trades.py` carga un modelo logístico por régimen entrenado sobre el shadow log forzado. Thresholds: `SPOT_BULL=0.60`, `RANGE_SCALP=0.52`, `FUTURES_SHORT=0.80`, `PRESERVATION=0.80`. `evidence_gate_enabled=true` activado vía `POST /config/apply` (snapshot `20260718_152602_367493`). Validación en 5,610 registros: SPOT_BULL queda completamente bloqueado (PnL medio negativo en sweep); RANGE_SCALP pasa 662 trades con WR 50.8% y PnL medio +1.09 USDT. Rollback inmediato: `POST /config/apply {"evidence_gate_enabled": false}`.
+
 ---
 
 ## 7. SKILLS — ROLES ACTIVOS POR ÁREA

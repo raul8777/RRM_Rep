@@ -69,6 +69,17 @@ class Settings(BaseSettings):
     bear_market_btc_7d_threshold: float = Field(default=-10.0)  # % change
     bear_market_kelly_multiplier: float = Field(default=0.5)  # reduce Kelly
     bear_market_volspike_min: float = Field(default=2.0)  # stricter spike req
+    # Bayesian evidence gate (calibrated by shadow-log sweep; enabled 2026-07-18)
+    evidence_gate_enabled: bool = Field(default=True)
+    evidence_gate_min_posterior: float = Field(default=0.65)
+    evidence_gate_prior: float = Field(default=0.50)
+    # Calibrated thresholds from the shadow-log sweep (2026-07-18).
+    evidence_gate_min_posterior_per_regime: Dict[str, float] = Field(default={
+        "SPOT_BULL": 0.60,
+        "FUTURES_SHORT": 0.80,
+        "RANGE_SCALP": 0.52,
+        "PRESERVATION": 0.80,
+    })
     # SPOT_BULL PnL boost â€” relax predictor thresholds when market is in confirmed uptrend
     spot_bull_pnl_boost_enabled: bool = Field(default=True)
     spot_bull_pnl_boost_large_cap: float = Field(default=0.0)    # BTC/ETH: allow up to 0 PnL

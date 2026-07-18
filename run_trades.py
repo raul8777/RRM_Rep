@@ -1,3 +1,4 @@
+import math
 import time
 import types
 import uuid
@@ -2740,7 +2741,7 @@ def _filter_by_quality(
                 break
 
     # Adaptive relaxation to avoid collapsing coverage in stressed markets.
-    _min_required = max(10, int(target_count * 0.30))
+    _min_required = max(1, int(target_count * 0.30))
     if len(filtered) >= _min_required:
         return filtered
 
@@ -3185,8 +3186,8 @@ def _compute_spot_trail_distance(client: BinanceClient, symbol: str, pnl_pct: fl
     """
     import time as _t
     _atr_enabled = getattr(settings, 'futures_trail_atr_enabled', True)
-    # I1: floor = max(0.5%, category trailing_distance_pct) — respects NARRATIVE=3% config
-    _floor = max(0.005, cat_trail_dist)
+    # s78-fix: tighter trailing for RANGE_SCALP so a small profit isn't fully surrendered
+    _floor = max(0.0025, cat_trail_dist)
     # I1: ceiling = max(1.5%, 2× category dist) — allows NARRATIVE to trail up to 6%
     _ceiling = max(0.015, cat_trail_dist * 2.0)
 
@@ -3194,15 +3195,15 @@ def _compute_spot_trail_distance(client: BinanceClient, symbol: str, pnl_pct: fl
         # Fallback to category-based static distance (not hardcoded 0.8%)
         return cat_trail_dist
 
-    # Select multiplier based on PnL level (SPOT is more patient = slightly wider)
+    # s78-fix: lower multipliers at low profit to trail closer
     if pnl_pct >= 0.08:
-        mult = 1.0
+        mult = 0.8
     elif pnl_pct >= 0.05:
-        mult = 1.2
+        mult = 1.0
     elif pnl_pct >= 0.03:
-        mult = 1.5
+        mult = 1.2
     else:
-        mult = 1.8  # wider at low PnL to let position breathe
+        mult = 1.5
 
     # Get or compute ATR
     now = _t.time()
@@ -3340,6 +3341,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
         # s70: RANGE_SCALP fast breakeven — activate at range_scalp_breakeven_pct (0.40%) not full trail_activate
         if regime == 'RANGE_SCALP' and hasattr(settings, 'range_scalp_breakeven_pct'):
             _rs_be = float(getattr(settings, 'range_scalp_breakeven_pct', 0.40))
+            _rs_be = min(_rs_be, 0.15)
             if _rs_be > 0:
                 trail_activate = min(trail_activate, _rs_be / 100.0)
         # M1: override sl_pct with ATR-based dynamic SL (prevents premature stops on volatile tokens)
@@ -3595,7 +3597,9 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 _sp_opened = _sp_opened.replace(tzinfo=timezone.utc)
                             _sp_age_h = (datetime.now(timezone.utc) - _sp_opened).total_seconds() / 3600
                             _sp_max_peak = getattr(settings, 'spot_bounce_rescue_max_peak_pct', 0.8) / 100.0
+                            _sp_max_peak = min(_sp_max_peak, 0.002)
                             _sp_min_h = getattr(settings, 'spot_bounce_rescue_min_hours', 6.0)
+                            _sp_min_h = min(_sp_min_h, 2.0)
                             _sp_peak = float(_spot_meta.get('trailing_peak', 0) or 0)
                             _sp_peak_pct = (_sp_peak - entry_price) / entry_price if entry_price > 0 and _sp_peak > 0 else 0.0
                             if _sp_age_h >= _sp_min_h and _sp_peak_pct < _sp_max_peak:
@@ -3615,7 +3619,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 # ── SSO: Smart Scale-Out (SPOT) ──────────────────────────────
                 _sso_s_action = None  # always defined; advisory result passed to UG
                 _sso_enabled_spot = getattr(settings, 'sso_enabled', True)
-                if close_reason is None and _sso_enabled_spot and (pnl_pct > 0 or _spot_bounce_entry_flag):
+                # s78-fix: evaluate SSO also on negative PnL so loss-cut / rescue triggers can fire
+                if close_reason is None and _sso_enabled_spot:
                     try:
                         from smart_scale_out import SmartScaleOut, SSOPositionData, compute_pnl_velocity, extract_sso_level_from_reason
                         metadata = getattr(pos, 'metadata', {}) or {}
@@ -3687,7 +3692,11 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         _sp_rescue_signal = None
                         _sp_rescue_signal_str = 0.0
                         _sp_rescue_target = getattr(settings, 'spot_bounce_rescue_target_pnl', -0.50)
+                        _sp_rescue_target = max(_sp_rescue_target, -0.10)
                         _sp_pnl_usdt = pnl_usdt_net  # C0: rescue target evaluated on net PnL
+                        if _sso_s_sig:
+                            _sp_rescue_signal = _sso_s_sig.get('signal')
+                            _sp_rescue_signal_str = float(_sso_s_sig.get('strength', 0.0))
                         if _spot_bounce_entry_flag and _sp_pnl_usdt >= _sp_rescue_target:
                             try:
                                 import pnl_service as _sp_pnl_svc
@@ -3701,9 +3710,6 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                     _sp_rescue_pred_ev = float(_sp_gate_pred.get('expected_pnl', 0.0))
                             except Exception:
                                 pass
-                            if _sso_s_sig:
-                                _sp_rescue_signal = _sso_s_sig.get('signal')
-                                _sp_rescue_signal_str = float(_sso_s_sig.get('strength', 0.0))
                         # Build position data
                         _sso_s_opened = getattr(pos, 'entry_time', None)
                         if _sso_s_opened and isinstance(_sso_s_opened, str):
@@ -4075,7 +4081,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                     pass
 
                 _prs_advisory = None
-                if pnl_pct_net > 0 and _spot_binance_validated:
+                # s78-fix: evaluate PRS also on negative PnL so it can propose a loss cut
+                if _spot_binance_validated:
                     _profit_started_at = _parse_profit_dt(metadata.get('profit_realization_started_at'))
                     # Use Wolf Hunter reconstructed peak price
                     _prs_peak_price = entry_price * (1.0 + _peak_pnl_pct_real)
@@ -5074,7 +5081,7 @@ def _check_entry_quality(
             return False, f"PRESERVATION_VOL (vol_spike={vol_spike:.2f} < {_min_vol:.2f})"
         if rsi > _rsi_max:
             return False, f"PRESERVATION_RSI (rsi={rsi:.1f})"
-        if strength < float(getattr(settings, "entry_quality_min_strength", 0.45)):
+        if strength < float(getattr(settings, "entry_quality_min_strength", 0.40)):
             return False, f"PRESERVATION_STRENGTH (strength={strength:.2f})"
         return True, "OK"
 
@@ -5090,11 +5097,89 @@ def _check_entry_quality(
             return False, f"FUTURES_SHORT_VOL (vol_spike={vol_spike:.2f} < {_min_vol:.2f})"
         if not (_rsi_min <= rsi <= _rsi_max):
             return False, f"FUTURES_SHORT_RSI (rsi={rsi:.1f})"
-        if strength < float(getattr(settings, "futures_min_inject_strength", 0.40)):
+        if strength < float(getattr(settings, "futures_min_inject_strength", 0.50)):
             return False, f"FUTURES_SHORT_STRENGTH (strength={strength:.2f})"
         return True, "OK"
 
     return False, f"UNKNOWN_REGIME ({_regime})"
+
+
+# Path to the calibrated per-regime posterior model produced by the shadow log sweep.
+_EVIDENCE_GATE_CALIBRATION_PATH = "/app/Dev/benchmarks/forced_regime_sweep/calibration/evidence_gate_calibration.json"
+_calibrated_posterior_model: Optional[Dict[str, Any]] = None
+
+
+def _load_calibrated_posterior_model() -> Dict[str, Any]:
+    """Load (and cache) the per-regime logistic posterior calibration."""
+    global _calibrated_posterior_model
+    if _calibrated_posterior_model is None:
+        try:
+            with open(_EVIDENCE_GATE_CALIBRATION_PATH, "r") as _f:
+                _calibrated_posterior_model = json.load(_f).get("posterior_model", {})
+        except Exception:
+            _calibrated_posterior_model = {}
+    return _calibrated_posterior_model or {}
+
+
+def _evidence_gate_posterior(
+    cand: Dict[str, Any],
+    signal_meta: Dict[str, Any],
+    settings,
+    regime_mode: str,
+    active_profile_label: Optional[str] = None,
+) -> float:
+    """Compute a calibrated Bayesian posterior probability for a candidate.
+
+    When a per-regime logistic calibration exists (trained on the shadow log), it
+    returns the model's predicted probability of a positive PnL outcome using the
+    predictor probability and expected PnL as features.  Falls back to the
+    original hand-tuned log-odds formula when no calibration is available.
+    """
+    prior = float(getattr(settings, "evidence_gate_prior", 0.50))
+    symbol = cand.get("symbol", "")
+    meta = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
+
+    prob = float(
+        cand.get("predictor_prob")
+        or cand.get("success_probability")
+        or meta.get("predictor_prob")
+        or meta.get("success_probability")
+        or prior
+    )
+    prob = max(0.001, min(0.999, prob))
+
+    # Calibrated logistic model per regime (shadow-log trained).
+    calibration = _load_calibrated_posterior_model().get(regime_mode)
+    if calibration:
+        ev = float(
+            cand.get("predictor_ev")
+            or cand.get("expected_pnl")
+            or meta.get("predictor_ev")
+            or meta.get("expected_pnl")
+            or 0.0
+        )
+        logit = math.log(prob / (1.0 - prob))
+        z = (
+            calibration["intercept"]
+            + calibration["logit_coef"] * logit
+            + calibration["ev_coef"] * ev
+        )
+        z = max(-20.0, min(20.0, z))
+        posterior = 1.0 / (1.0 + math.exp(-z))
+        return max(0.0, min(1.0, posterior))
+
+    # Fallback: original hand-tuned log-odds formula.
+    pq_profile = cand.get("peak_quality_profile") or meta.get("peak_quality_profile")
+    pq_mult = {"A": 1.25, "B": 1.0, "C": 0.85, "discarded": 0.0}.get(pq_profile, 1.0)
+
+    strength = float(cand.get("signal_strength") or meta.get("signal_strength") or 0.5)
+    strength_mult = 0.5 + strength  # 0.5..1.5
+
+    log_odds = math.log(prob / (1.0 - prob)) - math.log(prior / (1.0 - prior))
+    log_likelihood = math.log(max(0.01, pq_mult * strength_mult))
+    posterior_log_odds = math.log(prior / (1.0 - prior)) + log_odds + log_likelihood
+    posterior = 1.0 / (1.0 + math.exp(-posterior_log_odds))
+    return max(0.0, min(1.0, posterior))
 
 
 def _filter_buy_candidates(
@@ -5113,22 +5198,58 @@ def _filter_buy_candidates(
     """
     passed: List[Any] = []
     for cand in candidates:
-        symbol = cand["symbol"] if isinstance(cand, dict) else cand
+        if isinstance(cand, dict):
+            symbol = cand.get("symbol", "")
+            meta = cand
+        else:
+            symbol = cand
+            meta = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
 
         # Peak-quality hard discard gate: signals not in A/B/C are dropped.
-        if isinstance(cand, dict) and cand.get("peak_quality_profile") == "discarded":
+        if meta.get("peak_quality_profile") == "discarded":
             print(f"[FilterBuy] Rejected {symbol}: PEAK_QUALITY_DISCARDED")
             update_signal_decision(symbol, "rejected", "PEAK_QUALITY_DISCARDED")
             continue
 
+        # Audit the first 3 candidates' peak-quality profile/thresholds in production.
+        if len(passed) < 3:
+            print(
+                f"[EvidenceGateAudit] {symbol}: peak_profile={meta.get('peak_quality_profile')} "
+                f"thresholds={meta.get('thresholds')} "
+                f"expected_gain={meta.get('expected_gain')} "
+                f"prob={meta.get('success_probability')} "
+                f"strength={meta.get('signal_strength')}"
+            )
+
         _ok, _reason = _check_entry_quality(
             symbol, signal_meta, settings, regime_mode, active_profile_label
         )
-        if _ok:
-            passed.append(cand)
-        else:
+        if not _ok:
             print(f"[FilterBuy] Rejected {symbol}: {_reason}")
             update_signal_decision(symbol, "rejected", _reason.split(" ")[0])
+            continue
+
+        # Optional Bayesian evidence gate (disabled by default until calibrated).
+        if getattr(settings, "evidence_gate_enabled", False):
+            posterior = _evidence_gate_posterior(
+                meta, signal_meta, settings, regime_mode, active_profile_label
+            )
+            per_regime = getattr(settings, "evidence_gate_min_posterior_per_regime", {
+                "SPOT_BULL": 0.60, "FUTURES_SHORT": 0.80, "RANGE_SCALP": 0.52, "PRESERVATION": 0.80
+            }) or {}
+            min_posterior = float(
+                per_regime.get(regime_mode)
+                or getattr(settings, "evidence_gate_min_posterior", 0.65)
+            )
+            if posterior < min_posterior:
+                print(
+                    f"[FilterBuy] Rejected {symbol}: EVIDENCE_GATE_LOW "
+                    f"(posterior={posterior:.3f} < {min_posterior})"
+                )
+                update_signal_decision(symbol, "rejected", "EVIDENCE_GATE_LOW")
+                continue
+
+        passed.append(cand)
     return passed
 
 
@@ -5647,9 +5768,25 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                       peak_quality_score=_f_peak_quality)
                 if _pos:
                     _pb_new_shorts_this_cycle += 1
-                    orders.append({"symbol": symbol, "side": "SHORT_FUTURES",
-                                    "qty": _pos.qty, "entry_price": _pos.entry_price,
-                                    "sl": _pos.sl_price, "tp": _pos.tp_price})
+                    orders.append({
+                        "symbol": symbol,
+                        "side": "SHORT_FUTURES",
+                        "qty": _pos.qty,
+                        "entry_price": _pos.entry_price,
+                        "sl": _pos.sl_price,
+                        "tp": _pos.tp_price,
+                        "entry_metadata": {
+                            "regime_mode": _regime_mode,
+                            "profile_label": _active_profile_label,
+                            "peak_quality_profile": _f_sig_meta.get("peak_quality_profile"),
+                            "peak_quality": _f_sig_meta.get("peak_quality"),
+                            "expected_gain": _f_sig_meta.get("expected_gain"),
+                            "success_probability": _f_sig_meta.get("success_probability"),
+                            "signal_strength": _f_sig_meta.get("signal_strength"),
+                            "predictor_prob": _f_prediction.get("success_probability") if _f_prediction else None,
+                            "predictor_ev": _f_prediction.get("expected_pnl") if _f_prediction else None,
+                        },
+                    })
                     update_signal_decision(symbol, "executed", "FUTURES_SHORT")
                 elif _pos is None and "-1121" in str(getattr(_fc, '_last_error', '')):
                     # Auto-learn: symbol invalid on Binance Futures — block permanently this session
@@ -5915,9 +6052,25 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                                 peak_quality_profile=_l_peak_profile if _l_peak_profile in ('A','B','C') else None,
                                                 peak_quality_score=_l_peak_quality)
                         if _lpos:
-                            orders.append({"symbol": symbol, "side": "LONG_FUTURES",
-                                           "qty": _lpos.qty, "entry_price": _lpos.entry_price,
-                                           "sl": _lpos.sl_price, "tp": _lpos.tp_price})
+                            orders.append({
+                                "symbol": symbol,
+                                "side": "LONG_FUTURES",
+                                "qty": _lpos.qty,
+                                "entry_price": _lpos.entry_price,
+                                "sl": _lpos.sl_price,
+                                "tp": _lpos.tp_price,
+                                "entry_metadata": {
+                                    "regime_mode": _regime_mode,
+                                    "profile_label": _active_profile_label,
+                                    "peak_quality_profile": _l_sig_meta.get("peak_quality_profile"),
+                                    "peak_quality": _l_sig_meta.get("peak_quality"),
+                                    "expected_gain": _l_sig_meta.get("expected_gain"),
+                                    "success_probability": _l_sig_meta.get("success_probability"),
+                                    "signal_strength": _l_sig_meta.get("signal_strength"),
+                                    "predictor_prob": _l_prediction.get("success_probability") if _l_prediction else None,
+                                    "predictor_ev": _l_prediction.get("expected_pnl") if _l_prediction else None,
+                                },
+                            })
                             update_signal_decision(symbol, "executed", "FUTURES_LONG")
 
         # ── SPOT_BULL + RSI oversold: LONG futuros más eficiente que spot ──
@@ -6017,9 +6170,25 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                                 peak_quality_profile=_l_peak_profile if _l_peak_profile in ('A','B','C') else None,
                                                 peak_quality_score=_l_peak_quality)
                     if _lpos_sb:
-                        orders.append({"symbol": symbol, "side": "LONG_FUTURES",
-                                       "qty": _lpos_sb.qty, "entry_price": _lpos_sb.entry_price,
-                                       "sl": _lpos_sb.sl_price, "tp": _lpos_sb.tp_price})
+                        orders.append({
+                            "symbol": symbol,
+                            "side": "LONG_FUTURES",
+                            "qty": _lpos_sb.qty,
+                            "entry_price": _lpos_sb.entry_price,
+                            "sl": _lpos_sb.sl_price,
+                            "tp": _lpos_sb.tp_price,
+                            "entry_metadata": {
+                                "regime_mode": _regime_mode,
+                                "profile_label": _active_profile_label,
+                                "peak_quality_profile": _l_sig_meta.get("peak_quality_profile"),
+                                "peak_quality": _l_sig_meta.get("peak_quality"),
+                                "expected_gain": _l_sig_meta.get("expected_gain"),
+                                "success_probability": _l_sig_meta.get("success_probability"),
+                                "signal_strength": _l_sig_meta.get("signal_strength"),
+                                "predictor_prob": _l_prediction.get("success_probability") if _l_prediction else None,
+                                "predictor_ev": _l_prediction.get("expected_pnl") if _l_prediction else None,
+                            },
+                        })
                         update_signal_decision(symbol, "executed", "FUTURES_LONG_BULL")
 
         # ── Exclusion list — gold tokens, stablecoins, artificially-volatile ─
@@ -6386,7 +6555,23 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 qty = _executed_qty
             _binance_confirmed = True
             _real_commission = _fill.get('commission', 0.0)
-            orders.append({"symbol": symbol, "side": "BUY", "quantity": qty, "order": order})
+            orders.append({
+                "symbol": symbol,
+                "side": "BUY",
+                "quantity": qty,
+                "order": order,
+                "entry_metadata": {
+                    "regime_mode": _regime_mode,
+                    "profile_label": _active_profile_label,
+                    "peak_quality_profile": signal_meta.get(symbol, {}).get("peak_quality_profile"),
+                    "peak_quality": signal_meta.get(symbol, {}).get("peak_quality"),
+                    "expected_gain": signal_meta.get(symbol, {}).get("expected_gain"),
+                    "success_probability": signal_meta.get(symbol, {}).get("success_probability"),
+                    "signal_strength": signal_meta.get(symbol, {}).get("signal_strength"),
+                    "predictor_prob": prediction.get("success_probability") if prediction else None,
+                    "predictor_ev": prediction.get("expected_pnl") if prediction else None,
+                },
+            })
             usdt_liquid_now = max(0.0, usdt_liquid_now - qty * price)  # BUG-E5: local deduction, avoids re-fetch
             _spot_new_entries_this_cycle += 1  # A3: track entries for BTC correlation cap
             print(f"Bought {qty} {symbol}")

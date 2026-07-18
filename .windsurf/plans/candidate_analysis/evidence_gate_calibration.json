@@ -1,0 +1,24 @@
+{
+  "posterior_model": {
+    "SPOT_BULL": {
+      "intercept": 0.06908998947839678,
+      "logit_coef": -0.020208318314436063,
+      "ev_coef": -0.19462159854505834,
+      "success": true,
+      "n": 2608,
+      "n_pos": 560
+    },
+    "RANGE_SCALP": {
+      "intercept": -0.028847870775906854,
+      "logit_coef": 0.039625312070608903,
+      "ev_coef": 0.03528117760118073,
+      "success": true,
+      "n": 3174,
+      "n_pos": 1367
+    }
+  },
+  "thresholds": {
+    "SPOT_BULL": 0.55,
+    "RANGE_SCALP": 0.55
+  }
+}

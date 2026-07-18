@@ -1,0 +1,64 @@
+{
+  "notes": "Consolidated evidence-gate tuning from full (288 runs) and focused bear/lateral (144 runs) Super MIMIC sweeps. Kelly settings intentionally left unchanged to keep aggressive position sizing. Bayesian gate remains disabled until explicitly enabled.",
+  "apply_immediately": false,
+  "changes_applied_to_runtime": {
+    "min_signal_strength": 0.45,
+    "min_success_probability": 0.45,
+    "max_positions_spot_bull": 5,
+    "stop_loss_pct": 3.0
+  },
+  "changes_in_code_ready_after_restart": {
+    "evidence_gate_enabled": false,
+    "evidence_gate_prior": 0.50,
+    "evidence_gate_min_posterior": 0.65,
+    "evidence_gate_min_posterior_per_regime": {
+      "SPOT_BULL": 0.60,
+      "FUTURES_SHORT": 0.80,
+      "RANGE_SCALP": 0.52,
+      "PRESERVATION": 0.80
+    }
+  },
+  "kelly_settings_unchanged": [
+    "kelly_max_usdt",
+    "kelly_dynamic_base_pct",
+    "kelly_max_pct_cap",
+    "kelly_max_pct_liquid"
+  ],
+  "profile_A_cycle_overrides": {
+    "cycle_spot_bull": 8,
+    "cycle_range_scalp": 2,
+    "cycle_preservation": 36,
+    "cycle_futures_short": 3
+  },
+  "best_params_per_dominant_regime_from_focused_sweep": {
+    "SPOT_BULL": {
+      "max_positions_spot_bull": 5,
+      "min_signal_strength": 0.45,
+      "min_success_probability": 0.45,
+      "stop_loss_pct": 3.0
+    },
+    "FUTURES_SHORT": {
+      "max_positions_spot_bull": 5,
+      "min_signal_strength": 0.45,
+      "min_success_probability": 0.6,
+      "stop_loss_pct": 3.0
+    },
+    "RANGE_SCALP": {
+      "max_positions_spot_bull": 5,
+      "min_signal_strength": 0.6,
+      "min_success_probability": 0.45,
+      "stop_loss_pct": 3.0
+    },
+    "PRESERVATION": null
+  },
+  "remaining_calibration_gaps": [
+    "PRESERVATION and FUTURES_SHORT produced zero entries in the forced-regime shadow-log sweep; thresholds remain heuristic.",
+    "SPOT_BULL calibrated posterior is below the proposed threshold for all entries in this sweep, effectively blocking the regime under current entry logic."
+  ],
+  "next_steps": [
+    "Confirm SPOT_BULL blocking is desirable or improve bullish entry edge before enabling the gate.",
+    "Generate PRESERVATION and FUTURES_SHORT shadow-log entries before enabling evidence_gate_enabled=true.",
+    "Enable evidence_gate_enabled=true only after per-regime thresholds are validated and overall gated PnL is positive.",
+    "Monitor first cycles after enablement and compare win-rate / PnL vs baseline."
+  ]
+}

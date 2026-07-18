@@ -1,7 +1,38 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 16 2026 (noche) | s79: Peaks-first pipeline — QUBO + profit_score + gates = advisory mode
+> Última actualización: jul 18 2026 | s79: Evidence Gate calibrado y habilitado
+
+---
+
+## 🟢 Estado del Sistema — jul 18 2026 — s79: Evidence Gate calibrado y habilitado
+
+### Objetivo
+Reemplazar la fórmula heurística de `_evidence_gate_posterior` por un modelo logístico entrenado por régimen sobre un shadow log forzado, y habilitar el gate en producción.
+
+### Cambios implementados
+- **`run_trades.py`**: `_evidence_gate_posterior` carga `/app/Dev/benchmarks/forced_regime_sweep/calibration/evidence_gate_calibration.json` y aplica coeficientes logísticos por régimen; fallback a la fórmula anterior si no hay calibración.
+- **`mimic_mode_profile_sweep.py`**: copia local de `_evidence_gate_posterior` sincronizada; shadow logging corrige extracción de `entry_price` desde `order["fills"]`.
+- **`config.py` / `config_helpers.py`**: `evidence_gate_enabled=True` por defecto; thresholds calibrados `SPOT_BULL=0.60`, `RANGE_SCALP=0.52`, `FUTURES_SHORT=0.80`, `PRESERVATION=0.80`.
+- **`14_shadow_log_sweep.py` + `calibrate_evidence_gate.py`**: sweep forzado 144 jobs / 5,610 registros; modelo logístico por régimen entrenado con `logit(predictor_prob)` + `predictor_ev`.
+
+### Activación
+- Runtime: `POST /config/apply {"evidence_gate_enabled": true}` → snapshot `20260718_152602_367493`.
+
+### Resultados de validación
+- SPOT_BULL: posterior máximo 0.562 < 0.60 → gate bloquea todas las entradas del sweep (PnL medio -11.51 USDT).
+- RANGE_SCALP: 662/3,026 registros pasan, win-rate 50.8%, PnL medio +1.09 USDT/trade.
+- Back-test agregado: sin gate -35,156 USDT; con gate +721 USDT.
+
+### Rollback inmediato
+```
+POST /config/apply {"evidence_gate_enabled": false}
+```
+
+### Próximos pasos
+1. Monitorear frecuencia de trades y PnL en los próximos ciclos.
+2. Generar shadow entries para FUTURES_SHORT y PRESERVATION antes de confiar en sus umbrales heurísticos.
+3. Decidir si se mejora el edge de SPOT_BULL o se mantiene el bloqueo bajo la lógica actual.
 
 ---
 
