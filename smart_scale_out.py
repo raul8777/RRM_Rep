@@ -177,6 +177,7 @@ class SmartScaleOut:
         """
         _diag_parts = []
         checks = [
+            ("SSO-LOSS", self._check_sso_loss),
             ("SSO-6", self._check_sso6_bounce_rescue),
             ("SSO-1", self._check_sso1_stagnant),
             ("SSO-2", self._check_sso2_momentum_exhausted),
@@ -197,6 +198,33 @@ class SmartScaleOut:
         no_action.diagnosis = " | ".join(_diag_parts)
         return no_action
 
+    # ── SSO-LOSS: Fast loss cut when position has reversed against us ───────────
+    def _check_sso_loss(self, pos: SSOPositionData) -> SSOAction:
+        """Close 100% if the position is losing and current signal is against it."""
+        if pos.pnl_pct > -0.005:
+            return SSOAction(diagnosis=f"SSO-LOSS:no(pnl={pos.pnl_pct*100:.2f}%>-0.5%)")
+        if not pos.rescue_signal or pos.rescue_signal_strength is None:
+            return SSOAction(diagnosis="SSO-LOSS:no(signal_missing)")
+        _sig = str(pos.rescue_signal).strip().upper()
+        _str = float(pos.rescue_signal_strength)
+        _is_against = (
+            (pos.side.upper() in ("LONG", "BUY") and _sig == "SELL")
+            or (pos.side.upper() in ("SHORT", "SELL") and _sig == "BUY")
+        )
+        if not _is_against or _str < 0.55:
+            return SSOAction(diagnosis=f"SSO-LOSS:no(signal={_sig} str={_str:.2f})")
+        return SSOAction(
+            should_close=True,
+            close_pct=1.0,
+            reason="sso_loss_cut",
+            detail=(
+                f"SSO-LOSS: pnl={pos.pnl_pct*100:.2f}% signal={_sig} str={_str:.2f} "
+                f"vel={(pos.pnl_velocity_1h or 0)*100:.3f}%/h"
+            ),
+            trigger="SSO-LOSS",
+            priority=10,
+        )
+
     # ── SSO-6: Bounce Rescue Mode — close trapped bounce entries near breakeven ──
     def _check_sso6_bounce_rescue(self, pos: SSOPositionData) -> SSOAction:
         """Close 100% when a bounce-trapped position approaches breakeven.
@@ -214,32 +242,48 @@ class SmartScaleOut:
 
         age_hours = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
 
-        # Use per-type thresholds
+        # Use per-type thresholds (canonical defaults)
         _max_peak = self.bounce_rescue_max_peak_pct
         _min_hours = self.bounce_rescue_min_hours
         _target_pnl = self.bounce_rescue_target_pnl
         if pos.trade_type == 'spot':
             _max_peak = self._cfg('spot_bounce_rescue_max_peak_pct', 0.8) / 100.0
             _min_hours = self._cfg('spot_bounce_rescue_min_hours', 8.0)
-            _target_pnl = self._cfg('spot_bounce_rescue_target_pnl', -0.30)
+            _target_pnl = self._cfg('spot_bounce_rescue_target_pnl', -0.50)
+        # s78-fix: tighter rescue thresholds only for RANGE_SCALP
+        _is_range_scalp = str(pos.regime_mode or '').strip().upper() == 'RANGE_SCALP'
+        if _is_range_scalp:
+            _max_peak = min(_max_peak, 0.002)
+            _min_hours = min(_min_hours, 2.0)
+            _target_pnl = max(_target_pnl, -0.10)
         _min_hours *= self._profile_scale(pos, aggressive=1.12, balanced=1.0, defensive=0.90)
         _target_pnl *= self._profile_scale(pos, aggressive=1.10, balanced=1.0, defensive=0.90)
 
         # Determine if this position qualifies as a bounce entry
+        _inline_bounce = False
         _is_bounce = pos.bounce_entry
         if not _is_bounce:
-            # Inline detection: peak too low after enough time
-            if age_hours >= _min_hours and pos.peak_pnl_pct < _max_peak:
+            # Inline detection: peak too low after enough time OR position already losing
+            _loss_trigger = _is_range_scalp and pos.pnl_pct < -0.001
+            if age_hours >= _min_hours and (pos.peak_pnl_pct < _max_peak or _loss_trigger):
                 _is_bounce = True
+                _inline_bounce = True
 
         if not _is_bounce:
-            return SSOAction(diagnosis=f"SSO-6:no(peak={pos.peak_pnl_pct*100:.2f}%>={_max_peak*100:.1f}% or age={age_hours:.1f}h<{_min_hours:.1f}h)")
+            return SSOAction(diagnosis=f"SSO-6:no(peak={pos.peak_pnl_pct*100:.2f}%>={_max_peak*100:.2f}% or age={age_hours:.1f}h<{_min_hours:.1f}h)")
 
         # Bounce confirmed — check if we're near enough to breakeven to close
         if pos.pnl_usdt < _target_pnl:
             return SSOAction(
                 diagnosis=(f"SSO-6:wait(bounce=True,pnl=${pos.pnl_usdt:.2f}<${_target_pnl:.2f},"
                            f"age={age_hours:.1f}h)")
+            )
+
+        # s78-fix: inline-detected bounces that are already in profit should not be rescued;
+        # let normal SSO/stagnation logic handle them. Bounce-flagged entries still run the smart gate.
+        if _inline_bounce and pos.pnl_usdt > 0.05:
+            return SSOAction(
+                diagnosis=(f"SSO-6:skip(inline_bounce,pnl=${pos.pnl_usdt:.2f}>0.05 profit, not near breakeven)")
             )
 
         # ── SMART GATE: block rescue if position is already recovering ──────
@@ -377,9 +421,9 @@ class SmartScaleOut:
         if not self._cfg('sso7_enabled', True):
             return SSOAction(diagnosis="SSO-7:disabled")
 
-        # ── Guard: losses → SL handles it ───────────────────────────────────────
-        if pos.pnl_usdt < 0:
-            return SSOAction(diagnosis=f"SSO-7:skip(pnl=${pos.pnl_usdt:.2f}<0 — SL handles)")
+        # ── Guard: severe losses → let hard SL / UG fast-cut handle it ─────────────
+        if pos.pnl_pct < -0.005:
+            return SSOAction(diagnosis=f"SSO-7:skip(pnl_pct={pos.pnl_pct*100:.2f}%<-0.5% — UG/SL handles)")
 
         # ── Guard: graduated positions (significant profit → trailing manages) ───
         _max_pnl = self._cfg('sso7_max_pnl_usdt', 3.0)
@@ -391,6 +435,10 @@ class SmartScaleOut:
             return SSOAction(diagnosis="SSO-7:skip(no opened_at)")
         age_hours = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
         _min_age = self._cfg('sso7_min_age_hours', 1.0)
+        # s78-fix: faster stagnation trailing for RANGE_SCALP
+        _min_age = self._cfg(f'sso7_min_age_hours_{str(pos.regime_mode or "").lower()}', _min_age)
+        if str(pos.regime_mode or '').strip().upper() == 'RANGE_SCALP':
+            _min_age = min(_min_age, 0.5)
         if age_hours < _min_age:
             return SSOAction(diagnosis=f"SSO-7:skip(age={age_hours:.2f}h<{_min_age:.1f}h — anti-flip)")
 

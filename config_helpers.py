@@ -41,7 +41,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'futures_kelly_min_usdt': 0.0,
 
     # FUTURES trading
-    'futures_enabled': True,
+    'futures_enabled': False,  # s80: disabled under entry-profile gate redesign
     'futures_leverage': 10,
     'futures_max_shorts': 5,
     'futures_max_largecap_shorts': 3,
@@ -98,10 +98,17 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'entry_quality_vol_spike_min_range_scalp': 0.35,  # s72: lateral = low vol structural; lower floor
     'sso_target_contribution_pct_range_scalp': 0.05,  # s73 C2: 5% of half-target — achievable at TP=1.8%
 
-    # Bayesian evidence gate (calibrated by shadow-log sweep; enabled 2026-07-18)
-    'evidence_gate_enabled': True,
+    # Bayesian evidence gate (superseded by entry_profile_gate; kept disabled)
+    'evidence_gate_enabled': False,
     'evidence_gate_min_posterior': 0.65,
     'evidence_gate_prior': 0.50,
+
+    # Entry profile gate (A/B/C tiered selection based on calibrated historical outcomes)
+    'entry_profile_gate_enabled': True,
+    'entry_profile_gate_thresholds_path': 'Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json',
+    'peaks_first_enabled': True,
+    'predictor_gate_mode': 'advisory',  # 'blocking' | 'advisory' | 'disabled'
+    'entry_quality_gate_mode': 'disabled',  # superseded by entry_profile_gate; 'blocking' kept for legacy overrides
     # Calibrated thresholds from the shadow-log sweep (2026-07-18).
     'evidence_gate_min_posterior_per_regime': {
         'SPOT_BULL': 0.60,
@@ -197,8 +204,10 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'sso_flat_stagnation_timeout_pnl_pct': 0.003,
     'sso_flat_stagnation_timeout_pnl_pct_range_scalp': 0.003,
 
-    # VolSpike override
-    'volspike_override_enabled': True,
+    # VolSpike override — disabled under the new entry-profile gate; volume
+    # spikes are already part of the quality score.  Re-enable only with a
+    # dedicated calibration showing positive post-cost outcomes.
+    'volspike_override_enabled': False,
     'volspike_override_narrative_only': True,
     'volspike_override_min_spike': 2.0,
     'volspike_override_max_rsi': 65.0,
@@ -299,6 +308,61 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'profit_predexit_giveback_penalty_weight': 0.5,
     'peak_reconstruction_enabled': True,
     'peak_reconstruction_lookback_candles': 30,
+
+    # Staged multi-cycle entry validation (ready state)
+    'staged_entry_enabled': True,
+    'staged_entry_price_source': 'avg',
+    'staged_entry_persist_checks': True,
+    'staged_entry_regime_config': {
+        'SPOT_BULL': {
+            'enabled': True,
+            'checks_per_cycle': 3,
+            'required_positive_checks': 2,
+            'max_cycles': 3,
+            'max_age_min': 60,
+            'intra_mode': 'predictor',
+            'price_source': 'avg',
+            'use_fear_greed': True,
+            'cooldown_min': 0,
+            'require_inter_positive': False,
+        },
+        'RANGE_SCALP': {
+            'enabled': True,
+            'checks_per_cycle': 2,
+            'required_positive_checks': 2,
+            'max_cycles': 3,
+            'max_age_min': 20,
+            'intra_mode': 'predictor',
+            'price_source': 'avg',
+            'use_fear_greed': True,
+            'cooldown_min': 0,
+            'require_inter_positive': False,
+        },
+        'FUTURES_SHORT': {
+            'enabled': False,
+            'checks_per_cycle': 1,
+            'required_positive_checks': 2,
+            'max_cycles': 3,
+            'max_age_min': 20,
+            'intra_mode': 'disabled',
+            'price_source': 'ticker',
+            'use_fear_greed': False,
+            'cooldown_min': 0,
+            'require_inter_positive': True,
+        },
+        'PRESERVATION': {
+            'enabled': False,
+            'checks_per_cycle': 1,
+            'required_positive_checks': 2,
+            'max_cycles': 3,
+            'max_age_min': 100,
+            'intra_mode': 'disabled',
+            'price_source': 'avg',
+            'use_fear_greed': True,
+            'cooldown_min': 0,
+            'require_inter_positive': True,
+        },
+    },
 
     # Narrative tokens
     'narrative_tokens': [],
@@ -596,6 +660,27 @@ def get_trade_param(settings, name: str, trade_type: str) -> Any:
     if tt in ('futures', 'future'):
         return get_futures_param(settings, name)
     raise ValueError(f"trade_type must be 'spot' or 'futures', got {trade_type}")
+
+
+_DEFAULT_STAGED_ENTRY_REGIME_CONFIG = _PARAM_DEFAULTS.get('staged_entry_regime_config', {})
+
+
+def get_staged_entry_regime_config(settings, regime: str) -> Dict[str, Any]:
+    """Return merged staged-entry config for a regime with canonical defaults."""
+    global_config = None
+    if settings is not None:
+        global_config = getattr(settings, 'staged_entry_regime_config', None)
+    if global_config is None:
+        global_config = _DEFAULT_STAGED_ENTRY_REGIME_CONFIG
+    regime_config = (global_config or {}).get(regime, {})
+    default_config = _DEFAULT_STAGED_ENTRY_REGIME_CONFIG.get(regime, {}) if isinstance(_DEFAULT_STAGED_ENTRY_REGIME_CONFIG, dict) else {}
+    merged = dict(default_config or {})
+    merged.update(regime_config)
+    enabled_global = False
+    if settings is not None:
+        enabled_global = bool(getattr(settings, 'staged_entry_enabled', False))
+    merged['enabled'] = bool(merged.get('enabled', False)) and enabled_global
+    return merged
 
 
 def validate_config(settings) -> Dict[str, Any]:

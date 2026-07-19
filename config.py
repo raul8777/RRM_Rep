@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 from typing import Any, Dict, List
 
@@ -69,10 +69,13 @@ class Settings(BaseSettings):
     bear_market_btc_7d_threshold: float = Field(default=-10.0)  # % change
     bear_market_kelly_multiplier: float = Field(default=0.5)  # reduce Kelly
     bear_market_volspike_min: float = Field(default=2.0)  # stricter spike req
-    # Bayesian evidence gate (calibrated by shadow-log sweep; enabled 2026-07-18)
-    evidence_gate_enabled: bool = Field(default=True)
+    # Bayesian evidence gate (superseded by entry_profile_gate; kept disabled)
+    evidence_gate_enabled: bool = Field(default=False)
     evidence_gate_min_posterior: float = Field(default=0.65)
     evidence_gate_prior: float = Field(default=0.50)
+    # Entry profile gate (A/B/C tiered selection based on calibrated historical outcomes)
+    entry_profile_gate_enabled: bool = Field(default=True)
+    entry_profile_gate_thresholds_path: str = Field(default="Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json")
     # Calibrated thresholds from the shadow-log sweep (2026-07-18).
     evidence_gate_min_posterior_per_regime: Dict[str, float] = Field(default={
         "SPOT_BULL": 0.60,
@@ -327,8 +330,10 @@ class Settings(BaseSettings):
         'SEIUSDT', 'SUSHIUSDT',  # Infra + DeFi
     ])  # E1: Removido env=ANALYSIS_SYMBOLS para forzar lista de 32 tokens
 
-    # VolSpike override: bypass PnL predictor for narrative tokens with strong volume
-    volspike_override_enabled: bool = Field(default=True)
+    # VolSpike override: bypass PnL predictor for narrative tokens with strong volume.
+    # Disabled under the new entry-profile gate; volume information is already
+    # embedded in the calibrated quality score.
+    volspike_override_enabled: bool = Field(default=False)
     volspike_override_min_spike: float = Field(default=2.0)   # concentrated: volumen excepcional
     volspike_override_max_rsi: float = Field(default=65.0)      # RSI must be below this
     volspike_override_trend_required: bool = Field(default=True)  # must be 4h UP
@@ -407,7 +412,7 @@ class Settings(BaseSettings):
     # Peaks-first pipeline feature flags (s79)
     peaks_first_enabled: bool = Field(default=True)          # Peaks profile drives selection priority
     predictor_gate_mode: str = Field(default="advisory")     # "blocking" | "advisory" | "disabled"
-    entry_quality_gate_mode: str = Field(default="advisory") # "blocking" | "advisory" | "disabled"
+    entry_quality_gate_mode: str = Field(default="disabled")  # superseded by entry_profile_gate; "blocking" is legacy
     # Active replacement: swap weakest open position for a better new signal
     replace_only_losing: bool = Field(default=True)  # only replace positions in loss/flat
     replace_ev_min_ratio: float = Field(default=1.1)  # MEJO-1: 1.3â†’1.1 â€” more permissive given small EV values
@@ -568,6 +573,62 @@ class Settings(BaseSettings):
     profit_predexit_giveback_penalty_weight: float = Field(default=0.5)
     peak_reconstruction_enabled: bool = Field(default=True)
     peak_reconstruction_lookback_candles: int = Field(default=30)
+
+    # ── Staged multi-cycle entry validation (ready state) ──────────────────────
+    staged_entry_enabled: bool = Field(default=True)
+    staged_entry_price_source: str = Field(default="avg")  # 'avg' (VWAP 5m) or 'ticker'
+    staged_entry_persist_checks: bool = Field(default=True)
+    staged_entry_regime_config: Dict[str, Any] = Field(default={
+        "SPOT_BULL": {
+            "enabled": True,
+            "checks_per_cycle": 3,
+            "required_positive_checks": 2,
+            "max_cycles": 3,
+            "max_age_min": 60,
+            "intra_mode": "predictor",  # 'predictor' | 'price_ratio' | 'disabled'
+            "price_source": "avg",
+            "use_fear_greed": True,
+            "cooldown_min": 0,
+            "require_inter_positive": False,
+        },
+        "RANGE_SCALP": {
+            "enabled": True,
+            "checks_per_cycle": 2,
+            "required_positive_checks": 2,
+            "max_cycles": 3,
+            "max_age_min": 20,
+            "intra_mode": "predictor",
+            "price_source": "avg",
+            "use_fear_greed": True,
+            "cooldown_min": 0,
+            "require_inter_positive": False,
+        },
+        "FUTURES_SHORT": {
+            "enabled": False,
+            "checks_per_cycle": 1,
+            "required_positive_checks": 2,
+            "max_cycles": 3,
+            "max_age_min": 20,
+            "intra_mode": "disabled",
+            "price_source": "ticker",
+            "use_fear_greed": False,
+            "cooldown_min": 0,
+            "require_inter_positive": True,
+        },
+        "PRESERVATION": {
+            "enabled": False,
+            "checks_per_cycle": 1,
+            "required_positive_checks": 2,
+            "max_cycles": 3,
+            "max_age_min": 100,
+            "intra_mode": "disabled",
+            "price_source": "avg",
+            "use_fear_greed": True,
+            "cooldown_min": 0,
+            "require_inter_positive": True,
+        },
+    })
+
     # C2: Segunda entrada permitida si predicciÃ³n nueva es fuertemente mejor
     allow_prediction_based_add: bool = Field(default=True)
     prediction_add_min_ev_ratio: float = Field(default=1.5)  # nueva pred >= 1.5x la existente
@@ -579,7 +640,7 @@ class Settings(BaseSettings):
     auto_close_excluded_on_startup: bool = Field(default=True)
 
     # â”€â”€ Futures trading (USDM, fapi.binance.com) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    futures_enabled: bool = Field(default=True)  # K2: True â€” backtest run_0812 uses futures
+    futures_enabled: bool = Field(default=False)  # s80: disabled under entry-profile gate redesign â€” backtest run_0812 uses futures
     futures_leverage: int = Field(default=10)          # K2: 2â†’10 â€” backtest run_0812 validated 10x
     futures_max_shorts: int = Field(default=5)       # concentrated: 3-5 shorts simultáneos
     futures_max_largecap_shorts: int = Field(default=3)  # concentrated: no concentrar todo en BTC/ETH

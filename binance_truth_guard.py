@@ -194,8 +194,8 @@ def evaluate_spot_parity(
                 "error": "db_positions_unavailable", "ts": _utc_now_iso()}
 
     binance_balances: Dict[str, float] = {}
-    _keep_bnb_for_commission = bool(getattr(settings, 'use_bnb_for_commission', False)) or bool(
-        getattr(settings, 'auto_bnb_for_commission', False)
+    _keep_bnb_for_commission = bool(getattr(settings, 'use_bnb_for_commission', True)) or bool(
+        getattr(settings, 'auto_bnb_for_commission', True)
     )
     _ignore_bnb_in_parity = bool(getattr(settings, 'spot_ignore_bnb_when_commission_enabled', True))
     _skip_bnb = _keep_bnb_for_commission and _ignore_bnb_in_parity

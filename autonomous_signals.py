@@ -576,25 +576,25 @@ class AutonomousSignalGenerator:
                 _sig['trade_type'] = 'spot'
         logger.info(f"Buy signals above threshold {min_strength}: {len(buy_signals)}")
 
-        # ── Peak-quality prediction / A-B-C profile assignment ────────────────
+        # ── Entry-profile gate: A/B/C profile assignment based on realized outcomes ─
+        # The legacy peak_quality model is superseded by entry_profile_gate; the feature
+        # dict is still attached for diagnostics but we no longer depend on the joblib
+        # model (which is frequently absent and generates noisy warnings).
         _pq_regime = str(regime_mode or 'SPOT_BULL').strip().upper()
         for _sig in buy_signals:
+            # New calibrated entry-profile gate: A/B/C based on realized outcomes.
+            # If the signal cannot reach profile C it is marked as discarded.
             try:
-                _pq = peak_quality.predict_peak_quality(
-                    features=_sig.get('peak_quality_features'),
-                    regime_mode=_pq_regime,
-                    direction=_sig.get('expected_side', 'LONG'),
+                import entry_profile_gate
+                _profile, _pinfo = entry_profile_gate.classify(
+                    _sig, _pq_regime, _sig.get('expected_side', 'LONG'), _sig.get('symbol', '')
                 )
-                _sig.update({
-                    'predicted_peak_return': _pq['predicted_peak_return'],
-                    'expected_gain': _pq['expected_gain'],
-                    'peak_quality_profile': _pq['peak_quality_profile'],
-                    'peak_quality_score': _pq['peak_quality_score'],
-                    'peak_quality_thresholds': _pq['thresholds'],
-                })
-            except Exception as _pq_err:
-                logger.warning(f"peak_quality prediction failed for {_sig.get('symbol')}: {_pq_err}")
-                _sig.setdefault('peak_quality_profile', 'C')
+                _sig['peak_quality_profile'] = _profile if _profile else 'discarded'
+                _sig['peak_quality_score'] = _pinfo['score']
+                _sig['entry_profile_gate_info'] = _pinfo
+            except Exception as _gate_err:
+                logger.warning(f"entry_profile_gate failed for {_sig.get('symbol')}: {_gate_err}")
+                _sig.setdefault('peak_quality_profile', 'discarded')
                 _sig.setdefault('peak_quality_score', 0.0)
 
         def _regime_signal_score(signal: Dict, regime: str) -> float:

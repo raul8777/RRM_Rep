@@ -154,6 +154,26 @@ class BinanceClient:
         except (BinanceAPIException, BinanceRequestException) as exc:
             raise RuntimeError(f"Binance price error: {exc}") from exc
 
+    def get_symbol_avg_price(self, symbol: str, use_cache: bool = True) -> float:
+        """Return 5-minute rolling average price (VWAP) for a symbol.
+
+        This is more robust than lastPrice for dashboard unrealized PnL because
+        it smooths single-candle wicks and illiquid prints.
+        """
+        now = time.monotonic()
+        cache_key = f"{symbol}:avg"
+        if use_cache and cache_key in self._price_cache:
+            val, ts = self._price_cache[cache_key]
+            if now - ts < self.PRICE_CACHE_TTL:
+                return val
+        try:
+            avg = self.client.get_avg_price(symbol=symbol)
+            price = float(avg.get("price", 0))
+            self._price_cache[cache_key] = (price, now)
+            return price
+        except (BinanceAPIException, BinanceRequestException) as exc:
+            raise RuntimeError(f"Binance avg price error: {exc}") from exc
+
     def get_symbol_filters(self, symbol: str) -> Dict:
         """Return symbol filters with 1-hour cache to minimize API calls."""
         now = time.monotonic()

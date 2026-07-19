@@ -36,12 +36,14 @@ _apply_regime_params()        → carga overrides del modo activo desde DB → a
 _apply_mode_profile_harmony() → aplica multiplicadores de perfil A/B/C sobre el resultado anterior
     ↓
 pair_screener.py              → candidatos técnicos del universo de análisis
-autonomous_signals.py         → genera señales + peak_quality_profile (A/B/C/discarded)
-                                 + peak_quality_score (expected_gain from peak model)
+autonomous_signals.py         → genera señales + asigna peak_quality_profile vía entry_profile_gate.classify
+                                 (A/B/C/discard basado en expected_pnl/score calibrado)
+entry_profile_gate.py         → score de calidad y umbrales A/B/C calibrados sobre outcomes reales
 learning_engine.py            → pesos por indicador (symbol, regime) → escala boosts en autonomous_signals
     ↓
-_filter_buy_candidates()      → ANTES de QUBO (s79): hard-reject "discarded"; advisory mode for rest
-                                 entry_quality_gate_mode: "advisory"|"blocking"|"disabled"
+_filter_buy_candidates()      → ANTES de QUBO (s80): hard-reject cualquier perfil != A/B/C;
+                                 legacy entry_quality_gate opcional y desactivado por defecto.
+                                 entry_quality_gate_mode: "disabled"|"advisory"|"blocking"
     ↓
 _compute_profit_score()       → pq_norm×0.40 + ev_norm×0.20 + prob×0.20 + strength×0.10 + regime_bonus×0.10
     ↓
@@ -62,11 +64,18 @@ peak_capture_engine.py        → PredExit: advisory de captura de peak (solo en
 unified_governance_supervisor.py → UG: árbitro final — consolida advisories en acción única
 ```
 
-**Feature flags (s79) — hot-config via PATCH /config/kelly:**
+：**Feature flags (s80) — entry-profile gate redesign:**
+- Ver detalle completo en `.windsurf/plans/calibracion_entradas-db0300.md`.
+- `entry_profile_gate_enabled`: bool (default True) — gate A/B/C basado en umbrales calibrados sobre outcomes reales
+- `entry_profile_gate_thresholds_path`: ruta a `Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json`
+- **SPOT_BULL quality-score model**: `Dev/benchmarks/entry_profile_calibration/quality_score_model_spot_bull.pkl` se carga lazy en `entry_profile_gate.compute_quality_score()` y predice `realized_net_pnl_pct` cuando todas las features requeridas están presentes. Si no, se usa fallback heurístico.
+- **Umbrales v3 recalibrados post-sweep (realized_net_pnl_pct, costo 0.0025)**: `SPOT_BULL` A=0.6673, B=0.3361, C=0.2456; `RANGE_SCALP` A=B=C=0.0917.
 - `peaks_first_enabled`: bool (default True) — Peaks profile drives selection priority
-- `predictor_gate_mode`: "advisory"|"blocking"|"disabled" (default "advisory")
-- `entry_quality_gate_mode`: "advisory"|"blocking"|"disabled" (default "advisory")
-- Rollback inmediato: `PATCH /config/kelly {"predictor_gate_mode":"blocking","entry_quality_gate_mode":"blocking"}`
+- `predictor_gate_mode`: "advisory"|"blocking"|"disabled" (default "blocking")
+- `entry_quality_gate_mode`: "advisory"|"blocking"|"disabled" (default "disabled") — legacy behavior-first gate, superseded by entry_profile_gate
+- `evidence_gate_enabled`: bool (default False) — legacy Bayesian posterior gate, superseded
+- `volspike_override_enabled`: bool (default False) — override narrative desactivado bajo el nuevo gate
+- Rollback inmediato: `PATCH /config/kelly {"entry_profile_gate_enabled": false, "entry_quality_gate_mode": "blocking", "predictor_gate_mode": "advisory"}`
 
 **Tablas DB clave** (SQLite `trades.db`):
 - `trades_open` — posiciones activas + metadata JSON (`_smart_meta`: trailing, breakeven, SSO state)
@@ -103,9 +112,9 @@ unified_governance_supervisor.py → UG: árbitro final — consolida advisories
 
 **Entrada SPOT:**
 1. `pair_screener` → candidato → señal en `signal_store`
-2. `_buy_top_symbols()` aplica gates secuenciales: régimen confirmado → `_filter_buy_candidates` (behavior-first gate) → RSI por modo → filtros BTC → funding rate → predictor ML (no hay bypass bootstrap)
-3. VolSpike override: señal de volumen excepcional en NARRATIVE bypasa el predictor (pero no los filtros de régimen ni el behavior gate)
-4. QUBO selector → Kelly sizing (`_kelly_position_size()`) → `BinanceClient.buy()` → `_verify_entry_filled()`
+2. `autonomous_signals.py` asigna `peak_quality_profile` vía `entry_profile_gate.classify()` (A/B/C/discard). Discard = descarte inmediato.
+3. `_filter_buy_candidates()` (s80) aplica únicamente el entry-profile gate: cualquier perfil distinto de A/B/C se descarta. El legacy behavior-first gate (`entry_quality_gate_mode`) está desactivado por defecto y solo se reactiva bajo análisis explícito.
+4. `pnl_service.validate()` / predictor gate según `predictor_gate_mode` → QUBO selector → Kelly sizing → `BinanceClient.buy()` → `_verify_entry_filled()`
 5. Solo si fill confirmado: INSERT `trades_open` con `regime_at_entry`, `profile_at_entry`, `config_snapshot_id`, comisión de entrada
 
 **Vida activa (cada ciclo sobre posiciones abiertas):**
@@ -207,8 +216,17 @@ Nunca `getattr(settings, 'key', hardcode)` — el hardcode puede quedar stale y 
 5. `docker exec app python /app/tmp_audit_config.py` → ¿`CRITICAL mismatch`? Si sí → fix antes de operar
 
 **"El sistema no abre posiciones"**
-→ Revisar en orden: `trading_runtime_state.pause_new_entries` → max_positions por régimen → **`category_max_positions_enabled` + límite por bucket** (gate R4: log `LÍM_CATEGORÍA MIDCAP_ALT 2/2` bloquea TODAS las señales si el bucket está lleno) → `min_signal_strength`/`min_success_probability` → filtros BTC (dominance, momentum 4h/3h/1h) → `regime.confirmed` (necesita 2 ciclos) → `entry_quality_gate` → QUBO resultado vacío.
-Logs: `[BuyTop]`, `[Screener]`, `[Kelly]`, `[QUBO]`.
+→ Revisar en orden: `trading_runtime_state.pause_new_entries` → max_positions por régimen → **`category_max_positions_enabled` + límite por bucket** (gate R4: log `LÍM_CATEGORÍA MIDCAP_ALT 2/2` bloquea TODAS las señales si el bucket está lleno) → `min_signal_strength`/`min_success_probability` → filtros BTC (dominance, momentum 4h/3h/1h) → `regime.confirmed` (necesita 2 ciclos) → `entry_profile_gate` (rechazo `PEAK_QUALITY_DISCARDED`) → `entry_quality_gate` (legacy, desactivado por defecto en s80) → QUBO resultado vacío.
+Logs: `[BuyTop]`, `[FilterBuy]`, `[Screener]`, `[Kelly]`, `[QUBO]`.
+
+**"Todas las señales son PEAK_QUALITY_DISCARDED" (entry_profile_gate s80)**
+→ Revisar:
+1. Que `entry_profile_gate_thresholds_path` exista y tenga el formato `{ "thresholds": { "SPOT_BULL": {"A":..., "B":..., "C":...}, ... } }`.
+2. Que `entry_profile_gate_enabled=True` y que `entry_quality_gate_mode` no esté en `blocking` (legacy, desactivado por defecto).
+3. Que `autonomous_signals.py` esté llamando `entry_profile_gate.classify()` y propagando `expected_pnl`/`success_probability`/`strength`/`vol_spike`.
+4. Que el score (`peak_quality_score`) sea ≥ umbral C para el régimen activo. Validación histórica: `python Dev/scripts/validate_entry_profile_gate.py --limit 50000`.
+Rollback: `PATCH /config/kelly {"entry_profile_gate_enabled": false, "entry_quality_gate_mode": "blocking"}`.
+
 
 **"RANGE_SCALP no abre posiciones" (gates específicos s78)**
 → Si todos los candidatos son rechazados con `RANGE_VOL` o `RANGE_BB`, verificar los 3 parámetros calibrados en s78:
@@ -300,7 +318,7 @@ Fix: `auto_reconcile_spot()` / `auto_reconcile_futures()` o endpoint `/reconcile
 
 - **🔴 Posición fantasma (ghost) por divergencia balance/qty > 1000×**: si `binance_balance / db_qty < 0.001`, la posición es candidata a ghost — el SL/TP se bloqueará para siempre porque el clamp deja `qty=0`. Detectar en dos puntos: (1) `position_manager.py` durante `sync_with_exchange_balance` → loguear CRITICAL; (2) `run_trades.py` en SL/TP clamp → auto-close del registro DB con `close_reason='ghost_balance_mismatch'`. Sin esta detección, el ciclo imprime `cannot sell` silenciosamente durante horas y el UG queda bloqueado con `watchdog_level` creciente.
 
-- **🟢 Evidence gate calibrado y habilitado (s79, jul 18 2026)**: `_evidence_gate_posterior` en `run_trades.py` carga un modelo logístico por régimen entrenado sobre el shadow log forzado. Thresholds: `SPOT_BULL=0.60`, `RANGE_SCALP=0.52`, `FUTURES_SHORT=0.80`, `PRESERVATION=0.80`. `evidence_gate_enabled=true` activado vía `POST /config/apply` (snapshot `20260718_152602_367493`). Validación en 5,610 registros: SPOT_BULL queda completamente bloqueado (PnL medio negativo en sweep); RANGE_SCALP pasa 662 trades con WR 50.8% y PnL medio +1.09 USDT. Rollback inmediato: `POST /config/apply {"evidence_gate_enabled": false}`.
+- **🟢 Evidence gate calibrado y habilitado (s79, jul 18 2026)** — **SUPERSEDIDO por entry_profile_gate (s80)**: `_evidence_gate_posterior` queda desactivado por defecto (`evidence_gate_enabled=False`). El nuevo `entry_profile_gate` (`entry_profile_gate.py`) asigna perfiles A/B/C usando `compute_quality_score` + umbrales calibrados sobre `signal_peak_outcomes.jsonl`, garantizando retorno neto positivo mínimo para perfil C y descartando todo lo demás. Rollback del nuevo gate: `PATCH /config/kelly {"entry_profile_gate_enabled": false, "entry_quality_gate_mode": "blocking"}`.
 
 ---
 

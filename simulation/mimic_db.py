@@ -6,7 +6,236 @@ runtime configuration as production would.
 """
 import json
 import os
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
+
+
+class _StagedTables:
+    """In-memory implementation of ready_candidates and ready_candidate_checks for simulations."""
+
+    def __init__(self) -> None:
+        self.ready: List[Dict[str, Any]] = []
+        self.checks: List[Dict[str, Any]] = []
+        self._ready_id = 0
+        self._check_id = 0
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    def _json(self, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except Exception:
+                return value
+        return value
+
+    def query(self, sql: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
+        params = params or ()
+        s = sql.strip()
+        if "COALESCE(MAX(check_sequence)" in s:
+            ready_id = params[0]
+            m = max(
+                (c["check_sequence"] for c in self.checks if c["ready_candidate_id"] == ready_id),
+                default=0,
+            )
+            return [{"seq": m + 1}]
+
+        if "SELECT check_type, positive FROM ready_candidate_checks" in s:
+            ready_id, check_type = params[:2]
+            rows = [c for c in self.checks if c["ready_candidate_id"] == ready_id and c["check_type"] == check_type]
+            rows = sorted(rows, key=lambda c: c["id"], reverse=True)[:5]
+            return [{"check_type": c["check_type"], "positive": c["positive"]} for c in rows]
+
+        if "SELECT id, symbol FROM ready_candidates" in s:
+            regime = params[0]
+            return [
+                {"id": r["id"], "symbol": r["symbol"]}
+                for r in self.ready
+                if r["regime_mode"] == regime and r["status"] in ("ready", "validated")
+            ]
+
+        if "SELECT id FROM ready_candidates" in s or ("SELECT * FROM ready_candidates" in s and "symbol=%s AND trade_type=%s AND regime_mode=%s" in s):
+            sym, tt, reg = params[:3]
+            for r in self.ready:
+                if r["symbol"] == sym and r["trade_type"] == tt and r["regime_mode"] == reg and r["status"] in ("ready", "validated"):
+                    return [dict(r)]
+            return []
+
+        if "SELECT * FROM ready_candidates" in s:
+            return self._select_ready(s, params)
+
+        if s.startswith("INSERT INTO ready_candidates") and "RETURNING id" in s:
+            row = self._insert_ready(s, params)
+            self._ready_id += 1
+            row["id"] = self._ready_id
+            self.ready.append(row)
+            return [{"id": row["id"]}]
+
+        return []
+
+    def _select_ready(self, sql: str, params: tuple) -> List[Dict[str, Any]]:
+        if "status IN %s" in sql:
+            statuses = list(params[0])
+            idx = 1
+        elif "status='validated'" in sql:
+            statuses = ["validated"]
+            idx = 0
+        elif "status IN ('ready','validated')" in sql:
+            statuses = ["ready", "validated"]
+            idx = 0
+        else:
+            statuses = ["ready", "validated"]
+            idx = 0
+
+        rows = [r for r in self.ready if r["status"] in statuses]
+
+        if "regime_mode = %s" in sql or "regime_mode=%s" in sql:
+            if idx < len(params):
+                regime = params[idx]
+                idx += 1
+                rows = [r for r in rows if r["regime_mode"] == regime]
+
+        if "trade_type = %s" in sql or "trade_type=%s" in sql:
+            if idx < len(params):
+                tt = params[idx]
+                idx += 1
+                rows = [r for r in rows if r["trade_type"] == tt]
+
+        if "symbol = %s" in sql or "symbol=%s" in sql:
+            if idx < len(params):
+                sym = params[idx]
+                idx += 1
+                rows = [r for r in rows if r["symbol"] == sym]
+
+        if "symbol = ANY(%s)" in sql or "symbol=ANY(%s)" in sql:
+            if idx < len(params):
+                syms = list(params[idx])
+                idx += 1
+                rows = [r for r in rows if r["symbol"] in syms]
+
+        if "ORDER BY positive_checks DESC" in sql:
+            rows = sorted(rows, key=lambda r: (-r.get("positive_checks", 0), r.get("ready_at") or self._now()))
+        else:
+            rows = sorted(rows, key=lambda r: r.get("ready_at") or self._now())
+        return [dict(r) for r in rows]
+
+    def _parse_insert(self, sql: str, params: tuple) -> Dict[str, Any]:
+        col_part = sql[sql.find("(") + 1 : sql.find(")")]
+        columns = [c.strip() for c in col_part.split(",")]
+        after_values = sql[sql.find("VALUES") + 6 :]
+        val_part = after_values[after_values.find("(") + 1 : after_values.rfind(")")]
+        value_tokens = [t.strip() for t in val_part.split(",")]
+
+        row: Dict[str, Any] = {}
+        param_iter = iter(params)
+        for col, tok in zip(columns, value_tokens):
+            tok = tok.strip()
+            if "%s" in tok:
+                val = next(param_iter)
+                if "::jsonb" in tok and isinstance(val, str):
+                    try:
+                        val = json.loads(val)
+                    except Exception:
+                        pass
+                row[col] = val
+            elif tok == "NOW()":
+                row[col] = self._now()
+            elif tok.startswith("'") and tok.endswith("'"):
+                row[col] = tok[1:-1]
+            else:
+                try:
+                    row[col] = int(tok)
+                except ValueError:
+                    row[col] = tok
+        return row
+
+    def _insert_ready(self, sql: str, params: tuple) -> Dict[str, Any]:
+        row = self._parse_insert(sql, params)
+        row.setdefault("updated_at", self._now())
+        for k in ("signal_meta", "config_snapshot", "data"):
+            if isinstance(row.get(k), str):
+                try:
+                    row[k] = json.loads(row[k])
+                except Exception:
+                    pass
+        return row
+
+    def update(self, sql: str, params: Optional[tuple] = None) -> int:
+        params = params or ()
+        s = sql.strip()
+        if s.startswith("INSERT INTO ready_candidate_checks"):
+            self._check_id += 1
+            row = self._parse_insert(s, params)
+            for k in ("input_features", "gate_thresholds"):
+                if isinstance(row.get(k), str):
+                    try:
+                        row[k] = json.loads(row[k])
+                    except Exception:
+                        pass
+            row["id"] = self._check_id
+            self.checks.append(row)
+            return 1
+
+        if s.startswith("UPDATE ready_candidates SET"):
+            return self._update_ready(s, params)
+
+        if s.startswith("DELETE FROM ready_candidates"):
+            days = params[0] if params else 7
+            cutoff = self._now() - timedelta(days=int(days))
+            before = len(self.ready)
+            self.ready = [
+                r
+                for r in self.ready
+                if not (r["status"] in ("discarded", "opened") and r.get("updated_at", self._now()) < cutoff)
+            ]
+            return before - len(self.ready)
+
+        return 0
+
+    def _update_ready(self, sql: str, params: tuple) -> int:
+        upper = sql.upper()
+        set_start = upper.find("SET ") + 4
+        where_pos = upper.rfind(" WHERE ")
+        set_part = sql[set_start:where_pos]
+        assignments = [a.strip() for a in set_part.split(",")]
+        row_id = params[-1]
+
+        row = next((r for r in self.ready if r["id"] == row_id), None)
+        if row is None:
+            return 0
+
+        param_iter = iter(params[:-1])
+        for assign in assignments:
+            if "=" not in assign:
+                continue
+            field, value_expr = assign.split("=", 1)
+            field = field.strip()
+            value_expr = value_expr.strip()
+            if value_expr == "NOW()":
+                row[field] = self._now()
+            elif "|| %s::jsonb" in value_expr and field == "data":
+                delta_raw = next(param_iter)
+                if isinstance(delta_raw, str):
+                    try:
+                        delta_raw = json.loads(delta_raw)
+                    except Exception:
+                        pass
+                if isinstance(delta_raw, dict):
+                    if not isinstance(row.get("data"), dict):
+                        row["data"] = {}
+                    row["data"].update(delta_raw)
+            elif "%s" in value_expr:
+                val = next(param_iter)
+                if value_expr.endswith("::jsonb") and isinstance(val, str):
+                    try:
+                        val = json.loads(val)
+                    except Exception:
+                        pass
+                row[field] = val
+        row["updated_at"] = self._now()
+        return 1
 
 
 MODES = ["SPOT_BULL", "RANGE_SCALP", "PRESERVATION", "FUTURES_SHORT"]
@@ -99,6 +328,8 @@ class SimulationDatabaseClient:
         self._indicator_weights: Dict[str, Any] = {}
         if use_indicator_weights:
             self._indicator_weights = _load_indicator_weights()
+        # In-memory staged-entry tables so the lifecycle kernel works under MIMIC.
+        self._staged = _StagedTables()
         self._init_regime_state(forced_profile, profile_overrides)
 
     def _init_regime_state(
@@ -160,6 +391,9 @@ class SimulationDatabaseClient:
     def execute_query(self, sql: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
         # Minimal parsing for the queries used by run_trades
         sql_lower = sql.lower()
+        # Route staged-entry tables to the in-memory store.
+        if "ready_candidates" in sql_lower or "ready_candidate_checks" in sql_lower:
+            return self._staged.query(sql, params)
         if "trading_runtime_state" in sql_lower and "where key=%s" in sql_lower:
             key = params[0] if params else None
             if key in self._runtime_state:
@@ -177,8 +411,11 @@ class SimulationDatabaseClient:
         return self.execute_update(sql, params)
 
     def execute_update(self, sql: str, params: Optional[tuple] = None) -> int:
-        # Insert/Update trading_runtime_state
         sql_lower = sql.lower()
+        # Route staged-entry tables to the in-memory store.
+        if "ready_candidates" in sql_lower or "ready_candidate_checks" in sql_lower:
+            return self._staged.update(sql, params)
+        # Insert/Update trading_runtime_state
         if "trading_runtime_state" in sql_lower and "on conflict" in sql_lower:
             key = params[0] if params else None
             value = params[1] if params and len(params) > 1 else None

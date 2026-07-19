@@ -212,7 +212,14 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
         partial_close_pct = float(get_param(settings, "profit_realization_spot_partial_close_pct", defaults["partial_close_pct"]))
         max_extensions = int(get_param(settings, "profit_realization_spot_max_extensions", defaults["max_extensions"]))
 
-    if not enabled or context.pnl_pct <= 0 or context.pnl_pct < min_profit_pct:
+    if not enabled:
+        return ProfitRealizationDecision()
+
+    # s78-fix: evaluate negative PnL too, but skip tiny positives below min_profit
+    _loss_branch = False
+    if context.pnl_pct <= 0:
+        _loss_branch = True
+    elif context.pnl_pct < min_profit_pct:
         return ProfitRealizationDecision()
 
     if not context.regime_mode:
@@ -331,6 +338,48 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
             diagnostics=_pp_diagnostics,
             state_patch=_pp_state_patch,
         )
+
+    # s78-fix: loss-side PRS exit — cut when momentum/signal has reversed and we are losing
+    if _loss_branch:
+        if (context.pnl_pct <= -0.005 and (momentum_low or (not positive_velocity and signal_faded))
+                and held_min >= 10):
+            _loss_detail = (
+                f"{trade_type.upper()} loss pnl={context.pnl_pct*100:.2f}% "
+                f"momentum_score={momentum_score:.0f} velocity={None if velocity is None else round(float(velocity)*100, 4)}"
+            )
+            _loss_diag = (
+                f"loss_branch: pnl_pct={context.pnl_pct*100:.2f}%; "
+                f"momentum_score={momentum_score:.1f}; momentum_low={momentum_low}; "
+                f"positive_velocity={positive_velocity}; signal_faded={signal_faded}; held_min={held_min}"
+            )
+            _loss_patch = {
+                LAST_DECISION_KEY: {
+                    "action": "close",
+                    "reason": "prs_loss_momentum_exit",
+                    "close_pct": 1.0,
+                    "detail": _loss_detail,
+                    "diagnostics": _loss_diag,
+                    "pnl_pct": round(float(context.pnl_pct or 0.0), 6),
+                    "peak_pnl_pct": round(float(peak or 0.0), 6),
+                    "momentum_score": round(momentum_score, 1),
+                    "trade_type": trade_type,
+                    "symbol": context.symbol,
+                    "updated_at": now.isoformat(),
+                },
+                LAST_DECISION_AT_KEY: now.isoformat(),
+            }
+            return ProfitRealizationDecision(
+                should_close=True,
+                close_pct=1.0,
+                action="close",
+                reason="prs_loss_momentum_exit",
+                detail=_loss_detail,
+                override_target="risk_containment",
+                priority=60,
+                diagnostics=_loss_diag,
+                state_patch=_loss_patch,
+            )
+        return ProfitRealizationDecision()
 
     if held_min < partial_minutes and giveback_pct < (drawback_pct * 0.5) and positive_velocity and signal_faded:
         return ProfitRealizationDecision()

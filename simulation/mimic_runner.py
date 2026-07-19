@@ -94,6 +94,14 @@ class SimulationRunner:
             profile_overrides=profile_overrides,
         )
 
+        # Wire the global analysis cache to the simulation DB so production caches
+        # do not attempt to connect to a real PostgreSQL instance.
+        try:
+            from analysis_cache import analysis_cache as _mimic_analysis_cache
+            _mimic_analysis_cache.set_db_client(self.db_client)
+        except Exception:
+            pass
+
         self.results: List[Dict[str, Any]] = []
         self._last_mode: Optional[str] = None
         self._transition_log: List[Dict[str, Any]] = []

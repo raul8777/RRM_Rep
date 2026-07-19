@@ -41,8 +41,10 @@ def main() -> int:
     settings.agent_mode = "auto"
     settings.dry_run = True
     settings.allow_real_trading = False
+    settings.binance_use_testnet = True
     settings.screener_enabled = False
     settings.screener_top_n_enabled = False
+    settings.spot_require_confirmed_regime = False  # allow backtesting in historical windows without confirmed regime
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     settings.analysis_symbols = list(symbols)

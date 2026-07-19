@@ -12,6 +12,7 @@ from typing import Dict, Optional, Callable
 from datetime import datetime
 from enum import Enum
 from binance_truth_guard import is_truth_critical
+import staged_entry
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,8 @@ class Orchestrator:
         self.trade_cycle_thread = None
         self.analysis_cycle_thread = None
         self.learning_cycle_thread = None
+        self.staged_entry_intra_thread = None
+        self.staged_entry_intra_stop: Optional[threading.Event] = None
         self.should_run = False
         self.last_trade_cycle_at: Optional[datetime] = None
         self.current_cycle_minutes: int = 5  # updated dynamically per regime
@@ -311,6 +314,9 @@ class Orchestrator:
         )
         self.trade_cycle_thread.start()
         logger.info(f"Trade cycle started with {interval_minutes} minute interval")
+
+        # Start the intra-cycle staged-entry validation loop (best-effort background).
+        self._start_staged_entry_intra_cycle()
     
     def start_analysis_cycle(self, cycle_func: Callable, interval_minutes: int = 15) -> None:
         """
@@ -496,9 +502,82 @@ class Orchestrator:
                             reason=f"consecutive_cycle_failures:{self.consecutive_cycle_failures}",
                         )
     
+    def _start_staged_entry_intra_cycle(self) -> None:
+        """Start a background thread that runs intra-cycle staged-entry checks.
+
+        It sleeps dynamically between checks based on the current regime's
+        staged_entry_regime_config.  If staged entry is disabled, the thread
+        exits cleanly on the next stop event.
+        """
+        if self.staged_entry_intra_thread and self.staged_entry_intra_thread.is_alive():
+            return
+        self.staged_entry_intra_stop = threading.Event()
+        self.staged_entry_intra_thread = threading.Thread(
+            target=self._staged_entry_intra_loop,
+            daemon=True,
+        )
+        self.staged_entry_intra_thread.start()
+        logger.info("Staged-entry intra-cycle validation started")
+
+    def _staged_entry_intra_loop(self) -> None:
+        while True:
+            try:
+                if not self.should_run or self.staged_entry_intra_stop is None or self.staged_entry_intra_stop.is_set():
+                    break
+                if not self.can_execute_trades():
+                    # Wait briefly until RUNNING again, but still respect stop.
+                    if self.staged_entry_intra_stop.wait(5):
+                        break
+                    continue
+
+                from init_components import get_components as _get_components
+                comp = _get_components()
+                if comp is None or not comp.db_client or not comp.settings:
+                    if self.staged_entry_intra_stop.wait(5):
+                        break
+                    continue
+
+                settings = comp.settings
+                db_client = comp.db_client
+                client = getattr(comp, 'binance_client', None)
+                news_client = getattr(comp, 'news_client', None)
+
+                # Determine current regime; prefer orchestrator state, then settings.
+                regime_mode = self.current_regime_mode or getattr(settings, 'current_regime_mode', 'SPOT_BULL')
+                cfg = staged_entry.get_staged_entry_regime_config(settings, regime_mode)
+                if not cfg.get('enabled') or cfg.get('intra_mode') == 'disabled':
+                    # Feature off for this regime; back off for a full cycle.
+                    if self.staged_entry_intra_stop.wait(max(1, self.current_cycle_minutes) * 60):
+                        break
+                    continue
+
+                # Sleep interval = cycle length / checks_per_cycle (minimum 30s).
+                cycle_min = self.current_cycle_minutes or 5
+                checks = max(1, int(cfg.get('checks_per_cycle', 1)))
+                sleep_seconds = max(30, int(cycle_min * 60 / checks))
+
+                staged_entry.perform_intra_cycle_check(
+                    db_client, client, settings, regime_mode, news_client=news_client
+                )
+                if self.staged_entry_intra_stop.wait(sleep_seconds):
+                    break
+            except Exception as e:
+                logger.warning(f"[StagedEntry/IntraCycle] error: {e}")
+                try:
+                    if self.staged_entry_intra_stop and self.staged_entry_intra_stop.wait(30):
+                        break
+                except Exception:
+                    break
+        logger.info("Staged-entry intra-cycle validation stopped")
+
     def stop_all_cycles(self) -> None:
         """Stop all background cycles."""
         self.should_run = False
+
+        if self.staged_entry_intra_stop:
+            self.staged_entry_intra_stop.set()
+        if self.staged_entry_intra_thread:
+            self.staged_entry_intra_thread.join(timeout=2)
 
         if self.trade_cycle_thread:
             self.trade_cycle_thread.join(timeout=5)
@@ -524,6 +603,7 @@ class Orchestrator:
             "trade_cycle_running": self.trade_cycle_thread.is_alive() if self.trade_cycle_thread else False,
             "analysis_cycle_running": self.analysis_cycle_thread.is_alive() if self.analysis_cycle_thread else False,
             "learning_cycle_running": self.learning_cycle_thread.is_alive() if self.learning_cycle_thread else False,
+            "staged_entry_intra_cycle_running": self.staged_entry_intra_thread.is_alive() if self.staged_entry_intra_thread else False,
             "portfolio_manager_active": self.portfolio_manager is not None,
             "position_manager_active": self.position_manager is not None,
             "backtester_active": self.backtester is not None,

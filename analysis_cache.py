@@ -21,6 +21,22 @@ class AnalysisCache:
         self._db_client = db_client
         logger.info("Database client set for analysis cache")
 
+    def _db_ready(self) -> bool:
+        """Return True only if the injected DB client is actually usable.
+
+        This prevents noisy repeated attempts against a PostgreSQL client whose
+        connection pool failed to initialise (e.g. MIMIC or container without DB).
+        """
+        if self._db_client is None:
+            return False
+        # Production DatabaseClient exposes connection_pool; a missing or None
+        # pool means the client is unusable, so drop it and fall back.
+        if hasattr(self._db_client, "connection_pool") and self._db_client.connection_pool is None:
+            logger.warning("DB client has no active pool; falling back to in-memory analysis cache")
+            self._db_client = None
+            return False
+        return True
+
     def set(self, symbol: str, indicators: Dict, technical_score: float) -> None:
         """Store indicators and score for a symbol."""
         data = {
@@ -29,7 +45,7 @@ class AnalysisCache:
             'timestamp': datetime.utcnow().isoformat(),
         }
         
-        if self._db_client:
+        if self._db_ready():
             try:
                 data_json = json.dumps(data)
                 updated = self._db_client.execute_update(
@@ -57,7 +73,7 @@ class AnalysisCache:
 
     def get(self, symbol: str) -> Optional[Dict]:
         """Retrieve cached analysis for a symbol."""
-        if self._db_client:
+        if self._db_ready():
             try:
                 query = """
                     SELECT data FROM market_data 
@@ -83,7 +99,7 @@ class AnalysisCache:
 
     def get_all(self) -> Dict[str, Dict]:
         """Retrieve all cached analyses."""
-        if self._db_client:
+        if self._db_ready():
             try:
                 query = """
                     SELECT symbol, data FROM market_data 
@@ -110,7 +126,7 @@ class AnalysisCache:
 
     def clear(self) -> None:
         """Clear entire cache."""
-        if self._db_client:
+        if self._db_ready():
             try:
                 query = "DELETE FROM market_data WHERE data_type = 'technical'"
                 self._db_client.execute_update(query)

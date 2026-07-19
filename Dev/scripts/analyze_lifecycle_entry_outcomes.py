@@ -28,6 +28,8 @@ class Entry:
     entry_cycle: int
     position_usdt: float
     features: Dict[str, Any]
+    regime: str = "SPOT_BULL"
+    quantity: float = 0.0
 
 
 def _feature(entry: Dict[str, Any], key: str, default: float = 0.0) -> float:
@@ -72,6 +74,7 @@ def match_entries_exits(result: Dict[str, Any]) -> List[Tuple[Entry, List[Dict[s
         summary = cycle if isinstance(cycle, dict) and "entries" in cycle else cycle.get("summary", {})
         if not isinstance(summary, dict):
             continue
+        regime = summary.get("regime") or result.get("regime") or result.get("forced_regime") or "SPOT_BULL"
         for ent in summary.get("entries", []):
             if not ent:
                 continue
@@ -80,11 +83,15 @@ def match_entries_exits(result: Dict[str, Any]) -> List[Tuple[Entry, List[Dict[s
                 continue
             sig = ent.get("signal") or {}
             sig_features = sig.get("features") or {}
+            position_usdt = float(ent.get("position_usdt") or 0)
+            quantity = float(ent.get("quantity") or sig.get("quantity") or 0)
             entry = Entry(
                 run_id=f"{result.get('window_id','?')}_{result.get('profile','?')}_{json.dumps(result.get('params','?'), sort_keys=True)}",
                 symbol=symbol,
                 entry_cycle=cycle_idx,
-                position_usdt=float(ent.get("position_usdt") or 0),
+                position_usdt=position_usdt,
+                quantity=quantity,
+                regime=str(regime).upper(),
                 features={
                     **{k: float(v) for k, v in sig_features.items() if isinstance(v, (int, float, bool))},
                     "composite_score": _feature(ent, "composite_score"),
@@ -126,11 +133,21 @@ def compute_outcomes(matched: List[Tuple[Entry, List[Dict[str, Any]]]]) -> List[
     for entry, exits in matched:
         total_pnl_usdt = sum(float(ex.get("realized_pnl_usdt") or ex.get("result", {}).get("realized_pnl_usdt") or 0) for ex in exits)
         pnl_pct = (total_pnl_usdt / entry.position_usdt * 100) if entry.position_usdt > 0 else 0.0
+        expected_pnl = entry.features.get("expected_pnl", 0.0)
+        expected_pnl_pct = (expected_pnl / entry.position_usdt * 100) if entry.position_usdt > 0 else 0.0
+        entry_price = (entry.position_usdt / entry.quantity) if entry.quantity > 0 else 0.0
         rows.append({
             **entry.features,
+            "run_id": entry.run_id,
+            "symbol": entry.symbol,
+            "regime": entry.regime,
             "position_usdt": entry.position_usdt,
+            "quantity": entry.quantity,
+            "entry_price": round(entry_price, 8),
+            "expected_pnl_pct": expected_pnl_pct,
             "pnl_usdt": total_pnl_usdt,
-            "pnl_pct": pnl_pct,
+            "realized_net_pnl_pct": pnl_pct,
+            "pnl_pct": pnl_pct,  # alias retained for backward compatibility
             "exits": len(exits),
         })
     return rows

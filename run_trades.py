@@ -26,6 +26,7 @@ from peak_capture_engine import (
     PeakCaptureDecision,
 )
 from config_helpers import get_param as _get_param
+import staged_entry
 from profit_realization_supervisor import (
     ProfitRealizationContext,
     evaluate as _evaluate_profit_realization,
@@ -5188,6 +5189,8 @@ def _filter_buy_candidates(
     settings,
     regime_mode: str,
     active_profile_label: Optional[str] = None,
+    predictions: Optional[Dict[str, Dict]] = None,
+    news_client: Optional[Any] = None,
 ) -> List[Any]:
     """
     Pre-filter candidate signals using the behavior-first entry gate.
@@ -5195,21 +5198,76 @@ def _filter_buy_candidates(
     Accepts either symbol strings or dicts with a 'symbol' key.  Returns the same
     shape filtered to candidates whose current behavior matches the active
     regime/profile objective.
+
+    `predictions` is the optional mapping from symbol -> pnl_service prediction dict.
+    When provided, expected-pnl values are merged into the candidate metadata so
+    the entry_profile_gate uses the production predictor output, not stale
+    signal features.
+
+    `news_client` is used to fetch the current Fear & Greed value so the gate can
+    dynamically tighten/loosen the C threshold in extreme market conditions.
     """
+    # Resolve Fear & Greed once for this filtering pass.
+    _fng_value: Optional[float] = None
+    if news_client is not None:
+        try:
+            _fng_data = news_client.get_fear_greed()
+            _fng_value = float(_fng_data.get("value")) if isinstance(_fng_data, dict) else None
+        except Exception:
+            _fng_value = None
+
     passed: List[Any] = []
     for cand in candidates:
         if isinstance(cand, dict):
             symbol = cand.get("symbol", "")
-            meta = cand
+            # Start with the full signal metadata, then overlay candidate-specific keys.
+            meta = (dict(signal_meta.get(symbol, {})) if isinstance(signal_meta, dict) else {})
+            meta.update(cand)
         else:
             symbol = cand
             meta = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
 
-        # Peak-quality hard discard gate: signals not in A/B/C are dropped.
-        if meta.get("peak_quality_profile") == "discarded":
-            print(f"[FilterBuy] Rejected {symbol}: PEAK_QUALITY_DISCARDED")
+        # Merge live predictor output if available so the gate uses scale-invariant
+        # expected returns rather than stale signal metadata.
+        _pred = (predictions or {}).get(symbol)
+        if _pred:
+            meta.setdefault("expected_pnl", _pred.get("expected_pnl"))
+            meta.setdefault("expected_pnl_percentage", _pred.get("expected_pnl_percentage"))
+            meta.setdefault("position_size_usdt", _pred.get("position_size_usdt"))
+            meta.setdefault("success_probability", _pred.get("success_probability"))
+
+        # Entry-profile gate: A/B/C tiers calibrated on realized post-cost outcomes.
+        # Anything that is not explicitly A, B or C is discarded.
+        _profile = str(meta.get("peak_quality_profile") or "").strip().upper()
+        if _profile not in ("A", "B", "C"):
+            # Re-evaluate dynamically if the gate is enabled and we have enough metadata.
+            if getattr(settings, "entry_profile_gate_enabled", True):
+                try:
+                    import entry_profile_gate
+                    _profile, _pinfo = entry_profile_gate.classify(
+                        meta, regime_mode, meta.get("expected_side", "LONG"), symbol,
+                        fear_greed_value=_fng_value,
+                    )
+                    meta["peak_quality_profile"] = _profile
+                    meta["peak_quality_score"] = _pinfo["score"]
+                    meta["entry_profile_gate_info"] = _pinfo
+                except Exception as _gate_err:
+                    print(f"[FilterBuy] {symbol}: entry_profile_gate error ({_gate_err}) -> discard")
+                    _profile = None
+
+        if _profile not in ("A", "B", "C"):
+            print(f"[FilterBuy] Rejected {symbol}: PEAK_QUALITY_DISCARDED (profile={_profile})")
             update_signal_decision(symbol, "rejected", "PEAK_QUALITY_DISCARDED")
             continue
+
+        # Audit all accepted candidates.
+        print(
+            f"[FilterBuy] {symbol}: ACCEPTED profile={_profile} "
+            f"score={meta.get('peak_quality_score')} "
+            f"expected_gain={meta.get('expected_gain')} "
+            f"prob={meta.get('success_probability')} "
+            f"strength={meta.get('signal_strength')}"
+        )
 
         # Audit the first 3 candidates' peak-quality profile/thresholds in production.
         if len(passed) < 3:
@@ -5221,13 +5279,25 @@ def _filter_buy_candidates(
                 f"strength={meta.get('signal_strength')}"
             )
 
-        _ok, _reason = _check_entry_quality(
-            symbol, signal_meta, settings, regime_mode, active_profile_label
-        )
-        if not _ok:
-            print(f"[FilterBuy] Rejected {symbol}: {_reason}")
-            update_signal_decision(symbol, "rejected", _reason.split(" ")[0])
-            continue
+        # Optional legacy behavior-first entry-quality gate.  It is now superseded by
+        # the entry_profile_gate, so by default it is disabled.  When enabled it can
+        # be used in blocking or advisory mode for additional hard/soft filtering.
+        _eq_mode = str(getattr(settings, "entry_quality_gate_mode", "disabled")).lower()
+        if _eq_mode in ("blocking", "advisory"):
+            _ok, _reason = _check_entry_quality(
+                symbol, signal_meta, settings, regime_mode, active_profile_label
+            )
+            if not _ok:
+                if _eq_mode == "blocking":
+                    print(f"[FilterBuy] Rejected {symbol}: {_reason}")
+                    update_signal_decision(symbol, "rejected", _reason.split(" ")[0])
+                    continue
+                # advisory: keep the candidate but attach a warning
+                print(f"[FilterBuy/Advisory] {symbol}: WOULD_REJECT ({_reason}) → kept")
+                if isinstance(cand, dict):
+                    cand.setdefault("gate_warnings", []).append({
+                        "gate": "entry_quality", "reason": _reason, "action": "advisory_pass"
+                    })
 
         # Optional Bayesian evidence gate (disabled by default until calibrated).
         if getattr(settings, "evidence_gate_enabled", False):
@@ -5303,21 +5373,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         except Exception:
             pass
 
-    # ── Behavior-first candidate filter ───────────────────────────────────────
-    # NOTE: Primary filtering now runs in execute_once() BEFORE QUBO.
-    # This secondary pass only applies when _buy_top_symbols is called directly
-    # (e.g., from tests or alternative paths) and entry_quality_gate_mode is blocking.
-    _eq_mode_bts = str(getattr(settings, 'entry_quality_gate_mode', 'blocking')).lower()
-    if _eq_mode_bts == "blocking":
-        top_signals_with_meta = _filter_buy_candidates(
-            top_signals_with_meta, signal_meta, settings, _regime_mode, _active_profile_label
-        )
-    else:
-        # Advisory/disabled: only hard-reject peak_quality_profile == "discarded"
-        top_signals_with_meta = [
-            c for c in top_signals_with_meta
-            if not (isinstance(c, dict) and str(c.get('peak_quality_profile', '')).lower() == 'discarded')
-        ]
+    # ── Entry-profile gate (secondary pass) ─────────────────────────────────
+    # Always run the profile gate when this function is called directly; it is a
+    # no-op duplicate if execute_once() already filtered the same symbols.
+    top_signals_with_meta = _filter_buy_candidates(
+        top_signals_with_meta, signal_meta, settings, _regime_mode, _active_profile_label,
+        precomputed_predictions,
+        news_client,
+    )
     if top_signals_with_meta and isinstance(top_signals_with_meta[0], dict):
         top_symbols = [s['symbol'] for s in top_signals_with_meta]
     else:
@@ -7852,6 +7915,17 @@ def execute_once(monitor_only: bool = False, components=None):
             except Exception as _rpe:
                 print(f"[RegimeParams] execute_once application failed: {_rpe}")
 
+    # ── Staged entry: discard ready candidates from a regime that is no longer active.
+    if _db_client_ref:
+        try:
+            _discarded_regime = staged_entry.discard_ready_by_regime_change(
+                _db_client_ref, _active_mode_before, _regime_mode
+            )
+            if _discarded_regime:
+                print(f"[StagedEntry] regime change {_active_mode_before} -> {_regime_mode}: discarded {_discarded_regime}")
+        except Exception as _se_regime:
+            print(f"[StagedEntry] regime change discard error: {_se_regime}")
+
     # ── Auto BNB commission discount management (after regime detection) ───────────
     try:
         from binance_commission import auto_manage_bnb_discount
@@ -8367,35 +8441,15 @@ def execute_once(monitor_only: bool = False, components=None):
     )
     _selection_capture_candidates(top_signals, predictions, "predicted")
 
-    # ── Peaks-first: pre-filter before QUBO (hard-reject discarded, advisory for entry_quality) ─
-    _eq_gate_mode = str(getattr(settings, 'entry_quality_gate_mode', 'blocking')).lower()
+    # ── Peaks-first: apply the entry-profile gate before QUBO ────────────────
+    # The old behavior-first entry_quality gate is superseded by the calibrated
+    # entry_profile_gate and is disabled by default; see entry_quality_gate_mode.
     _active_profile_label_exec = _get_active_profile_label(_db_client_ref, _regime_mode)
-    if _eq_gate_mode == "blocking":
-        # Full blocking mode — filter as before
-        top_signals = _filter_buy_candidates(
-            top_signals, _step2_signal_meta, settings, _regime_mode, _active_profile_label_exec
-        )
-    elif _eq_gate_mode == "advisory":
-        # Advisory mode: only hard-reject "discarded" profiles; log other rejections as warnings
-        _filtered = []
-        for _sig in top_signals:
-            _sym = _sig['symbol'] if isinstance(_sig, dict) else _sig
-            _pq_prof = str((_sig if isinstance(_sig, dict) else {}).get('peak_quality_profile', '')).lower()
-            if _pq_prof == 'discarded':
-                print(f"[FilterBuy/Advisory] Hard-rejected {_sym}: PEAK_QUALITY_DISCARDED")
-                update_signal_decision(_sym, "rejected", "PEAK_QUALITY_DISCARDED")
-                continue
-            _ok, _reason = _check_entry_quality(_sym, _step2_signal_meta, settings, _regime_mode, _active_profile_label_exec)
-            if not _ok:
-                # Advisory: log warning but keep the candidate
-                if isinstance(_sig, dict):
-                    _sig.setdefault('gate_warnings', []).append({
-                        "gate": "entry_quality", "reason": _reason, "action": "advisory_pass",
-                    })
-                print(f"[FilterBuy/Advisory] {_sym}: WOULD_REJECT ({_reason}) → kept (Peaks advisory mode)")
-            _filtered.append(_sig)
-        top_signals = _filtered
-    # else: "disabled" — skip entry_quality filter entirely
+    top_signals = _filter_buy_candidates(
+        top_signals, _step2_signal_meta, settings, _regime_mode, _active_profile_label_exec,
+        predictions,
+        news_client,
+    )
 
     if top_signals and isinstance(top_signals[0], dict):
         top_symbols = [s['symbol'] for s in top_signals]
@@ -8432,6 +8486,53 @@ def execute_once(monitor_only: bool = False, components=None):
     for _qubo_excluded_symbol in _pre_qubo_symbols - set(top_symbols):
         _selection_mark_stage(_qubo_excluded_symbol, "qubo_excluded", "QUBO_EXCLUDED")
     _selection_context["selected_count"] = len(top_symbols)
+
+    # ── Staged multi-cycle entry validation ───────────────────────────────────
+    # Inserted between QUBO selection and actual execution.  Validated candidates
+    # that are still in the QUBO top become _buy_signals; new QUBO candidates are
+    # staged as `ready` for future cycles.
+    _buy_signals = top_signals
+    _openable_ready_ids_by_symbol: Dict[str, int] = {}
+    if _db_client_ref and getattr(settings, 'staged_entry_enabled', False):
+        try:
+            _staged_cfg = staged_entry.get_staged_entry_regime_config(settings, _regime_mode)
+            if _staged_cfg.get('enabled'):
+                _cycle_id = _selection_context.get('cycle_id')
+                # 1. Re-evaluate existing ready/validated candidates across cycles.
+                _staged_status = staged_entry.evaluate_inter_cycle(
+                    _db_client_ref, client, settings, _regime_mode,
+                    top_signals, predictions, _step2_signal_meta,
+                    cycle_id=_cycle_id, news_client=news_client,
+                )
+                if _staged_status.get('validated') or _staged_status.get('discarded') or _staged_status.get('kept'):
+                    print(f"[StagedEntry] inter-cycle: validated={_staged_status.get('validated')} "
+                          f"discarded={_staged_status.get('discarded')} kept={_staged_status.get('kept')}")
+                # 2. Stage new QUBO-selected candidates (initial positive check).
+                _staged_new = staged_entry.stage_ready_candidates(
+                    top_signals, predictions, _step2_signal_meta, _regime_mode,
+                    _db_client_ref, cycle_id=_cycle_id, settings=settings,
+                    news_client=news_client, client=client,
+                )
+                if _staged_new:
+                    print(f"[StagedEntry] staged new: {[_s.get('symbol') for _s in _staged_new]}")
+                # 3. Only pass validated candidates that are still QUBO-selected to execution.
+                _openable_rows = staged_entry.get_openable_candidates(
+                    _db_client_ref, _regime_mode, top_symbols,
+                )
+                if _openable_rows:
+                    _buy_signals = [dict(_r.get('signal_meta', {})) for _r in _openable_rows]
+                    for _sig in _buy_signals:
+                        _sig.setdefault('symbol', _sig.get('symbol'))
+                    _openable_ready_ids_by_symbol = {
+                        _r['symbol']: _r['id'] for _r in _openable_rows if _r.get('symbol')
+                    }
+                else:
+                    _buy_signals = []
+            else:
+                _buy_signals = top_signals
+        except Exception as _se:
+            print(f"[StagedEntry] staged entry error: {_se}")
+            _buy_signals = top_signals
 
     # ── SSO-7: Populate best candidate cache for next cycle's monitoring ────────
     try:
@@ -8476,7 +8577,18 @@ def execute_once(monitor_only: bool = False, components=None):
         print("Balances after sells:", balances)
 
     # ── Step 5: Buy top symbols — pass full signal dicts for aggressive mode ───
-    buy_orders = _buy_top_symbols(client, settings, top_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client, regime_obj=_regime_exe, regime_mode_override=_regime_mode, screened_pairs_cache=_cached_screened_pairs, pre_switch_state=_pre_switch_state, futures_client=comp.futures_client)
+    buy_orders = _buy_top_symbols(client, settings, _buy_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client, regime_obj=_regime_exe, regime_mode_override=_regime_mode, screened_pairs_cache=_cached_screened_pairs, pre_switch_state=_pre_switch_state, futures_client=comp.futures_client)
+
+    # Mark staged-entry candidates as opened when the trade filled.
+    if _openable_ready_ids_by_symbol and buy_orders:
+        try:
+            for _bo in buy_orders:
+                _sym = _bo.get('symbol') if isinstance(_bo, dict) else getattr(_bo, 'symbol', None)
+                _ready_id = _openable_ready_ids_by_symbol.get(_sym)
+                if _ready_id:
+                    staged_entry.mark_opened(_db_client_ref, _ready_id, _bo.get('order_id') if isinstance(_bo, dict) else None)
+        except Exception as _se_mark:
+            print(f"[StagedEntry] mark_opened error: {_se_mark}")
 
     # ── Dynamic cycle scheduling — return next interval based on active regime ──
     _cycle_by_regime = {

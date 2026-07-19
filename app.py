@@ -127,13 +127,20 @@ def to_mexico_time_str(utc_iso: str) -> str:
         return utc_iso
 
 
-def _get_request_price(price_cache: Dict[str, float], symbol: str) -> float:
-    """Return a symbol price using a request-local cache to avoid repeated fetches."""
-    cached = price_cache.get(symbol)
+def _get_request_price(price_cache: Dict[str, float], symbol: str, avg: bool = False) -> float:
+    """Return a symbol price using a request-local cache to avoid repeated fetches.
+
+    When avg=True, use the 5-minute rolling VWAP price instead of lastPrice.
+    """
+    key = f"{symbol}:avg" if avg else symbol
+    cached = price_cache.get(key)
     if cached is not None:
         return cached
-    price = float(binance_client.get_symbol_price(symbol))
-    price_cache[symbol] = price
+    if avg and hasattr(binance_client, 'get_symbol_avg_price'):
+        price = float(binance_client.get_symbol_avg_price(symbol))
+    else:
+        price = float(binance_client.get_symbol_price(symbol))
+    price_cache[key] = price
     return price
 
 
@@ -1358,6 +1365,19 @@ async def get_open_positions() -> Dict:
                 meta = getattr(position, 'metadata', {}) or {}
                 trailing_peak = meta.get('trailing_peak')
                 trail_stop_price = round(float(trailing_peak) * (1 - settings.trailing_stop_distance_pct / 100), 6) if trailing_peak else None
+                breakeven_done = bool(
+                    meta.get('breakeven_done')
+                    or (
+                        trailing_peak is not None
+                        and entry_price > 0
+                        and float(position.stop_loss or 0) >= entry_price
+                    )
+                )
+                peak_pnl_pct = 0.0
+                if meta.get('peak_pnl_pct_real'):
+                    peak_pnl_pct = round(float(meta.get('peak_pnl_pct_real')) * 100, 2)
+                elif trailing_peak is not None and entry_price > 0:
+                    peak_pnl_pct = round((float(trailing_peak) - entry_price) / entry_price * 100, 2)
                 positions_data.append({
                     "symbol": symbol,
                     "position_id": position.position_id,
@@ -1374,6 +1394,12 @@ async def get_open_positions() -> Dict:
                     "take_profit_price": tp_price,
                     "trailing_peak": float(trailing_peak) if trailing_peak else None,
                     "trail_stop_price": trail_stop_price,
+                    "breakeven_done": breakeven_done,
+                    "scale_out_done": bool(meta.get('scale_out_done', False)),
+                    "sso_levels_done": list(meta.get('sso_levels_done', []) or []),
+                    "sso_last_trigger": str(meta.get('sso_last_trigger', '') or ''),
+                    "peak_pnl_pct": peak_pnl_pct,
+                    "bounce_entry": bool(meta.get('bounce_entry', False)),
                     **_normalize_transaction_context(getattr(position, 'metadata', {}) or {}, _runtime_ctx),
                 })
                 _enrich_position_with_exit_policy(positions_data[-1])
@@ -2987,9 +3013,9 @@ async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
         positions = position_manager.get_all_positions()
         open_list = []
         for symbol, pos_list in positions.items():
-            # Fetch price once per symbol
+            # Fetch price once per symbol (avg/VWAP for dashboard unrealized PnL)
             try:
-                current_price_sym = float(_get_request_price(price_cache, symbol))
+                current_price_sym = float(_get_request_price(price_cache, symbol, avg=True))
             except Exception:
                 current_price_sym = None
 
@@ -3113,6 +3139,21 @@ async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
             _tp_dist = round((_tp_f - _sp_wap) / _sp_wap * 100, 2) if _tp_f and _sp_wap > 0 else None
             _trail_peak = float(_sp_meta_last.get('trailing_peak', 0)) if _sp_meta_last.get('trailing_peak') else None
 
+            # SPOT lifecycle badges derived from metadata
+            _sp_breakeven_done = bool(
+                _sp_meta_last.get('breakeven_done')
+                or (
+                    _trail_peak is not None
+                    and _sp_wap > 0
+                    and float(_sp_first.stop_loss or 0) >= _sp_wap
+                )
+            )
+            _sp_peak_pnl_pct = 0.0
+            if _sp_meta_last.get('peak_pnl_pct_real'):
+                _sp_peak_pnl_pct = round(float(_sp_meta_last.get('peak_pnl_pct_real')) * 100, 2)
+            elif _trail_peak is not None and _sp_wap > 0:
+                _sp_peak_pnl_pct = round((_trail_peak - _sp_wap) / _sp_wap * 100, 2)
+
             open_list.append({
                 "symbol": symbol,
                 "position_id": _sp_first.position_id,
@@ -3146,10 +3187,13 @@ async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
                 "tp_dist_pct": _tp_dist,
                 "trailing_peak": _trail_peak,
                 "trailing_active": _trail_peak is not None and _trail_peak > 0,
-                "breakeven_done": False,
+                "breakeven_done": _sp_breakeven_done,
                 "tp_extensions": int(_sp_meta_last.get('tp_extensions_count', 0)),
                 "tp_decisions": _sp_meta_last.get('tp_decisions', []),
                 "scale_out_done": bool(_sp_meta_last.get('scale_out_done', False)),
+                "sso_levels_done": list(_sp_meta_last.get('sso_levels_done', []) or []),
+                "sso_last_trigger": str(_sp_meta_last.get('sso_last_trigger', '') or ''),
+                "peak_pnl_pct": _sp_peak_pnl_pct,
                 "escalamientos": _sp_esc_n,
                 "entries": _enrich_entries(_sp_entries_raw, _sp_cp, _sp_first.side),
                 "bounce_entry": bool(_sp_meta_last.get('bounce_entry', False)),
@@ -7719,6 +7763,9 @@ _KELLY_EDITABLE_FIELDS = {
     "sso_target_contribution_pct_range_scalp",  # s73 C2: DB-governed per profile
     # s75: category limit hot-config governance
     "category_max_positions_enabled",
+    # phased staged entry flags
+    "staged_entry_enabled",
+    "staged_entry_regime_config",
 }
 
 _REGIME_MODES = {"SPOT_BULL", "RANGE_SCALP", "PRESERVATION", "FUTURES_SHORT"}
@@ -9154,6 +9201,11 @@ def _check_config_drift(settings) -> List[Dict]:
         'sso_flat_stagnation_timeout_hours_range_scalp',
         'sso_flat_stagnation_timeout_pnl_pct',
         'sso_flat_stagnation_timeout_pnl_pct_range_scalp',
+        # Current runtime overrides / hot-config intentionally tuned in production
+        'kelly_min_usdt', 'futures_kelly_min_usdt',
+        'entry_quality_vol_spike_min_spot_bull', 'entry_quality_vol_spike_floor_spot_bull',
+        'portfolio_concentration_min_mult',
+        'sso_stagnant_min_hours', 'sso_decay_min_hours',
     }
     # Canonical default drift (SPOT+FUTURES parameters) — skip keys already covered by baseline
     for k, expected in _PARAM_DEFAULTS.items():
@@ -10456,6 +10508,11 @@ async def post_config_verify(body: Dict = None, _auth=Depends(_require_api_key))
             'sso_flat_stagnation_timeout_hours_range_scalp',
             'sso_flat_stagnation_timeout_pnl_pct',
             'sso_flat_stagnation_timeout_pnl_pct_range_scalp',
+            # Current runtime overrides / hot-config intentionally tuned in production
+            'kelly_min_usdt', 'futures_kelly_min_usdt',
+            'entry_quality_vol_spike_min_spot_bull', 'entry_quality_vol_spike_floor_spot_bull',
+            'portfolio_concentration_min_mult',
+            'sso_stagnant_min_hours', 'sso_decay_min_hours',
         }
         if body and isinstance(body, dict):
             _exclude.update(body.get('exclude', []))

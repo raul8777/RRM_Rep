@@ -1,25 +1,139 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 18 2026 | s79: Evidence Gate calibrado y habilitado
+> Última actualización: jul 18 2026 | s81: Staged Entry Lifecycle integrado y MIMIC sweep ejecutado
 
 ---
 
-## 🟢 Estado del Sistema — jul 18 2026 — s79: Evidence Gate calibrado y habilitado
+## 🟢 Estado del Sistema — jul 18 2026 — s81: Staged Entry Lifecycle integrado y MIMIC sweep ejecutado
 
 ### Objetivo
-Reemplazar la fórmula heurística de `_evidence_gate_posterior` por un modelo logístico entrenado por régimen sobre un shadow log forzado, y habilitar el gate en producción.
+Añadir un ciclo de vida `ready → validated → opened | discarded` entre la selección QUBO y la ejecución de compras, con re-chequeos inter-ciclo e intra-ciclo, persistencia en `ready_candidates`/`ready_candidate_checks`, y soporte en simulaciones MIMIC.
+
+### Cambios implementados
+- **`staged_entry.py`**: lifecycle completo con `stage_ready_candidates`, `evaluate_inter_cycle`, `perform_intra_cycle_check`, `get_openable_candidates`, `mark_opened`, `cleanup_old`.
+- **`run_trades.py`**: integración entre QUBO y `_buy_top_symbols`; los candidatos validados que siguen en el top se ejecutan, los demás se stanean.
+- **`orchestrator.py`**: scheduler de re-chequeos intra-ciclo cuando `staged_entry_enabled=True`.
+- **`config.py` / `config_helpers.py`**: `staged_entry_enabled` y `staged_entry_regime_config` por régimen.
+- **`database/migrations/021_ready_candidates.sql`**: tablas `ready_candidates` y `ready_candidate_checks` con JSONB.
+- **`simulation/mimic_db.py`**: `_StagedTables` implementa las tablas en memoria para `SimulationDatabaseClient`.
+- **`Dev/scripts/mimic_staged_entry_sweep.py`**: sweep MIMIC con `max_workers=10` que fuerza régimen y calibra `required_positive_checks` / `intra_mode`.
+- **`simulation/mimic_mode_profile_sweep.py`**: acepta `forced_regime` y parchea `entry_profile_gate` en simulación forzada.
+- **`analysis_cache.py`**: fallback silencioso a memoria cuando el pool PostgreSQL no está disponible (MIMIC).
+
+### Configuración por régimen (post-sweep)
+| Régimen | `enabled` | `required_positive_checks` | `intra_mode` | `max_age_min` | `price_source` |
+|---|---|---|---|---|---|
+| SPOT_BULL | True | 2 | predictor | 60 | avg |
+| RANGE_SCALP | True | 2 | predictor | 20 | avg |
+| FUTURES_SHORT | False | 2 | disabled | 20 | ticker |
+| PRESERVATION | False | 2 | disabled | 100 | avg |
+
+### Resultados del MIMIC sweep SPOT_BULL
+- `Dev/benchmarks/staged_entry_sweep_spot_bull/mimic_sweep_report.json`
+- 24 corridas (4 ventanas × 3 configs × 1 perfil A) con `max_workers=10`, `max_cycles=30`.
+- El gate de entradas en MIMIC descartó todos los candidatos (`predictor PnL negativo`), por lo que no se abrieron posiciones. El lifecycle **sí** validó/descartó candidatos correctamente.
+- Pendiente: sweep con señales positivas o en modo `advisory` para obtener métricas de PnL comparables.
+
+### Rollback inmediato
+```
+PATCH /config/kelly {"staged_entry_enabled": false}
+```
+
+### Activación en producción
+- `config.py` / `config_helpers.py`: `staged_entry_enabled=True` por defecto.
+- SPOT_BULL y RANGE_SCALP: `enabled=True`, `required_positive_checks=2`, `max_cycles=3`.
+- FUTURES_SHORT y PRESERVATION: `enabled=False` hasta tener gate/calibración específica.
+- `app.py`: `staged_entry_enabled` y `staged_entry_regime_config` en `_KELLY_EDITABLE_FIELDS` para hot-config vía `PATCH /config/kelly`.
+
+### Monitoreo en producción
+```sql
+-- Candidatos activos por régimen y estado
+SELECT regime_mode, status, COUNT(*) 
+FROM ready_candidates 
+GROUP BY regime_mode, status;
+
+-- Últimos re-chequeos con resultado positivo/negativo
+SELECT ready_candidate_id, regime_mode, check_type, positive, decision, discard_reason, created_at
+FROM ready_candidate_checks
+WHERE created_at >= NOW() - INTERVAL '24 hours'
+ORDER BY created_at DESC LIMIT 50;
+
+-- Candidatos validados esperando apertura
+SELECT id, symbol, regime_mode, positive_checks, total_checks, ready_at, last_checked_at
+FROM ready_candidates
+WHERE status='validated';
+```
+
+### Próximos pasos
+1. Ejecutar sweep por régimen con `entry_profile_gate` en modo `advisory` para obtener muestras de PnL.
+2. Calibrar `required_positive_checks` y `max_age_min` por régimen a partir de los resultados de PnL.
+3. Generar ventanas dominadas por `PRESERVATION` y `FUTURES_SHORT` para calibrar su `staged_entry_regime_config`.
+
+---
+
+## 🟢 Estado del Sistema — jul 18 2026 — s80: Entry Profile Gate integrado y calibrado
+
+### Objetivo
+Reemplazar la asignación de perfiles A/B/C basada en `peak_quality.py` y el filtro heurístico `_filter_buy_candidates` por un único gate calibrado sobre outcomes reales: `entry_profile_gate.py`. El gate garantiza que cada posición C tenga retorno neto positivo mínimo después de costos; todo lo que no alcance C se descarta.
+
+### Cambios implementados
+- **`entry_profile_gate.py`**: implementa `compute_quality_score()` y `classify()`. El score primario es el `expected_pnl` post-costo del predictor; si falta, cae a un heuristico basado en `vol_spike`, `strength`, `probability` y categoría del símbolo. Los umbrales A/B/C se cargan desde `Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json`.
+- **`autonomous_signals.py`**: reemplaza la asignación de `peak_quality_profile` por `entry_profile_gate.classify()`. Las señales descartadas quedan marcadas como `discarded`.
+- **`run_trades.py`**: `_filter_buy_candidates()` ahora utiliza el entry_profile_gate como gate principal. Cualquier perfil distinto de A/B/C se descarta con `PEAK_QUALITY_DISCARDED`. El behavior-first `entry_quality_gate` queda desactivado por defecto (`entry_quality_gate_mode=disabled`) y es opcional en modo advisory/blocking.
+- **`config.py` / `config_helpers.py`**: `entry_profile_gate_enabled=True`; `entry_profile_gate_thresholds_path=Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json`; `evidence_gate_enabled=False`; `volspike_override_enabled=False`; `entry_quality_gate_mode=disabled`; `predictor_gate_mode=blocking`; `futures_enabled=False`.
+- **`Dev/scripts/mimic_single_simulation.py` / `mimic_mode_profile_sweep.py`**: configuran `binance_use_testnet=True`, `spot_require_confirmed_regime=False` y `futures_enabled=False` para backtests sin datos de mercado en vivo.
+- **`Dev/scripts/validate_entry_profile_gate.py`**: validador de streaming que clasifica registros históricos y verifica que cada tier A/B/C tenga retorno neto positivo.
+
+### Umbrales calibrados (outcome `realized_net_pnl_pct`, costo 0.0025)
+- `SPOT_BULL` **v3 recalibrado post-sweep (quality-score model)**: A=0.6673, B=0.3361, C=0.2456
+- `RANGE_SCALP`: A=0.0917, B=0.0917, C=0.0917  (A-only, posible recalibración con más cobertura)
+- Umbrales anteriores (`v1`) archivados en `entry_profile_thresholds_v1.json`.
+
+### Quality-score model SPOT_BULL
+- **Archivo**: `Dev/benchmarks/entry_profile_calibration/quality_score_model_spot_bull.pkl`  
+  Entrenado con `ExtraTreesRegressor` sobre `training_data_v2_bestexit.jsonl` (1,916 registros SPOT_BULL tras re-sweep).
+- **Features**: `expected_pnl_pct`, `peak_quality`, `composite_score`, `confluence`, `short_term_score`, `success_probability`, `signal_strength`, `range_score`, `vol_score`, `rsi_score`, `pnl_score`, `symbol_quality_score`, `rsi_4h`, `vol_spike`, `range_position`, `trend_4h`, `atr`.
+- **Importancia dominante**: `expected_pnl_pct` (~0.99), lo que indica que el problema es la **forma no monótona** del predictor (valores altos de `expected_pnl_pct` → resultados negativos; el rango óptimo está alrededor de 0.08).
+- **Uso**: `entry_profile_gate.compute_quality_score()` invoca el modelo cuando todas las features requeridas están presentes; si no, cae al fallback heurístico.
+
+### Validación histórica (training_data_v2_bestexit.jsonl, 1,916 registros SPOT_BULL post re-sweep)
+- `SPOT_BULL` v3 recalibrado: A n=89 WR=95.5% mean_net=+4.35%; B n=185 WR=92.4% mean_net=+1.29%; C n=229 WR=89.1% mean_net=+0.25%; discarded n=1,413 mean_net=-2.98%.
+- `SPOT_BULL` **v1** (signal_peak_outcomes): A n=219 WR=93.6% mean_net=+1.65%; B n=437 WR=90.4% mean_net=+1.34%; C n=1,531 WR=87.5% mean_net=+0.95%.
+- **PASS**: todos los tiers aceptados (A/B/C) tienen retorno neto medio positivo; descarte filtra el lado negativo.
+
+### Otras vías de entrada identificadas y desactivadas
+- **FUTURES_SHORT**: ciclo de apertura de shorts en `run_trades.py`/`futures_client.py`. Queda desactivado por `futures_enabled=False` bajo el nuevo diseño hasta que se calibre un gate equivalente para shorts.
+- **VolSpike override**: bypass del predictor para tokens NARRATIVE con volumen excepcional. Funcionalidad integrada en el score del entry_profile_gate; desactivado vía `volspike_override_enabled=False`.
+- **Evidence gate**: posterior bayesiano por régimen. Supersededido por el entry_profile_gate; desactivado vía `evidence_gate_enabled=False`.
+
+### Rollback inmediato
+```
+PATCH /config/kelly {"entry_profile_gate_enabled": false, "entry_quality_gate_mode": "blocking", "predictor_gate_mode": "advisory"}
+```
+
+### Próximos pasos
+1. Monitorear en producción que solo se abran posiciones A/B/C y que el perfil C realmente genere PnL neto positivo.
+2. Calibrar un gate equivalente para FUTURES_SHORT antes de re-habilitar `futures_enabled`.
+3. Ejecutar sweep SuperMIMIC overnight con max_cycles=50 y max_workers=6 para refinar meta-fields de A/B/C.
+
+---
+
+## 🟢 Estado del Sistema — jul 18 2026 — s79: Evidence Gate calibrado y habilitado (SUPERSEDIDO por s80)
+
+### Objetivo
+Reemplazar la fórmula heurística de `_evidence_gate_posterior` por un modelo logístico entrenado por régimen sobre un shadow log forzado. **Este gate queda desactivado por defecto en s80; el entry_profile_gate lo reemplaza.**
 
 ### Cambios implementados
 - **`run_trades.py`**: `_evidence_gate_posterior` carga `/app/Dev/benchmarks/forced_regime_sweep/calibration/evidence_gate_calibration.json` y aplica coeficientes logísticos por régimen; fallback a la fórmula anterior si no hay calibración.
 - **`mimic_mode_profile_sweep.py`**: copia local de `_evidence_gate_posterior` sincronizada; shadow logging corrige extracción de `entry_price` desde `order["fills"]`.
-- **`config.py` / `config_helpers.py`**: `evidence_gate_enabled=True` por defecto; thresholds calibrados `SPOT_BULL=0.60`, `RANGE_SCALP=0.52`, `FUTURES_SHORT=0.80`, `PRESERVATION=0.80`.
+- **`config.py` / `config_helpers.py`**: `evidence_gate_enabled=False` en s80; thresholds calibrados `SPOT_BULL=0.60`, `RANGE_SCALP=0.52`, `FUTURES_SHORT=0.80`, `PRESERVATION=0.80`.
 - **`14_shadow_log_sweep.py` + `calibrate_evidence_gate.py`**: sweep forzado 144 jobs / 5,610 registros; modelo logístico por régimen entrenado con `logit(predictor_prob)` + `predictor_ev`.
 
-### Activación
-- Runtime: `POST /config/apply {"evidence_gate_enabled": true}` → snapshot `20260718_152602_367493`.
+### Activación (legacy)
+- Runtime: `POST /config/apply {"evidence_gate_enabled": true}`.
 
-### Resultados de validación
+### Resultados de validación histórica
 - SPOT_BULL: posterior máximo 0.562 < 0.60 → gate bloquea todas las entradas del sweep (PnL medio -11.51 USDT).
 - RANGE_SCALP: 662/3,026 registros pasan, win-rate 50.8%, PnL medio +1.09 USDT/trade.
 - Back-test agregado: sin gate -35,156 USDT; con gate +721 USDT.
@@ -28,11 +142,6 @@ Reemplazar la fórmula heurística de `_evidence_gate_posterior` por un modelo l
 ```
 POST /config/apply {"evidence_gate_enabled": false}
 ```
-
-### Próximos pasos
-1. Monitorear frecuencia de trades y PnL en los próximos ciclos.
-2. Generar shadow entries para FUTURES_SHORT y PRESERVATION antes de confiar en sus umbrales heurísticos.
-3. Decidir si se mejora el edge de SPOT_BULL o se mantiene el bloqueo bajo la lógica actual.
 
 ---
 

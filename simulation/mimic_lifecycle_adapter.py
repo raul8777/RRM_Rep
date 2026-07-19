@@ -17,11 +17,15 @@ from lifecycle.adapter import ExecutionAdapter
 from lifecycle.base import (
     EntryDecision,
     ExitDecision,
+    ExitPolicy,
     LifecycleConfig,
     MarketContext,
+    MomentumExitRule,
+    PartialTake,
     Position,
     Side,
     SizedTrade,
+    StagnationRule,
 )
 from lifecycle.signal import _DEFAULT_CATEGORIES
 
@@ -46,6 +50,64 @@ def _load_symbol_quality_map() -> Dict[str, float]:
 
 
 _SYMBOL_QUALITY_MAP = _load_symbol_quality_map()
+
+_BEST_EXIT_POLICY_PATH = Path("Dev/benchmarks/peak_lifecycle_tuning/best_exit_policy.json")
+
+
+def _partial_take_from_mode(mode: Optional[str]) -> Any:
+    if not mode or mode == "none":
+        return ()
+    if mode == "tp1_25_at_1.5":
+        return (PartialTake(0.25, 1.5, "tp1"),)
+    if mode == "tp1_25_at_2.0":
+        return (PartialTake(0.25, 2.0, "tp1"),)
+    if mode == "tp1_25_at_1.5_tp2_25_at_2.5":
+        return (
+            PartialTake(0.25, 1.5, "tp1"),
+            PartialTake(0.25, 2.5, "tp2"),
+        )
+    return ()
+
+
+def _load_best_exit_policies(
+    regime: str, profile_label: str = "PREDICTIVE"
+) -> Dict[str, ExitPolicy]:
+    if not _BEST_EXIT_POLICY_PATH.exists():
+        return {}
+    try:
+        data = json.loads(_BEST_EXIT_POLICY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    per = data.get("per_profile_exit_policy", {})
+    policies: Dict[str, ExitPolicy] = {}
+    for prof in ("A", "B", "C"):
+        p = per.get(prof, {})
+        tsh = p.get("time_stop_hours")
+        policies[prof] = ExitPolicy(
+            regime=regime,
+            profile=prof,
+            hard_sl_atr_mult=float(p.get("hard_sl_atr_mult", 2.5)),
+            hard_tp_atr_mult=float(p.get("hard_tp_atr_mult", 3.0)),
+            trailing_activation_pct=float(p.get("trailing_activation_pct", 0.02)),
+            trailing_atr_mult=float(p.get("trailing_atr_mult", 1.5)),
+            breakeven_activation_pct=float(p.get("breakeven_activation_pct", 0.015)),
+            partial_takes=_partial_take_from_mode(p.get("partial_take_mode")),
+            momentum_exit=MomentumExitRule(
+                int(p.get("momentum_rsi_overbought", 70)),
+                int(p.get("momentum_rsi_oversold", 30)),
+                int(p.get("momentum_fng_extreme_greed", 80)),
+                int(p.get("momentum_fng_extreme_fear", 20)),
+            ),
+            stagnation_rule=StagnationRule(
+                int(p.get("stagnation_min_hours", 6)),
+                float(p.get("stagnation_max_drawdown_from_peak_pct", 0.05)),
+                0.5,
+            ),
+            use_expected_gain_for_tp=bool(p.get("use_expected_gain_for_tp", False)),
+            expected_gain_mult=float(p.get("expected_gain_mult", 1.0)),
+            time_stop_hours=float(tsh) if tsh is not None else None,
+        )
+    return policies
 
 
 def _approx_atr(symbol: str, feed: List[Dict[str, Any]], lookback: int = 14) -> Optional[float]:
@@ -988,7 +1050,7 @@ def predictive_spot_bull_config_from_params(
         profile_order=("A", "B", "C"),
         profile_thresholds=thresholds,
         profile_sizing_policies=sizing,
-        profile_exit_policies=base.profile_exit_policies,
+        profile_exit_policies=_load_best_exit_policies("SPOT_BULL", profile) or base.profile_exit_policies,
     )
 
 
@@ -1279,7 +1341,7 @@ def predictive_range_scalp_config_from_params(
         profile_order=("A", "B", "C"),
         profile_thresholds=thresholds,
         profile_sizing_policies=sizing,
-        profile_exit_policies=base.profile_exit_policies,
+        profile_exit_policies=_load_best_exit_policies("RANGE_SCALP", profile) or base.profile_exit_policies,
     )
 
 

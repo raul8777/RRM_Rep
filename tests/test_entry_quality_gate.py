@@ -279,10 +279,10 @@ def test_quality_score_for_regime_changes_with_mode():
 
 def test_filter_by_quality_is_mode_aware_across_four_modes():
     tickers = {
-        "UPTREND": {"priceChangePercent": "6.0", "lastPrice": "10"},
-        "DOWNTREND": {"priceChangePercent": "-6.0", "lastPrice": "10"},
-        "STABLE": {"priceChangePercent": "0.4", "lastPrice": "10"},
-        "MEDIUM": {"priceChangePercent": "2.0", "lastPrice": "10"},
+        "UPTREND": {"priceChangePercent": "6.0", "lastPrice": "10", "quoteVolume": "100000000"},
+        "DOWNTREND": {"priceChangePercent": "-6.0", "lastPrice": "10", "quoteVolume": "100000000"},
+        "STABLE": {"priceChangePercent": "0.4", "lastPrice": "10", "quoteVolume": "100000000"},
+        "MEDIUM": {"priceChangePercent": "2.0", "lastPrice": "10", "quoteVolume": "100000000"},
     }
     symbols = ["UPTREND", "DOWNTREND", "STABLE", "MEDIUM"]
     client = _FakeClient(tickers)
@@ -298,4 +298,27 @@ def test_filter_by_quality_is_mode_aware_across_four_modes():
     assert preservation[0] == "STABLE"
 
     futures_short = _filter_by_quality(symbols, client, SETTINGS, target_count=2, regime_mode="FUTURES_SHORT")
-    assert futures_short[0] == "DOWNTREND"
+    assert futures_short[0] == "UPTREND"
+
+
+def test_entry_profile_gate_dynamic_fg_adjustment():
+    """Extreme fear lowers C threshold; extreme greed raises it, keeping A/B fixed."""
+    import entry_profile_gate
+
+    # A score that is exactly the C threshold should benefit from fear and be hurt by greed.
+    base_c = entry_profile_gate.load_thresholds()["thresholds"]["SPOT_BULL"]["C"]
+    base_a = entry_profile_gate.load_thresholds()["thresholds"]["SPOT_BULL"]["A"]
+    meta = {"expected_pnl_percentage": base_c, "position_size_usdt": 100.0}
+
+    profile_fear, info_fear = entry_profile_gate.classify(
+        meta, "SPOT_BULL", symbol="TESTUSDT", fear_greed_value=15
+    )
+    profile_greed, info_greed = entry_profile_gate.classify(
+        meta, "SPOT_BULL", symbol="TESTUSDT", fear_greed_value=80
+    )
+
+    assert profile_fear == "C"
+    assert info_fear["thresholds"]["C"] < base_c
+    assert info_fear["thresholds"]["A"] == base_a
+    assert profile_greed is None
+    assert info_greed["thresholds"]["C"] > base_c

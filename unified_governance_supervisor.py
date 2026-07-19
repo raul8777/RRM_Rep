@@ -412,7 +412,12 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
         {"A": 120.0, "B": 90.0, "C": 60.0},
     ) * _regime_esc_mult
 
-    distance_min = float(get_param(settings, "unified_governance_loss_distance_to_sl_min_pct", 0.5))
+    # s78-fix: in RANGE_SCALP mean-reversion is minutes-scale; cap patience for losers
+    if str(context.regime_mode or "").strip().upper() == "RANGE_SCALP":
+        min_age = min(min_age, 15.0)
+        escalation_age = min(escalation_age, 60.0)
+
+    distance_min = float(get_param(settings, "unified_governance_loss_distance_to_sl_min_pct", 0.15))
     accel_cfg = float(get_param(settings, "unified_governance_loss_trajectory_acceleration_pct", 0.5))
     accel_threshold = accel_cfg / 100.0 if accel_cfg > 1 else accel_cfg
     min_signal_strength = float(get_param(settings, "unified_governance_loss_signal_reversal_strength", 0.65))
@@ -479,31 +484,57 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
 
     near_sl = _distance_guard(context.distance_to_sl_pct, distance_min)
 
-    # Keep hard SL precedence: do not override when we are already too close.
-    if near_sl:
-        action = "watchdog"
-        reason = "unified_governance_near_sl_hold"
-        should_close = False
-        close_pct = 0.0
-        priority = 45
-    elif held_min < min_age:
-        action = "hold"
-        reason = "unified_governance_loss_hold_min_age"
-        should_close = False
-        close_pct = 0.0
-        priority = 35
-    elif deterioration or held_min >= escalation_age:
+    # s78-fix: fast loss cut / peak drawdown / soft supervisor escalation before age/near-sl guards
+    _regime_upper = str(context.regime_mode or "").strip().upper()
+    _fast_loss_threshold = -0.0075 if _regime_upper == "RANGE_SCALP" else -0.0150
+    if context.pnl_pct <= _fast_loss_threshold and (context.pnl_velocity_1h or 0) < 0:
         action = "close"
-        reason = "unified_governance_loss_defensive_close"
+        reason = "unified_governance_loss_fast_cut"
         should_close = True
         close_pct = 1.0
-        priority = 92
+        priority = 96
+    elif context.peak_pnl_pct >= 0.002 and (context.peak_pnl_pct - context.pnl_pct) > 0.0015:
+        action = "close"
+        reason = "unified_governance_peak_drawdown_cut"
+        should_close = True
+        close_pct = 1.0
+        priority = 96
+    elif (context.sso_advisory_should_close or context.prs_advisory_should_close) and context.pnl_pct < 0:
+        action = "close"
+        reason = "unified_governance_soft_supervisor_escalated"
+        should_close = True
+        close_pct = 1.0
+        priority = 94
+        if context.sso_advisory_reason:
+            reason += f" ({context.sso_advisory_reason})"
+        elif context.prs_advisory_reason:
+            reason += f" ({context.prs_advisory_reason})"
     else:
-        action = "watchdog"
-        reason = "unified_governance_loss_watchdog"
-        should_close = False
-        close_pct = 0.0
-        priority = 55
+        # Keep hard SL precedence: do not override when we are already too close.
+        if near_sl:
+            action = "watchdog"
+            reason = "unified_governance_near_sl_hold"
+            should_close = False
+            close_pct = 0.0
+            priority = 45
+        elif held_min < min_age:
+            action = "hold"
+            reason = "unified_governance_loss_hold_min_age"
+            should_close = False
+            close_pct = 0.0
+            priority = 35
+        elif deterioration or held_min >= escalation_age:
+            action = "close"
+            reason = "unified_governance_loss_defensive_close"
+            should_close = True
+            close_pct = 1.0
+            priority = 92
+        else:
+            action = "watchdog"
+            reason = "unified_governance_loss_watchdog"
+            should_close = False
+            close_pct = 0.0
+            priority = 55
 
     if action == "watchdog":
         watchdog_level += 1

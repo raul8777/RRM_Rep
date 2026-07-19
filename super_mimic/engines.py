@@ -40,15 +40,14 @@ def _extract_recommended_params(rec: Optional[Dict[str, Any]]) -> Dict[str, Any]
     return {**params, **overrides}
 
 
-def run_mimic_sweep_experiment(design: DesignSpec) -> tuple[EngineResults, Dict[str, Any]]:
-    """Run a MIMIC mode×profile sweep as an isolated subprocess.
+def run_sweep(design: DesignSpec) -> Dict[str, Any]:
+    """Execute a MIMIC mode×profile sweep as an isolated subprocess.
 
     Spawning a separate process for the sweep avoids nesting a
     ProcessPoolExecutor inside the runner's own process pool, which would
     deadlock when ``design.max_workers`` is 10 or more.
 
-    Returns the engine results plus the recommended config for the requested
-    profile.
+    Returns the parsed sweep report dict.
     """
     output_dir = design.output_dir or os.path.join(
         repo_root, "Dev", "benchmarks", "super_mimic", "unknown"
@@ -113,6 +112,24 @@ def run_mimic_sweep_experiment(design: DesignSpec) -> tuple[EngineResults, Dict[
 
     with open(paths["report_path"], "r", encoding="utf-8") as f:
         report = json.load(f)
+
+    report["_paths"] = paths
+    return report
+
+
+def run_mimic_sweep_experiment(design: DesignSpec) -> tuple[EngineResults, Dict[str, Any]]:
+    """Run a MIMIC mode×profile sweep and return EngineResults plus recommended config."""
+    report = run_sweep(design)
+    paths = report.pop("_paths", None)
+    if paths is None:
+        output_dir = design.output_dir or os.path.join(
+            repo_root, "Dev", "benchmarks", "super_mimic", "unknown"
+        )
+        paths = {
+            "status_path": os.path.join(output_dir, "mimic_sweep_status.json"),
+            "results_path": os.path.join(output_dir, "mimic_sweep_results.jsonl"),
+            "report_path": os.path.join(output_dir, "mimic_sweep_report.json"),
+        }
 
     rec = _best_recommendation(report, design.profile)
     recommended_config = _extract_recommended_params(rec)

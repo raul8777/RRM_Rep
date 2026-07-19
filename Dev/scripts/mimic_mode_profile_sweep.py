@@ -12,7 +12,10 @@ import argparse
 import itertools
 import json
 import logging
-import fcntl
+try:
+    import fcntl
+except ModuleNotFoundError:  # Windows does not have fcntl
+    fcntl = None  # type: ignore
 import os
 import sys
 import traceback
@@ -155,8 +158,8 @@ def _base_settings(profile: str, symbols: List[str]) -> Any:
     settings.binance_use_testnet = True
     settings.agent_mode = "auto"
     settings.market_regime_enabled = True
-    settings.spot_require_confirmed_regime = True
-    settings.futures_enabled = True
+    settings.spot_require_confirmed_regime = False  # historical backtests do not require confirmed live regime
+    settings.futures_enabled = False  # futures short path disabled under entry-profile gate redesign
     settings.screener_enabled = False
     settings.screener_top_n_enabled = False
     settings.category_max_positions_enabled = True
@@ -585,10 +588,12 @@ def _append_shadow_log(records: List[Dict[str, Any]], shadow_log_path: str) -> N
         return
     os.makedirs(os.path.dirname(shadow_log_path), exist_ok=True)
     with open(shadow_log_path, "a", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(f, fcntl.LOCK_EX)
         for rec in records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        fcntl.flock(f, fcntl.LOCK_UN)
+        if fcntl is not None:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def _run_single_config(
@@ -717,6 +722,29 @@ def _run_single_config(
         forced_profile=profile,
         profile_overrides=profile_overrides,
     )
+
+    # When a regime is forced, entry_profile_gate cannot be calibrated from local
+    # historical data. We patch it so the forced profile is honoured in MIMIC.
+    # This is only active inside the simulation worker process.
+    if forced_regime:
+        try:
+            import entry_profile_gate as _epg_module
+
+            _forced_profile = profile
+
+            def _forced_classify(*args, **kwargs):
+                return _forced_profile, {
+                    "score": 0.75,
+                    "thresholds": {"A": 0.9, "B": 0.6, "C": 0.3},
+                    "regime": forced_regime,
+                    "direction": "SHORT" if forced_regime == "FUTURES_SHORT" else "LONG",
+                    "fear_greed_value": 50.0,
+                    "mimic_forced_profile": True,
+                }
+
+            _epg_module.classify = _forced_classify
+        except Exception:
+            pass
 
     # D15: Run with early-stop monitoring instead of runner.run() in one shot
     components = runner.build_components()
@@ -916,12 +944,18 @@ def run_sweep(
     param_grid_file: Optional[str] = None,
     profiles: Optional[List[str]] = None,
     peak_signal_mode: bool = False,
+    forced_regime: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the profile sweep across all configured windows.
 
     Paths can be supplied individually or via ``output_dir`` for isolated
     experiments. When omitted, the historical global defaults are used so the
     CLI keeps working exactly as before.
+
+    Args:
+        forced_regime: When set, overrides market_regime.get_regime for the
+            whole simulation. Useful for calibrating staged-entry parameters
+            under a specific regime.
     """
     # Resolve output paths
     if output_dir:
@@ -1068,6 +1102,7 @@ def run_sweep(
                         lifecycle=lifecycle,
                         peak_signal_mode=peak_signal_mode,
                         peak_entry_schedule=peak_entry_schedule,
+                        forced_regime=forced_regime,
                     )
                     if _cache and _cache_key:
                         _cache.put(_cache_key, res)
@@ -1113,6 +1148,7 @@ def run_sweep(
                     max_cycles_per_sim,
                     max_drawdown_stop_pct,
                     lifecycle,
+                    forced_regime=forced_regime,
                 )
                 futures_to_job[fut] = (i, window_id, profile, params)
 
