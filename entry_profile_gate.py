@@ -235,12 +235,129 @@ def _expected_return_pct(signal_meta: Dict[str, Any]) -> Optional[float]:
     return None
 
 
+def _extract_float(signal_meta: Dict[str, Any], keys: List[str], default: float = 0.0) -> float:
+    """Return the first float value found under any of the given keys."""
+    for key in keys:
+        v = signal_meta.get(key)
+        if v is None:
+            continue
+        if isinstance(v, dict):
+            v = v.get("value") if "value" in v else None
+        if v is None:
+            continue
+        try:
+            f = float(v)
+            if not math.isnan(f):
+                return f
+        except Exception:
+            pass
+    return default
+
+
+def _range_scalp_score(signal_meta: Dict[str, Any], symbol: str) -> float:
+    """Heuristic score tailored for RANGE_SCALP long entries.
+
+    It rewards classic mean-reversion setups: price in the lower half of the
+    Bollinger bandwidth, a healthy volume spike, RSI in the neutral zone,
+    and a non-down 4h trend.  It penalizes entries near the upper band or
+    with low volume, and it treats the raw predictor expected-return as a
+    contrarian signal (a negative short-term prediction often means the
+    price is oversold within the range).
+    """
+    score = 0.0
+
+    # Bollinger position in [0, 1] (0 = lower band, 1 = upper band)
+    price = _extract_float(signal_meta, ["current_price", "price", "entry_avg_price"], default=0.0)
+    bb = signal_meta.get("bollinger_bands") or signal_meta.get("bb") or {}
+    if not bb and isinstance(signal_meta.get("indicators"), dict):
+        bb = signal_meta["indicators"].get("bollinger_bands") or {}
+    bb_lower = _extract_float(bb, ["lower", "bb_lower"], default=0.0)
+    bb_upper = _extract_float(bb, ["upper", "bb_upper"], default=0.0)
+    bb_position = _extract_float(signal_meta, ["bb_position"], default=-1.0)
+    if bb_position < 0.0 and price and bb_upper > bb_lower:
+        bb_position = (price - bb_lower) / (bb_upper - bb_lower)
+    if bb_position < 0.0:
+        bb_position = 0.5
+
+    # Ideal mean-reversion zone: 20-40% of the BB width (lower half, but not extreme)
+    if 0.20 <= bb_position <= 0.40:
+        score += 1.0
+    elif 0.10 <= bb_position < 0.20 or 0.40 < bb_position <= 0.55:
+        score += 0.3
+    elif 0.55 < bb_position <= 0.75:
+        score += 0.0
+    else:
+        score -= 1.0
+
+    # Volume confirmation
+    vol_spike = _extract_float(signal_meta, ["vol_spike", "vol_spike_at_entry"], default=1.0)
+    if vol_spike >= 1.5:
+        score += 1.0
+    elif vol_spike >= 1.0:
+        score += 0.4
+    elif vol_spike >= 0.5:
+        score += 0.0
+    else:
+        score -= 0.5
+
+    # RSI: neutral-bullish zone 35-55 is ideal; avoid overbought > 65
+    rsi = _extract_float(signal_meta, ["rsi", "rsi_at_entry", "rsi_4h"], default=50.0)
+    if 35 <= rsi <= 55:
+        score += 1.0
+    elif 30 <= rsi < 35 or 55 < rsi <= 65:
+        score += 0.3
+    elif rsi > 65:
+        score -= 1.0
+    elif rsi < 25:
+        score -= 0.5
+
+    # 4h trend: up is supportive, down is penalized for longs
+    trend = str(signal_meta.get("higher_tf_trend") or signal_meta.get("trend_4h") or "").upper()
+    if trend == "UP":
+        score += 0.5
+    elif trend == "DOWN":
+        score -= 0.5
+
+    # Predictor expected return is used as a contrarian input for range scalps:
+    # an oversold dip produces a negative short-term prediction, which is bullish
+    # for a bounce.  Cap the contribution to avoid extreme outliers.
+    expected_pnl_pct = _expected_return_pct(signal_meta) or 0.0
+    score -= 0.2 * max(-2.0, min(2.0, expected_pnl_pct))
+
+    # Probability and strength add conviction but never dominate the technical setup.
+    prob = _extract_float(signal_meta, ["success_probability", "predictor_prob"], default=0.5)
+    if prob >= 0.60:
+        score += 0.4
+    elif prob >= 0.45:
+        score += 0.1
+    else:
+        score -= 0.3
+
+    strength = _extract_float(signal_meta, ["strength", "signal_strength"], default=0.5)
+    if strength >= 0.75:
+        score += 0.3
+    elif strength >= 0.55:
+        score += 0.1
+    else:
+        score -= 0.2
+
+    # Category bonus/penalty (large caps are stabler in ranges, midcaps more noisy)
+    cat = _symbol_category(symbol)
+    cat_bonus = _CATEGORIES.get(cat, {}).get("bonus", 0.0)
+    score += cat_bonus
+
+    return score
+
+
 def _fallback_score(
     signal_meta: Dict[str, Any],
     regime: str,
     symbol: str,
 ) -> float:
     """Heuristic score when no calibrated expected PnL is available."""
+    if regime == "RANGE_SCALP":
+        return _range_scalp_score(signal_meta, symbol)
+
     expected_pnl = _expected_return_pct(signal_meta) or 0.0
     prob = _as_float(
         signal_meta.get("success_probability")
@@ -253,8 +370,6 @@ def _fallback_score(
     regime_term = 0.0
     if regime == "SPOT_BULL":
         regime_term = -0.03 * _as_float(signal_meta.get("ticker_price_change_pct"))
-    elif regime == "RANGE_SCALP":
-        regime_term = 0.03 * _as_float(signal_meta.get("ticker_price_change_pct"))
     return (
         0.35 * vol_spike
         + 0.30 * expected_pnl
@@ -288,6 +403,12 @@ def compute_quality_score(
         model_score = _model_quality_score(signal_meta)
         if model_score is not None:
             return model_score
+
+    # For RANGE_SCALP the predictor's expected return is not reliably correlated with
+    # realized PnL in the current windows, so we always use the feature-based fallback
+    # score that blends vol_spike, success_probability, strength and price change.
+    if regime == "RANGE_SCALP":
+        return _fallback_score(signal_meta, regime, symbol)
 
     expected_pnl_pct = _expected_return_pct(signal_meta)
     if expected_pnl_pct is not None and not math.isnan(expected_pnl_pct):

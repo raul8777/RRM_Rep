@@ -5220,11 +5220,18 @@ def _filter_buy_candidates(
     for cand in candidates:
         if isinstance(cand, dict):
             symbol = cand.get("symbol", "")
-            # Start with the full signal metadata, then overlay candidate-specific keys.
-            meta = (dict(signal_meta.get(symbol, {})) if isinstance(signal_meta, dict) else {})
-            meta.update(cand)
+            # Enrich the candidate dict with base signal metadata (without overwriting candidate-specific keys).
+            if isinstance(signal_meta, dict):
+                _base = signal_meta.get(symbol, {}) or {}
+                for _k, _v in _base.items():
+                    cand.setdefault(_k, _v)
+                # Anchor the enriched candidate in signal_meta so downstream stages see gate results.
+                signal_meta[symbol] = cand
+            meta = cand
         else:
             symbol = cand
+            if isinstance(signal_meta, dict):
+                signal_meta.setdefault(symbol, {})
             meta = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
 
         # Merge live predictor output if available so the gate uses scale-invariant
