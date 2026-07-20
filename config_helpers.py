@@ -112,10 +112,10 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'entry_decision_enabled': True,
     'entry_decision_policy_version': 'strict_v1',
     'entry_decision_regime_mode': {
-        'SPOT_BULL': 'blocked',
-        'RANGE_SCALP': 'blocked',
-        'FUTURES_SHORT': 'blocked',
-        'PRESERVATION': 'blocked',
+        'SPOT_BULL': 'enforced',
+        'RANGE_SCALP': 'enforced',
+        'FUTURES_SHORT': 'enforced',
+        'PRESERVATION': 'enforced',
     },
     'entry_decision_min_expected_pnl': {
         'SPOT_BULL': 0.0,

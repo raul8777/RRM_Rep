@@ -416,10 +416,10 @@ class Settings(BaseSettings):
     entry_decision_enabled: bool = Field(default=True)
     entry_decision_policy_version: str = Field(default="strict_v1")
     entry_decision_regime_mode: Dict[str, str] = Field(default={
-        "SPOT_BULL": "blocked",
-        "RANGE_SCALP": "blocked",
-        "FUTURES_SHORT": "blocked",
-        "PRESERVATION": "blocked",
+        "SPOT_BULL": "enforced",
+        "RANGE_SCALP": "enforced",
+        "FUTURES_SHORT": "enforced",
+        "PRESERVATION": "enforced",
     })
     entry_decision_min_expected_pnl: Dict[str, float] = Field(default={
         "SPOT_BULL": 0.0,
