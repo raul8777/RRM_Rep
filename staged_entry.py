@@ -832,37 +832,72 @@ def discard_ready(
 def get_openable_candidates(
     db_client: Any,
     regime_mode: str,
-    top_symbols_qubo: List[str],
+    top_symbols_qubo: Optional[List[str]] = None,
     settings: Any = None,
 ) -> List[Dict[str, Any]]:
-    """Return validated candidates that are also selected by QUBO in the current cycle."""
-    if not db_client or not top_symbols_qubo:
+    """Return the highest-priority non-expired validated candidate in the active regime."""
+    if not db_client:
         return []
     trade_type = _trade_type_for_regime(regime_mode)
     try:
         rows = db_client.execute_query(
             """
             SELECT * FROM ready_candidates
-            WHERE status='validated' AND regime_mode=%s AND trade_type=%s AND symbol = ANY(%s)
+            WHERE status='validated' AND regime_mode=%s AND trade_type=%s
             ORDER BY ready_at ASC
             """,
-            (regime_mode, trade_type, top_symbols_qubo),
+            (regime_mode, trade_type),
         )
-        for row in (rows or []):
+        cfg = get_staged_entry_regime_config(settings, regime_mode)
+        active_rows: List[Dict[str, Any]] = []
+        for row in rows or []:
             for key in ("signal_meta", "config_snapshot", "data"):
                 if row.get(key) and isinstance(row[key], str):
                     try:
                         row[key] = json.loads(row[key])
                     except Exception:
                         pass
-        cfg = get_staged_entry_regime_config(settings, regime_mode)
+            max_age = int(row.get("max_age_min") or cfg.get("max_age_min") or 0)
+            ready_at = row.get("ready_at")
+            if max_age and ready_at and (_now() - ready_at).total_seconds() / 60.0 >= max_age:
+                _discard_ready(db_client, row["id"], "MAX_AGE_EXPIRED")
+                continue
+            active_rows.append(row)
+
         def priority(row: Dict[str, Any]) -> Tuple[float, float, float, float]:
-            values = ((row.get("data") or {}).get("priority") or [])
-            normalized = [float(v) for v in values[:3]]
-            normalized += [-float("inf")] * (3 - len(normalized))
-            return (normalized[0], normalized[1], normalized[2], -float(row.get("positive_checks") or 0))
-        rows = sorted(rows or [], key=priority, reverse=True)
-        return rows[:max(1, int(cfg.get("max_open_per_cycle", 1)))]
+            policy = ((row.get("data") or {}).get("policy") or {})
+            expected_pnl = policy.get("expected_pnl")
+            quality_score = policy.get("quality_score")
+            probability = policy.get("success_probability")
+            try:
+                expected_pnl = float(expected_pnl)
+            except (TypeError, ValueError):
+                expected_pnl = -float("inf")
+            try:
+                quality_score = float(quality_score)
+            except (TypeError, ValueError):
+                quality_score = -float("inf")
+            try:
+                probability = float(probability)
+            except (TypeError, ValueError):
+                probability = -float("inf")
+            ready_at = row.get("ready_at")
+            ready_timestamp = ready_at.timestamp() if ready_at and hasattr(ready_at, "timestamp") else float("inf")
+            return (expected_pnl, quality_score, probability, -ready_timestamp)
+
+        active_rows = sorted(active_rows, key=priority, reverse=True)
+        selected = active_rows[:max(1, int(cfg.get("max_open_per_cycle", 1)))]
+        for rank, row in enumerate(selected, start=1):
+            _update_ready_status(
+                db_client,
+                row["id"],
+                data_update={
+                    "global_validated_rank": rank,
+                    "global_validated_universe_size": len(active_rows),
+                    "selection_criterion": "EV_NET_DESC_QUALITY_PROBABILITY_READY_AT",
+                },
+            )
+        return selected
     except Exception as exc:
         logger.warning(f"[StagedEntry] get_openable_candidates failed: {exc}")
         return []

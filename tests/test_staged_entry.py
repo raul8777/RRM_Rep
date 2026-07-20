@@ -396,20 +396,25 @@ def test_evaluate_inter_cycle_discards_on_negative(fake_db, settings, monkeypatc
     assert fake_db.ready[0]["discard_reason"] == "QUALITY_BELOW_C"
 
 
-def test_get_openable_candidates_returns_validated_in_qubo(fake_db, settings):
-    meta = {"BTCUSDT": _make_signal("BTCUSDT")}
-    top = [_make_signal("BTCUSDT")]
+def test_get_openable_candidates_returns_best_validated_ev_globally(fake_db, settings):
+    meta = {
+        "BTCUSDT": _make_signal("BTCUSDT"),
+        "ETHUSDT": _make_signal("ETHUSDT"),
+    }
+    top = [meta["BTCUSDT"], meta["ETHUSDT"]]
     staged_entry.stage_ready_candidates(top, {}, meta, "SPOT_BULL", fake_db, settings=settings)
     staged_entry.evaluate_inter_cycle(
         fake_db, None, settings, "SPOT_BULL", top, {}, meta, cycle_id="c2", news_client=None,
     )
+    btc_row, eth_row = fake_db.ready
+    btc_row["data"]["policy"].update({"expected_pnl": 1.0, "quality_score": 0.5, "success_probability": 0.6})
+    eth_row["data"]["policy"].update({"expected_pnl": 2.0, "quality_score": 0.4, "success_probability": 0.7})
 
-    openable = staged_entry.get_openable_candidates(fake_db, "SPOT_BULL", ["BTCUSDT"])
+    openable = staged_entry.get_openable_candidates(fake_db, "SPOT_BULL", ["BTCUSDT"], settings=settings)
     assert len(openable) == 1
-    assert openable[0]["symbol"] == "BTCUSDT"
-
-    openable2 = staged_entry.get_openable_candidates(fake_db, "SPOT_BULL", ["ETHUSDT"])
-    assert openable2 == []
+    assert openable[0]["symbol"] == "ETHUSDT"
+    assert eth_row["data"]["global_validated_rank"] == 1
+    assert eth_row["data"]["global_validated_universe_size"] == 2
 
 
 def test_perform_intra_cycle_check_validates(fake_db, settings):
