@@ -41,7 +41,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'futures_kelly_min_usdt': 0.0,
 
     # FUTURES trading
-    'futures_enabled': False,  # s80: disabled under entry-profile gate redesign
+    'futures_enabled': True,  # EntryDecision blocks unpromoted futures entries
     'futures_leverage': 10,
     'futures_max_shorts': 5,
     'futures_max_largecap_shorts': 3,
