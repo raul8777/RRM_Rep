@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from config_helpers import get_staged_entry_regime_config
+from entry_decision import evaluate as evaluate_entry_decision
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +27,21 @@ except Exception:  # pragma: no cover
     entry_profile_gate = None  # type: ignore
 
 
+def _to_native(obj: Any) -> Any:
+    """Recursively convert numpy/pandas scalars to plain Python types."""
+    if isinstance(obj, dict):
+        return {k: _to_native(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_native(v) for v in obj]
+    if hasattr(obj, "item") and callable(getattr(obj, "item")):
+        return obj.item()
+    if isinstance(obj, (int, float, bool, str, type(None))):
+        return obj
+    return str(obj)
+
+
 def _json(obj: Any) -> str:
-    return json.dumps(obj, default=str)
+    return json.dumps(_to_native(obj), default=str)
 
 
 def _now() -> datetime:
@@ -65,6 +79,7 @@ def _build_meta_for_symbol(
 
     pred = (predictions or {}).get(symbol)
     if pred:
+        meta.setdefault("entry_decision_prediction", pred)
         for key in ("expected_pnl", "expected_pnl_percentage", "position_size_usdt", "success_probability"):
             if pred.get(key) is not None:
                 meta.setdefault(key, pred.get(key))
@@ -157,6 +172,76 @@ def _run_predictor_for_validation(
         return None
 
 
+def _range_reversion_shadow(meta: Dict[str, Any], current_price: Optional[float], settings: Any) -> Optional[Dict[str, Any]]:
+    if str(getattr(settings, "range_reversion_predictor_mode", "disabled")).lower() == "disabled":
+        return None
+    if current_price is None:
+        return {"valid": False, "reason": "missing_current_price"}
+    try:
+        import pnl_service
+        predictor = pnl_service.get_predictor()
+        indicators = meta.get("indicators") or {}
+        if not indicators:
+            return {"valid": False, "reason": "missing_indicators"}
+        return predictor.predict_range_reversion(
+            current_price=float(current_price),
+            indicators=indicators,
+            position_size_usdt=_position_size_for_validation(meta),
+            settings=settings,
+            trade_type=meta.get("trade_type") or "spot",
+        )
+    except Exception as exc:
+        logger.warning(f"[StagedEntry] range reversion shadow failed: {exc}")
+        return {"valid": False, "reason": "shadow_prediction_error"}
+
+
+def _evaluate_candidate_policy(
+    meta: Dict[str, Any],
+    regime_mode: str,
+    cfg: Dict[str, Any],
+    profile: Optional[str],
+    quality_score: float,
+    current_price: Optional[float],
+    settings: Any,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    shadow = _range_reversion_shadow(meta, current_price, settings) if regime_mode == "RANGE_SCALP" else None
+    expected_pnl = meta.get("expected_pnl")
+    probability = meta.get("success_probability")
+    try:
+        expected_pnl = float(expected_pnl) if expected_pnl is not None else None
+    except (TypeError, ValueError):
+        expected_pnl = None
+    try:
+        probability = float(probability) if probability is not None else None
+    except (TypeError, ValueError):
+        probability = None
+    if profile not in ("A", "B", "C"):
+        return False, "QUALITY_BELOW_C", {
+            "policy_version": cfg.get("policy_version", "v1"),
+            "regime": regime_mode,
+            "profile": profile,
+            "quality_score": quality_score,
+            "expected_pnl": expected_pnl,
+            "success_probability": probability,
+            "range_reversion_shadow": shadow,
+        }
+    if shadow:
+        meta["range_reversion_prediction"] = shadow
+    decision = evaluate_entry_decision(
+        meta=meta,
+        regime=regime_mode,
+        profile=profile,
+        quality_score=quality_score,
+        settings=settings,
+        current_price=current_price,
+    )
+    policy = decision.to_dict()
+    policy["range_reversion_shadow"] = shadow
+    if not decision.eligible:
+        return False, decision.reason, policy
+    return True, decision.reason, policy
+
+
 def _input_features_for_check(
     meta: Dict[str, Any],
     current_price: Optional[float],
@@ -186,8 +271,10 @@ def _input_features_for_check(
         "current_price": current_price,
         "signal_price": signal_price,
     }
-    if current_price and signal_price and signal_price > 0:
-        features["price_delta_pct"] = (current_price - signal_price) / signal_price * 100.0
+    _cp = float(current_price) if current_price is not None else None
+    _sp = float(signal_price) if signal_price is not None else None
+    if _cp is not None and _sp is not None and _sp > 0:
+        features["price_delta_pct"] = (_cp - _sp) / _sp * 100.0
     return {k: v for k, v in features.items() if v is not None}
 
 
@@ -271,22 +358,22 @@ def _record_check(
             )
             """,
             (
-                ready_id,
+                int(ready_id) if ready_id is not None else None,
                 cycle_id,
-                check_sequence,
+                int(check_sequence) if check_sequence is not None else None,
                 check_type,
-                current_price,
+                float(current_price) if current_price is not None else None,
                 price_source,
-                input_features.get("expected_pnl_pct"),
-                quality_score,
+                float(input_features.get("expected_pnl_pct")) if input_features.get("expected_pnl_pct") is not None else None,
+                float(quality_score) if quality_score is not None else None,
                 profile,
                 _json(thresholds) if thresholds else "{}",
-                fear_greed,
+                float(fear_greed) if fear_greed is not None else None,
                 _json(input_features),
-                positive,
+                bool(positive),
                 decision,
                 reason,
-                execution_ms,
+                int(execution_ms) if execution_ms is not None else None,
             ),
         )
     except Exception as exc:
@@ -316,10 +403,10 @@ def _update_ready_status(
         params.append(status)
     if positive_checks is not None:
         fields.append("positive_checks = %s")
-        params.append(positive_checks)
+        params.append(int(positive_checks))
     if total_checks is not None:
         fields.append("total_checks = %s")
-        params.append(total_checks)
+        params.append(int(total_checks))
     if last_checked_at:
         fields.append("last_checked_at = NOW()")
     if validated_at:
@@ -328,7 +415,7 @@ def _update_ready_status(
         fields.append("opened_at = NOW()")
     if opened_trade_id is not None:
         fields.append("opened_trade_id = %s")
-        params.append(opened_trade_id)
+        params.append(int(opened_trade_id))
     if discard_reason:
         fields.append("discard_reason = %s")
         params.append(discard_reason)
@@ -340,7 +427,7 @@ def _update_ready_status(
     if not fields:
         return
     sql = "UPDATE ready_candidates SET " + ", ".join(fields) + ", updated_at = NOW() WHERE id = %s"
-    params.append(ready_id)
+    params.append(int(ready_id))
     try:
         db_client.execute_update(sql, tuple(params))
     except Exception as exc:
@@ -414,6 +501,12 @@ def stage_ready_candidates(
         signal_price = meta.get("current_price") or meta.get("price")
         if signal_price is None and client is not None:
             signal_price = _get_price(client, symbol, cfg.get("price_source", "avg"))
+        eligible, policy_reason, policy_data = _evaluate_candidate_policy(
+            meta, regime_mode, cfg, meta.get("peak_quality_profile"),
+            float(meta.get("peak_quality_score", 0.0) or 0.0), signal_price, settings,
+        )
+        if not eligible:
+            continue
         position_size = _position_size_for_validation(meta)
         required = int(cfg.get("required_positive_checks", 2))
         checks_per_cycle = int(cfg.get("checks_per_cycle", 1))
@@ -435,9 +528,14 @@ def stage_ready_candidates(
                 """,
                 (
                     symbol, trade_type, regime_mode,
-                    meta.get("peak_quality_profile"), signal_price, position_size,
-                    required, checks_per_cycle, max_cycles, max_age,
-                    _json(meta), _json(cfg), _json({"cycles_active": 1}),
+                    meta.get("peak_quality_profile"),
+                    float(signal_price) if signal_price is not None else None,
+                    float(position_size) if position_size is not None else None,
+                    int(required) if required is not None else None,
+                    int(checks_per_cycle) if checks_per_cycle is not None else None,
+                    int(max_cycles) if max_cycles is not None else None,
+                    int(max_age) if max_age is not None else None,
+                    _json(meta), _json(cfg), _json({"cycles_active": 1, "policy": policy_data, "priority": policy_data.get("priority")}),
                 ),
             )
             ready_id = rows[0]["id"]
@@ -449,8 +547,8 @@ def stage_ready_candidates(
             db_client, ready_id, cycle_id, 0, "inter", signal_price, cfg.get("price_source"),
             meta.get("peak_quality_profile"), float(meta.get("peak_quality_score", 0.0) or 0.0),
             (meta.get("entry_profile_gate_info") or {}).get("thresholds"),
-            fear_greed, _input_features_for_check(meta, signal_price, signal_price),
-            True, "positive", "STAGE_INITIAL", 0,
+            fear_greed, {**_input_features_for_check(meta, signal_price, signal_price), "policy": policy_data},
+            True, "positive", policy_reason, 0,
         )
         staged.append({"id": ready_id, "symbol": symbol, "status": "ready", "new": True})
 
@@ -525,7 +623,10 @@ def evaluate_inter_cycle(
         input_features = _input_features_for_check(meta, current_price, signal_price)
         execution_ms = int((time.monotonic() - start) * 1000)
 
-        positive = profile in ("A", "B", "C")
+        positive, policy_reason, policy_data = _evaluate_candidate_policy(
+            meta, regime_mode, cfg, profile, quality_score, current_price, settings,
+        )
+        input_features["policy"] = policy_data
         if positive:
             total = row["total_checks"] + 1
             positives = row["positive_checks"] + 1
@@ -533,7 +634,7 @@ def evaluate_inter_cycle(
             decision = "positive"
             _update_ready_status(
                 db_client, ready_id, positive_checks=positives, total_checks=total,
-                data_update={"cycles_active": _cycles_active},
+                data_update={"cycles_active": _cycles_active, "policy": policy_data, "priority": policy_data.get("priority")},
             )
 
             if positives >= int(row["required_positive_checks"]):
@@ -546,11 +647,11 @@ def evaluate_inter_cycle(
             total = row["total_checks"] + 1
             _update_ready_status(
                 db_client, ready_id, total_checks=total,
-                data_update={"cycles_active": _cycles_active},
+                data_update={"cycles_active": _cycles_active, "policy": policy_data, "priority": policy_data.get("priority")},
             )
-            reason = "INTER_GATE_FAILED"
+            reason = policy_reason
             decision = "negative"
-            _discard_ready(db_client, ready_id, "QUALITY_BELOW_C")
+            _discard_ready(db_client, ready_id, policy_reason)
             row["status"] = "discarded"
             result["discarded"].append(symbol)
 
@@ -664,11 +765,17 @@ def perform_intra_cycle_check(
         input_features = _input_features_for_check(meta, current_price, signal_price)
         execution_ms = int((time.monotonic() - start) * 1000)
 
-        positive = profile in ("A", "B", "C")
+        positive, policy_reason, policy_data = _evaluate_candidate_policy(
+            meta, regime_mode, cfg, profile, quality_score, current_price, settings,
+        )
+        input_features["policy"] = policy_data
         if positive:
             positives = row["positive_checks"] + 1
             total = row["total_checks"] + 1
-            _update_ready_status(db_client, ready_id, positive_checks=positives, total_checks=total)
+            _update_ready_status(
+                db_client, ready_id, positive_checks=positives, total_checks=total,
+                data_update={"policy": policy_data, "priority": policy_data.get("priority")},
+            )
             if positives >= int(row["required_positive_checks"]):
                 _update_ready_status(db_client, ready_id, status="validated", validated_at=True)
                 validated.append(symbol)
@@ -676,9 +783,12 @@ def perform_intra_cycle_check(
             reason = "INTRA_GATE_POSITIVE"
         else:
             total = row["total_checks"] + 1
-            _update_ready_status(db_client, ready_id, total_checks=total)
+            _update_ready_status(
+                db_client, ready_id, total_checks=total,
+                data_update={"policy": policy_data, "priority": policy_data.get("priority")},
+            )
             decision = "negative"
-            reason = "INTRA_GATE_FAILED"
+            reason = policy_reason
 
         _record_check(
             db_client, ready_id, None, _next_check_sequence(db_client, ready_id), "intra",
@@ -688,7 +798,7 @@ def perform_intra_cycle_check(
         )
 
         if not positive:
-            _discard_ready(db_client, ready_id, "QUALITY_BELOW_C")
+            _discard_ready(db_client, ready_id, policy_reason)
 
         _maybe_expire(db_client, row)
 
@@ -723,6 +833,7 @@ def get_openable_candidates(
     db_client: Any,
     regime_mode: str,
     top_symbols_qubo: List[str],
+    settings: Any = None,
 ) -> List[Dict[str, Any]]:
     """Return validated candidates that are also selected by QUBO in the current cycle."""
     if not db_client or not top_symbols_qubo:
@@ -733,7 +844,7 @@ def get_openable_candidates(
             """
             SELECT * FROM ready_candidates
             WHERE status='validated' AND regime_mode=%s AND trade_type=%s AND symbol = ANY(%s)
-            ORDER BY positive_checks DESC, ready_at ASC
+            ORDER BY ready_at ASC
             """,
             (regime_mode, trade_type, top_symbols_qubo),
         )
@@ -744,7 +855,14 @@ def get_openable_candidates(
                         row[key] = json.loads(row[key])
                     except Exception:
                         pass
-        return rows or []
+        cfg = get_staged_entry_regime_config(settings, regime_mode)
+        def priority(row: Dict[str, Any]) -> Tuple[float, float, float, float]:
+            values = ((row.get("data") or {}).get("priority") or [])
+            normalized = [float(v) for v in values[:3]]
+            normalized += [-float("inf")] * (3 - len(normalized))
+            return (normalized[0], normalized[1], normalized[2], -float(row.get("positive_checks") or 0))
+        rows = sorted(rows or [], key=priority, reverse=True)
+        return rows[:max(1, int(cfg.get("max_open_per_cycle", 1)))]
     except Exception as exc:
         logger.warning(f"[StagedEntry] get_openable_candidates failed: {exc}")
         return []

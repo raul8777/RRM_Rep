@@ -137,6 +137,7 @@ class DatabaseClient:
                     self._log_query_error(query, params, exc)
                     raise
                 results = cursor.fetchall()
+                conn.commit()
                 return [dict(row) for row in results]
     
     def execute_update(self, query: str, params: Optional[tuple] = None) -> int:

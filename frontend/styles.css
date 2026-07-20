@@ -881,6 +881,7 @@ body {
 .pos-filter-bar { display:flex; gap:12px; align-items:center; padding:8px 10px; background:var(--bg2); border-bottom:1px solid var(--border); font-size:12px; flex-wrap:wrap; }
 .pos-filter-bar label { color:#aaa; display:flex; align-items:center; gap:4px; }
 .pos-filter-bar select { background:var(--bg); color:#eee; border:1px solid var(--border); border-radius:4px; padding:3px 6px; font-size:11px; }
+.pos-filter-status { color:var(--text-muted); font-size:11px; margin-left:auto; }
 .sl-tp-lifecycle { display:block; }
 .sl-tp-lifecycle div label { min-width:140px; }
 .sl-regla-oro { color:#ffc107; }
@@ -1966,3 +1967,47 @@ button:not(.btn):hover, select:hover, input:not([type="checkbox"]):not([type="ra
 .selection-row strong { color:var(--control-text); font-size:11px; }
 .selection-row span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 @media (max-width:700px) { .selection-row { grid-template-columns:1fr 1fr 1fr; } .selection-row span:last-child { grid-column:span 2; } }
+
+/* ── Selection observability tabs & list ─────────────────────────────────── */
+.selection-tabs { display:flex; gap:0; margin:10px -16px 0; padding:0 16px; border-bottom:2px solid var(--border); background:var(--bg2); }
+.selection-tab {
+    flex:1; padding:8px 12px; font-size:12px; font-weight:700;
+    border:none; border-bottom:3px solid transparent; background:transparent;
+    color:var(--text-muted); cursor:pointer; transition:all 0.15s; margin-bottom:-2px;
+    text-align:center;
+}
+.selection-tab:hover { color:var(--text); background:rgba(255,255,255,0.03); }
+.selection-tab.active { color:var(--mode-color); border-bottom-color:var(--mode-color); }
+.selection-tab-badge {
+    display:inline-block; font-size:10px; font-weight:700; padding:1px 6px;
+    border-radius:10px; background:var(--control-bg); color:var(--text-muted); margin-left:6px;
+}
+.selection-candidates-header {
+    display:grid; grid-template-columns:1.1fr .7fr .75fr .7fr .9fr 1.3fr .8fr; gap:6px;
+    padding:7px 0; border-bottom:1px solid var(--border); color:var(--text-muted);
+    font-size:10px; font-weight:700; text-transform:uppercase; margin-top:8px;
+}
+.selection-candidates { max-height:360px; overflow-y:auto; }
+.selection-candidate-row {
+    display:grid; grid-template-columns:1.1fr .7fr .75fr .7fr .9fr 1.3fr .8fr; gap:6px;
+    align-items:center; padding:7px 0; border-bottom:1px solid var(--border2);
+    color:var(--text-muted); font-size:10px;
+}
+.selection-candidate-row:hover { background:rgba(255,255,255,0.03); }
+.selection-candidate-row strong { color:var(--control-text); font-size:11px; }
+.selection-candidate-row small { color:var(--text-muted); font-size:9px; }
+.selection-col-symbol { display:flex; flex-direction:column; }
+.selection-sub { font-size:9px; color:var(--text-muted); }
+.selection-col-status {
+    font-weight:700; padding:2px 6px; border-radius:5px; text-align:center; font-size:10px;
+}
+.status-pending { background:rgba(243,156,18,0.12); color:#f39c12; }
+.status-positive { background:rgba(78,204,163,0.12); color:#4ecca3; }
+.status-negative { background:rgba(231,76,60,0.12); color:#e74c3c; }
+.status-neutral  { background:rgba(149,165,166,0.12); color:#bdc3c7; }
+@media (max-width:900px) {
+    .selection-candidates-header { display:none; }
+    .selection-candidate-row { grid-template-columns:1fr 1fr; gap:4px; padding:8px 0; }
+    .selection-col-time { grid-column:span 2; text-align:right; }
+    .selection-col-decision { grid-column:span 2; }
+}

@@ -630,6 +630,8 @@ let _lastOpenData   = null;
 let _lastClosedData = null;
 let _opsMainTab = 'open';  // 'open' | 'closed'
 let _opsSubFilter = 'all'; // 'all' | 'spot' | 'fut'
+let _selectionObservabilityTab = 'under_review'; // 'under_review' | 'reviewed'
+let _lastSelectionObservabilityData = null;
 let _openSortMode = localStorage.getItem('ops_open_sort') || 'entry_desc'; // 'entry_desc' | 'entry_asc' | 'pnl_desc' | 'pnl_asc'
 let _openProfileFilter = 'all';   // 'all' | 'A' | 'B' | 'C'
 let _openModeFilter = 'all';      // 'all' | 'SPOT_BULL' | 'RANGE_SCALP' | 'PRESERVATION' | 'FUTURES_SHORT'
@@ -677,6 +679,16 @@ function switchInnerTab(card, filter) {
 
 function setOpenProfileFilter(v) { _openProfileFilter = v; if (_lastOpenData) renderOpenPositions(_lastOpenData); }
 function setOpenModeFilter(v)    { _openModeFilter = v;    if (_lastOpenData) renderOpenPositions(_lastOpenData); }
+function clearOpenPositionFilters() {
+    _currentOpenFilter = 'all';
+    _opsSubFilter = 'all';
+    _openProfileFilter = 'all';
+    _openModeFilter = 'all';
+    document.querySelectorAll('[data-inner-tab^="ops-"]').forEach(b => {
+        b.classList.toggle('active', b.dataset.innerTab === 'ops-all');
+    });
+    if (_lastOpenData) renderOpenPositions(_lastOpenData);
+}
 function setClosedProfileFilter(v) { _closedProfileFilter = v; if (_lastClosedData) renderClosedPositions(_lastClosedData); }
 function setClosedModeFilter(v)    { _closedModeFilter = v;    if (_lastClosedData) renderClosedPositions(_lastClosedData); }
 function setDashboardDays(v) {
@@ -1134,6 +1146,7 @@ function renderOpenPositions(d) {
     else if (_filter === 'fut') visiblePositions = _allPos.filter(p => p.trade_type === 'futures');
     // Filter by profile and mode
     visiblePositions = visiblePositions.filter(p => _positionMatchesProfileMode(p, _openProfileFilter, _openModeFilter));
+    const hiddenPositionCount = _allPos.length - visiblePositions.length;
 
     // Sort by selected mode (default: newest entry first)
     function _entryTs(p) {
@@ -1151,7 +1164,7 @@ function renderOpenPositions(d) {
     if (visiblePositions.length === 0) {
         el.innerHTML = _allPos.length === 0
             ? '<p class="loading">Sin posiciones abiertas</p>'
-            : `<p class="loading">Sin posiciones ${_filter === 'spot' ? 'SPOT' : 'FUTUROS'} abiertas</p>`;
+            : '<p class="loading">No hay posiciones con los filtros activos. <button class="btn btn-xs" type="button" onclick="clearOpenPositionFilters()">Ver todas</button></p>';
         return;
     }
 
@@ -1174,6 +1187,7 @@ function renderOpenPositions(d) {
 
     const rows = [];
     for (const p of visiblePositions) {
+        try {
         const _isBounce = !!p.bounce_entry;
         const _ctxCls = p.config_context_state === 'legacy' ? 'row-context-legacy' : p.config_context_state === 'partial' ? 'row-context-partial' : p.config_context_state === 'current' ? 'row-context-current' : '';
         const rowCls = [
@@ -1314,6 +1328,10 @@ function renderOpenPositions(d) {
         </tr>`);
             }
         }
+        } catch (err) {
+            console.error(`Open-position render error for ${p?.symbol || 'unknown'}:`, err);
+            rows.push(`<tr><td colspan="12" class="empty">No se pudo renderizar ${p?.symbol || 'una posición'}.</td></tr>`);
+        }
     }
 
     const _profileOpts = [{v:'all',l:'Todos'},{v:'A',l:'A — Agresivo'},{v:'B',l:'B — Balance'},{v:'C',l:'C — Defensa'}];
@@ -1323,6 +1341,7 @@ function renderOpenPositions(d) {
         <div class="pos-filter-bar">
             <label>Perfil: <select onchange="setOpenProfileFilter(this.value)">${_optSel(_profileOpts, _openProfileFilter)}</select></label>
             <label>Modo: <select onchange="setOpenModeFilter(this.value)">${_optSel(_modeOpts, _openModeFilter)}</select></label>
+            ${hiddenPositionCount ? `<span class="pos-filter-status">Mostrando ${visiblePositions.length} de ${_allPos.length}</span><button class="btn btn-xs" type="button" onclick="clearOpenPositionFilters()">Ver todas</button>` : ''}
         </div>
         <div class="table-scroll-10">
         <table class="positions-table">
@@ -1625,41 +1644,98 @@ function renderExpectativaVsRealidad(data) {
     `;
 }
 
+function switchSelectionTab(tab) {
+    _selectionObservabilityTab = tab || 'under_review';
+    if (_lastSelectionObservabilityData) {
+        renderSelectionObservability(_lastSelectionObservabilityData);
+    }
+}
+
 function renderSelectionObservability(data) {
     const el = document.getElementById('selectionObservabilityData');
     if (!el) return;
+    _lastSelectionObservabilityData = data || null;
     if (!data?.available) {
-        el.innerHTML = '<p class="loading">La observabilidad estará disponible después de la próxima migración y ciclo.</p>';
+        el.innerHTML = '<p class="loading">La observabilidad estará disponible después del próximo ciclo.</p>';
         return;
     }
-    const latest = data.latest_cycle || {};
     const candidates = data.candidates || [];
-    const stages = data.stage_counts || {};
-    const reasons = data.reason_counts || {};
-    const reasonRows = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    const activeTab = _selectionObservabilityTab || 'under_review';
     const formatTime = value => value ? new Date(value).toLocaleString('es-MX', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' }) : '—';
-    const stageText = { predicted: 'Predicho', qubo_selected: 'QUBO', qubo_excluded: 'QUBO excluyó', rejected: 'Bloqueado', executed: 'Abierto' };
-    el.innerHTML = `
+    const statusClass = {
+        ready: 'status-pending',
+        validated: 'status-pending',
+        opened: 'status-positive',
+        discarded: 'status-negative',
+        expired: 'status-neutral'
+    };
+    const statusText = {
+        ready: 'En revisión',
+        validated: 'Pendiente de apertura',
+        opened: 'Aceptada · Abierta',
+        discarded: 'Rechazada · Descartada',
+        expired: 'Expirada'
+    };
+
+    const comparePriority = (a, b) => {
+        const ap = Array.isArray(a.priority) ? a.priority : [];
+        const bp = Array.isArray(b.priority) ? b.priority : [];
+        for (let i = 0; i < 3; i += 1) {
+            const diff = Number(bp[i] ?? -Infinity) - Number(ap[i] ?? -Infinity);
+            if (diff !== 0) return diff;
+        }
+        return (a.last_review_at || '').localeCompare(b.last_review_at || '');
+    };
+    const underReview = candidates.filter(c => c.under_review).sort(comparePriority);
+    const reviewed = candidates.filter(c => c.reviewed).sort((a, b) => (b.last_review_at || '') > (a.last_review_at || '') ? 1 : -1);
+    const shown = activeTab === 'under_review' ? underReview : reviewed;
+
+    const countsSummary = `
         <div class="selection-summary">
-            <div><span>Último ciclo</span><strong>${formatTime(latest.started_at)}</strong></div>
-            <div><span>Modo / Perfil</span><strong>${latest.regime_mode || '—'} ${latest.profile_label ? `· ${latest.profile_label}` : ''}</strong></div>
-            <div><span>Candidatos</span><strong>${latest.candidate_count ?? 0} → ${latest.selected_count ?? 0} → ${latest.executed_count ?? 0}</strong></div>
-            <div><span>Bloqueo principal</span><strong>${data.dominant_reason || 'Sin bloqueos'}</strong></div>
-        </div>
-        <div class="selection-stages">
-            ${Object.entries(stages).map(([stage, count]) => `<span class="selection-stage stage-${stage}">${stageText[stage] || stage}: ${count}</span>`).join('') || '<span class="selection-stage">Sin candidatos en este periodo</span>'}
-        </div>
-        ${reasonRows.length ? `<div class="selection-reasons">${reasonRows.map(([reason, count]) => `<span title="${reason}">${reason}: <b>${count}</b></span>`).join('')}</div>` : ''}
-        <div class="selection-history">
-            ${candidates.slice(0, 8).map(candidate => `
-                <div class="selection-row">
-                    <strong>${candidate.symbol || '—'}</strong>
-                    <span>${candidate.trade_type === 'futures' ? 'FUT' : 'SPOT'}</span>
-                    <span>${stageText[candidate.stage] || candidate.stage || '—'}</span>
-                    <span class="${parseFloat(candidate.expected_pnl || 0) >= 0 ? 'positive' : 'negative'}">${candidate.expected_pnl == null ? 'EV —' : `EV ${parseFloat(candidate.expected_pnl).toFixed(2)}`}</span>
-                    <span title="${candidate.reason || ''}">${candidate.reason || 'Pendiente'}</span>
-                </div>`).join('') || '<p class="loading">Sin candidatos persistidos aún.</p>'}
+            <div><span>En revisión</span><strong>${data.under_review_count ?? 0}</strong></div>
+            <div><span>Revisadas</span><strong>${data.reviewed_count ?? 0}</strong></div>
+            <div><span>Aceptadas</span><strong>${data.opened_count ?? 0}</strong></div>
+            <div><span>Rechazadas</span><strong>${(data.discarded_count ?? 0) + (data.expired_count ?? 0)}</strong></div>
         </div>`;
+
+    const tabs = `
+        <div class="selection-tabs">
+            <button class="selection-tab ${activeTab === 'under_review' ? 'active' : ''}" onclick="switchSelectionTab('under_review')">
+                En revisión / pendientes <span class="selection-tab-badge">${underReview.length}</span>
+            </button>
+            <button class="selection-tab ${activeTab === 'reviewed' ? 'active' : ''}" onclick="switchSelectionTab('reviewed')">
+                Revisadas: aceptadas / rechazadas <span class="selection-tab-badge">${reviewed.length}</span>
+            </button>
+        </div>`;
+
+    const rows = shown.length ? shown.map(c => `
+        <div class="selection-candidate-row">
+            <div class="selection-col-symbol">
+                <strong>${c.symbol || '—'}</strong>
+                <span class="selection-sub">${c.regime_mode || '—'} · ${c.trade_type === 'futures' ? 'FUT' : 'SPOT'}</span>
+            </div>
+            <div class="selection-col-profile">${c.profile_label ? `Perfil <b>${c.profile_label}</b>` : '—'}</div>
+            <div class="selection-col-score">Score <b>${c.quality_score != null ? parseFloat(c.quality_score).toFixed(2) : '—'}</b><br><small>EV ${c.expected_pnl != null ? parseFloat(c.expected_pnl).toFixed(2) : '—'}</small></div>
+            <div class="selection-col-checks">${c.positive_checks ?? 0}/${c.total_checks ?? 0} checks</div>
+            <div class="selection-col-status ${statusClass[c.status] || 'status-neutral'}">${statusText[c.status] || c.status}</div>
+            <div class="selection-col-decision" title="${c.reason || ''}">${c.decision || '—'}<br><small>${c.reason || ''}</small></div>
+            <div class="selection-col-time">${formatTime(c.last_review_at)}</div>
+        </div>`).join('') : '<p class="loading">Sin candidatos en esta pestaña.</p>';
+
+    el.innerHTML = `
+        ${countsSummary}
+        ${tabs}
+        <div class="selection-candidates-header">
+            <span>Símbolo</span>
+            <span>Perfil</span>
+            <span>Score</span>
+            <span>Checks</span>
+            <span>Estado</span>
+            <span>Decisión / Razón</span>
+            <span>Últ. revisión</span>
+        </div>
+        <div class="selection-candidates">${rows}</div>
+    `;
 }
 
 async function renderVolSpikeAudit() {

@@ -102,7 +102,7 @@ class PnLPredictor:
                 _side = 'LONG'
 
             # Calculate success probability based on indicators + learned weights
-            success_probability = self._calculate_success_probability(indicators, weights, trade_side=_side)
+            success_probability = self._calculate_success_probability(indicators, weights, trade_side=_side, current_price=current_price)
 
             # Estimate price range for the cycle
             price_range = self._estimate_price_range(current_price, indicators, cycle_duration_minutes)
@@ -173,7 +173,7 @@ class PnLPredictor:
                 'error': str(e)
             }
     
-    def _calculate_success_probability(self, indicators: Dict, weights: Dict = None, trade_side: str = 'LONG') -> float:
+    def _calculate_success_probability(self, indicators: Dict, weights: Dict = None, trade_side: str = 'LONG', current_price: Optional[float] = None) -> float:
         """
         Calculate success probability using adaptive indicator weights.
 
@@ -265,7 +265,8 @@ class PnLPredictor:
             lower  = _num(bollinger.get('lower', 0), 0.0)
             middle = _num(bollinger.get('middle', 0), 0.0)
             if lower > 0 and middle > 0 and upper > lower:
-                position_in_band = (middle - lower) / (upper - lower)
+                price_for_band = float(current_price) if current_price is not None else middle
+                position_in_band = (price_for_band - lower) / (upper - lower)
                 if _is_short:
                     if position_in_band > 0.8:
                         probability += w_bb
@@ -417,6 +418,68 @@ class PnLPredictor:
         
         return expected_pnl
     
+    def predict_range_reversion(
+        self,
+        current_price: float,
+        indicators: Dict,
+        position_size_usdt: float,
+        settings=None,
+        take_profit_pct: Optional[float] = None,
+        stop_loss_pct: Optional[float] = None,
+        trade_type: str = "spot",
+    ) -> Dict:
+        bollinger = indicators.get("bollinger_bands") or {}
+        lower = float(bollinger.get("lower", 0.0) or 0.0)
+        middle = float(bollinger.get("middle", 0.0) or 0.0)
+        upper = float(bollinger.get("upper", 0.0) or 0.0)
+        if current_price <= 0 or lower <= 0 or middle <= lower or upper <= middle or position_size_usdt <= 0:
+            return {"valid": False, "reason": "invalid_bollinger_or_position"}
+
+        band_position = max(0.0, min(1.0, (current_price - lower) / (upper - lower)))
+        configured_tp = float(take_profit_pct if take_profit_pct is not None else getattr(settings, "take_profit_pct", 1.8)) / 100.0
+        configured_sl = float(stop_loss_pct if stop_loss_pct is not None else getattr(settings, "range_scalp_sl_pct", getattr(settings, "stop_loss_pct", 2.5))) / 100.0
+        target_price = min(middle, current_price * (1.0 + max(configured_tp, 0.0)))
+        structural_stop = lower
+        configured_stop = current_price * (1.0 - max(configured_sl, 0.0))
+        stop_price = max(structural_stop, configured_stop)
+        if target_price <= current_price or stop_price >= current_price:
+            return {"valid": False, "reason": "invalid_reversion_payoff", "band_position": band_position}
+
+        rsi = float((indicators.get("rsi") or {}).get("value", 50.0) or 50.0)
+        volume = float((indicators.get("vol_spike") or {}).get("value", 1.0) or 1.0)
+        trend_raw = (indicators.get("trend_4h") or {}).get("value", 0.0)
+        if isinstance(trend_raw, str):
+            trend = 1.0 if trend_raw.strip().upper() in ("UP", "BULL", "BULLISH") else -1.0 if trend_raw.strip().upper() in ("DOWN", "BEAR", "BEARISH") else 0.0
+        else:
+            trend = float(trend_raw or 0.0)
+        strength = float(indicators.get("signal_strength", indicators.get("strength", 0.5)) or 0.5)
+        probability = 0.50
+        probability += max(-0.20, min(0.20, (0.55 - band_position) * 0.50))
+        probability += 0.12 if 45.0 <= rsi <= 56.0 else 0.04 if 35.0 <= rsi <= 65.0 else -0.10
+        probability += 0.10 if 1.5 <= volume <= 2.5 else 0.03 if volume >= 1.0 else -0.10
+        probability += 0.05 if trend > 0 else -0.10 if trend < 0 else 0.0
+        probability += max(-0.08, min(0.08, (strength - 0.5) * 0.32))
+        probability = max(0.05, min(0.95, probability))
+
+        quantity = position_size_usdt / current_price
+        gross_gain = (target_price - current_price) * quantity
+        gross_loss = (current_price - stop_price) * quantity
+        expected_pnl = probability * gross_gain - (1.0 - probability) * gross_loss
+        from binance_commission import expected_pnl_after_fees
+        expected_pnl = expected_pnl_after_fees(expected_pnl, position_size_usdt, trade_type, settings)
+        return {
+            "valid": True,
+            "model": "range_reversion_v1",
+            "expected_pnl": expected_pnl,
+            "expected_pnl_percentage": expected_pnl / position_size_usdt * 100.0,
+            "success_probability": probability,
+            "target_price": target_price,
+            "stop_price": stop_price,
+            "band_position": band_position,
+            "gross_gain": gross_gain,
+            "gross_loss": gross_loss,
+        }
+
     def _calculate_risk_metrics(
         self,
         current_price: float,

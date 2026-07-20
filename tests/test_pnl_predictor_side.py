@@ -41,6 +41,31 @@ def test_expected_pnl_uses_direction_specific_math():
     assert ev_short > 0.0
 
 
+def test_bollinger_probability_uses_current_price():
+    predictor = PnLPredictor()
+    indicators = _bearish_indicators()
+
+    low_band = predictor._calculate_success_probability(indicators, trade_side="LONG", current_price=96.0)
+    high_band = predictor._calculate_success_probability(indicators, trade_side="LONG", current_price=102.5)
+
+    assert low_band > high_band
+
+
+def test_range_reversion_prediction_returns_net_ev():
+    predictor = PnLPredictor()
+    indicators = _bearish_indicators()
+    indicators["rsi"] = {"value": 50.0}
+    indicators["trend_4h"] = {"value": 1}
+    indicators["signal_strength"] = 0.7
+
+    prediction = predictor.predict_range_reversion(96.0, indicators, 100.0)
+
+    assert prediction["valid"] is True
+    assert prediction["model"] == "range_reversion_v1"
+    assert prediction["target_price"] > 96.0
+    assert prediction["stop_price"] < 96.0
+
+
 def test_prediction_payload_includes_trade_side():
     predictor = PnLPredictor()
     prediction = predictor.predict_pnl(

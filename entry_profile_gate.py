@@ -255,14 +255,15 @@ def _extract_float(signal_meta: Dict[str, Any], keys: List[str], default: float 
 
 
 def _range_scalp_score(signal_meta: Dict[str, Any], symbol: str) -> float:
-    """Heuristic score tailored for RANGE_SCALP long entries.
+    """Heuristic score tailored for RANGE_SCALP long entries (v2).
 
-    It rewards classic mean-reversion setups: price in the lower half of the
+    Rewards classic mean-reversion setups: price in the lower/middle part of the
     Bollinger bandwidth, a healthy volume spike, RSI in the neutral zone,
-    and a non-down 4h trend.  It penalizes entries near the upper band or
-    with low volume, and it treats the raw predictor expected-return as a
-    contrarian signal (a negative short-term prediction often means the
-    price is oversold within the range).
+    and a non-down 4h trend.  It penalizes entries near the upper band or with
+    low volume.  The predictor expected-return is treated as a contrarian
+    signal: a negative short-term prediction often flags an oversold dip inside
+    the range, while an optimistic prediction suggests limited mean-reversion
+    upside.
     """
     score = 0.0
 
@@ -279,65 +280,65 @@ def _range_scalp_score(signal_meta: Dict[str, Any], symbol: str) -> float:
     if bb_position < 0.0:
         bb_position = 0.5
 
-    # Ideal mean-reversion zone: 20-40% of the BB width (lower half, but not extreme)
-    if 0.20 <= bb_position <= 0.40:
+    # Optimal mean-reversion zone: 25-45% of BB width (lower half, not extreme)
+    if 0.25 <= bb_position <= 0.45:
         score += 1.0
-    elif 0.10 <= bb_position < 0.20 or 0.40 < bb_position <= 0.55:
+    elif 0.15 <= bb_position < 0.25 or 0.45 < bb_position <= 0.60:
         score += 0.3
-    elif 0.55 < bb_position <= 0.75:
+    elif 0.60 < bb_position <= 0.80:
         score += 0.0
     else:
         score -= 1.0
 
-    # Volume confirmation
+    # Volume confirmation: strongest reward at 1.5-2.0x; avoid very low volume
     vol_spike = _extract_float(signal_meta, ["vol_spike", "vol_spike_at_entry"], default=1.0)
-    if vol_spike >= 1.5:
-        score += 1.0
+    if vol_spike >= 2.0:
+        score += 0.3
+    elif vol_spike >= 1.5:
+        score += 0.8
     elif vol_spike >= 1.0:
-        score += 0.4
+        score += 0.2
     elif vol_spike >= 0.5:
         score += 0.0
     else:
         score -= 0.5
 
-    # RSI: neutral-bullish zone 35-55 is ideal; avoid overbought > 65
+    # RSI: neutral-bullish 45-56 is ideal; avoid overbought > 65
     rsi = _extract_float(signal_meta, ["rsi", "rsi_at_entry", "rsi_4h"], default=50.0)
-    if 35 <= rsi <= 55:
+    if 45 <= rsi <= 56:
         score += 1.0
-    elif 30 <= rsi < 35 or 55 < rsi <= 65:
+    elif 35 <= rsi < 45 or 56 < rsi <= 65:
         score += 0.3
     elif rsi > 65:
         score -= 1.0
-    elif rsi < 25:
+    elif rsi < 30:
         score -= 0.5
 
     # 4h trend: up is supportive, down is penalized for longs
     trend = str(signal_meta.get("higher_tf_trend") or signal_meta.get("trend_4h") or "").upper()
     if trend == "UP":
-        score += 0.5
+        score += 0.3
     elif trend == "DOWN":
-        score -= 0.5
-
-    # Predictor expected return is used as a contrarian input for range scalps:
-    # an oversold dip produces a negative short-term prediction, which is bullish
-    # for a bounce.  Cap the contribution to avoid extreme outliers.
-    expected_pnl_pct = _expected_return_pct(signal_meta) or 0.0
-    score -= 0.2 * max(-2.0, min(2.0, expected_pnl_pct))
-
-    # Probability and strength add conviction but never dominate the technical setup.
-    prob = _extract_float(signal_meta, ["success_probability", "predictor_prob"], default=0.5)
-    if prob >= 0.60:
-        score += 0.4
-    elif prob >= 0.45:
-        score += 0.1
-    else:
         score -= 0.3
 
-    strength = _extract_float(signal_meta, ["strength", "signal_strength"], default=0.5)
-    if strength >= 0.75:
+    # Expected PnL as contrarian input: negative predictor = oversold bounce
+    expected_pnl_pct = _expected_return_pct(signal_meta) or 0.0
+    score -= 0.8 * max(-2.0, min(2.0, expected_pnl_pct))
+
+    # Probability and strength add conviction but never dominate the setup
+    prob = _extract_float(signal_meta, ["success_probability", "predictor_prob"], default=0.5)
+    if prob >= 0.62:
         score += 0.3
-    elif strength >= 0.55:
+    elif prob >= 0.55:
         score += 0.1
+    else:
+        score -= 0.2
+
+    strength = _extract_float(signal_meta, ["strength", "signal_strength"], default=0.5)
+    if 0.55 <= strength <= 0.75:
+        score += 0.3
+    elif strength > 0.75:
+        score += 0.0
     else:
         score -= 0.2
 

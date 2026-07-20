@@ -9,8 +9,9 @@
 - Las posiciones NO se abren inmediatamente tras el QUBO. El candidato pasa primero al estado `ready` en `ready_candidates`.
 - Estados válidos: `ready`, `validated`, `opened`, `discarded`, `expired`.
 - Un candidato `ready` debe acumular `required_positive_checks` positivas antes de pasar a `validated`.
-- Solo los candidatos `validated` que sigan en el top QUBO se ejecutan (`opened`).
-- Si un candidato falla un re-chequeo, pasa a `discarded` con `discard_reason`.
+- Solo los candidatos `validated` que siguen en el top QUBO se ejecutan (`opened`), en el orden de prioridad persistido por la política del régimen.
+- La política se reevalúa antes de cada apertura; si falla, el candidato pasa a `discarded` con `discard_reason`.
+- QUBO/diversificación es una guarda independiente: pasar la política no sustituye la selección QUBO.
 
 ## 2. Re-chequeos
 
@@ -22,10 +23,12 @@
 ## 3. Configuración por régimen
 
 - `staged_entry_enabled` activa/desactiva el lifecycle global.
-- `staged_entry_regime_config` contiene por régimen: `enabled`, `required_positive_checks`, `checks_per_cycle`, `max_cycles`, `max_age_min`, `intra_mode`, `price_source`.
-- SPOT_BULL: `required_positive_checks` por defecto 2, `max_age_min` 60, `price_source` `avg`.
-- RANGE_SCALP: `required_positive_checks` 2, `max_age_min` 20, `intra_mode` `predictor`.
-- FUTURES_SHORT y PRESERVATION: desactivados por defecto hasta tener gates calibrados.
+- `staged_entry_regime_config` contiene por régimen: `enabled`, `required_positive_checks`, `checks_per_cycle`, `max_cycles`, `max_age_min`, `intra_mode`, `price_source`, `require_predictor_valid`, `min_expected_pnl`, `policy_version` y `max_open_per_cycle`.
+- Los cuatro regímenes están activados de forma conservadora y con `max_open_per_cycle=1`.
+- SPOT_BULL, FUTURES_SHORT y PRESERVATION requieren perfil A/B/C, predictor válido y EV neto actual estrictamente mayor a `min_expected_pnl`.
+- RANGE_SCALP requiere perfil A/B/C y predictor íntegro, pero se prioriza por calidad de reversión; el signo del predictor long genérico no es un veto.
+- `preservation_upgrade_to_futures=False` mantiene PRESERVATION independiente; solo se convierte en FUTURES_SHORT al activarlo explícitamente.
+- `range_reversion_predictor_mode=shadow` registra EV, probabilidad, target y stop de reversión sin bloquear aperturas.
 
 ## 4. MIMIC
 
@@ -49,7 +52,8 @@ PATCH /config/kelly {"staged_entry_enabled": false}
 
 - `config.py` y `config_helpers.py` tienen `staged_entry_enabled=True` por defecto.
 - SPOT_BULL y RANGE_SCALP: `enabled=True`, `required_positive_checks=2`, `max_cycles=3`.
-- FUTURES_SHORT y PRESERVATION: `enabled=False` hasta calibrar gate específico.
+- FUTURES_SHORT y PRESERVATION: `enabled=True` con predictor válido, EV neto positivo y una apertura máxima por ciclo; sus políticas siguen en calibración.
+- El predictor de reversión de RANGE_SCALP permanece en sombra hasta superar al baseline fuera de muestra en EV neto y calibración de probabilidad.
 - Hot-config disponible vía `PATCH /config/kelly` con `staged_entry_enabled` o `staged_entry_regime_config`.
 
 ## 8. Monitoreo en producción
@@ -74,5 +78,6 @@ WHERE status='validated';
 
 Alertas manuales a vigilar:
 - `discarded` > 90% del total sin `discard_reason` claro → revisar `entry_profile_gate` o predictor.
-- `validated` crece pero no pasa a `opened` → revisar `get_openable_candidates` y `_buy_top_symbols`.
+- `validated` crece pero no pasa a `opened` → revisar QUBO, capacidad y `get_openable_candidates`.
+- Comparar `policy.range_reversion_shadow` con el PnL realizado de RANGE_SCALP antes de cambiar `range_reversion_predictor_mode` a bloqueo.
 - Errores `[StagedEntry] staged entry error` en logs → revisar excepción y rollback temporal.

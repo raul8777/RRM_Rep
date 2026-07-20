@@ -8579,65 +8579,132 @@ def _build_selection_observability(db, limit: int = 100) -> Dict[str, Any]:
     if not db:
         return {"available": False, "reason": "database_unavailable", "candidates": []}
     safe_limit = max(1, min(int(limit), 500))
-    cycles = db.execute_query(
-        "SELECT cycle_id, started_at, completed_at, regime_mode, profile_label, candidate_count, selected_count, executed_count, summary "
-        "FROM entry_selection_cycles ORDER BY started_at DESC LIMIT 30"
-    )
-    candidate_rows = db.execute_query(
-        "SELECT c.cycle_id, c.symbol, c.trade_type, c.stage, c.decision, c.reason, c.data, c.updated_at, "
-        "cy.started_at, cy.regime_mode, cy.profile_label "
-        "FROM entry_selection_candidates c JOIN entry_selection_cycles cy ON cy.cycle_id=c.cycle_id "
-        "ORDER BY c.updated_at DESC LIMIT %s",
-        (safe_limit,),
-    )
-    candidates = []
-    reason_counts: Dict[str, int] = {}
-    stage_counts: Dict[str, int] = {}
-    for row in candidate_rows:
-        data = row.get("data") or {}
-        if isinstance(data, str):
-            try:
-                data = json.loads(data)
-            except Exception:
-                data = {}
-        reason = row.get("reason") or "PENDING"
-        stage = row.get("stage") or "unknown"
-        reason_counts[reason] = reason_counts.get(reason, 0) + 1
-        stage_counts[stage] = stage_counts.get(stage, 0) + 1
+    try:
+        rows = db.execute_query(
+            """
+            SELECT
+                rc.id,
+                rc.symbol,
+                rc.trade_type,
+                rc.regime_mode,
+                rc.profile_label,
+                rc.status,
+                rc.positive_checks,
+                rc.total_checks,
+                rc.required_positive_checks,
+                rc.ready_at,
+                rc.last_checked_at,
+                rc.validated_at,
+                rc.opened_at,
+                rc.discarded_at,
+                rc.discard_reason,
+                rc.data,
+                c.checked_at AS last_check_at,
+                c.quality_score,
+                c.profile_label AS check_profile,
+                c.decision AS check_decision,
+                c.reason AS check_reason,
+                c.check_type,
+                c.input_features,
+                c.thresholds_snapshot,
+                c.fear_greed
+            FROM ready_candidates rc
+            LEFT JOIN LATERAL (
+                SELECT *
+                FROM ready_candidate_checks
+                WHERE ready_candidate_id = rc.id
+                ORDER BY checked_at DESC
+                LIMIT 1
+            ) c ON true
+            ORDER BY rc.updated_at DESC
+            LIMIT %s
+            """,
+            (safe_limit,),
+        )
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "candidates": []}
+
+    candidates: List[Dict[str, Any]] = []
+    status_counts: Dict[str, int] = {}
+    for row in rows or []:
+        for key in ("signal_meta", "config_snapshot", "data", "input_features", "thresholds_snapshot"):
+            value = row.get(key)
+            if value and isinstance(value, str):
+                try:
+                    row[key] = json.loads(value)
+                except Exception:
+                    row[key] = {}
+
+        status = row.get("status") or "unknown"
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+        last_review_at = (
+            row.get("last_checked_at")
+            or row.get("last_check_at")
+            or row.get("validated_at")
+            or row.get("discarded_at")
+            or row.get("opened_at")
+            or row.get("ready_at")
+        )
+
+        reviewed = status in ("opened", "discarded", "expired")
+        under_review = status in ("ready", "validated")
+
         candidates.append({
-            "cycle_id": row.get("cycle_id"),
-            "timestamp": row.get("updated_at").isoformat() if row.get("updated_at") else None,
-            "cycle_started_at": row.get("started_at").isoformat() if row.get("started_at") else None,
+            "id": row.get("id"),
             "symbol": row.get("symbol"),
             "trade_type": row.get("trade_type"),
             "regime_mode": row.get("regime_mode"),
-            "profile_label": row.get("profile_label"),
-            "stage": stage,
-            "decision": row.get("decision"),
-            "reason": row.get("reason"),
-            **data,
+            "profile_label": row.get("profile_label") or row.get("check_profile"),
+            "status": status,
+            "reviewed": reviewed,
+            "under_review": under_review,
+            "positive_checks": row.get("positive_checks"),
+            "total_checks": row.get("total_checks"),
+            "required_positive_checks": row.get("required_positive_checks"),
+            "quality_score": float(row.get("quality_score")) if row.get("quality_score") is not None else None,
+            "last_review_at": last_review_at.isoformat() if last_review_at and hasattr(last_review_at, "isoformat") else None,
+            "ready_at": row.get("ready_at").isoformat() if row.get("ready_at") and hasattr(row["ready_at"], "isoformat") else None,
+            "validated_at": row.get("validated_at").isoformat() if row.get("validated_at") and hasattr(row["validated_at"], "isoformat") else None,
+            "opened_at": row.get("opened_at").isoformat() if row.get("opened_at") and hasattr(row["opened_at"], "isoformat") else None,
+            "discarded_at": row.get("discarded_at").isoformat() if row.get("discarded_at") and hasattr(row["discarded_at"], "isoformat") else None,
+            "discard_reason": row.get("discard_reason"),
+            "decision": row.get("check_decision") or row.get("decision"),
+            "reason": row.get("check_reason") or row.get("discard_reason") or row.get("reason"),
+            "check_type": row.get("check_type"),
+            "fear_greed": row.get("fear_greed"),
+            "input_features": row.get("input_features") or {},
+            "thresholds": row.get("thresholds_snapshot") or {},
+            "priority": (row.get("data") or {}).get("priority") or [],
+            "policy": (row.get("data") or {}).get("policy") or {},
+            "entry_decision": (row.get("data") or {}).get("policy") or {},
+            "expected_pnl": ((row.get("data") or {}).get("policy") or {}).get("expected_pnl"),
+            "range_reversion_shadow": ((row.get("data") or {}).get("policy") or {}).get("range_reversion_shadow"),
         })
-    latest_cycle = cycles[0] if cycles else None
-    if latest_cycle and isinstance(latest_cycle.get("summary"), str):
-        try:
-            latest_cycle["summary"] = json.loads(latest_cycle["summary"])
-        except Exception:
-            latest_cycle["summary"] = {}
-    for cycle in cycles:
-        for key in ("started_at", "completed_at"):
-            if cycle.get(key) and hasattr(cycle[key], "isoformat"):
-                cycle[key] = cycle[key].isoformat()
-    last_executed = next((c for c in candidates if c.get("decision") == "executed"), None)
-    dominant_reason = max(reason_counts, key=reason_counts.get) if reason_counts else None
+
+    under_review_count = status_counts.get("ready", 0) + status_counts.get("validated", 0)
+    reviewed_count = sum(v for k, v in status_counts.items() if k in ("opened", "discarded", "expired"))
+    latest_review_at = None
+    last_entry_at = None
+    for c in candidates:
+        if c["last_review_at"] and (latest_review_at is None or c["last_review_at"] > latest_review_at):
+            latest_review_at = c["last_review_at"]
+        if c["opened_at"] and (last_entry_at is None or c["opened_at"] > last_entry_at):
+            last_entry_at = c["opened_at"]
+
     return {
         "available": True,
-        "latest_cycle": latest_cycle,
-        "cycles": cycles,
         "candidates": candidates,
-        "stage_counts": stage_counts,
-        "reason_counts": reason_counts,
-        "dominant_reason": dominant_reason,
-        "last_entry_at": last_executed.get("timestamp") if last_executed else None,
+        "status_counts": status_counts,
+        "stage_counts": status_counts,
+        "under_review_count": under_review_count,
+        "reviewed_count": reviewed_count,
+        "opened_count": status_counts.get("opened", 0),
+        "discarded_count": status_counts.get("discarded", 0),
+        "expired_count": status_counts.get("expired", 0),
+        "latest_review_at": latest_review_at,
+        "last_entry_at": last_entry_at,
+        "total": len(candidates),
     }
 
 

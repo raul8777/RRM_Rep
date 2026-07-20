@@ -241,7 +241,9 @@ def test_filter_buy_candidates_handles_dict_candidates():
     }
     candidates = [{"symbol": "GOOD", "strength": 0.60}]
     passed = _filter_buy_candidates(candidates, meta, SETTINGS, "SPOT_BULL", "B")
-    assert passed == [{"symbol": "GOOD", "strength": 0.60}]
+    assert len(passed) == 1
+    assert passed[0]["symbol"] == "GOOD"
+    assert passed[0]["entry_decision"]["eligible"] is True
 
 
 class _FakeInnerClient:

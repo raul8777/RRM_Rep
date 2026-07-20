@@ -26,6 +26,7 @@ from peak_capture_engine import (
     PeakCaptureDecision,
 )
 from config_helpers import get_param as _get_param
+from entry_decision import evaluate as evaluate_entry_decision
 import staged_entry
 from profit_realization_supervisor import (
     ProfitRealizationContext,
@@ -5267,6 +5268,32 @@ def _filter_buy_candidates(
             update_signal_decision(symbol, "rejected", "PEAK_QUALITY_DISCARDED")
             continue
 
+        _decision_prediction = (predictions or {}).get(symbol)
+        if _decision_prediction:
+            meta["entry_decision_prediction"] = _decision_prediction
+        _entry_decision = evaluate_entry_decision(
+            meta=meta,
+            regime=regime_mode,
+            profile=_profile,
+            quality_score=float(meta.get("peak_quality_score", 0.0) or 0.0),
+            settings=settings,
+            current_price=meta.get("current_price") or meta.get("price"),
+        ).to_dict()
+        meta["entry_decision"] = _entry_decision
+        if isinstance(cand, dict):
+            cand["entry_decision"] = _entry_decision
+        if isinstance(signal_meta, dict):
+            signal_meta.setdefault(symbol, {}).update({
+                "peak_quality_profile": _profile,
+                "peak_quality_score": meta.get("peak_quality_score"),
+                "entry_profile_gate_info": meta.get("entry_profile_gate_info"),
+                "entry_decision": _entry_decision,
+            })
+        if not _entry_decision["eligible"]:
+            print(f"[FilterBuy] Rejected {symbol}: {_entry_decision['reason']}")
+            update_signal_decision(symbol, "rejected", _entry_decision["reason"])
+            continue
+
         # Audit all accepted candidates.
         print(
             f"[FilterBuy] {symbol}: ACCEPTED profile={_profile} "
@@ -6335,12 +6362,29 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     f"min_prob {_cur_min_prob:.2f}→{_new_th[_sym_cat]['min_prob']:.2f} "
                     f"(BTC 4h={btc_4h_chg_pct:+.2f}%)"
                 )
+        _preflight_meta = dict(meta)
+        if prediction:
+            _preflight_meta["entry_decision_prediction"] = prediction
+        _preflight_decision = evaluate_entry_decision(
+            meta=_preflight_meta,
+            regime=_regime_mode,
+            profile=str(_preflight_meta.get("peak_quality_profile") or "").upper(),
+            quality_score=float(_preflight_meta.get("peak_quality_score", 0.0) or 0.0),
+            settings=settings,
+            current_price=_preflight_meta.get("current_price") or _preflight_meta.get("price"),
+        ).to_dict()
+        if not _preflight_decision["eligible"]:
+            print(f"Skipping buy {symbol}: preflight {_preflight_decision['reason']}")
+            update_signal_decision(symbol, "rejected", _preflight_decision["reason"], signal_id=_signal_id)
+            continue
+        meta["entry_decision"] = _preflight_decision
         is_valid, reason = pnl_service.validate(prediction, _pnl_boosted_settings, symbol=symbol, news_client=news_client)
         # ── Peaks-first advisory mode: Profile A/B bypass predictor gate ──────
         _predictor_gate_mode = str(getattr(settings, 'predictor_gate_mode', 'blocking')).lower()
         _sig_peak_profile = str(signal_meta.get(symbol, {}).get('peak_quality_profile', '')).upper()
         _peaks_bypass = False
-        if not is_valid and _predictor_gate_mode == "advisory" and _sig_peak_profile in ("A", "B"):
+        if (not is_valid and not getattr(settings, "entry_decision_enabled", False)
+                and _predictor_gate_mode == "advisory" and _sig_peak_profile in ("A", "B")):
             _peaks_bypass = True
             _gate_warning = {
                 "gate": "predictor_pnl",
@@ -6354,7 +6398,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             if symbol in signal_meta and isinstance(signal_meta[symbol], dict):
                 signal_meta[symbol].setdefault('gate_warnings', []).append(_gate_warning)
             print(f"[PeaksFirst] {symbol}: predictor VETOED ({reason}) but Profile={_sig_peak_profile} → ADVISORY BYPASS")
-        elif not is_valid and _predictor_gate_mode == "disabled":
+        elif (not is_valid and not getattr(settings, "entry_decision_enabled", False)
+              and _predictor_gate_mode == "disabled"):
             _peaks_bypass = True
             print(f"[PeaksFirst] {symbol}: predictor gate DISABLED → bypass")
         if not is_valid and not _peaks_bypass:
@@ -6759,6 +6804,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "entry_commission": float(_fill.get('commission', entry_commission)),
                         "binance_entry_confirmed": bool(_fill.get('binance_confirmed', False)),
                     }
+                    metadata['entry_decision'] = _preflight_decision
                     # Persist gate_warnings collected during advisory mode
                     _gate_warnings_for_sym = _signal_for_symbol.get('gate_warnings', [])
                     if _gate_warnings_for_sym:
@@ -8524,7 +8570,7 @@ def execute_once(monitor_only: bool = False, components=None):
                     print(f"[StagedEntry] staged new: {[_s.get('symbol') for _s in _staged_new]}")
                 # 3. Only pass validated candidates that are still QUBO-selected to execution.
                 _openable_rows = staged_entry.get_openable_candidates(
-                    _db_client_ref, _regime_mode, top_symbols,
+                    _db_client_ref, _regime_mode, top_symbols, settings=settings,
                 )
                 if _openable_rows:
                     _buy_signals = [dict(_r.get('signal_meta', {})) for _r in _openable_rows]

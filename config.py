@@ -411,8 +411,28 @@ class Settings(BaseSettings):
     qubo_include_open_positions: bool = Field(default=True)  # include open positions in correlation matrix
     # Peaks-first pipeline feature flags (s79)
     peaks_first_enabled: bool = Field(default=True)          # Peaks profile drives selection priority
-    predictor_gate_mode: str = Field(default="advisory")     # "blocking" | "advisory" | "disabled"
+    predictor_gate_mode: str = Field(default="blocking")     # "blocking" | "advisory" | "disabled"
     entry_quality_gate_mode: str = Field(default="disabled")  # superseded by entry_profile_gate; "blocking" is legacy
+    entry_decision_enabled: bool = Field(default=True)
+    entry_decision_policy_version: str = Field(default="strict_v1")
+    entry_decision_regime_mode: Dict[str, str] = Field(default={
+        "SPOT_BULL": "blocked",
+        "RANGE_SCALP": "blocked",
+        "FUTURES_SHORT": "blocked",
+        "PRESERVATION": "blocked",
+    })
+    entry_decision_min_expected_pnl: Dict[str, float] = Field(default={
+        "SPOT_BULL": 0.0,
+        "RANGE_SCALP": 0.0,
+        "FUTURES_SHORT": 0.0,
+        "PRESERVATION": 0.0,
+    })
+    entry_decision_min_probability: Dict[str, float] = Field(default={
+        "SPOT_BULL": 0.60,
+        "RANGE_SCALP": 0.60,
+        "FUTURES_SHORT": 0.60,
+        "PRESERVATION": 0.60,
+    })
     # Active replacement: swap weakest open position for a better new signal
     replace_only_losing: bool = Field(default=True)  # only replace positions in loss/flat
     replace_ev_min_ratio: float = Field(default=1.1)  # MEJO-1: 1.3â†’1.1 â€” more permissive given small EV values
@@ -578,6 +598,8 @@ class Settings(BaseSettings):
     staged_entry_enabled: bool = Field(default=True)
     staged_entry_price_source: str = Field(default="avg")  # 'avg' (VWAP 5m) or 'ticker'
     staged_entry_persist_checks: bool = Field(default=True)
+    range_reversion_predictor_mode: str = Field(default="shadow")
+    preservation_upgrade_to_futures: bool = Field(default=False)
     staged_entry_regime_config: Dict[str, Any] = Field(default={
         "SPOT_BULL": {
             "enabled": True,
@@ -590,6 +612,10 @@ class Settings(BaseSettings):
             "use_fear_greed": True,
             "cooldown_min": 0,
             "require_inter_positive": False,
+            "require_predictor_valid": True,
+            "min_expected_pnl": 0.0,
+            "policy_version": "v1",
+            "max_open_per_cycle": 1,
         },
         "RANGE_SCALP": {
             "enabled": True,
@@ -602,30 +628,41 @@ class Settings(BaseSettings):
             "use_fear_greed": True,
             "cooldown_min": 0,
             "require_inter_positive": False,
+            "require_predictor_valid": True,
+            "policy_version": "v1",
+            "max_open_per_cycle": 1,
         },
         "FUTURES_SHORT": {
-            "enabled": False,
+            "enabled": True,
             "checks_per_cycle": 1,
             "required_positive_checks": 2,
             "max_cycles": 3,
             "max_age_min": 20,
-            "intra_mode": "disabled",
+            "intra_mode": "predictor",
             "price_source": "ticker",
             "use_fear_greed": False,
             "cooldown_min": 0,
             "require_inter_positive": True,
+            "require_predictor_valid": True,
+            "min_expected_pnl": 0.0,
+            "policy_version": "v1",
+            "max_open_per_cycle": 1,
         },
         "PRESERVATION": {
-            "enabled": False,
+            "enabled": True,
             "checks_per_cycle": 1,
             "required_positive_checks": 2,
             "max_cycles": 3,
             "max_age_min": 100,
-            "intra_mode": "disabled",
+            "intra_mode": "predictor",
             "price_source": "avg",
             "use_fear_greed": True,
             "cooldown_min": 0,
             "require_inter_positive": True,
+            "require_predictor_valid": True,
+            "min_expected_pnl": 0.0,
+            "policy_version": "v1",
+            "max_open_per_cycle": 1,
         },
     })
 
@@ -640,7 +677,7 @@ class Settings(BaseSettings):
     auto_close_excluded_on_startup: bool = Field(default=True)
 
     # â”€â”€ Futures trading (USDM, fapi.binance.com) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    futures_enabled: bool = Field(default=False)  # s80: disabled under entry-profile gate redesign â€” backtest run_0812 uses futures
+    futures_enabled: bool = Field(default=True)  # s80: disabled under entry-profile gate redesign â€” backtest run_0812 uses futures
     futures_leverage: int = Field(default=10)          # K2: 2â†’10 â€” backtest run_0812 validated 10x
     futures_max_shorts: int = Field(default=5)       # concentrated: 3-5 shorts simultáneos
     futures_max_largecap_shorts: int = Field(default=3)  # concentrated: no concentrar todo en BTC/ETH

@@ -1,7 +1,44 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 18 2026 | s81: Staged Entry Lifecycle integrado y MIMIC sweep ejecutado
+> Última actualización: jul 20 2026 | s82: Prioridad por política y predictor RANGE_SCALP en sombra
+
+---
+
+## 🟢 Estado del Sistema — jul 20 2026 — s82: Prioridad por política y predictor RANGE_SCALP en sombra
+
+### Objetivo
+Hacer que la apertura use una política explicable por régimen después de QUBO y medir un EV de reversión específico para RANGE_SCALP antes de convertirlo en gate bloqueante.
+
+### Cambios implementados
+- `staged_entry.py` evalúa la política en staging, re-chequeos inter/intra-ciclo y antes de abrir; persiste `policy`, `priority`, EV, probabilidad y resultado sombra.
+- SPOT_BULL, FUTURES_SHORT y PRESERVATION exigen perfil A/B/C, predictor no degenerado y EV neto positivo; RANGE_SCALP usa calidad de reversión como prioridad y no invierte ni bloquea por el PnL long genérico.
+- `get_openable_candidates()` conserva el requisito QUBO, ordena por prioridad persistida y aplica `max_open_per_cycle=1`.
+- `pnl_predictor.py` corrige la posición Bollinger con precio actual y añade `predict_range_reversion()`: target BB-middle/TP, stop estructural/configurado, probabilidad, fees y EV neto.
+- `range_reversion_predictor_mode=shadow` es el default: el resultado se observa, no altera elegibilidad.
+- FUTURES_SHORT y PRESERVATION se habilitan de forma conservadora. PRESERVATION se mantiene independiente salvo `preservation_upgrade_to_futures=True`.
+- `app.py` y dashboard exponen/ordenan prioridad, EV y salida sombra.
+
+### Configuración vigente
+| Régimen | Activo | Gate de política | Prioridad | Máx. aperturas/ciclo |
+|---|---|---|---|---|
+| SPOT_BULL | True | Perfil A/B/C + predictor válido + EV neto positivo | EV, calidad, probabilidad | 1 |
+| RANGE_SCALP | True | Perfil A/B/C + predictor íntegro | Calidad, probabilidad, EV genérico | 1 |
+| FUTURES_SHORT | True | Perfil A/B/C + predictor válido + EV short neto positivo | EV, calidad, probabilidad | 1 |
+| PRESERVATION | True | Perfil A/B/C + predictor válido + EV neto positivo | EV, calidad, probabilidad | 1 |
+
+### Validación
+- Focal: `tests/test_staged_entry.py` y `tests/test_pnl_predictor_side.py`: 16 passed.
+- Compilación de módulos modificados: correcta.
+- `tests/test_system_health.py`: 127 passed; un endpoint `/dashboard/summary` agotó su timeout de 30 s.
+
+### Rollback
+- Desactivar todo el lifecycle con `PATCH /config/kelly {"staged_entry_enabled": false}`.
+- Desactivar un régimen ajustando `staged_entry_regime_config.<REGIMEN>.enabled=false`.
+- Apagar el modelo de sombra con `range_reversion_predictor_mode="disabled"`.
+
+### Próximo criterio de promoción
+Promover el predictor de reversión a bloqueo únicamente si una comparación out-of-sample contra el baseline mejora EV neto y calibración de probabilidad con muestra suficiente por ventana/régimen.
 
 ---
 
