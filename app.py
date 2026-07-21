@@ -700,10 +700,44 @@ async def status() -> Dict[str, str]:
     }
 
 
+def _signal_display_state(signal: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
+    signal = dict(signal or {})
+    decision = str(signal.get("decision") or "").lower()
+    if decision == "executed":
+        return {"display_status": "executed", "display_label": "Ejecutada", "actionable": False}
+    if decision == "rejected":
+        return {
+            "display_status": "rejected",
+            "display_label": "Rechazada · descartada",
+            "actionable": False,
+        }
+    if decision == "pending":
+        return {"display_status": "pending_review", "display_label": "En revisión", "actionable": False}
+
+    received_at = signal.get("received_at")
+    received_dt = None
+    if received_at:
+        try:
+            received_dt = datetime.fromisoformat(str(received_at).replace("Z", "+00:00"))
+            if received_dt.tzinfo is None:
+                received_dt = received_dt.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            received_dt = None
+    ttl_minutes = int(getattr(settings, "signal_ttl_minutes", 45) or 45)
+    reference_now = now or datetime.now(timezone.utc)
+    if received_dt and (reference_now - received_dt).total_seconds() >= ttl_minutes * 60:
+        return {"display_status": "expired", "display_label": "Expirada", "actionable": False}
+    return {"display_status": "unresolved", "display_label": "Sin decisión final", "actionable": False}
+
+
+def _present_signals(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [{**dict(signal or {}), **_signal_display_state(signal or {})} for signal in signals or []]
+
+
 @app.get("/signals")
 async def signals() -> Dict[str, object]:
     return {
-        "signals": get_signals(),
+        "signals": _present_signals(get_signals()),
     }
 
 
@@ -711,7 +745,7 @@ async def signals() -> Dict[str, object]:
 async def signals_recent(limit: int = 20) -> Dict[str, object]:
     """Get the most recent N signals (BUY and SELL, processed or not)."""
     return {
-        "signals": get_recent_signals(limit=limit),
+        "signals": _present_signals(get_recent_signals(limit=limit)),
         "count": limit,
     }
 
@@ -1350,10 +1384,9 @@ async def get_open_positions() -> Dict:
                         _gross_unrealized = (cp - entry_price) * quantity
                     else:
                         _gross_unrealized = (entry_price - cp) * quantity
-                    # C0: return net PnL after Binance fees
-                    from binance_commission import total_commission as _open_total_comm
-                    _comm_unrealized = _open_total_comm(quantity, entry_price, cp, 'spot', settings)
-                    unrealized_pnl = round(_gross_unrealized - _comm_unrealized, 4)
+                    from pnl_accounting import mark_to_market_spot
+                    accounting = mark_to_market_spot(position, cp, settings)
+                    unrealized_pnl = round(float(accounting["net_pnl_usdt"]), 4)
                 else:
                     cp = entry_price
                     unrealized_pnl = 0.0
@@ -3053,7 +3086,8 @@ async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
                 if _sp_is_short:
                     _sp_total_pnl += (_ep - _sp_cp) * _qty
                 else:
-                    _sp_total_pnl += (_sp_cp - _ep) * _qty
+                    from pnl_accounting import mark_to_market_spot
+                    _sp_total_pnl += float(mark_to_market_spot(position, _sp_cp, settings)["net_pnl_usdt"])
                 # Age
                 try:
                     _et_str = to_mexico_time_str(position.entry_time) if position.entry_time else ""
@@ -3093,10 +3127,7 @@ async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
             if _sp_total_qty <= 0:
                 continue
             _sp_wap = _sp_total_cost / _sp_total_qty
-            # C0: dashboard shows net PnL after Binance fees (entry+exit on total notional)
-            from binance_commission import total_commission as _sp_total_commission
-            _sp_comm_total = _sp_total_commission(_sp_total_qty, _sp_wap, _sp_cp, 'spot', settings)
-            _sp_total_pnl = round(_sp_total_pnl - _sp_comm_total, 4)
+            _sp_total_pnl = round(_sp_total_pnl, 4)
             _sp_total_qty = round(_sp_total_qty, 8)
             _sp_wap       = round(_sp_wap, 8)
             _sp_total_cost = round(_sp_total_cost, 4)
@@ -5567,30 +5598,31 @@ async def get_open_positions_detail() -> Dict:
         positions = position_manager.get_all_positions()
         positions_data = []
         price_cache: Dict[str, float] = {}
-        for symbol, position in positions.items():
-            try:
-                current_price = _get_request_price(price_cache, symbol)
-                if position.side.upper() == "BUY":
-                    unrealized_pnl = float((current_price - position.entry_price) * position.quantity)
-                else:
-                    unrealized_pnl = float((position.entry_price - current_price) * position.quantity)
-            except Exception:
-                current_price = float(position.entry_price)
-                unrealized_pnl = 0.0
-            positions_data.append({
-                "symbol": symbol,
-                "side": position.side,
-                "quantity": float(position.quantity),
-                "entry_price": float(position.entry_price),
-                "current_price": float(current_price),
-                "unrealized_pnl": unrealized_pnl,
-                "entry_time": to_mexico_time_str(position.entry_time) if position.entry_time else "",
-                "entry_commission": float(position.entry_commission) if position.entry_commission else 0.0,
-                "stop_loss": float(position.stop_loss) if position.stop_loss else None,
-                "take_profit": float(position.take_profit) if position.take_profit else None,
-                "pnl_prediction": position.pnl_prediction,
-                "indicators_at_entry": position.indicators_at_entry,
-            })
+        for symbol, pos_list in positions.items():
+            for entry_num, position in enumerate(pos_list, start=1):
+                try:
+                    current_price = _get_request_price(price_cache, symbol)
+                    from pnl_accounting import mark_to_market_spot
+                    unrealized_pnl = float(mark_to_market_spot(position, current_price, settings)["net_pnl_usdt"])
+                except Exception:
+                    current_price = float(position.entry_price)
+                    unrealized_pnl = 0.0
+                positions_data.append({
+                    "symbol": symbol,
+                    "position_id": position.position_id,
+                    "entry_number": entry_num,
+                    "side": position.side,
+                    "quantity": float(position.quantity),
+                    "entry_price": float(position.entry_price),
+                    "current_price": float(current_price),
+                    "unrealized_pnl": unrealized_pnl,
+                    "entry_time": to_mexico_time_str(position.entry_time) if position.entry_time else "",
+                    "entry_commission": float(position.entry_commission) if position.entry_commission else 0.0,
+                    "stop_loss": float(position.stop_loss) if position.stop_loss else None,
+                    "take_profit": float(position.take_profit) if position.take_profit else None,
+                    "pnl_prediction": position.pnl_prediction,
+                    "indicators_at_entry": position.indicators_at_entry,
+                })
         return {"positions": positions_data, "count": len(positions_data),
                 "timestamp": to_mexico_time(datetime.utcnow()).isoformat()}
     except Exception as e:
@@ -8575,7 +8607,35 @@ async def get_dashboard_screener(_auth=Depends(_require_api_key)) -> Dict:
         return {"ok": False, "error": str(e)}
 
 
-def _build_selection_observability(db, limit: int = 100) -> Dict[str, Any]:
+def _selection_display_state(
+    candidate: Dict[str, Any],
+    active_regime: Optional[str],
+    open_symbols: set[str],
+    actionable_ids: set[int],
+) -> Dict[str, Any]:
+    status = str(candidate.get("status") or "unknown").lower()
+    symbol = str(candidate.get("symbol") or "")
+    reason = candidate.get("reason") or candidate.get("discard_reason") or ""
+    if status == "opened":
+        return {"display_status": "opened", "display_label": "Aceptada · abierta", "actionable": False, "display_reason": reason}
+    if status == "expired" or "EXPIRED" in str(reason).upper():
+        return {"display_status": "expired", "display_label": "Expirada", "actionable": False, "display_reason": reason}
+    if status == "discarded":
+        return {"display_status": "discarded", "display_label": "Rechazada · descartada", "actionable": False, "display_reason": reason}
+    if active_regime and candidate.get("regime_mode") and str(candidate["regime_mode"]).upper() != active_regime.upper():
+        return {"display_status": "blocked_regime", "display_label": "Bloqueada por régimen", "actionable": False, "display_reason": f"Régimen activo: {active_regime}"}
+    if symbol and symbol.upper() in open_symbols:
+        return {"display_status": "duplicate_position", "display_label": "Duplicada · posición abierta", "actionable": False, "display_reason": "El símbolo ya tiene una posición abierta"}
+    if status == "ready":
+        return {"display_status": "validating", "display_label": "En validación", "actionable": False, "display_reason": reason}
+    if status == "validated" and candidate.get("id") in actionable_ids:
+        return {"display_status": "ready_to_open", "display_label": "Lista para abrir", "actionable": True, "display_reason": reason}
+    if status == "validated":
+        return {"display_status": "validated_queue", "display_label": "Validada · en cola", "actionable": False, "display_reason": reason}
+    return {"display_status": "unknown", "display_label": "Sin estado operativo", "actionable": False, "display_reason": reason}
+
+
+def _build_selection_observability(db, limit: int = 100, active_regime: Optional[str] = None, open_symbols: Optional[set[str]] = None) -> Dict[str, Any]:
     if not db:
         return {"available": False, "reason": "database_unavailable", "candidates": []}
     safe_limit = max(1, min(int(limit), 500))
@@ -8599,6 +8659,7 @@ def _build_selection_observability(db, limit: int = 100) -> Dict[str, Any]:
                 rc.discarded_at,
                 rc.discard_reason,
                 rc.data,
+                rc.config_snapshot,
                 c.checked_at AS last_check_at,
                 c.quality_score,
                 c.profile_label AS check_profile,
@@ -8626,6 +8687,8 @@ def _build_selection_observability(db, limit: int = 100) -> Dict[str, Any]:
 
     candidates: List[Dict[str, Any]] = []
     status_counts: Dict[str, int] = {}
+    effective_regime = str(active_regime or getattr(settings, "current_regime_mode", "") or "").upper() or None
+    effective_open_symbols = {str(symbol).upper() for symbol in (open_symbols or set())}
     for row in rows or []:
         for key in ("signal_meta", "config_snapshot", "data", "input_features", "thresholds_snapshot"):
             value = row.get(key)
@@ -8677,10 +8740,34 @@ def _build_selection_observability(db, limit: int = 100) -> Dict[str, Any]:
             "thresholds": row.get("thresholds_snapshot") or {},
             "priority": (row.get("data") or {}).get("priority") or [],
             "policy": (row.get("data") or {}).get("policy") or {},
+            "config_snapshot": row.get("config_snapshot") or {},
             "entry_decision": (row.get("data") or {}).get("policy") or {},
             "expected_pnl": ((row.get("data") or {}).get("policy") or {}).get("expected_pnl"),
             "range_reversion_shadow": ((row.get("data") or {}).get("policy") or {}).get("range_reversion_shadow"),
         })
+
+    actionable_ids: set[int] = set()
+    validated_candidates = [
+        candidate for candidate in candidates
+        if candidate["status"] == "validated"
+        and (not effective_regime or str(candidate.get("regime_mode") or "").upper() == effective_regime)
+        and str(candidate.get("symbol") or "").upper() not in effective_open_symbols
+    ]
+    validated_candidates.sort(key=lambda candidate: tuple(candidate.get("priority") or []), reverse=True)
+    if validated_candidates:
+        max_open = max(
+            1,
+            max(int((candidate.get("config_snapshot") or {}).get("max_open_per_cycle", 1) or 1) for candidate in validated_candidates),
+        )
+        actionable_ids = {candidate["id"] for candidate in validated_candidates[:max_open] if candidate.get("id") is not None}
+
+    display_counts: Dict[str, int] = {}
+    for candidate in candidates:
+        display = _selection_display_state(candidate, effective_regime, effective_open_symbols, actionable_ids)
+        candidate.update(display)
+        display_counts[display["display_status"]] = display_counts.get(display["display_status"], 0) + 1
+        candidate["reviewed"] = candidate["status"] in ("opened", "discarded", "expired")
+        candidate["under_review"] = candidate["status"] in ("ready", "validated")
 
     under_review_count = status_counts.get("ready", 0) + status_counts.get("validated", 0)
     reviewed_count = sum(v for k, v in status_counts.items() if k in ("opened", "discarded", "expired"))
@@ -8696,6 +8783,7 @@ def _build_selection_observability(db, limit: int = 100) -> Dict[str, Any]:
         "available": True,
         "candidates": candidates,
         "status_counts": status_counts,
+        "display_counts": display_counts,
         "stage_counts": status_counts,
         "under_review_count": under_review_count,
         "reviewed_count": reviewed_count,
@@ -8711,7 +8799,16 @@ def _build_selection_observability(db, limit: int = 100) -> Dict[str, Any]:
 @app.get("/dashboard/selection-observability")
 async def get_selection_observability(limit: int = 100, _auth=Depends(_require_api_key)) -> Dict:
     try:
-        return _build_selection_observability(get_components().db_client, limit=limit)
+        components = get_components()
+        open_symbols = set()
+        if components.position_manager:
+            open_symbols = set(components.position_manager.get_all_positions().keys())
+        return _build_selection_observability(
+            components.db_client,
+            limit=limit,
+            active_regime=getattr(settings, "current_regime_mode", None),
+            open_symbols=open_symbols,
+        )
     except Exception as exc:
         return {"available": False, "error": str(exc), "candidates": []}
 

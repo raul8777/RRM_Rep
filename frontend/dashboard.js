@@ -781,10 +781,12 @@ function renderSignals(d) {
         } else if (s.decision === 'rejected') {
             const r = s.decision_reason || 'RECHAZADO';
             decisionBadge = `<span class="decision-badge decision-rejected">❌ ${r}</span>`;
-        } else if (s.processed) {
+        } else if (s.display_status === 'expired' || s.processed) {
             decisionBadge = '<span class="decision-badge decision-expired">⏱ EXPIRADA</span>';
+        } else if (s.display_status === 'pending_review') {
+            decisionBadge = '<span class="decision-badge decision-pending">EN REVISIÓN</span>';
         } else {
-            decisionBadge = '<span class="decision-badge decision-pending">PENDIENTE</span>';
+            decisionBadge = `<span class="decision-badge decision-pending">${s.display_label || 'SIN DECISIÓN FINAL'}</span>`;
         }
         const str = parseFloat(s.strength || 0);
         const strCls = str >= 0.75 ? 'positive' : str >= 0.55 ? '' : 'negative';
@@ -1663,19 +1665,16 @@ function renderSelectionObservability(data) {
     const activeTab = _selectionObservabilityTab || 'under_review';
     const formatTime = value => value ? new Date(value).toLocaleString('es-MX', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' }) : '—';
     const statusClass = {
-        ready: 'status-pending',
-        validated: 'status-pending',
+        validating: 'status-pending',
+        ready_to_open: 'status-positive',
+        validated_queue: 'status-neutral',
+        blocked_regime: 'status-negative',
+        duplicate_position: 'status-neutral',
         opened: 'status-positive',
         discarded: 'status-negative',
         expired: 'status-neutral'
     };
-    const statusText = {
-        ready: 'En revisión',
-        validated: 'Pendiente de apertura',
-        opened: 'Aceptada · Abierta',
-        discarded: 'Rechazada · Descartada',
-        expired: 'Expirada'
-    };
+    const displayCounts = data.display_counts || {};
 
     const comparePriority = (a, b) => {
         const ap = Array.isArray(a.priority) ? a.priority : [];
@@ -1692,16 +1691,16 @@ function renderSelectionObservability(data) {
 
     const countsSummary = `
         <div class="selection-summary">
-            <div><span>En revisión</span><strong>${data.under_review_count ?? 0}</strong></div>
-            <div><span>Revisadas</span><strong>${data.reviewed_count ?? 0}</strong></div>
-            <div><span>Aceptadas</span><strong>${data.opened_count ?? 0}</strong></div>
-            <div><span>Rechazadas</span><strong>${(data.discarded_count ?? 0) + (data.expired_count ?? 0)}</strong></div>
+            <div><span>En validación</span><strong>${displayCounts.validating ?? 0}</strong></div>
+            <div><span>Listas para abrir</span><strong>${displayCounts.ready_to_open ?? 0}</strong></div>
+            <div><span>En cola / bloqueadas</span><strong>${(displayCounts.validated_queue ?? 0) + (displayCounts.blocked_regime ?? 0) + (displayCounts.duplicate_position ?? 0)}</strong></div>
+            <div><span>Finalizadas</span><strong>${(displayCounts.opened ?? 0) + (displayCounts.discarded ?? 0) + (displayCounts.expired ?? 0)}</strong></div>
         </div>`;
 
     const tabs = `
         <div class="selection-tabs">
             <button class="selection-tab ${activeTab === 'under_review' ? 'active' : ''}" onclick="switchSelectionTab('under_review')">
-                En revisión / pendientes <span class="selection-tab-badge">${underReview.length}</span>
+                En validación / cola <span class="selection-tab-badge">${underReview.length}</span>
             </button>
             <button class="selection-tab ${activeTab === 'reviewed' ? 'active' : ''}" onclick="switchSelectionTab('reviewed')">
                 Revisadas: aceptadas / rechazadas <span class="selection-tab-badge">${reviewed.length}</span>
@@ -1717,8 +1716,8 @@ function renderSelectionObservability(data) {
             <div class="selection-col-profile">${c.profile_label ? `Perfil <b>${c.profile_label}</b>` : '—'}</div>
             <div class="selection-col-score">Score <b>${c.quality_score != null ? parseFloat(c.quality_score).toFixed(2) : '—'}</b><br><small>EV ${c.expected_pnl != null ? parseFloat(c.expected_pnl).toFixed(2) : '—'}</small></div>
             <div class="selection-col-checks">${c.positive_checks ?? 0}/${c.total_checks ?? 0} checks</div>
-            <div class="selection-col-status ${statusClass[c.status] || 'status-neutral'}">${statusText[c.status] || c.status}</div>
-            <div class="selection-col-decision" title="${c.reason || ''}">${c.decision || '—'}<br><small>${c.reason || ''}</small></div>
+            <div class="selection-col-status ${statusClass[c.display_status] || 'status-neutral'}">${c.display_label || c.status}</div>
+            <div class="selection-col-decision" title="${c.display_reason || c.reason || ''}">${c.decision || '—'}<br><small>${c.display_reason || c.reason || ''}</small></div>
             <div class="selection-col-time">${formatTime(c.last_review_at)}</div>
         </div>`).join('') : '<p class="loading">Sin candidatos en esta pestaña.</p>';
 
