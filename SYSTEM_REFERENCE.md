@@ -1,7 +1,31 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 20 2026 | s82: Prioridad por política y predictor RANGE_SCALP en sombra
+> Última actualización: jul 20 2026 | s83: Estados explícitos de apertura en dashboard
+
+---
+
+## 🟢 Estado del Sistema — jul 20 2026 — s83: Estados explícitos de apertura en dashboard
+
+### Objetivo
+
+Distinguir una señal, una candidatura staged y una orden real para que el dashboard no anuncie aperturas pendientes inexistentes.
+
+### Cambios implementados
+
+- `app.py` clasifica de forma read-only las señales recientes y las candidaturas staged con `display_status`, `display_label` y `actionable`.
+- Una candidatura `validated` sólo aparece como `Lista para abrir` si coincide con el régimen activo, no duplica una posición abierta y está dentro de la prioridad/cupo `max_open_per_cycle`.
+- Las restantes candidaturas validadas aparecen como `Validada · en cola`; los casos de régimen distinto y símbolo abierto aparecen como `Bloqueada por régimen` y `Duplicada · posición abierta`.
+- Las señales sin decisión final se muestran como `Sin decisión final`; las señales `pending` como `En revisión`; las vencidas por TTL como `Expirada`.
+- `GET /signals`, `GET /signals/recent` y `GET /dashboard/selection-observability` exponen los campos de presentación; el último añade `display_counts`.
+- `frontend/dashboard.js` usa exclusivamente esas etiquetas y separa los contadores de validación, listas para abrir, cola/bloqueadas y finalizadas.
+- No se modificaron los estados persistidos (`ready`, `validated`, `opened`, `discarded`, `expired`), los gates, el ranking ni la ejecución de órdenes.
+
+### Validación
+
+- `tests/test_selection_observability.py`, `tests/test_selection_display_states.py` y `tests/test_open_positions_detail.py`: **8 passed**.
+- Imagen Docker reconstruida y `crypto-agent-app` recreado; verificación runtime de `/signals/recent` y `_build_selection_observability` correcta.
+- Commit: `3655950 Clarify entry observability states`.
 
 ---
 
