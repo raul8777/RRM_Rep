@@ -2,6 +2,10 @@
 Integration tests for Position Manager
 """
 
+import json
+from decimal import Decimal
+from types import SimpleNamespace
+
 import pytest
 from position_manager import PositionManager, Position, ClosedPosition
 from binance_commission import get_config as _pm_test_cfg
@@ -11,9 +15,106 @@ def _spot_rate():
     return _pm_test_cfg().rate_for('spot')
 
 
+class RecordingDb:
+    def __init__(self, failed_context=None, fail_open_insert=False):
+        self.failed_context = failed_context
+        self.fail_open_insert = fail_open_insert
+        self.updates = []
+
+    def execute_query(self, sql, _params=None):
+        if "entry_persistence_failed" in sql and self.failed_context:
+            return [{"detail": self.failed_context}]
+        return []
+
+    def execute_update(self, sql, params=None):
+        if self.fail_open_insert and "INSERT INTO trades_open" in sql:
+            raise TypeError("database write failed")
+        self.updates.append((sql, params))
+        return 1
+
+
+class BalanceClient:
+    def get_account_balance(self):
+        return {"USDT": 1000.0, "BTC": 1.0}
+
+    def get_symbol_price(self, symbol):
+        assert symbol == "BTCUSDT"
+        return 100.0
+
+
 class TestPositionManager:
     """Test Position Manager functionality."""
     
+    def test_add_position_serializes_decimal_entry_context_before_persisting(self):
+        db = RecordingDb()
+        pm = PositionManager(db)
+        position = Position(
+            symbol="BTCUSDT",
+            side="BUY",
+            quantity=Decimal("0.5"),
+            entry_price=Decimal("50000"),
+            entry_time="2026-07-21T00:00:00Z",
+            metadata={
+                "entry_regime": "SPOT_BULL",
+                "entry_profile_label": "A",
+                "entry_order_id": "order-1",
+                "binance_entry_confirmed": True,
+                "nested": {"value": Decimal("1.25")},
+            },
+            pnl_prediction={"expected_pnl": Decimal("2.5")},
+        )
+
+        assert pm.add_position(position) is True
+
+        open_insert = next(params for sql, params in db.updates if "INSERT INTO trades_open" in sql)
+        metadata = json.loads(open_insert[8])
+        prediction = json.loads(open_insert[10])
+        assert metadata["regime_at_entry"] == "SPOT_BULL"
+        assert metadata["profile_at_entry"] == "A"
+        assert metadata["nested"]["value"] == 1.25
+        assert prediction["expected_pnl"] == 2.5
+
+    def test_add_position_fails_closed_when_canonical_persistence_fails(self):
+        db = RecordingDb(fail_open_insert=True)
+        pm = PositionManager(db)
+        position = Position(
+            symbol="BTCUSDT", side="BUY", quantity=0.5, entry_price=50000.0,
+            entry_time="2026-07-21T00:00:00Z",
+            metadata={"entry_order_id": "order-2", "binance_entry_confirmed": True},
+        )
+
+        assert pm.add_position(position) is False
+        assert pm.get_position("BTCUSDT") is None
+        audit_params = [params for sql, params in db.updates if "trades_audit" in sql]
+        assert any(params[2] == "entry_persistence_failed" for params in audit_params)
+        assert all(params[2] != "open" for params in audit_params)
+
+    def test_reconciliation_restores_only_verified_failed_entry_context(self):
+        failed_context = {
+            "quantity": 1.0,
+            "entry_metadata": {
+                "entry_order_id": "order-3",
+                "binance_entry_confirmed": True,
+                "regime_at_entry": "SPOT_BULL",
+                "profile_at_entry": "A",
+                "trade_type": "spot",
+            },
+        }
+        db = RecordingDb(failed_context=failed_context)
+        pm = PositionManager(db)
+        settings = SimpleNamespace(
+            token_categories={}, category_thresholds={}, use_bnb_for_commission=False,
+            auto_bnb_for_commission=False, binance_commission_rate=0.001,
+        )
+
+        assert pm.sync_with_exchange_balance(BalanceClient(), settings, min_value_usdt=5.0) == ["BTCUSDT"]
+
+        restored = pm.get_position("BTCUSDT")[0].metadata
+        assert restored["source"] == "reconcile_canonical_restored"
+        assert restored["entry_context_status"] == "restored_from_failed_persistence"
+        assert restored["regime_at_entry"] == "SPOT_BULL"
+        assert restored["profile_at_entry"] == "A"
+
     def test_add_position(self):
         """Test adding a position."""
         pm = PositionManager()

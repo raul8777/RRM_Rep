@@ -9,7 +9,9 @@ from peak_capture_engine import (
     PeakCaptureContext,
     PeakCaptureDecision,
     PeakCaptureEngine,
+    select_peak_capture_advisory,
 )
+from unified_governance_supervisor import UnifiedGovernanceContext, evaluate as evaluate_unified_governance
 
 
 def _make_settings(overrides=None):
@@ -24,6 +26,10 @@ def _make_settings(overrides=None):
         'profit_predexit_absolute_min_usd': 1.50,
         'profit_predexit_horizon_minutes': 60,
         'profit_predexit_giveback_penalty_weight': 0.5,
+        'profit_predexit_early_protection_mode': 'shadow',
+        'profit_predexit_early_active_regimes': ['SPOT_BULL'],
+        'profit_predexit_early_min_peak_pct': 1.5,
+        'profit_predexit_early_min_giveback_pct': 0.5,
         'peak_reconstruction_enabled': True,
         'peak_reconstruction_lookback_candles': 30,
         'max_positions': 4,
@@ -221,6 +227,120 @@ class TestPeakCaptureEngine:
 
         assert decision.should_close is False
         assert decision.reason == 'profit_predexit_below_min'
+
+    def test_early_peak_protection_shadows_confirmed_reversal(self):
+        settings = _make_settings()
+        engine = PeakCaptureEngine(settings)
+        ctx = PeakCaptureContext(
+            symbol='TOWNSUSDT', trade_type='spot', side='BUY',
+            position_size_usdt=1000.0, portfolio_total_usdt=2000.0,
+            current_price=104.0, entry_price=100.0,
+            current_pnl_usdt=40.0, current_pnl_pct=0.04, peak_pnl_pct=0.057,
+            regime_mode='SPOT_BULL', profile_label='A', signal_strength=0.5,
+            signal_direction='BUY', pnl_velocity_1h=-0.03, indicators={},
+            fear_greed_value=25, metadata={},
+        )
+
+        decision = engine.evaluate_early_peak_protection(ctx)
+
+        assert decision.should_close is False
+        assert decision.reason == 'profit_predexit_early_peak_protection'
+        assert decision.metrics['behavior_confirmed'] is True
+
+    def test_early_peak_protection_uses_partial_close_only_when_active(self):
+        settings = _make_settings({'profit_predexit_early_protection_mode': 'active'})
+        engine = PeakCaptureEngine(settings)
+        ctx = PeakCaptureContext(
+            symbol='TOWNSUSDT', trade_type='spot', side='BUY',
+            position_size_usdt=1000.0, portfolio_total_usdt=2000.0,
+            current_price=104.0, entry_price=100.0,
+            current_pnl_usdt=40.0, current_pnl_pct=0.04, peak_pnl_pct=0.057,
+            regime_mode='SPOT_BULL', profile_label='A', signal_strength=0.5,
+            signal_direction='BUY', pnl_velocity_1h=-0.03, indicators={},
+            fear_greed_value=25, metadata={},
+        )
+
+        decision = engine.evaluate_early_peak_protection(ctx)
+
+        assert decision.should_close is True
+        assert decision.close_pct == 0.5
+        assert decision.reason == 'profit_predexit_early_peak_protection'
+
+    def test_early_peak_protection_keeps_non_allowed_regime_in_shadow(self):
+        settings = _make_settings({'profit_predexit_early_protection_mode': 'active'})
+        engine = PeakCaptureEngine(settings)
+        ctx = PeakCaptureContext(
+            symbol='BTCUSDT', trade_type='spot', side='BUY',
+            position_size_usdt=1000.0, portfolio_total_usdt=2000.0,
+            current_price=104.0, entry_price=100.0,
+            current_pnl_usdt=40.0, current_pnl_pct=0.04, peak_pnl_pct=0.057,
+            regime_mode='RANGE_SCALP', profile_label='A', signal_strength=0.5,
+            signal_direction='BUY', pnl_velocity_1h=-0.03, indicators={},
+            fear_greed_value=25, metadata={},
+        )
+
+        decision = engine.evaluate_early_peak_protection(ctx)
+
+        assert decision.should_close is False
+        assert decision.reason == 'profit_predexit_early_peak_protection'
+        assert decision.metrics['mode'] == 'shadow'
+        assert decision.metrics['regime_allowed'] is False
+
+    def test_unified_governance_does_not_escalate_wolf_early_partial_with_prs(self):
+        settings = _make_settings()
+        ctx = UnifiedGovernanceContext(
+            symbol='TOWNSUSDT', trade_type='spot', side='LONG',
+            pnl_pct=0.04, pnl_usdt=40.0, entry_price=100.0, current_price=104.0,
+            regime_mode='SPOT_BULL', profile_label='A', peak_pnl_pct=0.057,
+            peak_capture_should_close=True, peak_capture_close_pct=0.5,
+            peak_capture_reason='profit_predexit_early_peak_protection',
+            peak_capture_detail='confirmed early reversal',
+            prs_advisory_should_close=True, prs_advisory_close_pct=1.0,
+            prs_advisory_reason='prs_loss_momentum_exit',
+        )
+
+        decision = evaluate_unified_governance(ctx, settings)
+
+        assert decision.should_close is True
+        assert decision.close_pct == 0.5
+        assert decision.reason == 'profit_predexit_early_peak_protection'
+
+    def test_early_peak_selection_is_not_overwritten_by_normal_hold(self):
+        early = PeakCaptureDecision(
+            should_close=True,
+            close_pct=0.5,
+            reason='profit_predexit_early_peak_protection',
+            priority=84,
+        )
+        normal = PeakCaptureDecision(
+            should_close=False,
+            reason='profit_predexit_hold',
+            priority=99,
+        )
+
+        selected, source = select_peak_capture_advisory(early, normal)
+
+        assert selected is early
+        assert source == 'early'
+
+    def test_higher_priority_normal_peak_close_replaces_early_protection(self):
+        early = PeakCaptureDecision(
+            should_close=True,
+            close_pct=0.5,
+            reason='profit_predexit_early_peak_protection',
+            priority=84,
+        )
+        normal = PeakCaptureDecision(
+            should_close=True,
+            close_pct=1.0,
+            reason='profit_predexit_momentum_exhausted',
+            priority=93,
+        )
+
+        selected, source = select_peak_capture_advisory(early, normal)
+
+        assert selected is normal
+        assert source == 'normal'
 
     def test_dynamic_close_pct(self):
         settings = _make_settings()

@@ -1,4 +1,4 @@
-import os, re, json, sys
+import os, re, json, sys, ast
 from collections import defaultdict
 
 ROOT = '/app'
@@ -8,6 +8,10 @@ from config_helpers import _PARAM_DEFAULTS
 # Canonical defaults from config_helpers.py (single source of truth)
 CANON = dict(_PARAM_DEFAULTS)
 CRITICAL_PARAMS = set(CANON.keys())
+
+# Module globals for evaluating non-literal defaults (e.g. constants / .get calls)
+import config_helpers as _cfg_helpers_mod
+_DEFAULTS_NAMESPACE = {k: getattr(_cfg_helpers_mod, k) for k in dir(_cfg_helpers_mod) if not k.startswith('__')}
 
 # Params excluded from CRITICAL classification because they are legitimately
 # overridden by docker-compose env vars, are dynamic runtime state, or are
@@ -68,7 +72,7 @@ import ast
 def parse_default(val):
     if val is None:
         return None
-    val = val.strip()
+    val = val.strip().rstrip(',')
     try:
         if val.lower() == 'true':
             return True
@@ -84,7 +88,15 @@ def parse_default(val):
             return float(val)
         return int(val)
     except Exception:
-        return val
+        pass
+    # Try evaluating module-level constants / simple expressions (e.g. _PARAM_DEFAULTS.get(...))
+    try:
+        # only allow safe attribute/subscript/getattr calls
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_\._]*(?:\(.*\))?(?:\[.*\])?$', val):
+            return eval(val, {"__builtins__": {}}, _DEFAULTS_NAMESPACE)
+    except Exception:
+        pass
+    return val
 
 def find_getattr_defaults(root):
     results = []

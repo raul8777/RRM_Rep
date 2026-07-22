@@ -51,3 +51,18 @@ python -m pytest tests/test_selection_observability.py tests/test_selection_disp
 ```
 
 Resultado de implementación: `8 passed`.
+
+## Actualización: régimen, latido y candidatas validadas
+
+- El régimen mostrado por dashboard y health se resuelve primero desde `effective_runtime_selection_snapshot`; el valor del orquestador queda como fallback.
+- Cada retorno del ciclo posterior a la detección de régimen devuelve `regime_mode` y `next_cycle_minutes`, incluidos `NO_SIGNALS` y `PRE_QUBO_FILTERED`.
+- Si no sobreviven señales nuevas, el ciclo reevalúa candidatas staged y puede abrir las `validated` mediante el mismo flujo principal de compra, preflight y auditoría.
+- La observabilidad de selección expone `latest_selection_cycle`, con hora, régimen, outcome, razón y conteos de universo, QUBO y órdenes.
+
+## Verificación de actualización
+
+```powershell
+python -m pytest tests/test_selection_observability.py tests/test_selection_display_states.py tests/test_staged_entry.py -q
+```
+
+Resultado: `21 passed`.

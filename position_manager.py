@@ -8,6 +8,7 @@ import json
 import logging
 import time
 import uuid
+from decimal import Decimal
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
@@ -26,6 +27,19 @@ def _parse_exit_time(t) -> datetime:
     return datetime.min.replace(tzinfo=timezone.utc)
 
 logger = logging.getLogger(__name__)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return value
+
 
 # Treat residual quantities below this threshold as zero / full close.
 _QTY_EPS = 1e-9
@@ -109,13 +123,42 @@ class PositionManager:
             self.db_client.execute_update(
                 "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
                 "VALUES (%s, %s, %s, %s, %s)",
-                (symbol, 'spot', event, json.dumps(detail), binance_confirmed)
+                (symbol, 'spot', event, json.dumps(_json_safe(detail)), binance_confirmed)
             )
         except Exception as e:
             # Keep trading flow alive, but surface traceability persistence failures.
             logger.error(f"SPOT audit write failed ({symbol}:{event}): {e}")
             ec.add_error(ec.SOURCE_SYSTEM, ec.LEVEL_ERROR,
                          f"SPOT audit write failed ({symbol}:{event}): {e}")
+
+    def _failed_entry_context(self, symbol: str, quantity: float) -> Optional[Dict[str, Any]]:
+        if not self.db_client:
+            return None
+        try:
+            rows = self.db_client.execute_query(
+                "SELECT detail FROM trades_audit WHERE symbol=%s AND event='entry_persistence_failed' "
+                "AND ts >= NOW() - INTERVAL '2 hours' ORDER BY ts DESC LIMIT 5",
+                (symbol,),
+            )
+            for row in rows or []:
+                detail = row.get("detail") or {}
+                if isinstance(detail, str):
+                    detail = json.loads(detail)
+                if not isinstance(detail, dict):
+                    continue
+                failed_qty = float(detail.get("quantity") or 0.0)
+                tolerance = max(1e-8, abs(quantity) * 0.01)
+                metadata = detail.get("entry_metadata") or {}
+                if (
+                    abs(failed_qty - float(quantity)) <= tolerance
+                    and isinstance(metadata, dict)
+                    and bool(metadata.get("binance_entry_confirmed"))
+                    and metadata.get("entry_order_id")
+                ):
+                    return _json_safe(metadata)
+        except Exception as exc:
+            logger.warning("Could not recover failed entry context for %s: %s", symbol, exc)
+        return None
 
     def _load_positions_from_db(self) -> None:
         """Load open positions from database."""
@@ -222,7 +265,7 @@ class PositionManager:
             logger.error(f"Failed to load closed positions from database: {e}")
             ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"Failed to load closed positions: {e}")
 
-    def add_position(self, position: Position) -> None:
+    def add_position(self, position: Position) -> bool:
         """
         Add a new open position.
         
@@ -288,18 +331,17 @@ class PositionManager:
                         except Exception:
                             pass
         position.metadata['total_escalonamientos'] = _esc_idx
-        self._open_positions[position.symbol].append(position)
-        
+        position.metadata = _json_safe(position.metadata)
+        position.pnl_prediction = _json_safe(position.pnl_prediction)
+        position.indicators_at_entry = _json_safe(position.indicators_at_entry)
+
         if self.db_client:
             try:
                 query = """
-                    INSERT INTO trades_open 
+                    INSERT INTO trades_open
                     (symbol, side, quantity, price, strategy_id, entry_time, stop_loss, take_profit, metadata, entry_commission, pnl_prediction, indicators_at_entry)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """
-                def _to_json(v):
-                    return json.dumps(v) if isinstance(v, (dict, list)) else v
-
                 self.db_client.execute_update(
                     query,
                     (
@@ -311,16 +353,28 @@ class PositionManager:
                         position.entry_time,
                         position.stop_loss,
                         position.take_profit,
-                        _to_json(position.metadata),
+                        json.dumps(position.metadata),
                         position.entry_commission,
-                        _to_json(position.pnl_prediction),
-                        _to_json(position.indicators_at_entry)
+                        json.dumps(position.pnl_prediction) if position.pnl_prediction is not None else None,
+                        json.dumps(position.indicators_at_entry) if position.indicators_at_entry is not None else None,
                     )
                 )
                 logger.info(f"Position added to database: {position.symbol}")
-            except Exception as e:
-                logger.error(f"Failed to save position to database: {e}")
-                ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"Failed to save position {position.symbol}: {e}")
+            except Exception as exc:
+                logger.error(f"Failed to save position to database: {exc}")
+                ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"Failed to save position {position.symbol}: {exc}")
+                _failed_metadata = position.metadata if isinstance(position.metadata, dict) else {}
+                self._audit(position.symbol, 'entry_persistence_failed', {
+                    'reason': str(exc),
+                    'quantity': float(position.quantity),
+                    'entry_price': float(position.entry_price),
+                    'entry_time': position.entry_time,
+                    'entry_order_id': str(_failed_metadata.get('entry_order_id', _failed_metadata.get('order_id', ''))),
+                    'entry_metadata': _failed_metadata,
+                }, binance_confirmed=bool(_failed_metadata.get('binance_entry_confirmed', False)))
+                return False
+
+        self._open_positions[position.symbol].append(position)
         _pos_meta = position.metadata if isinstance(position.metadata, dict) else {}
         self._audit(position.symbol, 'open', {
             'side': position.side, 'qty': float(position.quantity), 'price': float(position.entry_price),
@@ -331,6 +385,7 @@ class PositionManager:
             'binance_confirmed': bool(_pos_meta.get('binance_entry_confirmed', False)),
         }, binance_confirmed=bool(_pos_meta.get('binance_entry_confirmed', False)))
         logger.info(f"Position opened: {position.symbol} {position.side} {position.quantity} @ {position.entry_price}")
+        return True
     
     def get_position(self, symbol: str) -> Optional[List[Position]]:
         """
@@ -496,6 +551,18 @@ class PositionManager:
                 commission_rate = get_param(settings, 'binance_commission_rate')
                 entry_commission = amount * price * commission_rate
 
+                recovered_metadata = self._failed_entry_context(symbol, float(amount))
+                metadata = {
+                    "source": "balance_sync",
+                    "sync_time": datetime.utcnow().isoformat() + "Z",
+                    "value_usdt_at_sync": round(value_usdt, 4),
+                }
+                if recovered_metadata:
+                    metadata.update(recovered_metadata)
+                    metadata["source"] = "reconcile_canonical_restored"
+                    metadata["entry_context_status"] = "restored_from_failed_persistence"
+                else:
+                    metadata["entry_context_status"] = "unknown_reconciled"
                 pos = Position(
                     symbol=symbol,
                     side="BUY",
@@ -505,14 +572,23 @@ class PositionManager:
                     stop_loss=sl_price,
                     take_profit=tp_price,
                     entry_commission=entry_commission,
-                    metadata={
-                        "source": "balance_sync",
-                        "sync_time": datetime.utcnow().isoformat() + "Z",
-                        "value_usdt_at_sync": round(value_usdt, 4),
-                    },
+                    metadata=metadata,
                 )
-                self.add_position(pos)
+                if not self.add_position(pos):
+                    self._audit(symbol, 'reconcile_entry_persist_failed', {
+                        'quantity': float(amount),
+                        'price': float(price),
+                        'entry_context_status': metadata['entry_context_status'],
+                    })
+                    continue
                 imported.append(symbol)
+                reconcile_event = 'reconcile_canonical_restored' if recovered_metadata else 'reconcile_unknown_context'
+                self._audit(symbol, reconcile_event, {
+                    'quantity': float(amount),
+                    'price': float(price),
+                    'entry_context_status': metadata['entry_context_status'],
+                    'entry_order_id': metadata.get('entry_order_id'),
+                })
                 ec.add_error(
                     ec.SOURCE_SYSTEM, ec.LEVEL_INFO,
                     f"Balance sync: imported {symbol} {amount:.6f} @ {price:.4f} "
@@ -705,14 +781,16 @@ class PositionManager:
                             logger.warning(f"Could not persist TP update for {position_id}: {e}")
                     return
 
-    def _calc_close(self, position: Position, exit_price: float, commission_rate: float = None, qty_closed: Optional[float] = None, entry_comm_for_closed: Optional[float] = None):
+    def _calc_close(self, position: Position, exit_price: float, commission_rate: float = None, qty_closed: Optional[float] = None, entry_comm_for_closed: Optional[float] = None, exit_commission_override: Optional[float] = None):
         """Shared PnL calculation for closing a position. Returns (qty, entry_p, exit_price, pnl, pnl_pct, exit_comm, pred_accuracy)."""
         from binance_commission import get_config, exit_commission, net_pnl
         qty        = float(qty_closed) if qty_closed is not None else float(position.quantity)
         entry_p    = float(position.entry_price)
         exit_price = float(exit_price)
         # Use centralized commission module if commission_rate is not explicitly provided
-        if commission_rate is None:
+        if exit_commission_override is not None:
+            _exit_comm = float(exit_commission_override)
+        elif commission_rate is None:
             _exit_comm = exit_commission(qty, exit_price, 'spot')
         else:
             _exit_comm = qty * exit_price * commission_rate
@@ -743,6 +821,7 @@ class PositionManager:
         position_id: Optional[str] = None,
         exit_context: Optional[Dict[str, Any]] = None,
         qty_closed: Optional[float] = None,
+        exit_fill: Optional[Dict[str, Any]] = None,
     ) -> Optional[ClosedPosition]:
         """
         Close a specific open position for a symbol.
@@ -793,8 +872,14 @@ class PositionManager:
         _entry_comm_for_closed = _entry_comm_total * (_closed_qty / full_qty) if full_qty > 0 else _entry_comm_total
         _entry_comm_remaining = _entry_comm_total - _entry_comm_for_closed
 
+        if exit_fill and exit_fill.get('binance_confirmed'):
+            _fill_price = float(exit_fill.get('avg_price', 0.0) or 0.0)
+            if _fill_price > 0:
+                exit_price = _fill_price
         _, entry_p, exit_p, pnl, pnl_pct, exit_comm, pred_acc = self._calc_close(
-            target, exit_price, commission_rate, qty_closed=_closed_qty, entry_comm_for_closed=_entry_comm_for_closed
+            target, exit_price, commission_rate, qty_closed=_closed_qty,
+            entry_comm_for_closed=_entry_comm_for_closed,
+            exit_commission_override=(exit_fill or {}).get('commission_usdt') if exit_fill and exit_fill.get('binance_confirmed') else None,
         )
 
         _meta = dict(target.metadata or {}) if isinstance(target.metadata, dict) else {}
@@ -805,6 +890,11 @@ class PositionManager:
                 _meta['profile_at_exit'] = exit_context.get('profile_label')
             if exit_context.get('switch_id'):
                 _meta['switch_id'] = exit_context.get('switch_id')
+        if exit_fill and exit_fill.get('binance_confirmed'):
+            _meta['exit_fill'] = dict(exit_fill)
+            _meta['pnl_accounting_mode'] = 'binance_fill_verified'
+        else:
+            _meta['pnl_accounting_mode'] = 'estimated'
         if _is_partial:
             _meta['partial_close'] = True
             _meta['partial_qty_closed'] = _closed_qty
@@ -861,7 +951,8 @@ class PositionManager:
             'exit_price': float(closed_position.exit_price or 0),
             'pnl': round(float(pnl), 4), 'reason': close_reason, 'partial': _is_partial,
             'bounce_entry': bool(_cp_meta.get('bounce_entry', False)),
-        }, binance_confirmed=False)
+            'pnl_accounting_mode': _cp_meta.get('pnl_accounting_mode'),
+        }, binance_confirmed=bool(exit_fill and exit_fill.get('binance_confirmed')))
         logger.info(f"Position closed: {symbol} qty={_closed_qty:.4f} PnL={pnl:.2f} ({pnl_pct:.2f}%) reason={close_reason}")
         return closed_position
 
@@ -873,6 +964,7 @@ class PositionManager:
         commission_rate: float = 0.001,
         exit_context: Optional[Dict[str, Any]] = None,
         qty_closed: Optional[float] = None,
+        exit_fill: Optional[Dict[str, Any]] = None,
     ) -> List[ClosedPosition]:
         """
         Close open positions for a symbol. If qty_closed is provided, it closes up to that
@@ -908,7 +1000,7 @@ class PositionManager:
             closed = self.close_position(
                 symbol, exit_price, close_reason, commission_rate,
                 position_id=pos.position_id, exit_context=_exit_ctx,
-                qty_closed=_entry_close_qty,
+                qty_closed=_entry_close_qty, exit_fill=exit_fill,
             )
             if closed:
                 results.append(closed)

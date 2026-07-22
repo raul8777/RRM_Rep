@@ -26,11 +26,49 @@ def test_selection_display_state_labels_each_operational_condition():
 
 
 class FakeSelectionDb:
-    def __init__(self, rows):
+    def __init__(self, rows, latest_cycle=None):
         self.rows = rows
+        self.latest_cycle = latest_cycle
 
-    def execute_query(self, _sql, _params):
+    def execute_query(self, sql, _params=None):
+        if "entry_selection_cycles" in sql:
+            return [self.latest_cycle] if self.latest_cycle else []
         return self.rows
+
+
+def test_effective_runtime_prefers_persisted_snapshot_over_stale_orchestrator(monkeypatch):
+    class RuntimeDb:
+        def execute_query(self, _sql, _params=None):
+            return [{
+                "key": "effective_runtime_selection_snapshot",
+                "value": {"selected_mode": "RANGE_SCALP", "selected_profile": "A"},
+                "updated_at": None,
+            }]
+
+    monkeypatch.setattr(app, "db_client", RuntimeDb())
+    monkeypatch.setattr(app.orchestrator, "current_regime_mode", "SPOT_BULL")
+
+    runtime = app._get_effective_runtime_selection()
+
+    assert runtime["mode"] == "RANGE_SCALP"
+    assert runtime["mode_source"] == "effective_runtime_selection_snapshot"
+
+
+def test_selection_observability_exposes_latest_cycle_heartbeat():
+    cycle = {
+        "cycle_id": "cycle-1",
+        "regime_mode": "RANGE_SCALP",
+        "candidate_count": 9,
+        "selected_count": 0,
+        "executed_count": 0,
+        "summary": {"outcome": "all_filtered", "reason": "PRE_QUBO_FILTERED"},
+    }
+
+    payload = app._build_selection_observability(
+        FakeSelectionDb([], latest_cycle=cycle), active_regime="RANGE_SCALP", open_symbols=set()
+    )
+
+    assert payload["latest_selection_cycle"] == cycle
 
 
 def test_selection_observability_only_marks_ranked_validated_candidate_ready_to_open():

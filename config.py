@@ -591,6 +591,13 @@ class Settings(BaseSettings):
     profit_predexit_absolute_min_usd: float = Field(default=1.50)
     profit_predexit_horizon_minutes: int = Field(default=60)
     profit_predexit_giveback_penalty_weight: float = Field(default=0.5)
+    profit_predexit_early_protection_mode: str = Field(default="active")
+    profit_predexit_early_active_regimes: List[str] = Field(default=["SPOT_BULL"])
+    profit_predexit_early_min_peak_pct: float = Field(default=1.5)
+    profit_predexit_early_min_giveback_pct: float = Field(default=0.5)
+    loss_focus_enabled: bool = Field(default=True)
+    loss_focus_threshold_usdt: float = Field(default=9.0)
+    loss_focus_reset_usdt: float = Field(default=6.0)
     peak_reconstruction_enabled: bool = Field(default=True)
     peak_reconstruction_lookback_candles: int = Field(default=30)
 
@@ -616,6 +623,10 @@ class Settings(BaseSettings):
             "min_expected_pnl": 0.0,
             "policy_version": "v1",
             "max_open_per_cycle": 1,
+            "direction_confirmation_mode": "enforced",
+            "direction_min_progress_bps": 5.0,
+            "direction_max_adverse_bps": 50.0,
+            "direction_required_confirmations": 2,
         },
         "RANGE_SCALP": {
             "enabled": True,
@@ -631,6 +642,10 @@ class Settings(BaseSettings):
             "require_predictor_valid": True,
             "policy_version": "v1",
             "max_open_per_cycle": 1,
+            "direction_confirmation_mode": "enforced",
+            "direction_min_progress_bps": 3.0,
+            "direction_max_adverse_bps": 50.0,
+            "direction_required_confirmations": 2,
         },
         "FUTURES_SHORT": {
             "enabled": True,
@@ -647,6 +662,10 @@ class Settings(BaseSettings):
             "min_expected_pnl": 0.0,
             "policy_version": "v1",
             "max_open_per_cycle": 1,
+            "direction_confirmation_mode": "enforced",
+            "direction_min_progress_bps": 3.0,
+            "direction_max_adverse_bps": 50.0,
+            "direction_required_confirmations": 2,
         },
         "PRESERVATION": {
             "enabled": True,
@@ -663,6 +682,10 @@ class Settings(BaseSettings):
             "min_expected_pnl": 0.0,
             "policy_version": "v1",
             "max_open_per_cycle": 1,
+            "direction_confirmation_mode": "enforced",
+            "direction_min_progress_bps": 3.0,
+            "direction_max_adverse_bps": 50.0,
+            "direction_required_confirmations": 2,
         },
     })
 

@@ -265,6 +265,7 @@ class FakeSettings:
             "max_age_min": 1000,
             "intra_mode": "predictor",
             "price_source": "avg",
+            "direction_confirmation_mode": "shadow",
         },
         "FUTURES_SHORT": {
             "enabled": True,
@@ -325,6 +326,80 @@ def _make_signal(symbol: str, side: str = "LONG"):
         "success_probability": 0.6,
         "signal_strength": 0.7,
     }
+
+
+def _direction_cfg(**overrides):
+    cfg = {
+        "direction_confirmation_mode": "enforced",
+        "direction_min_progress_bps": 1.0,
+        "direction_max_adverse_bps": 500.0,
+        "direction_required_confirmations": 2,
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+def _direction_row(regime="SPOT_BULL", side="LONG", base=100.0):
+    return {
+        "regime_mode": regime,
+        "signal_price": base,
+        "data": {
+            "direction": {
+                "state": "awaiting_confirmation",
+                "base_price": base,
+                "last_observed_price": base,
+                "side": side,
+                "directional_confirmations": 0,
+                "adverse_observations": 0,
+            }
+        },
+    }
+
+
+def test_directional_recovery_requires_reclaim_and_two_advances():
+    cfg = _direction_cfg()
+    row = _direction_row()
+    policy = {"target_price": 105.0, "stop_price": 95.0}
+
+    positive, terminal, reason, snapshot = staged_entry._direction_transition(row, policy, 99.5, cfg)
+    assert (positive, terminal, reason) == (False, False, "DIRECTION_RECOVERY_PENDING")
+    row["data"]["direction"] = snapshot["direction"]
+
+    positive, terminal, reason, snapshot = staged_entry._direction_transition(row, policy, 100.2, cfg)
+    assert (positive, terminal, reason) == (False, False, "DIRECTION_CONFIRMING")
+    row["data"]["direction"] = snapshot["direction"]
+
+    positive, terminal, reason, snapshot = staged_entry._direction_transition(row, policy, 100.5, cfg)
+    assert (positive, terminal, reason) == (True, False, "DIRECTION_CONFIRMED")
+    assert snapshot["directional_confirmations"] == 2
+
+
+def test_directional_second_adverse_observation_is_terminal():
+    row = _direction_row()
+    policy = {"target_price": 105.0, "stop_price": 90.0}
+    _, _, _, snapshot = staged_entry._direction_transition(row, policy, 99.5, _direction_cfg())
+    row["data"]["direction"] = snapshot["direction"]
+
+    positive, terminal, reason, _ = staged_entry._direction_transition(row, policy, 99.0, _direction_cfg())
+    assert (positive, terminal, reason) == (False, True, "DIRECTION_NOT_CONFIRMED")
+
+
+def test_range_direction_requires_valid_target():
+    positive, terminal, reason, _ = staged_entry._direction_transition(
+        _direction_row(regime="RANGE_SCALP"), {}, 100.5, _direction_cfg()
+    )
+    assert (positive, terminal, reason) == (False, True, "DIRECTION_TARGET_MISSING")
+
+
+def test_short_direction_confirms_downward_progress():
+    row = _direction_row(regime="FUTURES_SHORT", side="SHORT")
+    policy = {"target_price": 95.0, "stop_price": 105.0}
+    positive, terminal, reason, snapshot = staged_entry._direction_transition(row, policy, 99.5, _direction_cfg())
+    assert (positive, terminal, reason) == (False, False, "DIRECTION_CONFIRMING")
+    row["data"]["direction"] = snapshot["direction"]
+
+    positive, terminal, reason, _ = staged_entry._direction_transition(row, policy, 99.0, _direction_cfg())
+    assert (positive, terminal, reason) == (True, False, "DIRECTION_CONFIRMED")
 
 
 def test_stage_ready_candidates_creates_record(fake_db, settings):

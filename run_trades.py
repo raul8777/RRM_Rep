@@ -24,8 +24,10 @@ from peak_capture_engine import (
     PeakCaptureContext,
     PeakCaptureEngine,
     PeakCaptureDecision,
+    select_peak_capture_advisory,
 )
 from config_helpers import get_param as _get_param
+from loss_focus import build_loss_focus_snapshot, evaluate_loss_focus
 from entry_decision import evaluate as evaluate_entry_decision
 import staged_entry
 from profit_realization_supervisor import (
@@ -131,7 +133,7 @@ def _infer_trade_type_from_reason(reason: str, explicit: Optional[str] = None) -
     if reason in {
         'QTY_INVALIDA', 'SIN_SALDO', 'ERROR_ORDEN', 'MAX_POSIC', 'LIM_SIMBOLO',
         'ADD_STR_LOW', 'ADD_EV_LOW', 'ADD_NO_BASELINE', 'LIQUIDEZ', 'FUNDING_RATE',
-        'PRESERVATION', 'PRSV_RSI', 'RANGE_RSI', 'RANGE_BB', 'EXCLUIDO', 'BTC_DOM',
+        'PRESERVATION', 'PRSV_RSI', 'RANGE_RSI', 'RANGE_BB', 'RANGE_MODEL_INVALID', 'EXCLUIDO', 'BTC_DOM',
         'NARRATIVE_CD', 'PNL_BAJO', 'ERROR_PRECIO', 'WR_BLOCK_3SL', 'WR_BLOCK_4SL',
         'EJECUTADO',
     } or reason.startswith('WR_BLOCK_'):
@@ -167,6 +169,29 @@ def _audit_signal_decision(symbol: str, decision: str, reason: str, signal_id: O
 update_signal_decision = _audit_signal_decision
 
 
+def _audit_range_reversion_prediction(symbol: str, prediction: Dict[str, Any]) -> None:
+    if not _db_client_ref:
+        return
+    try:
+        _db_client_ref.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+            (symbol, "spot", "range_reversion_prediction", json.dumps({
+                "symbol": symbol,
+                "valid": bool(prediction.get("valid")),
+                "reason": prediction.get("reason"),
+                "model": prediction.get("model"),
+                "expected_pnl": prediction.get("expected_pnl"),
+                "expected_pnl_percentage": prediction.get("expected_pnl_percentage"),
+                "success_probability": prediction.get("success_probability"),
+                "target_price": prediction.get("target_price"),
+                "stop_price": prediction.get("stop_price"),
+                "band_position": prediction.get("band_position"),
+            }), False),
+        )
+    except Exception as exc:
+        print(f"[RangeReversion] audit failed for {symbol}: {exc}")
+
+
 def _selection_begin_cycle(db_client, regime_mode: str, profile_label: Optional[str]) -> str:
     global _selection_context
     cycle_id = str(uuid.uuid4())
@@ -176,6 +201,19 @@ def _selection_begin_cycle(db_client, regime_mode: str, profile_label: Optional[
         "regime_mode": regime_mode,
         "profile_label": profile_label,
         "candidate_count": 0,
+        "profile_pass_count": 0,
+        "entry_decision_pass_count": 0,
+        "qubo_input_count": 0,
+        "qubo_selected_count": 0,
+        "qubo_excluded_count": 0,
+        "profile_score_min": None,
+        "profile_score_max": None,
+        "profile_rejected_count": 0,
+        "entry_decision_rejection_counts": {},
+        "filter_rejection_counts": {},
+        "range_reversion_valid_count": 0,
+        "range_reversion_invalid_count": 0,
+        "range_reversion_invalid_reasons": {},
         "selected_count": 0,
         "executed_count": 0,
     }
@@ -203,6 +241,13 @@ def _selection_capture_candidates(candidates: List[Any], predictions: Dict[str, 
             continue
         prediction = predictions.get(symbol, {}) or {}
         trade_type = str(signal.get("trade_type") or ("futures" if context.get("regime_mode") == "FUTURES_SHORT" else "spot"))
+        reversion_input = {
+            "current_price": signal.get("current_price", signal.get("price")),
+            "bb_lower": signal.get("bb_lower"),
+            "bb_middle": signal.get("bb_middle"),
+            "bb_upper": signal.get("bb_upper"),
+        }
+        reversion_input_complete = all(value is not None for value in reversion_input.values())
         payload = {
             "strength": signal.get("strength"),
             "score": signal.get("score"),
@@ -214,6 +259,12 @@ def _selection_capture_candidates(candidates: List[Any], predictions: Dict[str, 
             "expected_pnl": prediction.get("expected_pnl"),
             "success_probability": prediction.get("success_probability"),
             "peak_quality_profile": signal.get("peak_quality_profile"),
+            "current_price": reversion_input["current_price"],
+            "bb_lower": reversion_input["bb_lower"],
+            "bb_middle": reversion_input["bb_middle"],
+            "bb_upper": reversion_input["bb_upper"],
+            "range_reversion_input": reversion_input,
+            "range_reversion_input_complete": reversion_input_complete,
         }
         if db_client:
             try:
@@ -227,6 +278,33 @@ def _selection_capture_candidates(candidates: List[Any], predictions: Dict[str, 
             except Exception as exc:
                 print(f"[Selection] candidate persistence failed for {symbol}: {exc}")
     context["candidate_count"] = max(context.get("candidate_count", 0), len(candidates))
+
+
+def _selection_merge_candidate_data(symbol: str, payload: Dict[str, Any]) -> None:
+    context = _selection_context
+    db_client = context.get("db_client")
+    cycle_id = context.get("cycle_id")
+    if not db_client or not cycle_id:
+        return
+    try:
+        db_client.execute_update(
+            "UPDATE entry_selection_candidates SET data=COALESCE(data, '{}'::jsonb) || %s::jsonb, "
+            "updated_at=NOW() WHERE cycle_id=%s AND symbol=%s",
+            (json.dumps(payload), cycle_id, symbol),
+        )
+    except Exception as exc:
+        print(f"[Selection] payload persistence failed for {symbol}: {exc}")
+
+
+def _selection_record_filter_rejection(reason: str, profile_rejected: bool = False) -> None:
+    context = _selection_context
+    counts = context.setdefault("filter_rejection_counts", {})
+    counts[reason] = int(counts.get(reason, 0)) + 1
+    if profile_rejected:
+        context["profile_rejected_count"] = int(context.get("profile_rejected_count", 0)) + 1
+    else:
+        decision_counts = context.setdefault("entry_decision_rejection_counts", {})
+        decision_counts[reason] = int(decision_counts.get(reason, 0)) + 1
 
 
 def _selection_mark_stage(symbol: str, stage: str, reason: Optional[str] = None) -> None:
@@ -271,6 +349,19 @@ def _selection_complete_cycle(summary: Optional[Dict[str, Any]] = None) -> None:
     if db_client and cycle_id:
         payload = dict(summary or {})
         payload.setdefault("candidate_count", context.get("candidate_count", 0))
+        payload.setdefault("profile_pass_count", context.get("profile_pass_count", 0))
+        payload.setdefault("entry_decision_pass_count", context.get("entry_decision_pass_count", 0))
+        payload.setdefault("qubo_input_count", context.get("qubo_input_count", 0))
+        payload.setdefault("qubo_selected_count", context.get("qubo_selected_count", 0))
+        payload.setdefault("qubo_excluded_count", context.get("qubo_excluded_count", 0))
+        payload.setdefault("profile_score_min", context.get("profile_score_min"))
+        payload.setdefault("profile_score_max", context.get("profile_score_max"))
+        payload.setdefault("profile_rejected_count", context.get("profile_rejected_count", 0))
+        payload.setdefault("entry_decision_rejection_counts", context.get("entry_decision_rejection_counts", {}))
+        payload.setdefault("filter_rejection_counts", context.get("filter_rejection_counts", {}))
+        payload.setdefault("range_reversion_valid_count", context.get("range_reversion_valid_count", 0))
+        payload.setdefault("range_reversion_invalid_count", context.get("range_reversion_invalid_count", 0))
+        payload.setdefault("range_reversion_invalid_reasons", context.get("range_reversion_invalid_reasons", {}))
         payload.setdefault("selected_count", context.get("selected_count", 0))
         payload.setdefault("executed_count", context.get("executed_count", 0))
         try:
@@ -282,6 +373,95 @@ def _selection_complete_cycle(summary: Optional[Dict[str, Any]] = None) -> None:
         except Exception as exc:
             print(f"[Selection] cycle completion persistence failed: {exc}")
     _selection_context = {}
+
+
+def _cycle_result(
+    settings,
+    regime_mode: str,
+    top_symbols: Optional[List[str]] = None,
+    sell_orders: Optional[List[Dict]] = None,
+    buy_orders: Optional[List[Dict]] = None,
+    sl_tp_closes: Optional[List[Dict]] = None,
+    futures_closes: Optional[List[Dict]] = None,
+) -> Dict[str, Any]:
+    cycle_by_regime = {
+        "SPOT_BULL": getattr(settings, "cycle_spot_bull", 10),
+        "RANGE_SCALP": getattr(settings, "cycle_range_scalp", 5),
+        "PRESERVATION": getattr(settings, "cycle_preservation", 45),
+        "FUTURES_SHORT": _get_param(settings, "cycle_futures_short"),
+    }
+    return {
+        "top_symbols": top_symbols or [],
+        "sell_orders": sell_orders or [],
+        "buy_orders": buy_orders or [],
+        "sl_tp_closes": sl_tp_closes or [],
+        "futures_closes": futures_closes or [],
+        "next_cycle_minutes": cycle_by_regime.get(regime_mode, getattr(settings, "trade_cycle_minutes", 5)),
+        "regime_mode": regime_mode,
+    }
+
+
+def _open_validated_staged_candidates(
+    client: BinanceClient,
+    settings: Any,
+    regime_mode: str,
+    regime_obj: Optional[MarketRegime],
+    db_client: Any,
+    portfolio_manager: Any,
+    position_manager: Any,
+    news_client: Any,
+    screened_pairs_cache: Optional[Dict],
+    pre_switch_state: Optional[Dict[str, Any]],
+    futures_client: Any,
+) -> List[Dict]:
+    if not db_client or not getattr(settings, "staged_entry_enabled", True):
+        return []
+    if not staged_entry.get_staged_entry_regime_config(settings, regime_mode).get("enabled"):
+        return []
+    try:
+        staged_entry.evaluate_inter_cycle(
+            db_client, client, settings, regime_mode, [], {}, {},
+            cycle_id=_selection_context.get("cycle_id"), news_client=news_client,
+        )
+        rows = staged_entry.get_openable_candidates(db_client, regime_mode, settings=settings)
+        candidates = [(row, dict(row.get("signal_meta") or {})) for row in rows]
+        candidates = [(row, signal) for row, signal in candidates if signal.get("symbol")]
+        if not candidates:
+            return []
+        signals = [signal for _, signal in candidates]
+        predictions = {}
+        ready_ids = {}
+        for row, signal in candidates:
+            symbol = signal["symbol"]
+            policy = ((row.get("data") or {}).get("policy") or {})
+            predictions[symbol] = {
+                "expected_pnl": policy.get("expected_pnl"),
+                "success_probability": policy.get("success_probability"),
+                "position_size_usdt": row.get("position_size_usdt"),
+            }
+            ready_ids[symbol] = row["id"]
+        orders = _buy_top_symbols(
+            client, settings, signals, portfolio_manager, position_manager,
+            precomputed_predictions=predictions, news_client=news_client,
+            regime_obj=regime_obj, regime_mode_override=regime_mode,
+            screened_pairs_cache=screened_pairs_cache, pre_switch_state=pre_switch_state,
+            futures_client=futures_client,
+        )
+        for order in orders or []:
+            if isinstance(order, dict) and not order.get("position_persistence_confirmed", False):
+                continue
+            symbol = order.get("symbol") if isinstance(order, dict) else getattr(order, "symbol", None)
+            ready_id = ready_ids.get(symbol)
+            if ready_id:
+                staged_entry.mark_opened(
+                    db_client,
+                    ready_id,
+                    order.get("order_id") if isinstance(order, dict) else None,
+                )
+        return orders or []
+    except Exception as exc:
+        print(f"[StagedEntry] validated-candidate execution error: {exc}")
+        return []
 
 
 def _audit_screener_selection(db_client, regime_mode: str, screened: dict, profile_label: Optional[str] = None) -> None:
@@ -760,6 +940,13 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'profit_predexit_absolute_min_usd': 'profit_predexit_absolute_min_usd',
             'profit_predexit_horizon_minutes': 'profit_predexit_horizon_minutes',
             'profit_predexit_giveback_penalty_weight': 'profit_predexit_giveback_penalty_weight',
+            'profit_predexit_early_protection_mode': 'profit_predexit_early_protection_mode',
+            'profit_predexit_early_active_regimes': 'profit_predexit_early_active_regimes',
+            'profit_predexit_early_min_peak_pct': 'profit_predexit_early_min_peak_pct',
+            'profit_predexit_early_min_giveback_pct': 'profit_predexit_early_min_giveback_pct',
+            'loss_focus_enabled': 'loss_focus_enabled',
+            'loss_focus_threshold_usdt': 'loss_focus_threshold_usdt',
+            'loss_focus_reset_usdt': 'loss_focus_reset_usdt',
             'peak_reconstruction_enabled': 'peak_reconstruction_enabled',
             'peak_reconstruction_lookback_candles': 'peak_reconstruction_lookback_candles',
             'min_cycles_before_close_shorts': 'min_cycles_before_close_shorts',
@@ -2807,6 +2994,49 @@ def _is_analysis_cache_fresh(symbol: str, regime: str) -> bool:
     return _age_min <= _signal_max_age_minutes_for_regime(regime)
 
 
+def _normalize_autonomous_signal(signal: Dict[str, Any], regime: str, volume_24h_usdt: float) -> Dict[str, Any]:
+    indicators = signal.get("indicators") if isinstance(signal.get("indicators"), dict) else {}
+    current_price = signal.get("current_price", indicators.get("price"))
+    bb_lower = signal.get("bb_lower", indicators.get("lower_band"))
+    bb_middle = signal.get("bb_middle", indicators.get("middle_band"))
+    bb_upper = signal.get("bb_upper", indicators.get("upper_band"))
+    bb_position = signal.get("bb_position")
+    if bb_position is None:
+        try:
+            bb_range = float(bb_upper) - float(bb_lower)
+            bb_position = round((float(current_price) - float(bb_lower)) / bb_range, 4) if bb_range > 0 else None
+        except (TypeError, ValueError):
+            bb_position = None
+    bollinger_bands = {
+        "lower": bb_lower,
+        "middle": bb_middle,
+        "upper": bb_upper,
+    }
+    return {
+        "symbol": signal["symbol"],
+        "score": signal["strength"] * 100,
+        "reason": signal["reason"],
+        "indicators": indicators,
+        "strength": signal["strength"],
+        "volume_confirmed": signal.get("volume_confirmed", False),
+        "higher_tf_trend": signal.get("higher_tf_trend", "FLAT"),
+        "expected_side": signal.get("expected_side", "SHORT" if str(regime).upper() == "FUTURES_SHORT" else "LONG"),
+        "trade_type": signal.get("trade_type", "futures" if str(regime).upper() == "FUTURES_SHORT" else "spot"),
+        "current_price": current_price,
+        "bb_lower": bb_lower,
+        "bb_upper": bb_upper,
+        "bb_middle": bb_middle,
+        "bb_position": bb_position,
+        "bb_lower_touch": signal.get("bb_lower_touch", False),
+        "bb_near_lower": signal.get("bb_near_lower", False),
+        "bollinger_bands": bollinger_bands,
+        "vol_spike": signal.get("vol_spike", indicators.get("vol_spike", 0.0)),
+        "breakout_12h": signal.get("breakout_12h", False),
+        "rsi": indicators.get("rsi", signal.get("rsi", 50.0)),
+        "volume_24h_usdt": volume_24h_usdt,
+    }
+
+
 def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClient, portfolio_manager=None, regime: str = "SPOT_BULL", db_client=None) -> List[Dict]:
     _active_profile_label = _get_active_profile_label(db_client or _db_client_ref, regime)
     # Expire autonomous signals — TTL aligned to regime cycle (B-v2)
@@ -2906,23 +3136,7 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                     _vol_24h_usdt = float(_ticker_24h.get('quoteVolume', 0.0))
                 except Exception:
                     pass
-                signal_dict = {
-                    "symbol": signal['symbol'],
-                    "score": signal['strength'] * 100,  # Convert to 0-100 scale
-                    "reason": signal['reason'],
-                    "indicators": signal.get('indicators', {}),
-                    "strength": signal['strength'],
-                    "volume_confirmed": signal.get('volume_confirmed', False),
-                    "higher_tf_trend": signal.get('higher_tf_trend', 'FLAT'),
-                    "expected_side": signal.get('expected_side', 'SHORT' if str(regime).upper() == 'FUTURES_SHORT' else 'LONG'),
-                    "trade_type": signal.get('trade_type', 'futures' if str(regime).upper() == 'FUTURES_SHORT' else 'spot'),
-                    # M3/M4: propagate vol_spike and breakout flag for conviction sizing
-                    "vol_spike": signal.get('vol_spike', signal.get('indicators', {}).get('vol_spike', 0.0)),
-                    "breakout_12h": signal.get('breakout_12h', False),
-                    "rsi": signal.get('indicators', {}).get('rsi', 50.0),
-                    # MEJO-F: vol_24h_usdt needed by liquidity filter
-                    "volume_24h_usdt": _vol_24h_usdt,
-                }
+                signal_dict = _normalize_autonomous_signal(signal, regime, _vol_24h_usdt)
                 top_signals.append(signal_dict)
                 
                 # Add autonomous signal to signal store for analysis cycle
@@ -3243,14 +3457,13 @@ def _spot_net_pnl(pos, current_price: float, settings) -> tuple[float, float, fl
     qty = float(pos.quantity or 0)
     if entry_price <= 0 or qty <= 0:
         return 0.0, 0.0, 0.0
-    gross_pnl_usdt = (current_price - entry_price) * qty
-    entry_comm = float(pos.entry_commission or 0)
-    if entry_comm <= 0:
-        entry_comm = compute_commission(qty, entry_price, settings, 'spot')
-    exit_comm = compute_commission(qty, current_price, settings, 'spot')
-    net_pnl_usdt = gross_pnl_usdt - entry_comm - exit_comm
-    net_pnl_pct = net_pnl_usdt / (entry_price * qty) if entry_price * qty > 0 else 0.0
-    return gross_pnl_usdt, net_pnl_usdt, net_pnl_pct
+    from pnl_accounting import mark_to_market_spot
+    accounting = mark_to_market_spot(pos, current_price, settings)
+    return (
+        float(accounting["gross_pnl_usdt"]),
+        float(accounting["net_pnl_usdt"]),
+        float(accounting["net_pnl_pct"]),
+    )
 
 
 def _spot_net_pnl_aggregate(pos_list, current_price: float, settings) -> tuple[float, float, float]:
@@ -3332,6 +3545,90 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
         _spot_signal_cache[_symbol] = _ctx
         return _ctx
 
+    def _record_loss_focus(
+        pos,
+        metadata: Dict[str, Any],
+        *,
+        current_price: float,
+        pnl_usdt_net: float,
+        pnl_pct_net: float,
+        pnl_usdt_gross: float,
+        peak_pnl_pct: float,
+        signal_strength: Optional[float],
+        signal_direction: Optional[str],
+        pnl_velocity_1h: Optional[float],
+        fear_greed_value: Optional[float],
+    ) -> None:
+        if not bool(_get_param(settings, 'loss_focus_enabled', True)):
+            return
+        entry_context_status = str(metadata.get('entry_context_status') or 'canonical').strip().lower()
+        runtime_profile = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
+        if entry_context_status == 'unknown_reconciled':
+            if metadata.get('loss_focus_unknown_baseline_alerted'):
+                return
+            event = 'unknown_baseline_risk'
+            metadata['loss_focus_unknown_baseline_alerted'] = datetime.now(timezone.utc).isoformat()
+        else:
+            state, event = evaluate_loss_focus(
+                metadata,
+                pnl_usdt_net,
+                float(_get_param(settings, 'loss_focus_threshold_usdt', 9.0)),
+                float(_get_param(settings, 'loss_focus_reset_usdt', 6.0)),
+            )
+            metadata['loss_focus_state'] = state
+            if event is None:
+                return
+        snapshot = build_loss_focus_snapshot(
+            position=pos,
+            metadata=metadata,
+            pnl_usdt_net=pnl_usdt_net,
+            pnl_pct_net=pnl_pct_net,
+            pnl_usdt_gross=pnl_usdt_gross,
+            current_price=current_price,
+            regime_mode=regime,
+            runtime_profile=runtime_profile,
+            signal_strength=signal_strength,
+            signal_direction=signal_direction,
+            pnl_velocity_1h=pnl_velocity_1h,
+            peak_pnl_pct=peak_pnl_pct,
+            fear_greed_value=fear_greed_value,
+        )
+        snapshot['event'] = event
+        snapshot['loss_focus_state'] = metadata.get('loss_focus_state')
+        snapshot['non_blocking'] = True
+        try:
+            position_manager.update_position_metadata(pos.position_id, metadata)
+            position_manager._audit(symbol, event, snapshot)
+            if position_manager.db_client:
+                alert_id = f"loss_focus_{str(pos.position_id).replace('-', '')}"
+                if event == 'loss_focus_recovered':
+                    position_manager.db_client.execute_update(
+                        "UPDATE trading_runtime_state SET value = jsonb_set(value::jsonb, '{acknowledged}', 'true'::jsonb), updated_at=NOW() WHERE key=%s",
+                        (f'operator_alert_{alert_id}',),
+                    )
+                elif event in ('loss_focus_triggered', 'unknown_baseline_risk'):
+                    alert_payload = {
+                        'alert_type': 'loss_focus',
+                        'message': (
+                            f"{symbol} {'has unknown entry baseline' if event == 'unknown_baseline_risk' else f'crossed net loss ${abs(pnl_usdt_net):.2f}'}"
+                        ),
+                        'position_id': str(pos.position_id),
+                        'symbol': symbol,
+                        'event': event,
+                        'pnl_usdt_net': round(float(pnl_usdt_net), 8),
+                        'entry_context_status': entry_context_status,
+                        'snapshot': snapshot,
+                        'acknowledged': False,
+                        'ts': datetime.now(timezone.utc).isoformat(),
+                    }
+                    position_manager.db_client.execute_update(
+                        "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                        "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                        (f'operator_alert_{alert_id}', json.dumps(alert_payload)),
+                    )
+        except Exception as error:
+            print(f'[LossFocus] {symbol}: telemetry persistence failed: {error}')
+
     for symbol, pos_list in all_positions.items():
         # ── Per-category SL/TP/trailing thresholds ────────────────────────
         _cat_beh = _token_categories.get(symbol, {}).get('market_behavior', 'MIDCAP_ALT')
@@ -3383,6 +3680,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 supervisor_close_pct = 1.0
                 supervisor_force_close = False
                 metadata = getattr(pos, 'metadata', {}) or {}
+                _entry_context_unknown = str(metadata.get('entry_context_status') or '').strip().lower() == 'unknown_reconciled'
                 _ctx_signal_strength = None
                 _ctx_signal_direction = None
                 _ctx_signal_timestamp = None
@@ -3426,6 +3724,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
 
                 # ── C1: Re-evaluación predictiva (loss branch + Wolf Hunter profit branch) ──
                 _peak_capture_advisory = None
+                _early_peak_advisory = None
+                _normal_peak_advisory = None
                 _pc_fng_value = 50.0
                 try:
                     if news_client:
@@ -3434,7 +3734,63 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 except Exception:
                     pass
 
-                if getattr(settings, 'prediction_exit_enabled', True):
+                _record_loss_focus(
+                    pos,
+                    metadata,
+                    current_price=current_price,
+                    pnl_usdt_net=pnl_usdt_net,
+                    pnl_pct_net=pnl_pct_net,
+                    pnl_usdt_gross=_pnl_gross_usdt,
+                    peak_pnl_pct=_peak_pnl_pct_real,
+                    signal_strength=_ctx_signal_strength,
+                    signal_direction=_ctx_signal_direction,
+                    pnl_velocity_1h=_ctx_pnl_velocity,
+                    fear_greed_value=_pc_fng_value,
+                )
+
+                if not _entry_context_unknown and pnl_pct_net > 0 and getattr(settings, 'profit_predexit_enabled', True):
+                    try:
+                        _early_peak_price = entry_price * (1.0 + _peak_pnl_pct_real)
+                        _, _, _early_peak_pnl_pct_net = _spot_net_pnl(pos, _early_peak_price, settings)
+                        _early_peak_ctx = PeakCaptureContext(
+                            symbol=symbol,
+                            trade_type='spot',
+                            side='BUY',
+                            position_size_usdt=float(pos.quantity) * current_price,
+                            portfolio_total_usdt=max(_spot_total + (float(pos.quantity) * current_price), float(pos.quantity) * current_price),
+                            current_price=current_price,
+                            entry_price=entry_price,
+                            current_pnl_usdt=pnl_usdt_net,
+                            current_pnl_pct=pnl_pct_net,
+                            peak_pnl_pct=_early_peak_pnl_pct_net,
+                            regime_mode=regime,
+                            profile_label=str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                            signal_strength=float(_ctx_signal_strength or 0.0),
+                            signal_direction=_ctx_signal_direction or 'HOLD',
+                            pnl_velocity_1h=_ctx_pnl_velocity,
+                            indicators={},
+                            fear_greed_value=_pc_fng_value,
+                            metadata=metadata,
+                            leverage=1.0,
+                        )
+                        _early_peak_advisory = _peak_capture_engine.evaluate_early_peak_protection(_early_peak_ctx)
+                        metadata['early_peak_protection'] = {
+                            'should_close': bool(_early_peak_advisory.should_close),
+                            'reason': _early_peak_advisory.reason,
+                            'detail': _early_peak_advisory.detail,
+                            'close_pct': float(_early_peak_advisory.close_pct or 0.0),
+                            'peak_pnl_pct': round(_early_peak_pnl_pct_net, 6),
+                            'pnl_pct': round(pnl_pct_net, 6),
+                            'updated_at': datetime.now(timezone.utc).isoformat(),
+                            'metrics': _early_peak_advisory.metrics,
+                        }
+                        position_manager._audit(symbol, 'profit_predexit_early_decision', metadata['early_peak_protection'])
+                        if _early_peak_advisory.should_close:
+                            _peak_capture_advisory = _early_peak_advisory
+                    except Exception as _early_peak_error:
+                        print(f"[PredExit/Early] {symbol}: evaluation failed: {_early_peak_error}")
+
+                if not _entry_context_unknown and getattr(settings, 'prediction_exit_enabled', True):
                     try:
                         _min_hold_pred = int(getattr(settings, 'min_hold_for_prediction_exit', 90))
                         # s71 BUG-4 / s72 B1: per-regime override — each mode has its own hold floor
@@ -3547,42 +3903,68 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                         current_sl_price=float(pos.stop_loss) if pos.stop_loss else None,
                                         current_tp_price=float(pos.take_profit) if pos.take_profit else None,
                                     )
-                                    _peak_capture_advisory = _peak_capture_engine.evaluate(_pc_ctx)
+                                    _normal_peak_advisory = _peak_capture_engine.evaluate(_pc_ctx)
 
-                                    # Audit every profit PredExit evaluation
                                     try:
                                         position_manager._audit(symbol, 'profit_predexit_decision', {
                                             'side': 'BUY',
-                                            'should_close': bool(_peak_capture_advisory.should_close),
-                                            'reason': _peak_capture_advisory.reason,
-                                            'detail': _peak_capture_advisory.detail,
-                                            'close_pct': float(_peak_capture_advisory.close_pct or 0.0),
+                                            'should_close': bool(_normal_peak_advisory.should_close),
+                                            'reason': _normal_peak_advisory.reason,
+                                            'detail': _normal_peak_advisory.detail,
+                                            'close_pct': float(_normal_peak_advisory.close_pct or 0.0),
                                             'current_pnl_usdt': round(pnl_usdt_net, 4),
-                                            'expected_future_pnl': round(_peak_capture_advisory.expected_future_pnl, 4),
-                                            'prob_higher_peak': round(_peak_capture_advisory.prob_higher_peak, 4),
-                                            'capture_margin': round(_peak_capture_advisory.capture_margin, 4),
+                                            'expected_future_pnl': round(_normal_peak_advisory.expected_future_pnl, 4),
+                                            'prob_higher_peak': round(_normal_peak_advisory.prob_higher_peak, 4),
+                                            'capture_margin': round(_normal_peak_advisory.capture_margin, 4),
                                             'peak_pnl_pct_real': round(_peak_pnl_pct_real, 6),
                                             'pnl_velocity_1h': float(_ctx_pnl_velocity or 0.0),
                                             'fear_greed_value': float(_pc_fng_value),
                                             'regime_mode': regime,
                                             'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
-                                            'metrics': _peak_capture_advisory.metrics,
+                                            'metrics': _normal_peak_advisory.metrics,
                                         })
                                     except Exception:
                                         pass
-
-                                    if _peak_capture_advisory.should_close:
-                                        print(f"[PredExit/Profit] {symbol}: advisory={_peak_capture_advisory.reason} "
-                                              f"close_pct={_peak_capture_advisory.close_pct*100:.0f}% "
-                                              f"prob_higher={_peak_capture_advisory.prob_higher_peak:.2f}")
-                                        ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
-                                                     f"[PredExit/Profit] {symbol}: {_peak_capture_advisory.detail}")
                                 try:
                                     position_manager.update_position_metadata(pos.position_id, metadata)
                                 except Exception:
                                     pass
                     except Exception as _pe:
                         print(f"[PredEval] {symbol}: prediction check failed: {_pe}")
+
+                _peak_capture_advisory, _selected_peak_source = select_peak_capture_advisory(
+                    _early_peak_advisory,
+                    _normal_peak_advisory,
+                )
+
+                if _peak_capture_advisory:
+                    metadata['peak_capture_selection'] = {
+                        'selected_source': _selected_peak_source,
+                        'selected_reason': _peak_capture_advisory.reason,
+                        'selected_should_close': bool(_peak_capture_advisory.should_close),
+                        'selected_priority': int(_peak_capture_advisory.priority),
+                        'early_reason': _early_peak_advisory.reason if _early_peak_advisory else None,
+                        'early_should_close': bool(_early_peak_advisory and _early_peak_advisory.should_close),
+                        'early_priority': int(_early_peak_advisory.priority) if _early_peak_advisory else None,
+                        'normal_reason': _normal_peak_advisory.reason if _normal_peak_advisory else None,
+                        'normal_should_close': bool(_normal_peak_advisory and _normal_peak_advisory.should_close),
+                        'normal_priority': int(_normal_peak_advisory.priority) if _normal_peak_advisory else None,
+                        'updated_at': datetime.now(timezone.utc).isoformat(),
+                    }
+                    try:
+                        position_manager.update_position_metadata(pos.position_id, metadata)
+                        position_manager._audit(symbol, 'profit_predexit_selection', {
+                            'side': 'BUY',
+                            **metadata['peak_capture_selection'],
+                        })
+                    except Exception:
+                        pass
+                    if _peak_capture_advisory.should_close:
+                        print(f"[PredExit/Profit] {symbol}: advisory={_peak_capture_advisory.reason} "
+                              f"close_pct={_peak_capture_advisory.close_pct*100:.0f}% "
+                              f"prob_higher={_peak_capture_advisory.prob_higher_peak:.2f}")
+                        ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_INFO,
+                                     f"[PredExit/Profit] {symbol}: {_peak_capture_advisory.detail}")
 
                 # ── SSO-6 SPOT: Bounce rescue hook ──────────────────────────
                 # Auto-tag SPOT positions stuck in a downtrend bounce + run rescue close
@@ -3622,7 +4004,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 _sso_s_action = None  # always defined; advisory result passed to UG
                 _sso_enabled_spot = getattr(settings, 'sso_enabled', True)
                 # s78-fix: evaluate SSO also on negative PnL so loss-cut / rescue triggers can fire
-                if close_reason is None and _sso_enabled_spot:
+                if close_reason is None and not _entry_context_unknown and _sso_enabled_spot:
                     try:
                         from smart_scale_out import SmartScaleOut, SSOPositionData, compute_pnl_velocity, extract_sso_level_from_reason
                         metadata = getattr(pos, 'metadata', {}) or {}
@@ -3977,7 +4359,9 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                                 _sso_s_order2 = client.create_market_order(symbol=symbol, side="SELL", quantity=_final_qty)
                                                 _sso_s_fill2 = client.verify_and_fetch_fills(_sso_s_order2, f"SSO/SPOT SELL2 {symbol}")
                                                 if _sso_s_fill2:
-                                                    _sso_s_qty_sold = float(_sso_s_fill2.get('qty', _final_qty))
+                                                    from pnl_accounting import combine_spot_fills
+                                                    _sso_s_fill = combine_spot_fills(_sso_s_fill, _sso_s_fill2)
+                                                    _sso_s_qty_sold = float(_sso_s_fill.get('qty', _final_qty))
                                         # Persist the partial close in DB via PositionManager with the EXACT filled qty
                                         _sso_s_closed = position_manager.close_position(
                                             symbol=symbol,
@@ -3989,12 +4373,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                             exit_context={
                                                 'regime_mode': regime,
                                                 'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').upper(),
-                                                'exit_order_id': str(_sso_s_fill.get('order_id', '')),
-                                                'exit_filled_qty': float(_sso_s_qty_sold),
-                                                'exit_avg_price': float(_sso_s_fill.get('avg_price', current_price)),
-                                                'exit_commission': float(_sso_s_fill.get('commission', 0.0)),
-                                                'binance_exit_confirmed': True,
                                             },
+                                            exit_fill=_sso_s_fill,
                                         )
                                         if _sso_s_closed is None:
                                             print(f"[WARN] SSO/SPOT {symbol}: position_manager.close_position returned None — falling back to metadata-only update")
@@ -4074,6 +4454,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                     _spot_binance_validated = False
 
                 # F&G value for exit modifier (F8) — shared by PRS/SSO/UG audits
+                if _entry_context_unknown:
+                    _spot_binance_validated = False
                 _ug_fng_value = None
                 try:
                     if news_client:
@@ -4258,8 +4640,12 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                     try:
                         position_manager._audit(symbol, 'soft_supervisor_skip_unconfirmed', {
                             'side': 'BUY',
-                            'reason': 'spot_not_recently_validated_against_binance',
+                            'reason': (
+                                'unknown_reconciled_entry_context'
+                                if _entry_context_unknown else 'spot_not_recently_validated_against_binance'
+                            ),
                             'has_validation_ts': bool(metadata.get('binance_validated_at')),
+                            'entry_context_status': metadata.get('entry_context_status'),
                         }, binance_confirmed=False)
                     except Exception:
                         pass
@@ -4283,6 +4669,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             "profit_realization_supervisor",
                             "prs_partial",
                             "unified_governance",
+                            "profit_predexit_early_peak_protection",
                         )
                 ):
                     try:
@@ -4334,12 +4721,34 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 _prs_order2 = client.create_market_order(symbol=symbol, side="SELL", quantity=_prs_final_qty)
                                 _prs_fill2 = client.verify_and_fetch_fills(_prs_order2, f"ProfitRealization SELL2 {symbol}")
                                 if _prs_fill2:
-                                    _prs_qty_sold = float(_prs_fill2.get('qty', _prs_final_qty))
+                                    from pnl_accounting import combine_spot_fills
+                                    _prs_fill = combine_spot_fills(_prs_fill, _prs_fill2)
+                                    _prs_qty_sold = float(_prs_fill.get('qty', _prs_final_qty))
                             remaining_qty = 0.0
 
+                        _wolf_early_partial = bool(
+                            supervisor_decision
+                            and supervisor_decision.reason == 'profit_predexit_early_peak_protection'
+                        )
+                        _partial_reason = (
+                            'profit_predexit_early_peak_protection'
+                            if _wolf_early_partial
+                            else (supervisor_decision.reason if supervisor_decision else 'profit_realization_supervisor_partial')
+                        )
                         metadata['profit_realization_last_triggered_at'] = datetime.now(timezone.utc).isoformat()
                         metadata['profit_realization_partial_qty'] = _prs_qty_sold
-                        metadata['profit_realization_partial_reason'] = supervisor_decision.reason if supervisor_decision else 'profit_realization_supervisor_partial'
+                        metadata['profit_realization_partial_reason'] = _partial_reason
+                        if _wolf_early_partial:
+                            _early_meta = dict(metadata.get('early_peak_protection') or {})
+                            _early_meta.update({
+                                'execution_status': 'partial_executed',
+                                'trigger': 'WOLF_HUNTER_EARLY',
+                                'close_reason': _partial_reason,
+                                'qty_closed': float(_prs_qty_sold),
+                                'qty_remaining': float(remaining_qty),
+                                'executed_at': datetime.now(timezone.utc).isoformat(),
+                            })
+                            metadata['early_peak_protection'] = _early_meta
                         _exit_ctx = {
                             'regime_mode': regime,
                             'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
@@ -4359,15 +4768,21 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 position_id=pos.position_id,
                                 qty_closed=_prs_qty_sold,
                                 exit_context=_exit_ctx,
+                                exit_fill=_prs_fill,
                             )
-                            position_manager._audit(symbol, 'profit_realization_supervisor_partial', {
-                                'side': 'BUY',
-                                'qty_closed': _prs_qty_sold,
-                                'qty_remaining': remaining_qty,
-                                'reason': metadata['profit_realization_partial_reason'],
-                                'detail': supervisor_decision.detail if supervisor_decision else '',
-                                'diagnostics': supervisor_decision.diagnostics if supervisor_decision else '',
-                            })
+                            position_manager._audit(
+                                symbol,
+                                'wolf_hunter_early_partial' if _wolf_early_partial else 'profit_realization_supervisor_partial',
+                                {
+                                    'side': 'BUY',
+                                    'trigger': 'WOLF_HUNTER_EARLY' if _wolf_early_partial else 'UNIFIED_GOVERNANCE',
+                                    'qty_closed': _prs_qty_sold,
+                                    'qty_remaining': remaining_qty,
+                                    'reason': metadata['profit_realization_partial_reason'],
+                                    'detail': supervisor_decision.detail if supervisor_decision else '',
+                                    'diagnostics': supervisor_decision.diagnostics if supervisor_decision else '',
+                                },
+                            )
                         except Exception:
                             pass
                         print(f"[ProfitRealization/SPOT] {symbol}: partial close {supervisor_close_pct*100:.0f}% qty={_prs_qty_sold} reason={close_reason}")
@@ -4690,6 +5105,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 'binance_exit_confirmed': True,
                             },
                             qty_closed=_sold_qty,
+                            exit_fill=_sell_fill,
                         )
                         _overflow_positions.discard(symbol)  # free overflow slot if used
                         # V2: Tracking métricas VolSpike Override (jun 16 2026)
@@ -5263,11 +5679,56 @@ def _filter_buy_candidates(
                     print(f"[FilterBuy] {symbol}: entry_profile_gate error ({_gate_err}) -> discard")
                     _profile = None
 
+        _profile_info = meta.get("entry_profile_gate_info") or {}
+        _profile_score = float(meta.get("peak_quality_score", 0.0) or 0.0)
+        _selection_context["profile_score_min"] = (
+            _profile_score if _selection_context.get("profile_score_min") is None
+            else min(float(_selection_context["profile_score_min"]), _profile_score)
+        )
+        _selection_context["profile_score_max"] = (
+            _profile_score if _selection_context.get("profile_score_max") is None
+            else max(float(_selection_context["profile_score_max"]), _profile_score)
+        )
+        _selection_merge_candidate_data(symbol, {
+            "peak_quality_profile": _profile if _profile in ("A", "B", "C") else None,
+            "peak_quality_score": _profile_score,
+            "entry_profile_gate_info": _profile_info,
+        })
         if _profile not in ("A", "B", "C"):
             print(f"[FilterBuy] Rejected {symbol}: PEAK_QUALITY_DISCARDED (profile={_profile})")
+            _selection_record_filter_rejection("PEAK_QUALITY_DISCARDED", profile_rejected=True)
             update_signal_decision(symbol, "rejected", "PEAK_QUALITY_DISCARDED")
             continue
 
+        _selection_context["profile_pass_count"] = int(_selection_context.get("profile_pass_count", 0)) + 1
+        if regime_mode == "RANGE_SCALP":
+            _range_prediction = staged_entry.build_range_reversion_prediction(
+                meta,
+                meta.get("current_price") or meta.get("price"),
+                settings,
+            )
+            meta["range_reversion_prediction"] = _range_prediction
+            if isinstance(cand, dict):
+                cand["range_reversion_prediction"] = _range_prediction
+            if isinstance(signal_meta, dict):
+                signal_meta.setdefault(symbol, {}).update({
+                    "range_reversion_prediction": _range_prediction,
+                })
+            _selection_merge_candidate_data(symbol, {
+                "range_reversion_prediction": _range_prediction,
+            })
+            _audit_range_reversion_prediction(symbol, _range_prediction)
+            if _range_prediction.get("valid"):
+                _selection_context["range_reversion_valid_count"] = int(
+                    _selection_context.get("range_reversion_valid_count", 0)
+                ) + 1
+            else:
+                _selection_context["range_reversion_invalid_count"] = int(
+                    _selection_context.get("range_reversion_invalid_count", 0)
+                ) + 1
+                _range_reason = str(_range_prediction.get("reason") or "unknown")
+                _range_invalid_reasons = _selection_context.setdefault("range_reversion_invalid_reasons", {})
+                _range_invalid_reasons[_range_reason] = int(_range_invalid_reasons.get(_range_reason, 0)) + 1
         _decision_prediction = (predictions or {}).get(symbol)
         if _decision_prediction:
             meta["entry_decision_prediction"] = _decision_prediction
@@ -5280,6 +5741,12 @@ def _filter_buy_candidates(
             current_price=meta.get("current_price") or meta.get("price"),
         ).to_dict()
         meta["entry_decision"] = _entry_decision
+        _selection_merge_candidate_data(symbol, {
+            "peak_quality_profile": _profile,
+            "peak_quality_score": _profile_score,
+            "entry_profile_gate_info": _profile_info,
+            "entry_decision": _entry_decision,
+        })
         if isinstance(cand, dict):
             cand["entry_decision"] = _entry_decision
         if isinstance(signal_meta, dict):
@@ -5291,8 +5758,12 @@ def _filter_buy_candidates(
             })
         if not _entry_decision["eligible"]:
             print(f"[FilterBuy] Rejected {symbol}: {_entry_decision['reason']}")
+            _selection_record_filter_rejection(_entry_decision["reason"])
             update_signal_decision(symbol, "rejected", _entry_decision["reason"])
             continue
+        _selection_context["entry_decision_pass_count"] = int(
+            _selection_context.get("entry_decision_pass_count", 0)
+        ) + 1
 
         # Audit all accepted candidates.
         print(
@@ -6383,7 +6854,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         _predictor_gate_mode = str(getattr(settings, 'predictor_gate_mode', 'blocking')).lower()
         _sig_peak_profile = str(signal_meta.get(symbol, {}).get('peak_quality_profile', '')).upper()
         _peaks_bypass = False
-        if (not is_valid and not getattr(settings, "entry_decision_enabled", False)
+        if (not is_valid and not getattr(settings, "entry_decision_enabled", True)
                 and _predictor_gate_mode == "advisory" and _sig_peak_profile in ("A", "B")):
             _peaks_bypass = True
             _gate_warning = {
@@ -6398,7 +6869,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             if symbol in signal_meta and isinstance(signal_meta[symbol], dict):
                 signal_meta[symbol].setdefault('gate_warnings', []).append(_gate_warning)
             print(f"[PeaksFirst] {symbol}: predictor VETOED ({reason}) but Profile={_sig_peak_profile} → ADVISORY BYPASS")
-        elif (not is_valid and not getattr(settings, "entry_decision_enabled", False)
+        elif (not is_valid and not getattr(settings, "entry_decision_enabled", True)
               and _predictor_gate_mode == "disabled"):
             _peaks_bypass = True
             print(f"[PeaksFirst] {symbol}: predictor gate DISABLED → bypass")
@@ -6407,7 +6878,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             sp = prediction.get('success_probability', 0) if prediction else 0
             # ── VolSpike override for narrative tokens ─────────────────────
             volspike_override = False
-            if getattr(settings, 'volspike_override_enabled', True):
+            if getattr(settings, 'volspike_override_enabled', False):
                 narrative_set = set(getattr(settings, 'narrative_tokens', []))
                 only_narrative = getattr(settings, 'volspike_override_narrative_only', True)
                 if not only_narrative or symbol in narrative_set:
@@ -6675,9 +7146,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 "side": "BUY",
                 "quantity": qty,
                 "order": order,
+                "position_persistence_confirmed": False,
                 "entry_metadata": {
                     "regime_mode": _regime_mode,
-                    "profile_label": _active_profile_label,
+                    "profile_label": _kelly_profile,
+                    "entry_profile_label": _kelly_profile,
                     "peak_quality_profile": signal_meta.get(symbol, {}).get("peak_quality_profile"),
                     "peak_quality": signal_meta.get(symbol, {}).get("peak_quality"),
                     "expected_gain": signal_meta.get(symbol, {}).get("expected_gain"),
@@ -6772,7 +7245,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     _is_pred_add = (position_manager.get_positions_count(symbol) >= 1) if position_manager else False
                     _signal_for_symbol = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
                     _peak_quality_profile = str(_signal_for_symbol.get('peak_quality_profile', '') or '').strip().upper()
-                    _peak_quality_score = _signal_for_symbol.get('peak_quality')
+                    _peak_quality_score = _signal_for_symbol.get('peak_quality_score', _signal_for_symbol.get('peak_quality'))
+                    _range_reversion_at_entry = _signal_for_symbol.get('range_reversion_prediction')
                     try:
                         _peak_quality_score = float(_peak_quality_score) if _peak_quality_score is not None else None
                     except Exception:
@@ -6788,11 +7262,16 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "peak_quality_profile": _peak_quality_profile if _peak_quality_profile in ('A', 'B', 'C') else None,
                         "peak_quality": _peak_quality_score,
                         "entry_regime": _regime_mode,
-                        "entry_profile_label": _active_profile_label,
+                        "entry_profile_label": _kelly_profile,
                         "regime_mode": _regime_mode,
-                        "profile_label": _active_profile_label,
+                        "profile_label": _kelly_profile,
                         "entry_pred_pnl": float(prediction.get('expected_pnl', 0)) if prediction else None,
                         "entry_pred_prob": float(prediction.get('success_probability', 0)) if prediction else None,
+                        "range_reversion_prediction": _range_reversion_at_entry if _regime_mode == "RANGE_SCALP" else None,
+                        "range_reversion_ev": _range_reversion_at_entry.get("expected_pnl") if isinstance(_range_reversion_at_entry, dict) else None,
+                        "range_reversion_probability": _range_reversion_at_entry.get("success_probability") if isinstance(_range_reversion_at_entry, dict) else None,
+                        "range_reversion_target_price": _range_reversion_at_entry.get("target_price") if isinstance(_range_reversion_at_entry, dict) else None,
+                        "range_reversion_stop_price": _range_reversion_at_entry.get("stop_price") if isinstance(_range_reversion_at_entry, dict) else None,
                         "entry_type": "prediction_add" if _is_pred_add else "normal",
                         "reevaluation_count": 0,
                         "spot_total_at_open": usdt_liquid_now,  # SSO gate anchor — protects position from balance changes
@@ -6803,6 +7282,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "entry_avg_price": float(_fill.get('avg_price', price)),
                         "entry_commission": float(_fill.get('commission', entry_commission)),
                         "binance_entry_confirmed": bool(_fill.get('binance_confirmed', False)),
+                        "ready_candidate_id": _signal_for_symbol.get('ready_candidate_id'),
+                        "staged_direction": _signal_for_symbol.get('staged_direction') or {},
                     }
                     metadata['entry_decision'] = _preflight_decision
                     # Persist gate_warnings collected during advisory mode
@@ -6816,7 +7297,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         symbol=symbol,
                         side="BUY",
                         quantity=qty,
-                        entry_price=price,
+                        entry_price=float(_fill.get('avg_price', price) or price),
                         entry_time=datetime.utcnow().isoformat(),
                         stop_loss=sl_price,
                         take_profit=tp_price,
@@ -6825,8 +7306,17 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         pnl_prediction=prediction,
                         indicators_at_entry=_indicators_to_save
                     )
-                    position_manager.add_position(position)
-                    print(f"Position tracked with entry commission: {entry_commission:.4f} USDT")
+                    _position_persisted = bool(position_manager.add_position(position))
+                    orders[-1]["position_persistence_confirmed"] = _position_persisted
+                    if not _position_persisted:
+                        print(f"[CRITICAL] {symbol}: Binance fill confirmed but canonical position persistence failed")
+                        ec.add_error(
+                            ec.SOURCE_POSITION_MANAGER,
+                            ec.LEVEL_ERROR,
+                            f"Binance fill confirmed but canonical position persistence failed for {symbol}",
+                        )
+                    else:
+                        print(f"Position tracked with entry commission: {entry_commission:.4f} USDT")
                     if prediction:
                         print(f"Position includes PnL prediction: {prediction['expected_pnl']:.2f} USDT")
                 except Exception as e:
@@ -7077,6 +7567,9 @@ def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, 
             _side = str((_pre_sig or {}).get('expected_side', _default_side) or _default_side).strip().upper()
             if _side not in ('LONG', 'SHORT'):
                 _side = _default_side
+            _current_price = _get_cycle_price(client, symbol)
+            if isinstance(_pre_sig, dict) and _current_price:
+                _pre_sig["current_price"] = _current_price
             pred, _ = pnl_service.predict_for_symbol(
                 symbol,
                 client,
@@ -7085,7 +7578,7 @@ def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, 
                 precomputed_signal=_pre_sig,
                 trade_type=trade_type,
                 trade_side=_side,
-                current_price=_get_cycle_price(client, symbol),
+                current_price=_current_price,
             )
             if pred:
                 predictions[symbol] = pred
@@ -8469,9 +8962,15 @@ def execute_once(monitor_only: bool = False, components=None):
             top_signals = _new_futures + list(top_signals)  # futures first
 
     if not top_signals:
-        print("No buy signals available; skipping new buys this cycle.")
-        _selection_complete_cycle({"outcome": "no_signals", "reason": "NO_SIGNALS"})
-        return {"top_symbols": [], "sell_orders": [], "buy_orders": [], "sl_tp_closes": sl_tp_closes}
+        buy_orders = _open_validated_staged_candidates(
+            client, settings, _regime_mode, _regime_exe, _db_client_ref,
+            portfolio_manager, position_manager, news_client, _cached_screened_pairs,
+            _pre_switch_state, comp.futures_client,
+        )
+        outcome = "executed" if buy_orders else "no_signals"
+        reason = "VALIDATED_STAGED_ENTRY" if buy_orders else "NO_SIGNALS"
+        _selection_complete_cycle({"outcome": outcome, "reason": reason, "buy_order_count": len(buy_orders)})
+        return _cycle_result(settings, _regime_mode, buy_orders=buy_orders, sl_tp_closes=sl_tp_closes)
 
     # Normalize: _select_symbols may return dicts or strings
     if top_signals and isinstance(top_signals[0], dict):
@@ -8509,9 +9008,16 @@ def execute_once(monitor_only: bool = False, components=None):
     else:
         top_symbols = list(top_signals)
     if not top_signals:
-        print("[FilterBuy] All candidates filtered — no entries this cycle.")
-        _selection_complete_cycle({"outcome": "all_filtered", "reason": "ENTRY_QUALITY_GATE"})
-        return {"top_symbols": [], "sell_orders": [], "buy_orders": [], "sl_tp_closes": sl_tp_closes}
+        print("[FilterBuy] All candidates filtered before QUBO — checking validated staged candidates.")
+        buy_orders = _open_validated_staged_candidates(
+            client, settings, _regime_mode, _regime_exe, _db_client_ref,
+            portfolio_manager, position_manager, news_client, _cached_screened_pairs,
+            _pre_switch_state, comp.futures_client,
+        )
+        outcome = "executed" if buy_orders else "all_filtered"
+        reason = "VALIDATED_STAGED_ENTRY" if buy_orders else "PRE_QUBO_FILTERED"
+        _selection_complete_cycle({"outcome": outcome, "reason": reason, "buy_order_count": len(buy_orders)})
+        return _cycle_result(settings, _regime_mode, buy_orders=buy_orders, sl_tp_closes=sl_tp_closes)
 
     # ── GAP-B: Profit-potential scoring — rank by EV+prob+strength+regime ───────
     try:
@@ -8523,6 +9029,7 @@ def execute_once(monitor_only: bool = False, components=None):
     # Replaces simple EV-sort with an explicit K-best orthogonal selector.
     # Uses correlation matrix + predicted PnL to maximize risk-adjusted return.
     _pre_qubo_symbols = set(top_symbols)
+    _selection_context["qubo_input_count"] = len(_pre_qubo_symbols)
     try:
         top_signals, predictions = _apply_qubo_selector(
             settings, client, top_signals, predictions, _regime_mode,
@@ -8538,6 +9045,8 @@ def execute_once(monitor_only: bool = False, components=None):
     _selection_capture_candidates(top_signals, predictions, "qubo_selected")
     for _qubo_excluded_symbol in _pre_qubo_symbols - set(top_symbols):
         _selection_mark_stage(_qubo_excluded_symbol, "qubo_excluded", "QUBO_EXCLUDED")
+    _selection_context["qubo_selected_count"] = len(top_symbols)
+    _selection_context["qubo_excluded_count"] = len(_pre_qubo_symbols - set(top_symbols))
     _selection_context["selected_count"] = len(top_symbols)
 
     # ── Staged multi-cycle entry validation ───────────────────────────────────
@@ -8546,7 +9055,7 @@ def execute_once(monitor_only: bool = False, components=None):
     # staged as `ready` for future cycles.
     _buy_signals = top_signals
     _openable_ready_ids_by_symbol: Dict[str, int] = {}
-    if _db_client_ref and getattr(settings, 'staged_entry_enabled', False):
+    if _db_client_ref and getattr(settings, 'staged_entry_enabled', True):
         try:
             _staged_cfg = staged_entry.get_staged_entry_regime_config(settings, _regime_mode)
             if _staged_cfg.get('enabled'):
@@ -8574,8 +9083,10 @@ def execute_once(monitor_only: bool = False, components=None):
                 )
                 if _openable_rows:
                     _buy_signals = [dict(_r.get('signal_meta', {})) for _r in _openable_rows]
-                    for _sig in _buy_signals:
-                        _sig.setdefault('symbol', _sig.get('symbol'))
+                    for _sig, _ready_row in zip(_buy_signals, _openable_rows):
+                        _sig.setdefault('symbol', _ready_row.get('symbol'))
+                        _sig['ready_candidate_id'] = _ready_row.get('id')
+                        _sig['staged_direction'] = ((_ready_row.get('data') or {}).get('direction') or {})
                     _openable_ready_ids_by_symbol = {
                         _r['symbol']: _r['id'] for _r in _openable_rows if _r.get('symbol')
                     }
@@ -8636,6 +9147,8 @@ def execute_once(monitor_only: bool = False, components=None):
     if _openable_ready_ids_by_symbol and buy_orders:
         try:
             for _bo in buy_orders:
+                if isinstance(_bo, dict) and not _bo.get('position_persistence_confirmed', False):
+                    continue
                 _sym = _bo.get('symbol') if isinstance(_bo, dict) else getattr(_bo, 'symbol', None)
                 _ready_id = _openable_ready_ids_by_symbol.get(_sym)
                 if _ready_id:
@@ -8671,10 +9184,9 @@ def execute_once(monitor_only: bool = False, components=None):
             consecutive_failures=_consecutive_failures,
         )
 
-    return {"top_symbols": top_symbols, "sell_orders": sell_orders,
-            "buy_orders": buy_orders, "sl_tp_closes": sl_tp_closes,
-            "futures_closes": futures_closes, "next_cycle_minutes": _next_cycle,
-            "regime_mode": _regime_mode}
+    return _cycle_result(
+        settings, _regime_mode, top_symbols, sell_orders, buy_orders, sl_tp_closes, futures_closes,
+    )
 
 
 if __name__ == '__main__':

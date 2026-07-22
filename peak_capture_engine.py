@@ -73,6 +73,23 @@ class PeakCaptureDecision:
     metrics: Dict[str, Any] = field(default_factory=dict)
 
 
+def select_peak_capture_advisory(
+    early_advisory: Optional[PeakCaptureDecision],
+    normal_advisory: Optional[PeakCaptureDecision],
+) -> Tuple[Optional[PeakCaptureDecision], str]:
+    if early_advisory and early_advisory.should_close:
+        if (
+            normal_advisory
+            and normal_advisory.should_close
+            and normal_advisory.priority > early_advisory.priority
+        ):
+            return normal_advisory, "normal"
+        return early_advisory, "early"
+    if normal_advisory:
+        return normal_advisory, "normal"
+    return None, "none"
+
+
 class PeakCaptureEngine:
     """Decides whether to capture current profit or wait for a larger peak."""
 
@@ -160,6 +177,61 @@ class PeakCaptureEngine:
                 f"risk_adjusted_wait {risk_adjusted_wait:.2f}"
             )
 
+        return decision
+
+    def evaluate_early_peak_protection(self, ctx: PeakCaptureContext) -> PeakCaptureDecision:
+        configured_mode = str(get_param(self.settings, "profit_predexit_early_protection_mode", "shadow") or "shadow").strip().lower()
+        active_regimes = get_param(self.settings, "profit_predexit_early_active_regimes", ["SPOT_BULL"])
+        if isinstance(active_regimes, str):
+            active_regimes = [item.strip() for item in active_regimes.split(",") if item.strip()]
+        active_regimes = {str(item).strip().upper() for item in (active_regimes or [])}
+        regime_allowed = str(ctx.regime_mode or "").strip().upper() in active_regimes
+        mode = "shadow" if configured_mode == "active" and not regime_allowed else configured_mode
+        min_peak = float(get_param(self.settings, "profit_predexit_early_min_peak_pct", 1.5)) / 100.0
+        min_giveback = float(get_param(self.settings, "profit_predexit_early_min_giveback_pct", 0.5)) / 100.0
+        giveback = max(0.0, float(ctx.peak_pnl_pct) - float(ctx.current_pnl_pct))
+        min_profit = self._min_profit_threshold(ctx)
+        behavior_confirmed = bool(
+            (ctx.pnl_velocity_1h is not None and ctx.pnl_velocity_1h < 0)
+            or ctx.momentum_exhausted
+            or ctx.trend_reversal
+        )
+        metrics = {
+            "mode": mode,
+            "configured_mode": configured_mode,
+            "regime_mode": str(ctx.regime_mode or "").strip().upper(),
+            "regime_allowed": regime_allowed,
+            "min_peak_pct": round(min_peak, 6),
+            "min_giveback_pct": round(min_giveback, 6),
+            "peak_pnl_pct": round(float(ctx.peak_pnl_pct), 6),
+            "giveback_pct": round(giveback, 6),
+            "min_profit": round(min_profit, 4),
+            "behavior_confirmed": behavior_confirmed,
+        }
+        if mode == "disabled":
+            return PeakCaptureDecision(reason="profit_predexit_early_disabled", metrics=metrics)
+        if str((ctx.metadata.get("early_peak_protection") or {}).get("execution_status", "")) == "partial_executed":
+            return PeakCaptureDecision(reason="profit_predexit_early_already_executed", metrics=metrics)
+        if ctx.current_pnl_usdt < min_profit or ctx.current_pnl_pct <= 0:
+            return PeakCaptureDecision(reason="profit_predexit_early_below_net_profit", metrics=metrics)
+        if ctx.peak_pnl_pct < min_peak:
+            return PeakCaptureDecision(reason="profit_predexit_early_peak_below_threshold", metrics=metrics)
+        if giveback < min_giveback:
+            return PeakCaptureDecision(reason="profit_predexit_early_giveback_below_threshold", metrics=metrics)
+        if not behavior_confirmed:
+            return PeakCaptureDecision(reason="profit_predexit_early_behavior_unconfirmed", metrics=metrics)
+        decision = PeakCaptureDecision(
+            should_close=mode == "active",
+            close_pct=0.5 if mode == "active" else 0.0,
+            reason="profit_predexit_early_peak_protection",
+            detail=(
+                f"peak={ctx.peak_pnl_pct * 100:.2f}% giveback={giveback * 100:.2f}% "
+                f"velocity={ctx.pnl_velocity_1h if ctx.pnl_velocity_1h is not None else 0.0:.6f}"
+            ),
+            priority=84,
+            current_pnl_usdt=ctx.current_pnl_usdt,
+            metrics=metrics,
+        )
         return decision
 
     def reconstruct_peak_pnl_pct(

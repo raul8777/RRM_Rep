@@ -407,31 +407,14 @@ class SimulationBinanceClient:
         fills = order_result.get("fills") or []
         if not fills:
             return None
-        total_qty = 0.0
-        total_quote = 0.0
-        total_commission = 0.0
-        for f in fills:
-            q = float(f.get("qty", 0.0))
-            p = float(f.get("price", 0.0))
-            c_raw = float(f.get("commission", 0.0))
-            c_asset = f.get("commissionAsset", "USDT")
-            if c_asset not in ("USDT", "BNB") and p > 0:
-                c_usdt = c_raw * p
-            else:
-                c_usdt = c_raw
-            total_qty += q
-            total_quote += q * p
-            total_commission += c_usdt
-        avg_price = total_quote / total_qty if total_qty > 0 else 0.0
-        return {
-            "symbol": order_result.get("symbol", ""),
+        from pnl_accounting import normalize_spot_fills
+        payload = normalize_spot_fills(fills, order_result.get("symbol", ""))
+        payload.update({
             "order_id": order_result.get("orderId"),
-            "qty": total_qty,
-            "quote_qty": total_quote,
-            "commission": total_commission,
-            "avg_price": avg_price,
+            "commission": payload["commission_usdt"],
             "binance_confirmed": True,
-        }
+        })
+        return payload
 
     def get_symbol_price(self, symbol: str, use_cache: bool = True) -> float:
         now = self.clock.now().timestamp()

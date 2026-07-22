@@ -39,6 +39,7 @@ _CATEGORIES = {
 _stats_cache: Optional[Dict[str, Any]] = None
 _thresholds_cache: Optional[Dict[str, Any]] = None
 _model_cache: Optional[Any] = None
+_model_load_attempted = False
 
 
 _QUALITY_SCORE_FEATURES = [
@@ -64,9 +65,10 @@ _QUALITY_SCORE_FEATURES = [
 
 def _load_quality_score_model() -> Optional[Any]:
     """Lazy-load the SPOT_BULL quality score model artifact."""
-    global _model_cache
-    if _model_cache is not None:
+    global _model_cache, _model_load_attempted
+    if _model_load_attempted:
         return _model_cache
+    _model_load_attempted = True
     if not _QUALITY_MODEL_PATH.exists():
         return None
     try:
@@ -386,6 +388,8 @@ def compute_quality_score(
     regime: str,
     direction: str = "LONG",
     symbol: str = "",
+    model_score: Optional[float] = None,
+    model_score_resolved: bool = False,
 ) -> float:
     """Return a calibrated quality score for a candidate signal.
 
@@ -401,7 +405,8 @@ def compute_quality_score(
     """
     regime = str(regime or "SPOT_BULL").strip().upper() or "SPOT_BULL"
     if regime == "SPOT_BULL":
-        model_score = _model_quality_score(signal_meta)
+        if not model_score_resolved:
+            model_score = _model_quality_score(signal_meta)
         if model_score is not None:
             return model_score
 
@@ -451,7 +456,12 @@ def classify(
         if adjustment != 0.0:
             thresholds["C"] = min(thresholds["B"] - 1e-6, thresholds["C"] + adjustment)
 
-    score = compute_quality_score(signal_meta, regime, direction, symbol)
+    model_score = _model_quality_score(signal_meta) if regime == "SPOT_BULL" else None
+    score = compute_quality_score(
+        signal_meta, regime, direction, symbol,
+        model_score=model_score, model_score_resolved=True,
+    )
+    score_source = "model" if model_score is not None else "fallback"
 
     profile = None
     for tier in ("A", "B", "C"):
@@ -461,6 +471,7 @@ def classify(
 
     return profile, {
         "score": score,
+        "score_source": score_source,
         "thresholds": {k: v for k, v in thresholds.items() if k in ("A", "B", "C")},
         "regime": regime,
         "direction": direction,

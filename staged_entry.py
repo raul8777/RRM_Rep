@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from config_helpers import get_staged_entry_regime_config
 from entry_decision import evaluate as evaluate_entry_decision
+from entry_profile_gate import _DEFAULT_THRESHOLDS_PATH as _ENTRY_PROFILE_THRESHOLDS_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ def _classify_with_gate(
     if entry_profile_gate is None:
         return None, 0.0, {}
     try:
-        thresholds_path = getattr(settings, "entry_profile_gate_thresholds_path", None)
+        thresholds_path = getattr(settings, "entry_profile_gate_thresholds_path", "Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json")
         direction = meta.get("expected_side") or _side_for_regime(regime_mode)
         profile, info = entry_profile_gate.classify(
             meta,
@@ -172,27 +173,65 @@ def _run_predictor_for_validation(
         return None
 
 
-def _range_reversion_shadow(meta: Dict[str, Any], current_price: Optional[float], settings: Any) -> Optional[Dict[str, Any]]:
-    if str(getattr(settings, "range_reversion_predictor_mode", "disabled")).lower() == "disabled":
-        return None
-    if current_price is None:
-        return {"valid": False, "reason": "missing_current_price"}
+def build_range_reversion_prediction(
+    meta: Dict[str, Any],
+    current_price: Optional[float],
+    settings: Any,
+) -> Dict[str, Any]:
     try:
+        price = _number(current_price)
+        if price is None:
+            price = _number(meta.get("current_price") or meta.get("price"))
+        if price is None or price <= 0:
+            return {"valid": False, "reason": "missing_current_price"}
+        source = dict(meta.get("indicators") or {})
+        bollinger = source.get("bollinger_bands") or meta.get("bollinger_bands") or {}
+        lower = _number(bollinger.get("lower") if isinstance(bollinger, dict) else None)
+        upper = _number(bollinger.get("upper") if isinstance(bollinger, dict) else None)
+        if lower is None:
+            lower = _number(meta.get("bb_lower"))
+        if upper is None:
+            upper = _number(meta.get("bb_upper"))
+        middle = _number(bollinger.get("middle") if isinstance(bollinger, dict) else None)
+        if middle is None:
+            middle = _number(meta.get("bb_middle"))
+        if middle is None and lower is not None and upper is not None:
+            middle = (lower + upper) / 2.0
+        if lower is None or middle is None or upper is None:
+            return {"valid": False, "reason": "missing_bollinger_bands"}
+        source["bollinger_bands"] = {"lower": lower, "middle": middle, "upper": upper}
+        for key, fallback_keys in {
+            "rsi": ("rsi",),
+            "vol_spike": ("vol_spike", "volume_ratio"),
+            "trend_4h": ("trend_4h", "higher_tf_trend"),
+        }.items():
+            value = source.get(key)
+            if value is None:
+                for fallback_key in fallback_keys:
+                    value = meta.get(fallback_key)
+                    if value is not None:
+                        break
+            source[key] = value if isinstance(value, dict) else {"value": value}
+        source["signal_strength"] = _number(
+            source.get("signal_strength") or meta.get("signal_strength") or meta.get("strength")
+        ) or 0.5
         import pnl_service
-        predictor = pnl_service.get_predictor()
-        indicators = meta.get("indicators") or {}
-        if not indicators:
-            return {"valid": False, "reason": "missing_indicators"}
-        return predictor.predict_range_reversion(
-            current_price=float(current_price),
-            indicators=indicators,
+        return pnl_service.get_predictor().predict_range_reversion(
+            current_price=price,
+            indicators=source,
             position_size_usdt=_position_size_for_validation(meta),
             settings=settings,
             trade_type=meta.get("trade_type") or "spot",
         )
     except Exception as exc:
-        logger.warning(f"[StagedEntry] range reversion shadow failed: {exc}")
-        return {"valid": False, "reason": "shadow_prediction_error"}
+        logger.warning(f"[StagedEntry] range reversion prediction failed: {exc}")
+        return {"valid": False, "reason": "range_reversion_prediction_error"}
+
+
+def _range_reversion_shadow(meta: Dict[str, Any], current_price: Optional[float], settings: Any) -> Optional[Dict[str, Any]]:
+    if str(getattr(settings, "range_reversion_predictor_mode", "shadow")).lower() == "disabled":
+        return None
+    return build_range_reversion_prediction(meta, current_price, settings)
 
 
 def _evaluate_candidate_policy(
@@ -240,6 +279,147 @@ def _evaluate_candidate_policy(
     if not decision.eligible:
         return False, decision.reason, policy
     return True, decision.reason, policy
+
+
+def _number(value: Any) -> Optional[float]:
+    try:
+        number = float(value) if value is not None else None
+        return number if number is not None and math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _direction_mode(cfg: Dict[str, Any]) -> str:
+    return str(cfg.get("direction_confirmation_mode", "disabled")).strip().lower()
+
+
+def _direction_transition(
+    row: Dict[str, Any],
+    policy: Dict[str, Any],
+    current_price: Optional[float],
+    cfg: Dict[str, Any],
+) -> Tuple[bool, bool, str, Dict[str, Any]]:
+    data = row.get("data") or {}
+    direction = dict(data.get("direction") or {}) if isinstance(data, dict) else {}
+    mode = _direction_mode(cfg)
+    side = str(direction.get("side") or _side_for_regime(str(row.get("regime_mode") or ""))).upper()
+    base_price = _number(direction.get("base_price")) or _number(row.get("signal_price"))
+    price = _number(current_price)
+    state = str(direction.get("state") or "awaiting_confirmation")
+    target_price = _number(policy.get("target_price"))
+    stop_price = _number(policy.get("stop_price"))
+    last_price = _number(direction.get("last_observed_price")) or base_price
+    min_progress_bps = max(0.0, float(cfg.get("direction_min_progress_bps", 0.0) or 0.0))
+    max_adverse_bps = max(0.0, float(cfg.get("direction_max_adverse_bps", 0.0) or 0.0))
+    required = max(1, int(cfg.get("direction_required_confirmations", 2) or 2))
+    confirmations = int(direction.get("directional_confirmations", 0) or 0)
+    adverse_observations = int(direction.get("adverse_observations", 0) or 0)
+    snapshot: Dict[str, Any] = {
+        "mode": mode,
+        "state_before": state,
+        "side": side,
+        "base_price": base_price,
+        "previous_price": last_price,
+        "current_price": price,
+        "target_price": target_price,
+        "stop_price": stop_price,
+        "directional_confirmations": confirmations,
+        "adverse_observations": adverse_observations,
+        "required_confirmations": required,
+        "min_progress_bps": min_progress_bps,
+        "max_adverse_bps": max_adverse_bps,
+    }
+    if mode == "disabled":
+        snapshot["state_after"] = state
+        return True, False, "DIRECTION_DISABLED", snapshot
+    if price is None or price <= 0:
+        snapshot["state_after"] = state
+        return False, True, "DIRECTION_PRICE_MISSING", snapshot
+    if base_price is None or base_price <= 0 or last_price is None or last_price <= 0:
+        snapshot["state_after"] = state
+        return False, True, "DIRECTION_REFERENCE_MISSING", snapshot
+    is_short = side == "SHORT"
+    direction_sign = -1.0 if is_short else 1.0
+    progress_bps = direction_sign * (price - last_price) / last_price * 10_000.0
+    base_progress_bps = direction_sign * (price - base_price) / base_price * 10_000.0
+    snapshot["progress_bps"] = progress_bps
+    snapshot["base_progress_bps"] = base_progress_bps
+    if row.get("regime_mode") == "RANGE_SCALP":
+        if target_price is None or target_price <= 0:
+            snapshot["state_after"] = state
+            return False, True, "DIRECTION_TARGET_MISSING", snapshot
+        if (not is_short and target_price <= price) or (is_short and target_price >= price):
+            snapshot["state_after"] = state
+            return False, True, "DIRECTION_TARGET_INVALID", snapshot
+    if stop_price is not None and ((not is_short and price <= stop_price) or (is_short and price >= stop_price)):
+        snapshot["state_after"] = state
+        return False, True, "DIRECTION_STOP_BREACHED", snapshot
+    if max_adverse_bps and base_progress_bps <= -max_adverse_bps:
+        snapshot["state_after"] = state
+        return False, True, "DIRECTION_DRAWDOWN_LIMIT", snapshot
+    target_progress = True
+    if target_price is not None:
+        target_progress = abs(target_price - price) < abs(target_price - last_price)
+    snapshot["target_progress"] = target_progress
+    favorable = progress_bps >= min_progress_bps and target_progress
+    updated = dict(direction)
+    updated.update({
+        "base_price": base_price,
+        "side": side,
+        "target_price": target_price,
+        "stop_price": stop_price,
+        "last_observed_price": price,
+        "last_observed_at": _now().isoformat(),
+    })
+    if favorable:
+        if state == "recovery_pending":
+            if base_progress_bps < min_progress_bps:
+                updated["state"] = "recovery_pending"
+                snapshot["state_after"] = updated["state"]
+                snapshot["direction"] = updated
+                return False, False, "DIRECTION_RECOVERY_NOT_RECLAIMED", snapshot
+            confirmations = 1
+            updated["state"] = "recovery_confirming"
+        else:
+            confirmations += 1
+            updated["state"] = "confirmed" if confirmations >= required else "awaiting_confirmation"
+        updated["directional_confirmations"] = confirmations
+        updated["last_confirmed_price"] = price
+        updated["last_confirmed_at"] = _now().isoformat()
+        snapshot["state_after"] = updated["state"]
+        snapshot["directional_confirmations"] = confirmations
+        snapshot["direction"] = updated
+        if confirmations >= required:
+            return True, False, "DIRECTION_CONFIRMED", snapshot
+        return False, False, "DIRECTION_CONFIRMING", snapshot
+    if adverse_observations == 0:
+        updated["state"] = "recovery_pending"
+        updated["adverse_observations"] = 1
+        updated["directional_confirmations"] = 0
+        snapshot["state_after"] = updated["state"]
+        snapshot["direction"] = updated
+        return False, False, "DIRECTION_RECOVERY_PENDING", snapshot
+    snapshot["state_after"] = state
+    snapshot["direction"] = updated
+    return False, True, "DIRECTION_NOT_CONFIRMED", snapshot
+
+
+def _combine_directional_policy(
+    row: Dict[str, Any],
+    policy_eligible: bool,
+    policy_reason: str,
+    policy_data: Dict[str, Any],
+    current_price: Optional[float],
+    cfg: Dict[str, Any],
+) -> Tuple[bool, bool, str, Dict[str, Any]]:
+    if not policy_eligible:
+        return False, True, policy_reason, {}
+    direction_positive, direction_terminal, direction_reason, direction_snapshot = _direction_transition(
+        row, policy_data, current_price, cfg
+    )
+    if _direction_mode(cfg) != "enforced":
+        return True, False, policy_reason, direction_snapshot
+    return direction_positive, direction_terminal, direction_reason, direction_snapshot
 
 
 def _input_features_for_check(
@@ -513,6 +693,8 @@ def stage_ready_candidates(
         max_cycles = int(cfg.get("max_cycles", 2))
         max_age = int(cfg.get("max_age_min", 25))
 
+        _initial_direction_mode = _direction_mode(cfg)
+        _initial_positive = _initial_direction_mode != "enforced"
         try:
             rows = db_client.execute_query(
                 """
@@ -522,7 +704,7 @@ def stage_ready_candidates(
                     max_cycles, max_age_min, ready_at, last_checked_at, signal_meta, config_snapshot, data
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s,
-                    'ready', 1, 1, %s, %s,
+                    'ready', %s, 1, %s, %s,
                     %s, %s, NOW(), NOW(), %s::jsonb, %s::jsonb, %s::jsonb
                 ) RETURNING id
                 """,
@@ -531,11 +713,26 @@ def stage_ready_candidates(
                     meta.get("peak_quality_profile"),
                     float(signal_price) if signal_price is not None else None,
                     float(position_size) if position_size is not None else None,
+                    int(_initial_positive),
                     int(required) if required is not None else None,
                     int(checks_per_cycle) if checks_per_cycle is not None else None,
                     int(max_cycles) if max_cycles is not None else None,
                     int(max_age) if max_age is not None else None,
-                    _json(meta), _json(cfg), _json({"cycles_active": 1, "policy": policy_data, "priority": policy_data.get("priority")}),
+                    _json(meta), _json(cfg), _json({
+                        "cycles_active": 1,
+                        "policy": policy_data,
+                        "priority": policy_data.get("priority"),
+                        "direction": {
+                            "state": "awaiting_confirmation",
+                            "base_price": float(signal_price) if signal_price is not None else None,
+                            "last_observed_price": float(signal_price) if signal_price is not None else None,
+                            "side": meta.get("expected_side") or _side_for_regime(regime_mode),
+                            "target_price": policy_data.get("target_price"),
+                            "stop_price": policy_data.get("stop_price"),
+                            "directional_confirmations": 0,
+                            "adverse_observations": 0,
+                        },
+                    }),
                 ),
             )
             ready_id = rows[0]["id"]
@@ -547,8 +744,9 @@ def stage_ready_candidates(
             db_client, ready_id, cycle_id, 0, "inter", signal_price, cfg.get("price_source"),
             meta.get("peak_quality_profile"), float(meta.get("peak_quality_score", 0.0) or 0.0),
             (meta.get("entry_profile_gate_info") or {}).get("thresholds"),
-            fear_greed, {**_input_features_for_check(meta, signal_price, signal_price), "policy": policy_data},
-            True, "positive", policy_reason, 0,
+            fear_greed, {**_input_features_for_check(meta, signal_price, signal_price), "policy": policy_data,
+                         "direction": {"state_before": "setup", "state_after": "awaiting_confirmation"}},
+            _initial_positive, "setup" if not _initial_positive else "positive", policy_reason, 0,
         )
         staged.append({"id": ready_id, "symbol": symbol, "status": "ready", "new": True})
 
@@ -623,37 +821,47 @@ def evaluate_inter_cycle(
         input_features = _input_features_for_check(meta, current_price, signal_price)
         execution_ms = int((time.monotonic() - start) * 1000)
 
-        positive, policy_reason, policy_data = _evaluate_candidate_policy(
+        policy_eligible, policy_reason, policy_data = _evaluate_candidate_policy(
             meta, regime_mode, cfg, profile, quality_score, current_price, settings,
         )
+        positive, terminal, reason, direction_snapshot = _combine_directional_policy(
+            row, policy_eligible, policy_reason, policy_data, current_price, cfg,
+        )
         input_features["policy"] = policy_data
+        input_features["direction"] = direction_snapshot
+        total = row["total_checks"] + 1
+        data_update = {
+            "cycles_active": _cycles_active,
+            "policy": policy_data,
+            "priority": policy_data.get("priority"),
+        }
+        if direction_snapshot.get("direction"):
+            data_update["direction"] = direction_snapshot["direction"]
         if positive:
-            total = row["total_checks"] + 1
             positives = row["positive_checks"] + 1
-            reason = "INTER_GATE_QUBO" if in_top else "INTER_GATE_ONLY"
+            if _direction_mode(cfg) == "enforced":
+                positives = max(positives, int(row["required_positive_checks"]))
             decision = "positive"
             _update_ready_status(
-                db_client, ready_id, positive_checks=positives, total_checks=total,
-                data_update={"cycles_active": _cycles_active, "policy": policy_data, "priority": policy_data.get("priority")},
+                db_client, ready_id, positive_checks=positives, total_checks=total, data_update=data_update,
             )
-
             if positives >= int(row["required_positive_checks"]):
                 _update_ready_status(db_client, ready_id, status="validated", validated_at=True)
                 row["status"] = "validated"
                 result["validated"].append(symbol)
             else:
                 result["kept"].append(symbol)
-        else:
-            total = row["total_checks"] + 1
-            _update_ready_status(
-                db_client, ready_id, total_checks=total,
-                data_update={"cycles_active": _cycles_active, "policy": policy_data, "priority": policy_data.get("priority")},
-            )
-            reason = policy_reason
+        elif terminal:
             decision = "negative"
-            _discard_ready(db_client, ready_id, policy_reason)
+            data_update["last_rejection"] = {"reason": reason, "direction": direction_snapshot}
+            _update_ready_status(db_client, ready_id, total_checks=total, data_update=data_update)
+            _discard_ready(db_client, ready_id, reason)
             row["status"] = "discarded"
             result["discarded"].append(symbol)
+        else:
+            decision = "pending"
+            _update_ready_status(db_client, ready_id, total_checks=total, data_update=data_update)
+            result["kept"].append(symbol)
 
         _record_check(
             db_client, ready_id, cycle_id, _next_check_sequence(db_client, ready_id), "inter",
@@ -765,30 +973,36 @@ def perform_intra_cycle_check(
         input_features = _input_features_for_check(meta, current_price, signal_price)
         execution_ms = int((time.monotonic() - start) * 1000)
 
-        positive, policy_reason, policy_data = _evaluate_candidate_policy(
+        policy_eligible, policy_reason, policy_data = _evaluate_candidate_policy(
             meta, regime_mode, cfg, profile, quality_score, current_price, settings,
         )
+        positive, terminal, reason, direction_snapshot = _combine_directional_policy(
+            row, policy_eligible, policy_reason, policy_data, current_price, cfg,
+        )
         input_features["policy"] = policy_data
+        input_features["direction"] = direction_snapshot
+        total = row["total_checks"] + 1
+        data_update = {"policy": policy_data, "priority": policy_data.get("priority")}
+        if direction_snapshot.get("direction"):
+            data_update["direction"] = direction_snapshot["direction"]
         if positive:
             positives = row["positive_checks"] + 1
-            total = row["total_checks"] + 1
+            if _direction_mode(cfg) == "enforced":
+                positives = max(positives, int(row["required_positive_checks"]))
             _update_ready_status(
-                db_client, ready_id, positive_checks=positives, total_checks=total,
-                data_update={"policy": policy_data, "priority": policy_data.get("priority")},
+                db_client, ready_id, positive_checks=positives, total_checks=total, data_update=data_update,
             )
             if positives >= int(row["required_positive_checks"]):
                 _update_ready_status(db_client, ready_id, status="validated", validated_at=True)
                 validated.append(symbol)
             decision = "positive"
-            reason = "INTRA_GATE_POSITIVE"
-        else:
-            total = row["total_checks"] + 1
-            _update_ready_status(
-                db_client, ready_id, total_checks=total,
-                data_update={"policy": policy_data, "priority": policy_data.get("priority")},
-            )
+        elif terminal:
+            data_update["last_rejection"] = {"reason": reason, "direction": direction_snapshot}
+            _update_ready_status(db_client, ready_id, total_checks=total, data_update=data_update)
             decision = "negative"
-            reason = policy_reason
+        else:
+            _update_ready_status(db_client, ready_id, total_checks=total, data_update=data_update)
+            decision = "pending"
 
         _record_check(
             db_client, ready_id, None, _next_check_sequence(db_client, ready_id), "intra",
@@ -797,8 +1011,8 @@ def perform_intra_cycle_check(
             execution_ms,
         )
 
-        if not positive:
-            _discard_ready(db_client, ready_id, policy_reason)
+        if terminal:
+            _discard_ready(db_client, ready_id, reason)
 
         _maybe_expire(db_client, row)
 

@@ -71,6 +71,18 @@ class Orchestrator:
         self.learning_cycle_thread = None
         self.staged_entry_intra_thread = None
         self.staged_entry_intra_stop: Optional[threading.Event] = None
+        self.trade_cycle_wake_event = threading.Event()
+        self._trade_cycle_lock = threading.RLock()
+        self._trade_cycle_func: Optional[Callable] = None
+        self._trade_cycle_interval_minutes: int = 5
+        self.trade_cycle_in_progress = False
+        self.trade_cycle_started_at: Optional[datetime] = None
+        self.trade_cycle_completed_at: Optional[datetime] = None
+        self.trade_cycle_last_duration_seconds: Optional[float] = None
+        self.trade_cycle_phase = "idle"
+        self.trade_cycle_recovery_attempts = 0
+        self.trade_cycle_last_recovery_action: Optional[str] = None
+        self.trade_cycle_last_recovery_at: Optional[datetime] = None
         self.should_run = False
         self.last_trade_cycle_at: Optional[datetime] = None
         self.current_cycle_minutes: int = 5  # updated dynamically per regime
@@ -301,21 +313,22 @@ class Orchestrator:
             cycle_func: Function to run in the cycle
             interval_minutes: Interval between cycles in minutes
         """
-        if self.trade_cycle_thread and self.trade_cycle_thread.is_alive():
-            logger.warning("Trade cycle already running")
-            return
-        
-        self.should_run = True
-        self._trade_cycle_func = cycle_func
-        self.trade_cycle_thread = threading.Thread(
-            target=self._run_cycle,
-            args=(cycle_func, interval_minutes),
-            daemon=True
-        )
-        self.trade_cycle_thread.start()
+        with self._trade_cycle_lock:
+            if self.trade_cycle_thread and self.trade_cycle_thread.is_alive():
+                logger.warning("Trade cycle already running")
+                return
+            self.should_run = True
+            self.trade_cycle_wake_event.clear()
+            self._trade_cycle_func = cycle_func
+            self._trade_cycle_interval_minutes = interval_minutes
+            self.trade_cycle_phase = "starting"
+            self.trade_cycle_thread = threading.Thread(
+                target=self._run_cycle,
+                args=(cycle_func, interval_minutes),
+                daemon=True
+            )
+            self.trade_cycle_thread.start()
         logger.info(f"Trade cycle started with {interval_minutes} minute interval")
-
-        # Start the intra-cycle staged-entry validation loop (best-effort background).
         self._start_staged_entry_intra_cycle()
     
     def start_analysis_cycle(self, cycle_func: Callable, interval_minutes: int = 15) -> None:
@@ -403,6 +416,71 @@ class Orchestrator:
             logger.warning(f"LearningEngine cycle failed (non-critical): {e}")
             ec.add_error(ec.SOURCE_SYSTEM, ec.LEVEL_WARNING, f"LearningEngine cycle failed: {e}")
     
+    def get_trade_cycle_diagnostics(self, now: Optional[datetime] = None) -> Dict:
+        now = now or datetime.utcnow()
+        with self._trade_cycle_lock:
+            thread_alive = bool(self.trade_cycle_thread and self.trade_cycle_thread.is_alive())
+            last_cycle_at = self.last_trade_cycle_at
+            started_at = self.trade_cycle_started_at
+            threshold_minutes = max(1.0, float(self.current_cycle_minutes) * 1.5)
+            age_minutes = None
+            if last_cycle_at:
+                age_minutes = max(0.0, (now - last_cycle_at).total_seconds() / 60.0)
+            running_minutes = None
+            if self.trade_cycle_in_progress and started_at:
+                running_minutes = max(0.0, (now - started_at).total_seconds() / 60.0)
+            stale = age_minutes is not None and age_minutes > threshold_minutes
+            if not thread_alive:
+                worker_state = "dead"
+            elif self.trade_cycle_in_progress:
+                worker_state = "stale_running" if stale else "running"
+            else:
+                worker_state = "idle"
+            return {
+                "worker_state": worker_state,
+                "thread_alive": thread_alive,
+                "in_progress": self.trade_cycle_in_progress,
+                "phase": self.trade_cycle_phase,
+                "last_cycle_at": last_cycle_at,
+                "started_at": started_at,
+                "completed_at": self.trade_cycle_completed_at,
+                "age_minutes": age_minutes,
+                "running_minutes": running_minutes,
+                "stale_threshold_minutes": threshold_minutes,
+                "stale": stale,
+                "last_duration_seconds": self.trade_cycle_last_duration_seconds,
+                "last_error": self.last_cycle_error,
+                "last_error_at": self.last_cycle_error_at,
+                "recovery_attempts": self.trade_cycle_recovery_attempts,
+                "last_recovery_action": self.trade_cycle_last_recovery_action,
+                "last_recovery_at": self.trade_cycle_last_recovery_at,
+            }
+
+    def recover_stale_trade_cycle(self) -> Dict:
+        with self._trade_cycle_lock:
+            diagnostics = self.get_trade_cycle_diagnostics()
+            self.trade_cycle_last_recovery_at = datetime.utcnow()
+            if diagnostics["worker_state"] == "idle":
+                if not self.can_monitor_positions():
+                    action = "wake_skipped_system_stopped"
+                else:
+                    self.trade_cycle_wake_event.set()
+                    action = "wake_requested"
+            elif diagnostics["worker_state"] in ("running", "stale_running"):
+                action = "recovery_skipped_cycle_running"
+            elif self.state != SystemState.RUNNING:
+                action = "restart_skipped_system_not_running"
+            elif not self._trade_cycle_func:
+                action = "restart_skipped_missing_callback"
+            elif self.trade_cycle_recovery_attempts >= 1:
+                action = "restart_skipped_retry_limit"
+            else:
+                self.trade_cycle_recovery_attempts += 1
+                self.start_trade_cycle(self._trade_cycle_func, self._trade_cycle_interval_minutes)
+                action = "worker_restarted"
+            self.trade_cycle_last_recovery_action = action
+            return {"action": action, **self.get_trade_cycle_diagnostics()}
+
     def _run_cycle(self, cycle_func: Callable, interval_minutes: int) -> None:
         """
         Run a cycle function periodically.
@@ -417,10 +495,20 @@ class Orchestrator:
         _is_trade_cycle = False  # determined on first run
         while self.should_run:
             if not first_run:
-                time.sleep(max(1, _next_interval) * 60)
+                if cycle_func == getattr(self, '_trade_cycle_func', None):
+                    self.trade_cycle_wake_event.wait(max(1, _next_interval) * 60)
+                    self.trade_cycle_wake_event.clear()
+                else:
+                    time.sleep(max(1, _next_interval) * 60)
             first_run = False
             _cycle_ok = False
             _cycle_error = None
+            _is_trade_worker = cycle_func == getattr(self, '_trade_cycle_func', None)
+            if _is_trade_worker:
+                with self._trade_cycle_lock:
+                    self.trade_cycle_in_progress = True
+                    self.trade_cycle_started_at = datetime.utcnow()
+                    self.trade_cycle_phase = "executing"
             try:
                 if self.can_execute_trades():
                     result = cycle_func()
@@ -470,6 +558,18 @@ class Orchestrator:
                         },
                     )
             finally:
+                if _is_trade_worker:
+                    with self._trade_cycle_lock:
+                        completed_at = datetime.utcnow()
+                        self.trade_cycle_completed_at = completed_at
+                        if self.trade_cycle_started_at:
+                            self.trade_cycle_last_duration_seconds = round(
+                                (completed_at - self.trade_cycle_started_at).total_seconds(), 3
+                            )
+                        self.trade_cycle_in_progress = False
+                        self.trade_cycle_phase = "completed" if _cycle_ok else "failed"
+                        if _cycle_ok:
+                            self.trade_cycle_recovery_attempts = 0
                 if _cycle_ok:
                     self.consecutive_cycle_failures = 0
                     self.last_cycle_error = None
@@ -556,9 +656,12 @@ class Orchestrator:
                 checks = max(1, int(cfg.get('checks_per_cycle', 1)))
                 sleep_seconds = max(30, int(cycle_min * 60 / checks))
 
-                staged_entry.perform_intra_cycle_check(
+                validated = staged_entry.perform_intra_cycle_check(
                     db_client, client, settings, regime_mode, news_client=news_client
                 )
+                if validated:
+                    self.trade_cycle_wake_event.set()
+                    logger.info("Staged-entry validation woke trade cycle: %s", validated)
                 if self.staged_entry_intra_stop.wait(sleep_seconds):
                     break
             except Exception as e:
@@ -573,6 +676,7 @@ class Orchestrator:
     def stop_all_cycles(self) -> None:
         """Stop all background cycles."""
         self.should_run = False
+        self.trade_cycle_wake_event.set()
 
         if self.staged_entry_intra_stop:
             self.staged_entry_intra_stop.set()
@@ -608,6 +712,7 @@ class Orchestrator:
             "position_manager_active": self.position_manager is not None,
             "backtester_active": self.backtester is not None,
             "last_trade_cycle_at": self.last_trade_cycle_at.isoformat() if self.last_trade_cycle_at else None,
+            "trade_cycle_diagnostics": self.get_trade_cycle_diagnostics(),
             "consecutive_cycle_failures": self.consecutive_cycle_failures,
             "last_cycle_error": self.last_cycle_error,
             "last_cycle_error_at": self.last_cycle_error_at.isoformat() if self.last_cycle_error_at else None,

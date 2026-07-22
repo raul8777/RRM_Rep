@@ -326,6 +326,13 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'profit_predexit_absolute_min_usd': 1.50,
     'profit_predexit_horizon_minutes': 60,
     'profit_predexit_giveback_penalty_weight': 0.5,
+    'profit_predexit_early_protection_mode': 'active',
+    'profit_predexit_early_active_regimes': ['SPOT_BULL'],
+    'profit_predexit_early_min_peak_pct': 1.5,
+    'profit_predexit_early_min_giveback_pct': 0.5,
+    'loss_focus_enabled': True,
+    'loss_focus_threshold_usdt': 9.0,
+    'loss_focus_reset_usdt': 6.0,
     'peak_reconstruction_enabled': True,
     'peak_reconstruction_lookback_candles': 30,
 
@@ -351,6 +358,10 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'min_expected_pnl': 0.0,
             'policy_version': 'v1',
             'max_open_per_cycle': 1,
+            'direction_confirmation_mode': 'enforced',
+            'direction_min_progress_bps': 5.0,
+            'direction_max_adverse_bps': 50.0,
+            'direction_required_confirmations': 2,
         },
         'RANGE_SCALP': {
             'enabled': True,
@@ -366,6 +377,10 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'require_predictor_valid': True,
             'policy_version': 'v1',
             'max_open_per_cycle': 1,
+            'direction_confirmation_mode': 'enforced',
+            'direction_min_progress_bps': 3.0,
+            'direction_max_adverse_bps': 50.0,
+            'direction_required_confirmations': 2,
         },
         'FUTURES_SHORT': {
             'enabled': True,
@@ -382,6 +397,10 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'min_expected_pnl': 0.0,
             'policy_version': 'v1',
             'max_open_per_cycle': 1,
+            'direction_confirmation_mode': 'enforced',
+            'direction_min_progress_bps': 3.0,
+            'direction_max_adverse_bps': 50.0,
+            'direction_required_confirmations': 2,
         },
         'PRESERVATION': {
             'enabled': True,
@@ -398,6 +417,10 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'min_expected_pnl': 0.0,
             'policy_version': 'v1',
             'max_open_per_cycle': 1,
+            'direction_confirmation_mode': 'enforced',
+            'direction_min_progress_bps': 3.0,
+            'direction_max_adverse_bps': 50.0,
+            'direction_required_confirmations': 2,
         },
     },
 
@@ -706,8 +729,8 @@ def get_staged_entry_regime_config(settings, regime: str) -> Dict[str, Any]:
     """Return merged staged-entry config for a regime with canonical defaults."""
     global_config = None
     if settings is not None:
-        global_config = getattr(settings, 'staged_entry_regime_config', None)
-    if global_config is None:
+        global_config = getattr(settings, 'staged_entry_regime_config', _DEFAULT_STAGED_ENTRY_REGIME_CONFIG)
+    if not global_config:
         global_config = _DEFAULT_STAGED_ENTRY_REGIME_CONFIG
     regime_config = (global_config or {}).get(regime, {})
     default_config = _DEFAULT_STAGED_ENTRY_REGIME_CONFIG.get(regime, {}) if isinstance(_DEFAULT_STAGED_ENTRY_REGIME_CONFIG, dict) else {}
@@ -715,7 +738,7 @@ def get_staged_entry_regime_config(settings, regime: str) -> Dict[str, Any]:
     merged.update(regime_config)
     enabled_global = False
     if settings is not None:
-        enabled_global = bool(getattr(settings, 'staged_entry_enabled', False))
+        enabled_global = bool(getattr(settings, 'staged_entry_enabled', True))
     merged['enabled'] = bool(merged.get('enabled', False)) and enabled_global
     return merged
 

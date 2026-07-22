@@ -436,8 +436,8 @@ class PnLPredictor:
             return {"valid": False, "reason": "invalid_bollinger_or_position"}
 
         band_position = max(0.0, min(1.0, (current_price - lower) / (upper - lower)))
-        configured_tp = float(take_profit_pct if take_profit_pct is not None else getattr(settings, "take_profit_pct", 1.8)) / 100.0
-        configured_sl = float(stop_loss_pct if stop_loss_pct is not None else getattr(settings, "range_scalp_sl_pct", getattr(settings, "stop_loss_pct", 2.5))) / 100.0
+        configured_tp = float(take_profit_pct if take_profit_pct is not None else getattr(settings, "take_profit_pct", 4.14)) / 100.0
+        configured_sl = float(stop_loss_pct if stop_loss_pct is not None else getattr(settings, "range_scalp_sl_pct", 0.8)) / 100.0
         target_price = min(middle, current_price * (1.0 + max(configured_tp, 0.0)))
         structural_stop = lower
         configured_stop = current_price * (1.0 - max(configured_sl, 0.0))

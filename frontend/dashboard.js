@@ -1249,6 +1249,13 @@ function renderOpenPositions(d) {
         const profileBadge = fmtProfileBadge(p);
         const modeBadge = fmtModeBadge(p);
         const peakTuningBadges = fmtPeakTuningBadges(p);
+        const _earlyPeak = p.early_peak_protection || {};
+        const _earlyPeakReason = _earlyPeak.reason || '';
+        const _earlyPeakActive = !!_earlyPeak.should_close;
+        const _earlyPeakExecuted = _earlyPeak.execution_status === 'partial_executed';
+        const earlyPeakBadge = _earlyPeakReason
+            ? ` <span class="badge-peak${_earlyPeakActive ? ' badge-peak-active' : ''}" title="Wolf Hunter temprano: ${_earlyPeakReason}${_earlyPeak.detail ? ' — ' + _earlyPeak.detail : ''}">🐺${_earlyPeakExecuted ? ' PARCIAL WOLF EARLY' : _earlyPeakActive ? ' PROTECCIÓN TEMPRANA' : ' PEAK'}</span>`
+            : '';
         const entryMode = p.entry_regime_mode || p.metadata?.regime_at_entry || '—';
 
         const tp = parseFloat(p.take_profit || 0);
@@ -1269,7 +1276,7 @@ function renderOpenPositions(d) {
             : '';
         rows.push(`
         <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'open')" style="cursor:pointer" data-symbol="${p.symbol}">
-            <td>${typeBadge} <strong>${p.symbol}</strong>${contextBadge}${overflowBadge}${escBadge}${partialBadge}${bounceBadge}</td>
+            <td>${typeBadge} <strong>${p.symbol}</strong>${contextBadge}${overflowBadge}${escBadge}${partialBadge}${bounceBadge}${earlyPeakBadge}</td>
             <td class="profile-cell">${profileBadge}</td>
             <td class="mode-cell">${modeBadge}</td>
             <td>$${fmt(entryP)}<br><small class="entry-time">${entryTimeStr}</small></td>
@@ -1675,6 +1682,7 @@ function renderSelectionObservability(data) {
         expired: 'status-neutral'
     };
     const displayCounts = data.display_counts || {};
+    const latestCycle = data.latest_selection_cycle || null;
 
     const comparePriority = (a, b) => {
         const ap = Array.isArray(a.priority) ? a.priority : [];
@@ -1696,6 +1704,14 @@ function renderSelectionObservability(data) {
             <div><span>En cola / bloqueadas</span><strong>${(displayCounts.validated_queue ?? 0) + (displayCounts.blocked_regime ?? 0) + (displayCounts.duplicate_position ?? 0)}</strong></div>
             <div><span>Finalizadas</span><strong>${(displayCounts.opened ?? 0) + (displayCounts.discarded ?? 0) + (displayCounts.expired ?? 0)}</strong></div>
         </div>`;
+
+    const cycleSummary = latestCycle ? `
+        <div class="selection-summary">
+            <div><span>Última selección</span><strong>${formatTime(latestCycle.completed_at || latestCycle.started_at)}</strong></div>
+            <div><span>Régimen</span><strong>${latestCycle.regime_mode || '—'}</strong></div>
+            <div><span>Resultado</span><strong>${latestCycle.summary?.reason || latestCycle.summary?.outcome || '—'}</strong></div>
+            <div><span>Universo / QUBO / Órdenes</span><strong>${latestCycle.candidate_count ?? 0} / ${latestCycle.selected_count ?? 0} / ${latestCycle.executed_count ?? 0}</strong></div>
+        </div>` : '';
 
     const tabs = `
         <div class="selection-tabs">
@@ -1723,6 +1739,7 @@ function renderSelectionObservability(data) {
 
     el.innerHTML = `
         ${countsSummary}
+        ${cycleSummary}
         ${tabs}
         <div class="selection-candidates-header">
             <span>Símbolo</span>
@@ -3268,12 +3285,15 @@ async function updateOperatorAlerts() {
         const textEl = document.getElementById('operatorAlertText');
         if (!banner || !textEl) return;
         const alerts = data.alerts || [];
-        _activeAlertKeys = alerts.map(a => a.alert_type);
+        _activeAlertKeys = alerts.map(a => a.alert_key || a.alert_type);
         if (alerts.length === 0) {
             banner.style.display = 'none';
             return;
         }
-        const msgs = alerts.map(a => `<b>${a.alert_type}</b>: ${a.message}`).join(' &nbsp;|&nbsp; ');
+        const msgs = alerts.map(a => {
+            const position = a.symbol ? ` [${a.symbol}${a.pnl_usdt_net != null ? ` ${Number(a.pnl_usdt_net).toFixed(2)} USDT` : ''}]` : '';
+            return `<b>${a.alert_type}</b>${position}: ${a.message}`;
+        }).join(' &nbsp;|&nbsp; ');
         textEl.innerHTML = msgs;
         banner.style.display = 'flex';
     } catch (e) {

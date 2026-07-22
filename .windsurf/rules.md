@@ -111,11 +111,20 @@ unified_governance_supervisor.py → UG: árbitro final — consolida advisories
 ## 3. CICLO DE VIDA DE UNA POSICIÓN
 
 **Entrada SPOT:**
-1. `pair_screener` → candidato → señal en `signal_store`
+1. `pair_screener` → candidato → señal en `signal_store`.
 2. `autonomous_signals.py` asigna `peak_quality_profile` vía `entry_profile_gate.classify()` (A/B/C/discard). Discard = descarte inmediato.
 3. `_filter_buy_candidates()` (s80) aplica únicamente el entry-profile gate: cualquier perfil distinto de A/B/C se descarta. El legacy behavior-first gate (`entry_quality_gate_mode`) está desactivado por defecto y solo se reactiva bajo análisis explícito.
-4. `pnl_service.validate()` / predictor gate según `predictor_gate_mode` → QUBO selector → Kelly sizing → `BinanceClient.buy()` → `_verify_entry_filled()`
-5. Solo si fill confirmado: INSERT `trades_open` con `regime_at_entry`, `profile_at_entry`, `config_snapshot_id`, comisión de entrada
+4. `pnl_service.validate()` / predictor gate según `predictor_gate_mode` → QUBO selector → `staged_entry` persiste `ready`; re-chequeos inter/intra-ciclo lo convierten en `validated` tras los `required_positive_checks`.
+5. **Regla dura de latencia:** una validación intra-ciclo activa `trade_cycle_wake_event`; el scheduler no envía órdenes. El único trade cycle despierta y recorre la ruta canónica `execute_once()` → `get_openable_candidates()` → `_buy_top_symbols()` sin esperar el siguiente intervalo.
+6. La apertura sigue siendo fail-closed: ranking EV-first y `max_open_per_cycle`, régimen activo, ausencia de posición duplicada, capital, preflight, Kelly sizing y `_verify_entry_filled()` siguen siendo obligatorios. Las validaciones concurrentes se coalescen en un solo ciclo; nunca autorizan una orden directa por candidata.
+7. **🔴 Confirmación direccional staged:** `direction_confirmation_mode="enforced"` es obligatorio en `SPOT_BULL`, `RANGE_SCALP`, `FUTURES_SHORT` y `PRESERVATION`. El stage registra el setup y `base_price`, pero no es una confirmación. La apertura requiere `EntryDecision` elegible y dos avances consecutivos de al menos `direction_min_progress_bps`.
+8. LONG debe avanzar; SHORT debe descender; RANGE_SCALP además debe reducir distancia a un target válido. Perfil A/B/C, QUBO, EV y predictor no reemplazan esta condición.
+9. Un único retroceso limitado cambia a `recovery_pending` sin sumar checks positivos ni autorizar una orden. Solo se recupera al recapturar el setup y completar otro avance consecutivo. Un segundo retroceso, stop/drawdown, precio/referencia ausente, target inválido o expiración descarta terminalmente.
+10. Todo check persiste `ready_candidate_checks.input_features.direction`. Un descarte terminal tiene `decision="negative"`, razón `DIRECTION_*` y copia su contexto en `ready_candidates.data.last_rejection`; `recovery_pending` se registra como `decision="pending"`.
+11. La posición abierta conserva `ready_candidate_id` y `staged_direction` en metadata para atribuir el PnL realizado a su cadena de validación.
+12. Defaults activos: `direction_min_progress_bps=3.0`, `direction_max_adverse_bps=50.0`, `direction_required_confirmations=2`. Ajustar los dos espejos canónicos (`config.py` y `config_helpers.py`) y comparar por régimen/ventana, no por una racha aislada.
+
+**Monitoreo obligatorio de dirección:** por cada ventana de 24 h, medir staged, `recovery_pending`, validadas, abiertas, descartadas, razones `DIRECTION_*`, cobertura de aperturas y PnL neto de posiciones con `ready_candidate_id`. Si el rechazo terminal supera 90% o la cobertura cae materialmente, analizar `progress_bps`, `base_progress_bps` y `target_progress` antes de cambiar umbrales o desactivar la guarda.
 
 **Vida activa (cada ciclo sobre posiciones abiertas):**
 - `run_trades.py` itera `position_manager.get_open_positions()`
@@ -325,7 +334,10 @@ Fix: `auto_reconcile_spot()` / `auto_reconcile_futures()` o endpoint `/reconcile
 ## 7. SKILLS — ROLES ACTIVOS POR ÁREA
 
 Conocimiento experto que se activa automáticamente según el contexto de cada solicitud.
-Cada rol tiene dos niveles: **Principios** (dominio general, siempre válido, permite razonar más allá del código actual) y **En este sistema** (cómo aplica hoy, como referencia, no como límite).
+
+**Autonomía analítica total:** cada rol puede cuestionar libremente cualquier supuesto, parámetro, arquitectura, gate, modelo, prioridad o decisión histórica del sistema. La sección **En este sistema** describe evidencia y comportamiento vigente; nunca limita hipótesis, alternativas ni recomendaciones. Cada análisis debe separar hechos observados, incertidumbres, hipótesis, impacto SPOT/FUTURES y perfiles A/B/C, método de validación y rollback.
+
+Las únicas invariantes son de ejecución, no de razonamiento: no bypass de preflight/fill Binance, PnL neto, paridad Binance↔DB, custodia de secretos, auditoría inmutable y validación fuera de muestra antes de modificar capital real.
 
 ---
 
@@ -335,7 +347,7 @@ Cada rol tiene dos niveles: **Principios** (dominio general, siempre válido, pe
 
 **Behavioral Finance**
 - *Principios:* Los inversores son sistemáticamente irracionales en extremos de miedo/codicia. La capitulación genera oportunidades de compra con EV positivo; el greed extremo genera sobrecompra con reversión probable. El sesgo de recencia hace que los traders eleven SLs tras rachas ganadoras y los bajen tras perdedoras.
-- *En este sistema:* F&G modifica Kelly en `_kelly_position_size()`: capitulación amplía base, greed extremo la reduce. No suprimir este mecanismo — es la señal de sizing más robusta conductualmente. Al analizar sizing anómalo: verificar que el multiplicador F&G está activo y su valor actual.
+- *En este sistema:* F&G modifica Kelly en `_kelly_position_size()`: capitulación amplía base y greed extremo la reduce. Al analizar sizing anómalo, contrastar el multiplicador vigente con evidencia de resultados y con alternativas de sizing.
 
 **Actuario / Riesgo sistémico**
 - *Principios:* El riesgo técnico (fallo de infraestructura) y el riesgo de mercado (pérdidas normales) requieren respuestas distintas. Pausar operaciones por pérdidas de mercado introduce sesgo de timing y destruye el edge estadístico. Los circuit breakers deben responder a fallos del sistema, no a resultados del mercado.
@@ -379,7 +391,7 @@ Cada rol tiene dos niveles: **Principios** (dominio general, siempre válido, pe
 
 **Experto en ML/IA**
 - *Principios:* Un modelo que siempre predice "sí" con umbral bajo puede tener alta accuracy pero EV negativo. El overfitting en datos sintéticos se detecta por la diferencia entre performance en train vs live. Los features más predictivos deben mantenerse estables entre ciclos de reentrenamiento — si cambian mucho, el dataset es insuficiente.
-- *En este sistema:* `learning_engine.py` usa regresión logística con pesos por indicador. `bias_correction` compensa distribución sintéticos vs reales. **🔴 Nunca bajar umbrales de probabilidad para forzar más trades** — eso aprueba trades con EV negativo. Features más predictivos: `vol_spike` y `trend_4h`. Recalibrar con `POST /learning/run` cuando hay ≥50 trades reales cerrados.
+- *En este sistema:* `learning_engine.py` usa regresión logística con pesos por indicador y `bias_correction` compensa distribución sintéticos vs reales. Evaluar cualquier umbral de probabilidad contra EV neto, calibración, coste de falsos positivos y muestra fuera de entrenamiento. Features más predictivos actuales: `vol_spike` y `trend_4h`; su relevancia debe verificarse periódicamente.
 
 **Diseñador / UX**
 - *Principios:* La jerarquía visual determina qué información procesa primero el operador bajo presión. Las alertas críticas deben ser inmediatamente visibles sin acción del usuario. El color debe codificar estado (rojo=crítico, amarillo=warning, verde=ok) de forma consistente en toda la interfaz.
@@ -889,3 +901,39 @@ Kelly uniforme: $2500 max, KD=0.26, max_pct_liquid=0.90, conviction_max=0.30, MP
 ### Checks operativos
 - Si `db_client` es `None`, reiniciar el contenedor `app` después de confirmar que Postgres está healthy.
 - Si las posiciones cerradas no cargan, verificar que `PositionManager` tenga `db_client` con pool (no `None`) y que `get_closed_positions_since` use `exit_time >= since`.
+
+---
+
+## 9. Reanálisis de calibración de entradas — s88 (jul 22 2026)
+
+### Scope
+
+Cierre de la revisión de entry calibration con énfasis en `range_reversion_predictor_mode` y alineación completa de defaults auditables.
+
+### Decisiones clave
+
+- **RANGE_SCALP shadow fallback**: `entry_decision.py` no rechaza `RANGE_MODEL_INVALID` cuando `range_reversion_predictor_mode="shadow"`. Se conserva el predictor long genérico y se persiste `range_prediction={"valid": False, "reason": "shadow_skipped"}`.
+- **SPOT_BULL direccional**: `direction_min_progress_bps` pasa de `3.0` a `5.0`; `direction_required_confirmations` se mantiene en `2`.
+- **Defaults canónicos**: todos los `getattr(settings, ..., default)` para parámetros críticos ahora coinciden con `_PARAM_DEFAULTS` en `config_helpers.py`.
+
+### Archivos modificados
+
+- `entry_decision.py`: lógica condicional de `RANGE_MODEL_INVALID` y defaults canónicos.
+- `config.py` / `config_helpers.py`: umbrales de confirmación SPOT_BULL y defaults de staged/entry decision.
+- `staged_entry.py`: defaults de `entry_profile_gate_thresholds_path` y `range_reversion_predictor_mode`.
+- `run_trades.py`: defaults de `staged_entry_enabled`, `entry_decision_enabled`, `volspike_override_enabled`.
+- `pnl_predictor.py`: defaults de `take_profit_pct` y `range_scalp_sl_pct`.
+- `tests/test_entry_decision.py`, `tests/test_range_scalp_entry_pipeline.py`, `tests/test_entry_quality_gate.py`, `tests/test_open_positions_detail.py`, `Dev/benchmarks/mimic_baseline.json`.
+- `tmp_audit_config.py`: parser tolerante a constantes de módulo y comas finales.
+
+### Validación
+
+- **576 passed, 0 failed** en suite completa.
+- **0 critical mismatches** en audit de `getattr`.
+- Runtime activo y healthy tras reinicio de `crypto-agent-app`.
+
+### Rollback
+
+- Para volver al comportamiento anterior de `RANGE_SCALP`: `PATCH /config/apply {"range_reversion_predictor_mode": "blocking"}`.
+- Para restaurar SPOT_BULL 3 bps: editar `SPOT_BULL.direction_min_progress_bps` en `config.py` y `config_helpers.py`, rebuild/restart.
+- Para reactivar `volspike_override_enabled`: `PATCH /config/apply {"volspike_override_enabled": true}` (no recomendado bajo entry-profile gate).

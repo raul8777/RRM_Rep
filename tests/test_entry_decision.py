@@ -53,8 +53,11 @@ def test_requires_positive_ev_and_probability():
     assert weak.reason == "PROBABILITY_BELOW_THRESHOLD"
 
 
-def test_range_scalp_requires_valid_reversion_payoff():
-    settings = _settings(entry_decision_regime_mode={"RANGE_SCALP": "enforced"})
+def test_range_scalp_requires_valid_reversion_payoff_when_blocking():
+    settings = _settings(
+        entry_decision_regime_mode={"RANGE_SCALP": "enforced"},
+        range_reversion_predictor_mode="blocking",
+    )
     invalid = evaluate(
         {"expected_pnl": 2.0, "success_probability": 0.8},
         "RANGE_SCALP", "A", 1.0, settings,

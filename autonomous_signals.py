@@ -326,6 +326,7 @@ class AutonomousSignalGenerator:
                         analysis['bb_bandwidth'] = round(_bw, 4)
                         analysis['bb_lower'] = _bbl[-1]
                         analysis['bb_upper'] = _bbu[-1]
+                        analysis['bb_middle'] = _bbm[-1]
                         # s72 A5: bb_position = relative position in range (0=lower band, 1=upper band)
                         _bb_range = _bbu[-1] - _bbl[-1]
                         analysis['bb_position'] = round((_last_price - _bbl[-1]) / _bb_range, 4) if _bb_range > 0 else 0.5

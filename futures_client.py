@@ -25,9 +25,11 @@ import urllib.request
 import urllib.parse
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 from config_helpers import get_param
+from loss_focus import build_loss_focus_snapshot, evaluate_loss_focus
 import error_collector as ec
 from profit_realization_supervisor import (
     ProfitRealizationContext,
@@ -339,7 +341,9 @@ class FuturesClient:
             _settings = getattr(self, '_cached_settings', None)
             _entry_comm = round(entry_commission(pos.qty, pos.entry_price, 'futures', _settings), 6)
             _exit_comm = round(exit_commission(pos.qty, exit_price, 'futures', _settings), 6)
-            _total_comm = total_commission(pos.qty, pos.entry_price, exit_price, 'futures', _settings)
+            if pos._smart_meta.get('pnl_accounting_mode') == 'binance_user_trade_verified':
+                _exit_comm = round(float(pos._smart_meta.get('binance_close_commission', _exit_comm) or 0.0), 6)
+            _total_comm = _entry_comm + _exit_comm
             if pnl_override is not None:
                 # Proportional PnL from multi-entry close — ensure net of commission
                 pnl = pnl_override - _total_comm
@@ -446,25 +450,44 @@ class FuturesClient:
 
     # ── FIX-T4 helper: query Binance for realized PnL of closed position ────
 
-    def _get_realized_pnl_from_trades(self, symbol: str, side: str) -> dict:
+    def _get_realized_pnl_from_trades(self, symbol: str, side: str, opened_at: Optional[datetime] = None) -> dict:
         """Query Binance userTrades for the most recent closing trade on this symbol/side.
         Used when Binance executes SL/TP independently and our close call fails with -2022."""
         try:
             trades = self._get("/fapi/v1/userTrades", {
                 "symbol": symbol, "limit": "10"
             }, signed=True)
-            for t in sorted(trades, key=lambda x: -int(x.get("time", 0))):
-                pnl = float(t.get("realizedPnl", 0))
-                if pnl == 0:
-                    continue
+            relevant = []
+            for t in trades:
                 _t_side = t.get("positionSide", "BOTH")
                 if _t_side == "BOTH":
                     _t_side = "SHORT" if not t.get("buyer", True) else "LONG"
                 if _t_side != side.upper():
                     continue
+                if opened_at and int(t.get("time", 0) or 0) < int(opened_at.timestamp() * 1000):
+                    continue
+                relevant.append(t)
+            for t in sorted(relevant, key=lambda x: -int(x.get("time", 0))):
+                pnl = float(t.get("realizedPnl", 0))
+                if pnl == 0:
+                    continue
+                commission = sum(abs(float(row.get("commission", 0) or 0)) for row in relevant)
+                funding = 0.0
+                try:
+                    params = {"symbol": symbol, "incomeType": "FUNDING_FEE", "limit": "100"}
+                    if opened_at:
+                        params["startTime"] = str(int(opened_at.timestamp() * 1000))
+                    income_rows = self._get("/fapi/v1/income", params, signed=True)
+                    funding = sum(float(row.get("income", 0) or 0) for row in income_rows or [])
+                except Exception as funding_error:
+                    print(f"[Futures] funding reconciliation unavailable for {symbol}: {funding_error}")
                 return {
                     "exit_price": float(t.get("price", 0)),
-                    "pnl": pnl,
+                    "pnl": pnl - commission + funding,
+                    "realized_pnl": pnl,
+                    "commission": commission,
+                    "funding": funding,
+                    "pnl_accounting_mode": "binance_user_trade_verified",
                     "reason": "trailing_sl_binance" if pnl > 0 else "stop_loss_binance",
                 }
         except Exception as e:
@@ -2166,7 +2189,16 @@ class FuturesClient:
                     self._persist_smart_meta(pos)
                 return result
             if pos:
-                pos.closed = True; pos.closed_at = datetime.now(timezone.utc); pos.exit_price = current_price; pos.pnl = pnl
+                _real = self._get_realized_pnl_from_trades(symbol, "LONG", pos.opened_at)
+                pos.closed = True
+                pos.closed_at = datetime.now(timezone.utc)
+                pos.exit_price = _real.get('exit_price') or current_price
+                pos.pnl = _real.get('pnl') if _real.get('pnl_accounting_mode') else pnl
+                if _real.get('pnl_accounting_mode'):
+                    pos._smart_meta['pnl_accounting_mode'] = _real['pnl_accounting_mode']
+                    pos._smart_meta['binance_realized_pnl'] = _real.get('realized_pnl')
+                    pos._smart_meta['binance_close_commission'] = _real.get('commission')
+                    pos._smart_meta['binance_funding'] = _real.get('funding', 0.0)
                 self._save_futures_closed(pos, reason)  # FIX-G: persist to DB
             print(f"[Futures] LONG {symbol} CLOSED: PnL~${pnl:.2f}")
             return result
@@ -2175,7 +2207,7 @@ class FuturesClient:
             # FIX-T1: Binance already closed position via SL/TP algo order
             if pos and ("-2022" in _emsg or "ReduceOnly" in _emsg):
                 print(f"[Futures] close_long {symbol}: position already closed by Binance — recording")
-                _real = self._get_realized_pnl_from_trades(symbol, "LONG")
+                _real = self._get_realized_pnl_from_trades(symbol, "LONG", pos.opened_at)
                 pos.closed = True
                 pos.closed_at = datetime.now(timezone.utc)
                 pos.exit_price = _real.get('exit_price') or current_price
@@ -2242,10 +2274,16 @@ class FuturesClient:
                     self._persist_smart_meta(pos)
                 return result
             if pos:
+                _real = self._get_realized_pnl_from_trades(symbol, "SHORT", pos.opened_at)
                 pos.closed     = True
                 pos.closed_at  = datetime.now(timezone.utc)
-                pos.exit_price = current_price
-                pos.pnl        = pnl
+                pos.exit_price = _real.get('exit_price') or current_price
+                pos.pnl        = _real.get('pnl') if _real.get('pnl_accounting_mode') else pnl
+                if _real.get('pnl_accounting_mode'):
+                    pos._smart_meta['pnl_accounting_mode'] = _real['pnl_accounting_mode']
+                    pos._smart_meta['binance_realized_pnl'] = _real.get('realized_pnl')
+                    pos._smart_meta['binance_close_commission'] = _real.get('commission')
+                    pos._smart_meta['binance_funding'] = _real.get('funding', 0.0)
                 self._save_futures_closed(pos, reason)  # FIX-G: persist to DB
             print(f"[Futures] SHORT {symbol} CLOSED: PnL~${pnl:.2f}")
             return result
@@ -2254,7 +2292,7 @@ class FuturesClient:
             # FIX-T1: Binance already closed position via SL/TP algo order
             if pos and ("-2022" in _emsg or "ReduceOnly" in _emsg):
                 print(f"[Futures] close_short {symbol}: position already closed by Binance — recording")
-                _real = self._get_realized_pnl_from_trades(symbol, "SHORT")
+                _real = self._get_realized_pnl_from_trades(symbol, "SHORT", pos.opened_at)
                 pos.closed     = True
                 pos.closed_at  = datetime.now(timezone.utc)
                 pos.exit_price = _real.get('exit_price') or current_price
@@ -2493,6 +2531,91 @@ class FuturesClient:
             _signal_cache[_symbol] = _ctx
             return _ctx
 
+        def _record_loss_focus(
+            pos: Any,
+            position_key: str,
+            *,
+            price: float,
+            pnl_usdt_net: float,
+            pnl_pct_net: float,
+            pnl_usdt_gross: float,
+            signal_strength: Optional[float],
+            signal_direction: Optional[str],
+            pnl_velocity_1h: Optional[float],
+            fear_greed_value: Optional[float],
+        ) -> None:
+            if not bool(get_param(settings, 'loss_focus_enabled', True)):
+                return
+            metadata = pos._smart_meta if isinstance(pos._smart_meta, dict) else {}
+            metadata['trade_type'] = 'futures'
+            state, event = evaluate_loss_focus(
+                metadata,
+                pnl_usdt_net,
+                float(get_param(settings, 'loss_focus_threshold_usdt', 9.0)),
+                float(get_param(settings, 'loss_focus_reset_usdt', 6.0)),
+            )
+            metadata['loss_focus_state'] = state
+            if event is None:
+                return
+            snapshot_position = SimpleNamespace(
+                position_id=position_key,
+                symbol=pos.symbol,
+                side=pos.side,
+                entry_price=pos.entry_price,
+                entry_time=pos.opened_at,
+                quantity=pos.qty,
+                entry_commission=metadata.get('entry_commission', 0.0),
+                stop_loss=pos.sl_price,
+                take_profit=pos.tp_price,
+            )
+            snapshot = build_loss_focus_snapshot(
+                position=snapshot_position,
+                metadata=metadata,
+                pnl_usdt_net=pnl_usdt_net,
+                pnl_pct_net=pnl_pct_net,
+                pnl_usdt_gross=pnl_usdt_gross,
+                current_price=price,
+                regime_mode=getattr(settings, 'current_regime_mode', None) if settings else None,
+                runtime_profile=getattr(settings, 'current_regime_profile_label', None) if settings else None,
+                signal_strength=signal_strength,
+                signal_direction=signal_direction,
+                pnl_velocity_1h=pnl_velocity_1h,
+                peak_pnl_pct=float(metadata.get('peak_pnl_pct', 0.0) or 0.0),
+                fear_greed_value=fear_greed_value,
+            )
+            snapshot['event'] = event
+            snapshot['non_blocking'] = True
+            try:
+                self._persist_smart_meta(pos)
+                self._audit(pos.symbol, event, snapshot)
+                if self.db_client:
+                    alert_id = f"loss_focus_{position_key.replace('-', '').lower()}"
+                    if event == 'loss_focus_recovered':
+                        self.db_client.execute_update(
+                            "UPDATE trading_runtime_state SET value = jsonb_set(value::jsonb, '{acknowledged}', 'true'::jsonb), updated_at=NOW() WHERE key=%s",
+                            (f'operator_alert_{alert_id}',),
+                        )
+                    elif event == 'loss_focus_triggered':
+                        alert_payload = {
+                            'alert_type': 'loss_focus',
+                            'message': f"{pos.symbol} {pos.side} crossed net loss ${abs(pnl_usdt_net):.2f}",
+                            'position_id': position_key,
+                            'symbol': pos.symbol,
+                            'event': event,
+                            'pnl_usdt_net': round(float(pnl_usdt_net), 8),
+                            'entry_context_status': 'canonical',
+                            'snapshot': snapshot,
+                            'acknowledged': False,
+                            'ts': datetime.now(timezone.utc).isoformat(),
+                        }
+                        self.db_client.execute_update(
+                            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                            "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                            (f'operator_alert_{alert_id}', json.dumps(alert_payload)),
+                        )
+            except Exception as error:
+                print(f'[LossFocus/Futures] {pos.symbol}: telemetry persistence failed: {error}')
+
         # ── FIX-T4: Ghost detection — find positions closed by Binance SL/TP ──
         if not self.dry_run:
             try:
@@ -2717,9 +2840,24 @@ class FuturesClient:
                 _ctx_signal_direction = _base_sig.get("direction")
                 _ctx_signal_timestamp = _base_sig.get("timestamp")
 
-                print(f"[Futures] {symbol} {pos.side} check: price={price:.4f}, "
-                      f"entry={entry:.4f}, unr_pnl=${unr:.2f} ({pnl_pct*100:.2f}%), "
-                      f"SL={pos.sl_price:.4f}, TP={pos.tp_price:.4f}")
+                _record_loss_focus(
+                    pos,
+                    key,
+                    price=price,
+                    pnl_usdt_net=unr,
+                    pnl_pct_net=pnl_pct,
+                    pnl_usdt_gross=unr_gross,
+                    signal_strength=_ctx_signal_strength,
+                    signal_direction=_ctx_signal_direction,
+                    pnl_velocity_1h=_ctx_pnl_velocity,
+                    fear_greed_value=_cycle_fng_value,
+                )
+
+                print(
+                    f"[Futures] {symbol} {pos.side} check: price={price:.4f}, "
+                    f"entry={entry:.4f}, unr_pnl=${unr:.2f} ({pnl_pct*100:.2f}%), "
+                    f"SL={pos.sl_price:.4f}, TP={pos.tp_price:.4f}"
+                )
 
                 # ── 0a. Adverse signal early-exit (loss containment before hard SL) ──
                 _adv_enabled = bool(get_param(settings, 'futures_adverse_exit_enabled')) if settings else True

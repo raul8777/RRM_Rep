@@ -1050,8 +1050,14 @@ async def get_operator_alerts() -> Dict:
                 if not payload.get("acknowledged", False):
                     alerts.append({
                         "key": row.get("key"),
+                        "alert_key": str(row.get("key") or "").removeprefix("operator_alert_"),
                         "alert_type": payload.get("alert_type"),
                         "message": payload.get("message"),
+                        "position_id": payload.get("position_id"),
+                        "symbol": payload.get("symbol"),
+                        "event": payload.get("event"),
+                        "pnl_usdt_net": payload.get("pnl_usdt_net"),
+                        "entry_context_status": payload.get("entry_context_status"),
                         "ts": payload.get("ts"),
                         "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
                     })
@@ -1432,6 +1438,7 @@ async def get_open_positions() -> Dict:
                     "sso_levels_done": list(meta.get('sso_levels_done', []) or []),
                     "sso_last_trigger": str(meta.get('sso_last_trigger', '') or ''),
                     "peak_pnl_pct": peak_pnl_pct,
+                    "early_peak_protection": meta.get('early_peak_protection', {}),
                     "bounce_entry": bool(meta.get('bounce_entry', False)),
                     **_normalize_transaction_context(getattr(position, 'metadata', {}) or {}, _runtime_ctx),
                 })
@@ -2156,10 +2163,26 @@ def _get_effective_runtime_selection(summary_mode: Optional[str] = None) -> Dict
     try:
         _rows = db_client.execute_query(
             "SELECT key, value, updated_at FROM trading_runtime_state "
-            "WHERE key IN ('smart_total_active_mode', %s)",
+            "WHERE key IN ('effective_runtime_selection_snapshot', 'smart_total_active_mode', %s)",
             (f"regime_profile_active_{_mode or _fallback_mode}",),
         )
         _state = {str(r.get('key') or ''): r for r in (_rows or [])}
+        _snapshot = _state.get('effective_runtime_selection_snapshot')
+        if _snapshot:
+            _snapshot_value = _decode_runtime_state_value(_snapshot.get('value'))
+            if isinstance(_snapshot_value, dict):
+                _snapshot_mode = str(
+                    _snapshot_value.get('selected_mode') or _snapshot_value.get('mode') or ''
+                ).strip().upper()
+                if _snapshot_mode:
+                    _mode = _snapshot_mode
+                    _mode_source = "effective_runtime_selection_snapshot"
+                _snapshot_profile = str(_snapshot_value.get('selected_profile') or '').strip().upper()
+                if _snapshot_profile:
+                    _profile = _snapshot_profile
+                    _profile_source = "effective_runtime_selection_snapshot"
+                    _profile_ts = _snapshot.get('updated_at')
+                    _profile_updated_at = _profile_ts.isoformat() if _profile_ts else None
 
         if not _mode and _state.get('smart_total_active_mode'):
             _mv = _decode_runtime_state_value(_state['smart_total_active_mode'].get('value'))
@@ -3225,6 +3248,7 @@ async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
                 "sso_levels_done": list(_sp_meta_last.get('sso_levels_done', []) or []),
                 "sso_last_trigger": str(_sp_meta_last.get('sso_last_trigger', '') or ''),
                 "peak_pnl_pct": _sp_peak_pnl_pct,
+                "early_peak_protection": _sp_meta_last.get('early_peak_protection', {}),
                 "escalamientos": _sp_esc_n,
                 "entries": _enrich_entries(_sp_entries_raw, _sp_cp, _sp_first.side),
                 "bounce_entry": bool(_sp_meta_last.get('bounce_entry', False)),
@@ -6923,32 +6947,64 @@ async def get_health_status() -> Dict:
             if overall != "error":
                 overall = "warning"
 
-    # Trade cycle freshness
     last_cycle = orchestrator.last_trade_cycle_at
+    _cycle_diagnostics = orchestrator.get_trade_cycle_diagnostics()
     if last_cycle:
         _now_utc = datetime.now(timezone.utc)
         _last_cycle_aware = last_cycle if last_cycle.tzinfo else last_cycle.replace(tzinfo=timezone.utc)
         age_min = (_now_utc - _last_cycle_aware).total_seconds() / 60
-        _stale_threshold = orchestrator.current_cycle_minutes * 1.5
+        _stale_threshold = float(_cycle_diagnostics["stale_threshold_minutes"])
         stale = age_min > _stale_threshold
-        checks["trade_cycle"] = {
-            "status": "warning" if stale else "ok",
-            "last_cycle_at": to_mexico_time_str(last_cycle.isoformat()),
-            "age_minutes": round(age_min, 1),
-            "stale_threshold_minutes": round(_stale_threshold, 1),
-            "cycle_running": orchestrator.trade_cycle_thread.is_alive() if orchestrator.trade_cycle_thread else False,
-        }
+        _cycle_status = "warning" if stale else "ok"
+        _recovery_action = None
         if stale:
+            _recovery = orchestrator.recover_stale_trade_cycle()
+            _recovery_action = _recovery["action"]
+            _cycle_diagnostics = _recovery
             global _last_stale_reported_cycle
             if _last_stale_reported_cycle != last_cycle:
-                ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_WARNING,
-                             f"Trade cycle may be stale: last run {age_min:.1f} min ago "
-                             f"(threshold={_stale_threshold:.0f} min, regime={orchestrator.current_cycle_minutes}min)")
+                _stale_level = (
+                    ec.LEVEL_ERROR
+                    if _cycle_diagnostics["worker_state"] in ("dead", "stale_running")
+                    else ec.LEVEL_WARNING
+                )
+                ec.add_error(
+                    ec.SOURCE_TRADING_CYCLE,
+                    _stale_level,
+                    f"Trade cycle may be stale: last run {age_min:.1f} min ago "
+                    f"(threshold={_stale_threshold:.0f} min, regime={orchestrator.current_cycle_minutes}min, "
+                    f"worker={_cycle_diagnostics['worker_state']}, recovery={_recovery_action})",
+                )
                 _last_stale_reported_cycle = last_cycle
             if overall != "error":
                 overall = "warning"
+        checks["trade_cycle"] = {
+            "status": _cycle_status,
+            "last_cycle_at": to_mexico_time_str(last_cycle.isoformat()),
+            "age_minutes": round(age_min, 1),
+            "stale_threshold_minutes": round(_stale_threshold, 1),
+            "cycle_running": bool(_cycle_diagnostics["thread_alive"]),
+            "worker_state": _cycle_diagnostics["worker_state"],
+            "in_progress": bool(_cycle_diagnostics["in_progress"]),
+            "phase": _cycle_diagnostics["phase"],
+            "started_at": _cycle_diagnostics["started_at"].isoformat() if _cycle_diagnostics["started_at"] else None,
+            "completed_at": _cycle_diagnostics["completed_at"].isoformat() if _cycle_diagnostics["completed_at"] else None,
+            "running_minutes": round(_cycle_diagnostics["running_minutes"], 1) if _cycle_diagnostics["running_minutes"] is not None else None,
+            "last_duration_seconds": _cycle_diagnostics["last_duration_seconds"],
+            "last_error": _cycle_diagnostics["last_error"],
+            "last_error_at": _cycle_diagnostics["last_error_at"].isoformat() if _cycle_diagnostics["last_error_at"] else None,
+            "recovery_action": _recovery_action or _cycle_diagnostics["last_recovery_action"],
+            "recovery_attempts": _cycle_diagnostics["recovery_attempts"],
+            "last_recovery_at": _cycle_diagnostics["last_recovery_at"].isoformat() if _cycle_diagnostics["last_recovery_at"] else None,
+        }
     else:
-        checks["trade_cycle"] = {"status": "unknown", "detail": "No cycle completed yet"}
+        checks["trade_cycle"] = {
+            "status": "unknown",
+            "detail": "No cycle completed yet",
+            "worker_state": _cycle_diagnostics["worker_state"],
+            "cycle_running": bool(_cycle_diagnostics["thread_alive"]),
+            "phase": _cycle_diagnostics["phase"],
+        }
 
     _cycle_failures = int(getattr(orchestrator, 'consecutive_cycle_failures', 0) or 0)
     checks["cycle_failures"] = {
@@ -7100,7 +7156,10 @@ async def get_health_status() -> Dict:
         checks["portfolio_exposure"] = {"status": "error", "detail": str(_pe)}
 
     # Ciclo dinámico actual + posiciones dinámicas
-    _regime_now = getattr(orchestrator, 'current_regime_mode', 'SPOT_BULL') or 'SPOT_BULL'
+    _effective_runtime = _get_effective_runtime_selection(
+        str(getattr(orchestrator, 'current_regime_mode', '') or 'SPOT_BULL')
+    )
+    _regime_now = str(_effective_runtime.get('mode') or 'SPOT_BULL').upper()
     try:
         from run_trades import _get_max_positions_for_regime, _overflow_positions as _ov_set
         _max_pos_now = _get_max_positions_for_regime(settings, _regime_now)
@@ -7108,14 +7167,14 @@ async def get_health_status() -> Dict:
     except Exception:
         _max_pos_now = getattr(settings, 'max_positions', 12)
         _overflow_used = 0
-    checks["trade_cycle"] = {
+    checks["trade_cycle"].update({
         "current_cycle_minutes": orchestrator.current_cycle_minutes,
         "last_trade_cycle_at": orchestrator.last_trade_cycle_at.isoformat() if orchestrator.last_trade_cycle_at else None,
         "regime": _regime_now,
         "max_positions_current": _max_pos_now,
         "overflow_slots_used": _overflow_used,
         "overflow_max_extra": _cfg_param(settings, 'overflow_max_extra'),
-    }
+    })
 
     # Circuit breaker status
     try:
@@ -7748,6 +7807,8 @@ _KELLY_EDITABLE_FIELDS = {
     "max_rebalance_per_cycle",
     "rebalance_max_abs_pnl_pct",
     "min_hold_minutes_spot_bull", "min_hold_for_prediction_exit",
+    "profit_predexit_early_protection_mode", "profit_predexit_early_active_regimes", "profit_predexit_early_min_peak_pct", "profit_predexit_early_min_giveback_pct",
+    "loss_focus_enabled", "loss_focus_threshold_usdt", "loss_focus_reset_usdt",
     "min_cycles_before_close_shorts",
     "futures_breakeven_activation_pct",
     "futures_trailing_activation_pct", "futures_sl_cooldown_hours",
@@ -8685,9 +8746,26 @@ def _build_selection_observability(db, limit: int = 100, active_regime: Optional
     except Exception as exc:
         return {"available": False, "reason": str(exc), "candidates": []}
 
+    latest_cycle = None
+    try:
+        cycle_rows = db.execute_query(
+            "SELECT cycle_id, started_at, completed_at, regime_mode, candidate_count, selected_count, "
+            "executed_count, summary FROM entry_selection_cycles ORDER BY started_at DESC LIMIT 1"
+        )
+        if cycle_rows:
+            latest_cycle = cycle_rows[0]
+            if isinstance(latest_cycle.get("summary"), str):
+                latest_cycle["summary"] = json.loads(latest_cycle["summary"])
+            for key in ("started_at", "completed_at"):
+                value = latest_cycle.get(key)
+                if value and hasattr(value, "isoformat"):
+                    latest_cycle[key] = value.isoformat()
+    except Exception:
+        latest_cycle = None
+
     candidates: List[Dict[str, Any]] = []
     status_counts: Dict[str, int] = {}
-    effective_regime = str(active_regime or getattr(settings, "current_regime_mode", "") or "").upper() or None
+    effective_regime = str(active_regime or _get_effective_runtime_selection().get("mode") or "").upper() or None
     effective_open_symbols = {str(symbol).upper() for symbol in (open_symbols or set())}
     for row in rows or []:
         for key in ("signal_meta", "config_snapshot", "data", "input_features", "thresholds_snapshot"):
@@ -8792,6 +8870,7 @@ def _build_selection_observability(db, limit: int = 100, active_regime: Optional
         "expired_count": status_counts.get("expired", 0),
         "latest_review_at": latest_review_at,
         "last_entry_at": last_entry_at,
+        "latest_selection_cycle": latest_cycle,
         "total": len(candidates),
     }
 
@@ -8803,10 +8882,11 @@ async def get_selection_observability(limit: int = 100, _auth=Depends(_require_a
         open_symbols = set()
         if components.position_manager:
             open_symbols = set(components.position_manager.get_all_positions().keys())
+        effective_runtime = _get_effective_runtime_selection()
         return _build_selection_observability(
             components.db_client,
             limit=limit,
-            active_regime=getattr(settings, "current_regime_mode", None),
+            active_regime=effective_runtime.get("mode"),
             open_symbols=open_symbols,
         )
     except Exception as exc:
@@ -9359,6 +9439,8 @@ def _check_config_drift(settings) -> List[Dict]:
         'entry_quality_vol_spike_min_range_scalp',
         'range_scalp_max_rsi', 'range_scalp_max_bb_position',
         'sso_target_contribution_pct_range_scalp',
+        'profit_predexit_early_protection_mode', 'profit_predexit_early_active_regimes', 'profit_predexit_early_min_peak_pct', 'profit_predexit_early_min_giveback_pct',
+        'loss_focus_enabled', 'loss_focus_threshold_usdt', 'loss_focus_reset_usdt',
         # SSO-1d: Flat Stagnation Timeout — DB-governed
         'sso_flat_stagnation_timeout_enabled',
         'sso_flat_stagnation_timeout_hours',
@@ -10666,6 +10748,8 @@ async def post_config_verify(body: Dict = None, _auth=Depends(_require_api_key))
             'entry_quality_vol_spike_min_range_scalp',
             'range_scalp_max_rsi', 'range_scalp_max_bb_position',
             'sso_target_contribution_pct_range_scalp',
+            'profit_predexit_early_protection_mode', 'profit_predexit_early_active_regimes', 'profit_predexit_early_min_peak_pct', 'profit_predexit_early_min_giveback_pct',
+            'loss_focus_enabled', 'loss_focus_threshold_usdt', 'loss_focus_reset_usdt',
             # SSO-1d: Flat Stagnation Timeout — DB-governed
             'sso_flat_stagnation_timeout_enabled',
             'sso_flat_stagnation_timeout_hours',

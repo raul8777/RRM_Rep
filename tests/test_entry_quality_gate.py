@@ -5,6 +5,10 @@ The gate must approve only assets whose current price behavior matches the
 short-term profit objective of the active regime/profile.
 """
 
+import logging
+import sys
+import types
+
 import pytest
 
 from run_trades import (
@@ -24,6 +28,7 @@ class DummySettings:
             "range_scalp_min_rsi": 25.0,
             "range_scalp_max_rsi": 60.0,
             "futures_min_inject_strength": 0.40,
+            "entry_decision_enabled": False,
         }
         if name in defaults:
             return defaults[name]
@@ -301,6 +306,41 @@ def test_filter_by_quality_is_mode_aware_across_four_modes():
 
     futures_short = _filter_by_quality(symbols, client, SETTINGS, target_count=2, regime_mode="FUTURES_SHORT")
     assert futures_short[0] == "UPTREND"
+
+
+def test_quality_model_load_failure_is_cached(monkeypatch, tmp_path, caplog):
+    import entry_profile_gate
+
+    model_path = tmp_path / "quality-score.pkl"
+    model_path.touch()
+    calls = []
+
+    def _fail_load(path):
+        calls.append(path)
+        raise RuntimeError("unavailable model")
+
+    monkeypatch.setattr(entry_profile_gate, "_QUALITY_MODEL_PATH", model_path)
+    monkeypatch.setattr(entry_profile_gate, "_model_cache", None)
+    monkeypatch.setattr(entry_profile_gate, "_model_load_attempted", False)
+    monkeypatch.setitem(sys.modules, "joblib", types.SimpleNamespace(load=_fail_load))
+
+    with caplog.at_level(logging.WARNING, logger="entry_profile_gate"):
+        assert entry_profile_gate._load_quality_score_model() is None
+        assert entry_profile_gate._load_quality_score_model() is None
+
+    assert len(calls) == 1
+    assert caplog.messages.count("Could not load quality score model: unavailable model") == 1
+
+
+def test_quality_model_artifact_loads():
+    import entry_profile_gate
+
+    entry_profile_gate._model_cache = None
+    entry_profile_gate._model_load_attempted = False
+    model = entry_profile_gate._load_quality_score_model()
+
+    assert model is not None
+    assert hasattr(model, "predict")
 
 
 def test_entry_profile_gate_dynamic_fg_adjustment():

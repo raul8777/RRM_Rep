@@ -1,7 +1,107 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 20 2026 | s83: Estados explícitos de apertura en dashboard
+> Última actualización: jul 22 2026 | s88: Reanálisis de calibración de entradas y alineación de defaults
+
+---
+
+## 🟢 Estado del Sistema — jul 22 2026 — s88: Reanálisis de calibración de entradas y alineación de defaults
+
+### Objetivo
+
+Cerrar el reanálisis de calibración de entradas con tres objetivos: (1) que `range_reversion_predictor_mode="shadow"` permita fallback al predictor long genérico cuando el modelo de rango es inválido, (2) reducir la fricción de confirmación direccional en `SPOT_BULL`, y (3) dejar la suite de tests completa en verde alineando los `getattr` defaults con los valores canónicos de `_PARAM_DEFAULTS`.
+
+### Cambios implementados
+
+- **`entry_decision.py`**: para `RANGE_SCALP`, solo se rechaza con `RANGE_MODEL_INVALID` cuando `range_reversion_predictor_mode` es `"blocking"` o `"enforced"`. En modo `"shadow"` (default) se mantiene la predicción long genérica y se registra `range_prediction = {"valid": False, "reason": "shadow_skipped"}` para observabilidad.
+- **`config.py` / `config_helpers.py`**: `SPOT_BULL` mantiene `direction_required_confirmations=2`, pero `direction_min_progress_bps` sube de `3.0` a `5.0` para capturar rebotes con mayor calidad sin incrementar el número de confirmaciones.
+- **`staged_entry.py`**: `entry_profile_gate_thresholds_path` apunta por defecto al path canónico `Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json` y `range_reversion_predictor_mode` default `"shadow"`.
+- **`pnl_predictor.py`**: defaults canónicos `take_profit_pct=4.14` y `range_scalp_sl_pct=0.8` en la construcción de la predicción de reversión de rango.
+- **Alineación de defaults críticos** (`entry_decision_enabled=True`, `entry_decision_regime_mode`, `entry_decision_min_expected_pnl`, `entry_decision_min_probability`, `staged_entry_enabled=True`, `volspike_override_enabled=False`, etc.) en `entry_decision.py`, `run_trades.py` y `config_helpers.py` para eliminar los 13 critical mismatches del audit.
+- **`tmp_audit_config.py`**: se robusteció el parser para evaluar defaults que referencian constantes del módulo y para limpiar comas finales, evitando falsos positivos.
+- **Tests**: `test_entry_decision.py`, `test_range_scalp_entry_pipeline.py`, `test_entry_quality_gate.py`, `test_open_positions_detail.py` y `test_mimic_regression.py` fueron ajustados/baselineados. `test_config_governance.py` pasa tras aplicar `volspike_override_enabled=False` en runtime.
+
+### Validación y operación
+
+- Suite completa: **576 passed, 0 failed**.
+- Audit de `getattr(settings, ...)`: **0 critical mismatches**.
+- Runtime verificado: contenedor `crypto-agent-app` reiniciado y healthy; healthcheck reporta todos los ciclos activos.
+- Configuración runtime actualizada vía `/config/apply` para reflejar el default canónico de `volspike_override_enabled=False`.
+
+### Monitoreo recomendado
+
+- Próximos ciclos `RANGE_SCALP`: confirmar que señales con `range_reversion_prediction.valid=False` no se rechazan con `RANGE_MODEL_INVALID` y que se usan los valores del predictor long genérico.
+- SPOT_BULL: observar si el aumento a 5 bps reduce falsos positivos sin retrasar entradas rentables.
+- Estabilidad de `mimic_baseline.json`: el nuevo baseline (`total_value=2811.89`) queda vigente; vigilar desviaciones > tolerancia en futuros cambios.
+
+---
+
+## 🟢 Estado del Sistema — jul 21 2026 — s87: Confirmación direccional staged activa
+
+### Objetivo
+
+Impedir aperturas tras una tesis elegible pero sin movimiento de precio verificable, conservando una sola recuperación auditada en lugar de aceptar rebotes aislados.
+
+### Cambios implementados
+
+- `staged_entry.py` persiste `data.direction` desde el setup: lado, `base_price`, precio observado/confirmado, target, stop, estado, avances y observaciones adversas.
+- `direction_confirmation_mode="enforced"` está activo en SPOT_BULL, RANGE_SCALP, FUTURES_SHORT y PRESERVATION. El setup no cuenta como confirmación.
+- Cada recheck requiere progreso de al menos 3 bps en la dirección de la operación; RANGE_SCALP exige además acercamiento a target válido. Dos avances consecutivos son necesarios para validar y abrir.
+- Un solo retroceso limitado pone la candidata en `recovery_pending`. Debe recuperar el setup y completar el siguiente avance; un segundo retroceso, stop/drawdown, target inválido, ausencia de precio/referencia o expiración la descarta.
+- Inter e intra-cycle persisten el snapshot direccional en `ready_candidate_checks.input_features.direction`. Los descartes terminales se registran con `decision="negative"`, razón `DIRECTION_*` y `ready_candidates.data.last_rejection`; los estados recuperables usan `decision="pending"`.
+- `run_trades.py` conserva `ready_candidate_id` y `staged_direction` en metadata de posición, permitiendo atribuir el PnL cerrado a la trayectoria staged.
+- Defaults configurables por régimen: `direction_min_progress_bps=3.0`, `direction_max_adverse_bps=50.0` y `direction_required_confirmations=2`.
+
+### Validación y operación
+
+- `tests/test_staged_entry.py` y `tests/test_entry_decision.py`: **19 passed**; compilación y `git diff --check` correctos.
+- Imagen `crypto-agent-app` reconstruida y contenedor recreado. Verificación runtime: los cuatro regímenes reportan `enforced`.
+- Monitorear diariamente candidatos, estados `recovery_pending`, motivos `DIRECTION_*`, cobertura de aperturas y PnL neto por `ready_candidate_id`. No modificar umbrales por una racha aislada; comparar por régimen y ventana temporal.
+
+---
+
+## 🟢 Estado del Sistema — jul 20 2026 — s86: Wolf Hunter temprano activo en SPOT_BULL
+
+### Objetivo
+
+Realizar parcialmente ganancias netas tempranas en SPOT_BULL cuando un peak material confirma reversión, sin bloquear runners ni extender la política a otros regímenes.
+
+### Cambios implementados
+
+- `PeakCaptureEngine.evaluate_early_peak_protection()` evalúa peak neto, giveback, PnL neto y comportamiento adverso antes del hold general de PredExit.
+- El runtime activa `profit_predexit_early_protection_mode=active` sólo para `profit_predexit_early_active_regimes=['SPOT_BULL']`; RANGE_SCALP, PRESERVATION y cualquier régimen fuera de la allowlist conservan shadow.
+- La rama exige ganancia neta actual, peak neto ≥ `1.5%`, giveback ≥ `0.5%` y velocidad negativa, agotamiento de momentum o reversión de tendencia.
+- La salida es siempre parcial fija de 50%. UG preserva ese parcial ante advisory PRS concurrente; un SSO full-close conserva su autoridad.
+- `run_trades.py` persiste `early_peak_protection`, audita cada evaluación como `profit_predexit_early_decision` y un fill ejecutado como `wolf_hunter_early_partial`, con `trigger='WOLF_HUNTER_EARLY'` y `close_reason='profit_predexit_early_peak_protection'`.
+- El dashboard identifica la evaluación armada como `🐺 PROTECCIÓN TEMPRANA` y el residual ejecutado como `🐺 PARCIAL WOLF EARLY`.
+
+### Validación
+
+- `tests/test_peak_capture_engine.py`, `tests/test_smart_scale_out.py`, `tests/test_selection_display_states.py` y `tests/test_selection_observability.py`: **28 passed**.
+- Compilación de `config.py`, `config_helpers.py`, `peak_capture_engine.py`, `run_trades.py` y `app.py`: correcta.
+
+---
+
+## 🟢 Estado del Sistema — jul 20 2026 — s84: Apertura inmediata tras validación intra-ciclo
+
+### Objetivo
+
+Eliminar la latencia entre una validación staged y su evaluación para apertura, sin crear una segunda ruta de órdenes ni relajar gates de riesgo.
+
+### Cambios implementados
+
+- `orchestrator.py` mantiene `trade_cycle_wake_event` para interrumpir únicamente la espera del hilo principal de trade cycle.
+- `perform_intra_cycle_check()` conserva su responsabilidad de validar candidatas; cuando valida una o más, activa el evento y no envía ninguna orden por sí mismo.
+- El trade cycle despertado reutiliza la ruta canónica `execute_once()` → `get_openable_candidates()` → `_buy_top_symbols()`.
+- Se conservan el ranking EV-first, `max_open_per_cycle`, control de régimen, anti-duplicado, capital disponible, preflight fail-closed, Kelly sizing y confirmación de fill antes de persistir una posición.
+- El evento coalesce validaciones simultáneas en una ejecución; no implica abrir todas las candidatas `validated`.
+- Al parar los ciclos, el evento también libera el trade thread para evitar una espera residual.
+
+### Validación y despliegue
+
+- `tests/test_staged_entry_wake.py`, `tests/test_selection_observability.py` y `tests/test_selection_display_states.py`: **8 passed**.
+- `python -m py_compile orchestrator.py` y `git diff --check`: correctos.
+- Imagen `crypto-agent-app` reconstruida y contenedor `app` recreado; `/health/status` devolvió `overall: ok`, DB y Binance sanos, y cero fallos consecutivos de ciclo.
 
 ---
 

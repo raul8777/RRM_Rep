@@ -171,6 +171,10 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
         # ── F8: Wolf Hunter Peak Capture advisory ─────────────────────────────
         _peak_capture_close = context.peak_capture_should_close
         _peak_capture_pct = float(context.peak_capture_close_pct or 1.0)
+        _early_peak_protection = (
+            context.peak_capture_reason == "profit_predexit_early_peak_protection"
+            and 0.0 < _peak_capture_pct < 1.0
+        )
 
         # ── PRS evaluation with F&G-modified metadata ────────────────────────
         _prs_meta = dict(meta)
@@ -277,6 +281,15 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
                 f"prob_higher={context.peak_capture_prob_higher_peak:.2f} | F&G={_fng:.0f}"
             )
             _priority = 93
+        elif _early_peak_protection:
+            _should_close = True
+            _close_pct = _peak_capture_pct
+            _reason = context.peak_capture_reason
+            _detail = (
+                f"WolfHunterEarly fixed partial({_peak_capture_pct*100:.0f}%): "
+                f"{context.peak_capture_detail} | F&G={_fng:.0f}"
+            )
+            _priority = 84
         elif _peak_capture_close and _prs_close:
             # Peak Capture + PRS agree → escalate to full exit
             _should_close = True

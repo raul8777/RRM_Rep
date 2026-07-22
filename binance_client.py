@@ -258,34 +258,18 @@ class BinanceClient:
             fills = self.get_my_trades(sym, order_id=int(oid))
         if not fills:
             return None
-        total_qty = 0.0
-        total_quote = 0.0
-        total_commission = 0.0
-        for f in fills:
-            q = float(f.get("qty", 0.0)) or float(f.get("quantity", 0.0))
-            p = float(f.get("price", 0.0))
-            c_raw = float(f.get("commission", 0.0))
-            c_asset = f.get("commissionAsset", "USDT")
-            # Convert commission to USDT equivalent.
-            # If paid in base asset (e.g. PEPE), multiply by fill price.
-            # BNB and USDT are already in USDT-equivalent terms.
-            if c_asset not in ("USDT", "BNB") and p > 0:
-                c_usdt = c_raw * p
-            else:
-                c_usdt = c_raw
-            total_qty += q
-            total_quote += q * p
-            total_commission += c_usdt
-        avg_price = total_quote / total_qty if total_qty > 0 else 0.0
-        return {
-            "symbol": sym,
+        from pnl_accounting import normalize_spot_fills
+        payload = normalize_spot_fills(
+            fills,
+            sym,
+            price_lookup=lambda commission_symbol: self.get_symbol_price(commission_symbol, use_cache=False),
+        )
+        payload.update({
             "order_id": oid,
-            "qty": total_qty,
-            "quote_qty": total_quote,
-            "commission": total_commission,
-            "avg_price": avg_price,
+            "commission": payload["commission_usdt"],
             "binance_confirmed": True,
-        }
+        })
+        return payload
 
     def calculate_commission(self, amount: float, price: float, commission_rate: float = 0.001) -> float:
         """
