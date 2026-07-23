@@ -1,0 +1,23 @@
+services:
+  app:
+    environment:
+      # Calibración agresiva — apalancamiento reducido a 2x para FUTURES_SHORT (plan v3)
+      - FUTURES_LEVERAGE=2
+      # Permitir que el modo activo use más capital
+      - KELLY_MAX_USDT=2500.0
+      - KELLY_MAX_PCT_LIQUID=0.90
+      - KELLY_DYNAMIC_BASE_PCT=0.22
+      - KELLY_CONVICTION_MAX_PCT=0.22
+      - FUTURES_KELLY_MAX_USDT=2500.0
+      - FUTURES_KELLY_MAX_PCT_LIQUID=0.90
+      - FUTURES_KELLY_CAP_PCT=0.90
+      - FUTURES_KELLY_BASE_USDT=200.0
+      - FUTURES_MIN_PROB=0.45
+      - FUTURES_MAX_NEW_PER_CYCLE=3
+      - MIN_SIGNAL_STRENGTH=0.40
+      - MIN_SUCCESS_PROBABILITY=0.50
+      - VOLSPIKE_OVERRIDE_ENABLED=false
+      - MAX_POSITIONS_SPOT_BULL=8
+      - MAX_POSITIONS_RANGE_SCALP=6
+      - MAX_POSITIONS_PRESERVATION=6
+      - MAX_POSITIONS_FUTURES_SHORT=5

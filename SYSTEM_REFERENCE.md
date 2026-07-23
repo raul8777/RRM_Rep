@@ -1,7 +1,121 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 22 2026 | s88: Reanálisis de calibración de entradas y alineación de defaults
+> Última actualización: jul 22 2026 | s90: Calibración agresiva alineada y protegida contra perfiles de régimen
+
+---
+
+## 🟢 Estado del Sistema — jul 22 2026 — s90: Calibración agresiva alineada y protegida contra perfiles de régimen
+
+### Objetivo
+
+Asegurar que los parámetros agresivos de `Calibracion_Entradas-a20ab8-v3.md` sean los valores efectivos en runtime, evitando que perfiles de régimen (sweeps anteriores) los reviertan silenciosamente.
+
+### Cambios implementados
+
+- **`docker-compose.override.yml`**: variables de entorno agresivas completas (Kelly, futuros, mínimos de señal/probabilidad, límites de posiciones, leverage 2x, volspike override off).
+- **`config_helpers.py`**: se añadió `import os` para que `load_runtime_overrides_from_db()` respete variables de entorno.
+- **`run_trades.py`**: `_apply_regime_params()` ahora omite los escalares globales protegidos (`_ENV_PROTECTED_SCALARS`); los perfiles de régimen siguen ajustando SL/TP/vol_spike, pero no pueden revertir Kelly, límites de posición, leverage ni umbrales mínimos de señal/probabilidad.
+- **`tests/test_profit_boost_entries.py`**: expectativa actualizada a `futures_max_new_per_cycle=3`.
+- Se limpió `kelly_config_override` en DB y se recreó el contenedor `app`.
+
+### Configuración runtime verificada
+
+| Parámetro | Valor |
+|-----------|-------|
+| `kelly_max_usdt` | 2500.0 |
+| `kelly_max_pct_liquid` | 0.90 |
+| `kelly_dynamic_base_pct` | 0.22 |
+| `kelly_conviction_max_pct` | 0.22 |
+| `max_positions_spot_bull` | 8 |
+| `max_positions_range_scalp` | 6 |
+| `max_positions_preservation` | 6 |
+| `max_positions_futures_short` | 5 |
+| `futures_leverage` | 2 |
+| `futures_kelly_max_usdt` | 2500.0 |
+| `futures_kelly_cap_pct` | 0.90 |
+| `futures_kelly_base_usdt` | 200.0 |
+| `futures_min_prob` | 0.45 |
+| `futures_max_new_per_cycle` | 3 |
+| `min_signal_strength` | 0.40 |
+| `min_success_probability` | 0.50 |
+| `futures_entry_max_rsi_4h` | 50.0 |
+| `volspike_override_enabled` | False |
+
+### Validación
+
+- `/config/drift-check`: `drift_count=0`.
+- `/config/verify`: `ok=True`, `mismatch_count=0`.
+- `/health/status`: `overall=ok`, régimen activo `RANGE_SCALP`, leverage máximo 2x.
+- Suite completa: **576 passed, 0 failed**.
+
+### Pendientes del plan v3
+
+- C2: verificar propagación de `peak_quality_profile` a metadata de posición.
+- C3: recalibrar thresholds RANGE_SCALP A/B/C (actualmente A=1.5, B/C sin datos).
+- C4/C5: validar bypass B/C cuando `regime.confirmed=True` y `confidence>=0.8`.
+- C6: abrir primeros shorts reales y recalibrar thresholds FUTURES_SHORT con outcomes.
+- C7: PRESERVATION más ofensivo (`preservation_max_positions`, `preservation_kelly_mult`, etc.).
+- C8-C10: paralelización, datos de terceros, analista técnico gráfico.
+
+---
+
+## 🟢 Estado del Sistema — jul 22 2026 — s89: Calibración agresiva de entradas aplicada en producción
+
+### Objetivo
+
+Aplicar el plan `Calibracion_Entradas-a20ab8-v3.md` en producción real: aumentar el número de entradas ganadoras en todos los regímenes (SPOT_BULL, RANGE_SCALP, PRESERVATION, FUTURES_SHORT) sin romper los gates de riesgo, activar FUTURES_SHORT con apalancamiento reducido y mantener auditoría/drift en cero.
+
+### Cambios implementados
+
+- **`config.py`**: defaults canónicos actualizados a valores agresivos (`kelly_max_usdt=2500`, `kelly_max_pct_liquid=0.90`, `min_signal_strength=0.40`, `min_success_probability=0.50`, `futures_min_prob=0.45`, `futures_entry_max_rsi_4h=50`, etc.).
+- **`config_helpers.py`**: `_sync_canonical_defaults_from_settings()` sincroniza **todos** los campos de `config.Settings` en `_PARAM_DEFAULTS`, evitando drift silencioso.
+- **`docker-compose.override.yml`**: variables de entorno para Kelly, posiciones máximas, apalancamiento futuros (`FUTURES_LEVERAGE=2`) y capital base futuros (`FUTURES_KELLY_BASE_USDT=200`).
+- **`run_trades.py`**: nuevo gate `futures_entry_max_rsi_4h` para FUTURES_SHORT; actualizados los fallback defaults de `futures_kelly_cap_pct` y `kelly_conviction_max_pct`.
+- **`app.py`**: líneas base de backtest ajustadas a la calibración agresiva; listas de exclusión de drift/verify ampliadas con credenciales, toggles de entorno y campos calculados por harmony; `sl_confirmation_candles` añadido al hot-config whitelist; robustez en el parser de `config_drift_alerts`.
+- **`tmp_restore_canonical_config.py`**: actualizado para restaurar los nuevos valores agresivos y no revertirlos.
+- **Tests ajustados**: `test_profit_boost_entries.py`, `test_staged_entry.py`, `test_config_governance.py` alineados con la nueva política.
+- **Plan mergeado**: `Calibracion_Entradas-a20ab8-v3.md` ahora incluye el contenido de v2; v2 eliminado.
+
+### Configuración runtime activa
+
+| Parámetro | Valor |
+|-----------|-------|
+| `kelly_max_usdt` | 2500.0 |
+| `kelly_max_pct_liquid` | 0.90 |
+| `kelly_dynamic_base_pct` | 0.22 |
+| `max_positions_spot_bull` | 8 |
+| `max_positions_range_scalp` | 6 |
+| `max_positions_preservation` | 6 |
+| `futures_leverage` | 2 |
+| `futures_kelly_max_usdt` | 2500.0 |
+| `futures_kelly_cap_pct` | 0.90 |
+| `min_signal_strength` | 0.40 |
+| `futures_entry_max_rsi_4h` | 50.0 |
+| SPOT_BULL `required_positive_checks` | 1 |
+| SPOT_BULL `max_open_per_cycle` | 2 |
+| RANGE_SCALP `required_positive_checks` | 1 |
+| RANGE_SCALP `max_open_per_cycle` | 2 |
+
+### Validación y operación
+
+- `PATCH /config/kelly` aplicó 18 campos en caliente sin restart.
+- `/config/drift-check`: `drift_count=0`; `/config/verify`: `ok=True`, `mismatch_count=0`.
+- Suite completa: **576 passed, 0 failed**.
+- `/health/status`: `overall=ok`, régimen activo `RANGE_SCALP`, leverage máximo 2x.
+- `dry_run=False`, `allow_real_trading=True`, `futures_enabled=True`.
+
+### Monitoreo recomendado
+
+- Frecuencia y PnL neto por perfil A/B/C en SPOT/RANGE; rollback manual si WR<42% en 7 días.
+- Primeros shorts FUTURES: funding rate, OI, paridad Binance↔DB, drawdown bucket <5%/24h.
+- Latencia de ciclo de señales y rate-limit hits tras eventual paralelización.
+- `config_drift_alerts` y ghost positions a cero.
+
+### Referencias actualizadas
+
+- Plan maestro: `c:\Users\raul8\.windsurf\plans\Calibracion_Entradas-a20ab8-v3.md`
+- Reglas/flags: `.windsurf\rules.md` §s80
 
 ---
 

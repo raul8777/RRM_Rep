@@ -486,8 +486,9 @@ def test_get_openable_candidates_returns_best_validated_ev_globally(fake_db, set
     eth_row["data"]["policy"].update({"expected_pnl": 2.0, "quality_score": 0.4, "success_probability": 0.7})
 
     openable = staged_entry.get_openable_candidates(fake_db, "SPOT_BULL", ["BTCUSDT"], settings=settings)
-    assert len(openable) == 1
-    assert openable[0]["symbol"] == "ETHUSDT"
+    assert len(openable) == 2
+    assert openable[0]["symbol"] == "ETHUSDT"  # higher expected_pnl first
+    assert openable[1]["symbol"] == "BTCUSDT"
     assert eth_row["data"]["global_validated_rank"] == 1
     assert eth_row["data"]["global_validated_universe_size"] == 2
 

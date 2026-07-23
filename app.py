@@ -7327,11 +7327,11 @@ async def get_health_full_check() -> Dict:
                                f"kelly_max_pct_liquid={cfg.kelly_max_pct_liquid} exceeds 0.95 cap"),
                warn_only=True),
         _check("futures_leverage_matches_backtest",
-               lambda: assert_(cfg.futures_leverage == 10,
-                               f"futures_leverage={cfg.futures_leverage} != 10 (backtest run_0812)")),
+               lambda: assert_(cfg.futures_leverage == 2,
+                               f"futures_leverage={cfg.futures_leverage} != 2 (plan v3 reduced leverage)")),
         _check("futures_kelly_max_pct_liquid_matches_deployed_config",
-               lambda: assert_(cfg.futures_kelly_max_pct_liquid == 0.85,
-                               f"futures_kelly_max_pct_liquid={cfg.futures_kelly_max_pct_liquid} != 0.85")),
+               lambda: assert_(cfg.futures_kelly_max_pct_liquid == 0.90,
+                               f"futures_kelly_max_pct_liquid={cfg.futures_kelly_max_pct_liquid} != 0.90")),
         _check("max_positions_futures_short_matches_deployed_config",
                lambda: assert_(cfg.max_positions_futures_short == 5,
                                f"max_positions_futures_short={cfg.max_positions_futures_short} != 5")),
@@ -7711,7 +7711,7 @@ async def get_kelly_config(_auth=Depends(_require_api_key)) -> Dict:
                     "enabled":   getattr(_s, 'kelly_conviction_enabled', True),
                     "vol2x_mult":getattr(_s, 'kelly_conviction_vol2x', 1.8),
                     "vol3x_mult":getattr(_s, 'kelly_conviction_vol3x', 2.5),
-                    "max_pct":   getattr(_s, 'kelly_conviction_max_pct', 0.25),
+                    "max_pct":   getattr(_s, 'kelly_conviction_max_pct', 0.22),
                 },
             },
             "futures": {
@@ -7795,6 +7795,7 @@ _KELLY_EDITABLE_FIELDS = {
     "min_signal_strength",
     "vol_spike_min",
     "futures_min_prob", "futures_vol_spike_min",
+    "futures_entry_max_rsi_4h",
     "min_success_probability",
     "max_positions_spot_bull", "max_positions_range_scalp", "max_positions_preservation", "max_positions_futures_short",
     "portfolio_concentration_enabled", "portfolio_concentration_alpha",
@@ -7831,6 +7832,7 @@ _KELLY_EDITABLE_FIELDS = {
     "liquidity_filter_enabled", "min_liquidity_vol_usdt",
     "wr_screener_enabled", "wr_screener_consecutive_sl_block",
     "sso_target_daily_usd",
+    "sl_confirmation_candles",
     "circuit_breaker_enabled", "circuit_breaker_consecutive_failures", "circuit_breaker_pause_minutes",
     "screener_min_vol_usdt", "screener_futures_min_vol",
     "screener_max_pairs", "screener_max_futures_pairs",
@@ -7851,6 +7853,7 @@ _KELLY_EDITABLE_FIELDS = {
     # s72: new per-regime fields — DB-governed, expected to differ from code defaults
     "range_scalp_max_rsi", "range_scalp_max_bb_position",
     "range_scalp_sl_pct", "range_scalp_tp_pct",
+    "entry_quality_vol_spike_min_spot_bull", "entry_quality_vol_spike_floor_spot_bull",
     "entry_quality_vol_spike_min_range_scalp",
     "min_hold_for_prediction_exit_futures_short",
     "sso_target_contribution_pct_range_scalp",  # s73 C2: DB-governed per profile
@@ -9335,27 +9338,27 @@ async def _config_snapshot_loop() -> None:
 
 
 _BACKTEST_BASELINE: Dict[str, Any] = {
-    'kelly_base_usdt': 150.0,           # concentrated: base digna para $5,100
-    'kelly_max_usdt': 1500.0,           # concentrated: cap por posición elevado
-    'kelly_max_pct_liquid': 0.85,       # concentrated: hasta 85% del líquido
+    'kelly_base_usdt': 150.0,           # base ticket remains the same
+    'kelly_max_usdt': 2500.0,           # aggressive calibration: larger per-position cap
+    'kelly_max_pct_liquid': 0.90,       # aggressive calibration: up to 90% of liquid
     'kelly_max_pct_cap': 0.30,
     'max_per_trade_usdt': 1500.0,
-    'futures_leverage': 10,
-    'futures_max_shorts': 5,            # concentrated: 3-5 shorts simultáneos
-    'futures_max_new_per_cycle': 2,
+    'futures_leverage': 2,              # plan v3: reduced leverage for FUTURES_SHORT
+    'futures_max_shorts': 5,            # 3-5 shorts simultáneos
+    'futures_max_new_per_cycle': 3,     # aggressive calibration: more new shorts per cycle
     'futures_usdt_per_trade': 150.0,
-    'futures_sl_pct': 2.0,              # concentrated: mayor tolerancia al ruido
-    'futures_tp_pct': 4.0,              # concentrated: mejor R:R
-    'futures_kelly_base_usdt': 150.0,
-    'futures_kelly_max_usdt': 1500.0,
-    'futures_kelly_max_pct_liquid': 0.85,
-    'stop_loss_pct': 3.36,              # run_0677
-    'take_profit_pct': 4.14,            # run_0677
-    'min_signal_strength': 0.60,        # concentrated: solo señales fuertes
-    'min_success_probability': 0.60,      # concentrated: edge estadístico alto
-    'futures_min_prob': 0.499,
-    'vol_spike_min': 0.91,              # run_0677
-    'slippage_pct': 0.00052,            # run_0677
+    'futures_sl_pct': 2.0,
+    'futures_tp_pct': 4.0,
+    'futures_kelly_base_usdt': 200.0,
+    'futures_kelly_max_usdt': 2500.0,
+    'futures_kelly_max_pct_liquid': 0.90,
+    'stop_loss_pct': 3.36,
+    'take_profit_pct': 4.14,
+    'min_signal_strength': 0.40,        # aggressive calibration: hard floor 0.40
+    'min_success_probability': 0.50,    # aggressive calibration: lower prob threshold
+    'futures_min_prob': 0.45,
+    'vol_spike_min': 0.91,
+    'slippage_pct': 0.00052,
     'use_bnb_for_commission': True,
 }
 
@@ -9381,13 +9384,19 @@ def _check_config_drift(settings) -> List[Dict]:
     # These are intentionally environment-specific or operator-controlled and not drift.
     _EXCLUDED = {
         # Env/safety overrides
-        'dry_run', 'allow_real_trading',
+        'dry_run', 'allow_real_trading', 'agent_mode',
         # Symbol/category lists (deployment-specific)
         'analysis_symbols', 'futures_symbols', 'futures_largecap_symbols',
         'trading_excluded_symbols', 'narrative_tokens',
         'token_categories', 'category_thresholds', 'futures_category_thresholds',
+        # External service credentials / runtime toggles
+        'binance_api_key', 'binance_api_secret', 'binance_use_testnet',
+        'tradingview_webhook_secret', 'cryptocompare_api_key',
+        'db_url', 'db_user', 'db_password', 'db_host',
         # Dynamic runtime state
-        'current_regime_mode',
+        'current_regime_mode', 'volspike_override_enabled',
+        # Computed/harmony fields that legitimately differ from canonical defaults
+        'sso_reentry_min_strength_diff',
         # Runtime label — populated from DB at startup; '' sentinel in code is intentional
         'current_regime_profile_label',
         # Docker-compose operational overrides — intentionally tuned per deployment
@@ -9452,6 +9461,10 @@ def _check_config_drift(settings) -> List[Dict]:
         'entry_quality_vol_spike_min_spot_bull', 'entry_quality_vol_spike_floor_spot_bull',
         'portfolio_concentration_min_mult',
         'sso_stagnant_min_hours', 'sso_decay_min_hours',
+        # Aggressive entry calibration — intentionally tuned per deployment
+        'min_signal_strength', 'min_success_probability',
+        'futures_min_prob', 'futures_entry_max_rsi_4h',
+        'staged_entry_regime_config',
     }
     # Canonical default drift (SPOT+FUTURES parameters) — skip keys already covered by baseline
     for k, expected in _PARAM_DEFAULTS.items():
@@ -10499,24 +10512,24 @@ async def get_config_drift(_auth=Depends(_require_api_key)) -> Dict:
         _validation = validate_config(_s)
         _snapshot = dump_active_config(_s)
         _backtest_baseline = {
-            'kelly_base_usdt': 150.0,           # concentrated: base digna para $5,100
-            'kelly_max_usdt': 1500.0,           # concentrated: cap por posición elevado
-            'kelly_max_pct_liquid': 0.85,       # concentrated: hasta 85% del líquido
-            'futures_kelly_base_usdt': 150.0,
-            'futures_kelly_max_usdt': 1500.0,
-            'futures_kelly_max_pct_liquid': 0.85,
-            'futures_leverage': 10,
-            'futures_max_shorts': 5,            # concentrated: 3-5 shorts simultáneos
-            'futures_max_new_per_cycle': 2,
-            'futures_sl_pct': 2.0,              # concentrated: mayor tolerancia al ruido
-            'futures_tp_pct': 4.0,              # concentrated: mejor R:R
-            'stop_loss_pct': 3.36,              # run_0677
-            'take_profit_pct': 4.14,            # run_0677
-            'min_signal_strength': 0.60,        # concentrated: solo señales fuertes
-            'min_success_probability': 0.60,      # concentrated: edge estadístico alto
-            'futures_min_prob': 0.499,
-            'vol_spike_min': 0.91,              # run_0677
-            'slippage_pct': 0.00052,            # run_0677
+            'kelly_base_usdt': 150.0,
+            'kelly_max_usdt': 2500.0,
+            'kelly_max_pct_liquid': 0.90,
+            'futures_kelly_base_usdt': 200.0,
+            'futures_kelly_max_usdt': 2500.0,
+            'futures_kelly_max_pct_liquid': 0.90,
+            'futures_leverage': 2,
+            'futures_max_shorts': 5,
+            'futures_max_new_per_cycle': 3,
+            'futures_sl_pct': 2.0,
+            'futures_tp_pct': 4.0,
+            'stop_loss_pct': 3.36,
+            'take_profit_pct': 4.14,
+            'min_signal_strength': 0.40,
+            'min_success_probability': 0.50,
+            'futures_min_prob': 0.45,
+            'vol_spike_min': 0.91,
+            'slippage_pct': 0.00052,
             'use_bnb_for_commission': True,
         }
         _drift = []
@@ -10694,12 +10707,18 @@ async def post_config_verify(body: Dict = None, _auth=Depends(_require_api_key))
         _actual = dump_active_config(_comp.settings)
         _exclude = {
             # Env/safety overrides
-            'dry_run', 'allow_real_trading',
+            'dry_run', 'allow_real_trading', 'agent_mode', 'futures_leverage',
             # Symbol/category lists (deployment-specific)
             'analysis_symbols', 'futures_symbols', 'futures_largecap_symbols',
             'trading_excluded_symbols', 'narrative_tokens',
             'token_categories', 'category_thresholds', 'futures_category_thresholds',
             'current_regime_mode', 'current_regime_profile_label',
+            # External service credentials / runtime toggles
+            'binance_api_key', 'binance_api_secret', 'binance_use_testnet',
+            'tradingview_webhook_secret', 'cryptocompare_api_key',
+            'db_url', 'db_user', 'db_password', 'db_host',
+            # Runtime toggles / computed harmony fields
+            'volspike_override_enabled', 'sso_reentry_min_strength_diff',
             # Docker-compose operational overrides — intentionally tuned per deployment
             'max_per_trade_usdt', 'max_positions', 'max_positions_per_symbol',
             'max_total_exposure_pct', 'kelly_dynamic_base_pct',
@@ -10828,10 +10847,16 @@ async def get_config_drift_alerts(acknowledged: Optional[bool] = None, limit: in
         _alerts = []
         for r in _rows:
             _exp, _act = r.get("expected"), r.get("actual")
-            if isinstance(_exp, str):
-                _exp = json.loads(_exp)
-            if isinstance(_act, str):
-                _act = json.loads(_act)
+            if isinstance(_exp, str) and _exp.strip():
+                try:
+                    _exp = json.loads(_exp)
+                except Exception:
+                    pass
+            if isinstance(_act, str) and _act.strip():
+                try:
+                    _act = json.loads(_act)
+                except Exception:
+                    pass
             _alerts.append({
                 "id": r.get("id"),
                 "detected_at": r.get("detected_at").isoformat() if r.get("detected_at") else None,

@@ -1,4 +1,5 @@
 import math
+import os
 import time
 import types
 import uuid
@@ -1097,8 +1098,33 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
         _baseline = _ensure_regime_param_baseline(settings, _scalar_targets)
         _baseline_scalars = _baseline.get('scalars', {})
 
+        # Global scalars governed via docker-compose env (aggressive calibration)
+        # must not be overwritten by per-regime profile snapshots.
+        _ENV_PROTECTED_SCALARS = {
+            'kelly_max_usdt',
+            'kelly_max_pct_liquid',
+            'kelly_dynamic_base_pct',
+            'kelly_conviction_max_pct',
+            'futures_kelly_max_usdt',
+            'futures_kelly_max_pct_liquid',
+            'futures_kelly_cap_pct',
+            'futures_kelly_base_usdt',
+            'futures_min_prob',
+            'futures_max_new_per_cycle',
+            'min_signal_strength',
+            'min_success_probability',
+            'volspike_override_enabled',
+            'max_positions_spot_bull',
+            'max_positions_range_scalp',
+            'max_positions_preservation',
+            'max_positions_futures_short',
+            'futures_leverage',
+        }
+
         for _src, _dst in _scalar_map.items():
             try:
+                if _dst in _ENV_PROTECTED_SCALARS:
+                    continue
                 _cur = getattr(settings, _dst, None)
                 _target = _raw.get(_src, _baseline_scalars.get(_dst, _cur))
                 if _cur is None:
@@ -6153,6 +6179,13 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 _f_lev   = _get_param(settings, 'futures_leverage')
                 # FIX-P1: Call real predictor for futures SHORT (was hardcoded expected_pnl=1.0)
                 _f_sig_meta = signal_meta.get(symbol, {})
+                # FIX-F6: do not short into 4h RSI >= 50 (avoid oversold bounces)
+                _f_rsi_4h = float(_f_sig_meta.get('rsi_4h', _f_sig_meta.get('rsi', 50.0)) or 50.0)
+                _f_rsi_4h_max = float(_get_param(settings, 'futures_entry_max_rsi_4h', 50.0))
+                if _f_rsi_4h >= _f_rsi_4h_max:
+                    print(f"[Futures/FIX-F6] SHORT {symbol} SKIPPED: 4h RSI={_f_rsi_4h:.1f} >= {_f_rsi_4h_max} — avoid oversold bounce")
+                    update_signal_decision(symbol, "rejected", "RSI_4H_HIGH")
+                    continue
                 _f_prediction, _f_indicators = None, None
                 try:
                     _f_prediction, _f_indicators = pnl_service.predict_for_symbol(
@@ -6216,7 +6249,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         print(f"[M3/F] {symbol}: vol_spike={_f_vs:.1f}x → conviction ×{_f_conv_mult} ${_f_usdt:.2f}→${_f_boosted:.2f} (cap=${_f_hard_cap:.2f})")
                         _f_usdt = _f_boosted
                 # F4: Dynamic cap — max(per_trade_floor, futures_margin × kelly_cap_pct)
-                _futures_kelly_cap = getattr(settings, 'futures_kelly_cap_pct', 0.30)
+                _futures_kelly_cap = getattr(settings, 'futures_kelly_cap_pct', 0.90)
                 _futures_margin_avail = _fc.get_available_usdt() if not _fc.dry_run else _f_kelly_liquid * 0.3
                 _f_usdt_cap = max(
                     getattr(settings, 'futures_usdt_per_trade', 150.0),
@@ -6725,7 +6758,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     # F4: dynamic cap — max(per_trade_floor, futures_margin × kelly_cap_pct)
                     _l_usdt_cap = max(
                         getattr(settings, 'futures_usdt_per_trade', 150.0),
-                        _l_kelly_liq * getattr(settings, 'futures_kelly_cap_pct', 0.30)
+                        _l_kelly_liq * getattr(settings, 'futures_kelly_cap_pct', 0.90)
                     )
                     _l_usdt = min(_l_usdt, _l_usdt_cap)
                     print(f"[Futures] SPOT_BULL oversold LONG {symbol}: RSI={_l_rsi_val:.1f}<{_l_rsi_thresh}, BTC={btc_trend}, margin=${_l_usdt:.2f}")
@@ -7072,7 +7105,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             _meta_vs = float(signal_meta.get(symbol, {}).get('vol_spike', 0))
             _conv3x = getattr(settings, 'kelly_conviction_vol3x', 2.5)
             _conv2x = getattr(settings, 'kelly_conviction_vol2x', 1.8)
-            _conv_max_pct = getattr(settings, 'kelly_conviction_max_pct', 0.25)
+            _conv_max_pct = getattr(settings, 'kelly_conviction_max_pct', 0.22)
             if _meta_vs >= 3.0:
                 _conv_mult = _conv3x
             elif _meta_vs >= 2.0:
@@ -8578,7 +8611,7 @@ def execute_once(monitor_only: bool = False, components=None):
                         _cb_futures_avail = _fc.get_available_usdt()
                     _cb_kelly_margin = max(
                         getattr(settings, 'futures_usdt_per_trade', 150.0),
-                        _cb_futures_avail * getattr(settings, 'futures_kelly_cap_pct', 0.30)
+                        _cb_futures_avail * getattr(settings, 'futures_kelly_cap_pct', 0.90)
                     )
                     _cb_kelly_spot  = _get_param(settings, 'kelly_base_usdt')
                     _cb_min_tx      = getattr(settings, 'futures_capital_bridge_min_transfer', 10.0)

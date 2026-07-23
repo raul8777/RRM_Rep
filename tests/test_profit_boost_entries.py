@@ -28,7 +28,7 @@ class TestPBConfigDefaults:
         from config import Settings
         s = Settings()
         assert hasattr(s, 'futures_max_new_per_cycle')
-        assert s.futures_max_new_per_cycle == 2
+        assert s.futures_max_new_per_cycle == 3
 
     def test_futures_mass_sl_threshold_default(self):
         from config import Settings
@@ -68,10 +68,10 @@ class TestPBConfigDefaults:
         assert field_info.default == 150.0
 
     def test_futures_kelly_cap_pct_pb4(self):
-        """Check the code default is 0.30 (env vars may override at runtime)."""
+        """Check the code default is 0.90 under aggressive calibration."""
         from config import Settings
         field_info = Settings.model_fields['futures_kelly_cap_pct']
-        assert field_info.default == 0.30
+        assert field_info.default == 0.90
 
 
 # ─── Test PB2: Mass SL Circuit Breaker Variable ──────────────────────────────

@@ -17,6 +17,7 @@ from copy import deepcopy
 from typing import Any, Dict, Optional
 import json
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -666,17 +667,12 @@ def _sync_canonical_defaults_from_settings() -> None:
         from config import Settings as _Settings  # Local import to avoid startup cycles.
 
         fields = getattr(_Settings, "model_fields", {}) or {}
-        names = [
-            "token_categories",
-            "category_thresholds",
-            "narrative_tokens",
-            "analysis_symbols",
-            "trading_excluded_symbols",
-        ]
-        for name in names:
-            f = fields.get(name)
-            if f is not None:
-                _PARAM_DEFAULTS[name] = deepcopy(f.default)
+        for name, field in fields.items():
+            if field is None:
+                continue
+            default = getattr(field, "default", None)
+            if default is not None:
+                _PARAM_DEFAULTS[name] = deepcopy(default)
     except Exception:
         # Validation step will surface any remaining mismatch explicitly.
         return
@@ -822,6 +818,10 @@ def load_runtime_overrides_from_db(settings, db_client) -> Dict[str, Any]:
                     if field == "category_thresholds":
                         continue
                     if not hasattr(settings, field):
+                        continue
+                    # If an explicit env var exists for this field, it is authoritative.
+                    # Pydantic Settings maps FIELD_NAME from the environment to field_name.
+                    if os.environ.get(field.upper()) is not None:
                         continue
                     new_value = None
                     if isinstance(change, dict) and "new" in change:

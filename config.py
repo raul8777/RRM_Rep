@@ -59,11 +59,11 @@ class Settings(BaseSettings):
     # Kelly dynamic position sizing
     kelly_enabled: bool = Field(default=True)
     kelly_base_usdt: float = Field(default=150.0)  # concentrated: base digna para capital $5,100
-    kelly_max_usdt: float = Field(default=1500.0)   # concentrated: cap por posición elevado
+    kelly_max_usdt: float = Field(default=2500.0)   # aggressive calibration: use available capital per position
     kelly_max_pct_cap: float = Field(default=0.30)       # concentrated: ~$1,530/posición con $5,100
-    kelly_max_pct_liquid: float = Field(default=0.85)  # concentrated: hasta 85% del líquido en convicción extrema
+    kelly_max_pct_liquid: float = Field(default=0.90)  # aggressive calibration: up to 90% of liquid in extreme conviction
     kelly_min_usdt: float = Field(default=0.0)  # min absolute ticket per trade; 0 disables floor
-    kelly_dynamic_base_pct: float = Field(default=0.20)  # concentrated: base crece con capital disponible
+    kelly_dynamic_base_pct: float = Field(default=0.22)  # aggressive calibration: base grows faster with available capital
     # Bear market mode
     bear_market_mode_enabled: bool = Field(default=True)
     bear_market_btc_7d_threshold: float = Field(default=-10.0)  # % change
@@ -146,7 +146,7 @@ class Settings(BaseSettings):
     # FIX-F1: Cooldown after futures SL hit â€” prevents re-entering same symbol immediately after stop out
     futures_sl_cooldown_hours: float = Field(default=4.0)  # PB6: 1hâ†’4h â€” stop chasing after SL
     # PB1: Stagger entries â€” max new shorts per single cycle (de-correlates entries)
-    futures_max_new_per_cycle: int = Field(default=2)  # concentrated: menos entradas por ciclo
+    futures_max_new_per_cycle: int = Field(default=3)  # aggressive calibration: allow more new shorts per cycle
     # PB2: Mass SL circuit breaker â€” global pause after N+ positions stop in same check
     futures_mass_sl_threshold: int = Field(default=3)  # trigger if 3+ positions stop together
     futures_mass_sl_cooldown_hours: float = Field(default=4.0)  # 4h global pause
@@ -292,8 +292,8 @@ class Settings(BaseSettings):
     entry_quality_min_vol_spike: float = Field(default=1.2)  # concentrated: volumen confirma dirección
     entry_quality_min_strength: float = Field(default=0.40)  # jul07: 0.35→0.40
     entry_quality_max_failures: int = Field(default=0)  # concentrated: todos los gates deben pasar
-    entry_quality_vol_spike_min_spot_bull: float = Field(default=0.85)
-    entry_quality_vol_spike_floor_spot_bull: float = Field(default=0.70)
+    entry_quality_vol_spike_min_spot_bull: float = Field(default=0.45)
+    entry_quality_vol_spike_floor_spot_bull: float = Field(default=0.45)
     entry_quality_rsi_min_spot_bull: float = Field(default=33.0)
     entry_quality_rsi_max_spot_bull: float = Field(default=68.0)
     entry_quality_breakout_min_vol_spot_bull: float = Field(default=1.20)
@@ -373,7 +373,7 @@ class Settings(BaseSettings):
     kelly_conviction_enabled: bool = Field(default=True)
     kelly_conviction_vol2x: float = Field(default=1.8)   # jul07: 1.5→1.8 (wolf-hunter s63: vol 2-3x +80%)
     kelly_conviction_vol3x: float = Field(default=2.5)   # jul07: 2.0→2.5 (wolf-hunter s63: vol >3x +150%)
-    kelly_conviction_max_pct: float = Field(default=0.25)  # concentrated: vol >3x permite 25% de portafolio
+    kelly_conviction_max_pct: float = Field(default=0.22)  # aggressive calibration: cap conviction allocation
     # Smart exit: anti-wick SL confirmation
     sl_confirmation_candles: int = Field(default=1)  # 0=immediate, 1=require last 1m candle close below SL
     # Smart exit: rebalance skips if predictor sees upside
@@ -382,9 +382,9 @@ class Settings(BaseSettings):
     rebalance_skip_if_bullish_signal: bool = Field(default=True)  # require technical negative signal before rebalancing
     rebalance_rsi_overbought: float = Field(default=60.0)  # RSI1h threshold â€” rebalance only if RSI > this OR EMA9 descending
     # Dynamic max positions by regime (replaces single MAX_POSITIONS when regime is known)
-    max_positions_spot_bull: int = Field(default=5)    # concentrated: 4-5 posiciones en bull
-    max_positions_range_scalp: int = Field(default=4)                   # s71 BUG-8: lateral allows 4 simultaneous setups  # concentrated: pocos setups en rango
-    max_positions_preservation: int = Field(default=1)  # concentrated: capital preservado en bear
+    max_positions_spot_bull: int = Field(default=8)    # aggressive calibration: more simultaneous entries
+    max_positions_range_scalp: int = Field(default=6)                   # aggressive calibration: more range setups
+    max_positions_preservation: int = Field(default=6)  # aggressive calibration: deploy preservation capital
     max_positions_futures_short: int = Field(default=5)  # concentrated: 3-5 shorts simultáneos
     # Portfolio concentration policy: explicitly couple slot capacity with per-position sizing.
     # Objective: when a mode/profile runs fewer effective slots, increase ticket size in a controlled way.
@@ -483,8 +483,8 @@ class Settings(BaseSettings):
     cycle_futures_short: int = Field(default=4)     # H-FIX: 6â†’4 min (trailing mÃ¡s reactivo a movimientos rÃ¡pidos)
 
     # Signal quality filter
-    min_signal_strength: float = Field(default=0.60)  # concentrated: solo señales fuertes
-    min_success_probability: float = Field(default=0.60)  # concentrated: edge estadístico alto
+    min_signal_strength: float = Field(default=0.40)  # aggressive calibration: hard floor 0.40
+    min_success_probability: float = Field(default=0.50)  # aggressive calibration: lower probability threshold
     # P1.3: Signal cache TTL dinÃ¡mico â€” reduce de 600s fijo a 1 ciclo por rÃ©gimen
     signal_cache_ttl_seconds: int = Field(default=240)  # default 4 min (1 ciclo FUTURES_SHORT)
 
@@ -611,7 +611,7 @@ class Settings(BaseSettings):
         "SPOT_BULL": {
             "enabled": True,
             "checks_per_cycle": 3,
-            "required_positive_checks": 2,
+            "required_positive_checks": 1,
             "max_cycles": 3,
             "max_age_min": 60,
             "intra_mode": "predictor",  # 'predictor' | 'price_ratio' | 'disabled'
@@ -622,16 +622,16 @@ class Settings(BaseSettings):
             "require_predictor_valid": True,
             "min_expected_pnl": 0.0,
             "policy_version": "v1",
-            "max_open_per_cycle": 1,
-            "direction_confirmation_mode": "enforced",
+            "max_open_per_cycle": 2,
+            "direction_confirmation_mode": "direction",
             "direction_min_progress_bps": 5.0,
             "direction_max_adverse_bps": 50.0,
-            "direction_required_confirmations": 2,
+            "direction_required_confirmations": 1,
         },
         "RANGE_SCALP": {
             "enabled": True,
             "checks_per_cycle": 2,
-            "required_positive_checks": 2,
+            "required_positive_checks": 1,
             "max_cycles": 3,
             "max_age_min": 20,
             "intra_mode": "predictor",
@@ -641,11 +641,11 @@ class Settings(BaseSettings):
             "require_inter_positive": False,
             "require_predictor_valid": True,
             "policy_version": "v1",
-            "max_open_per_cycle": 1,
-            "direction_confirmation_mode": "enforced",
+            "max_open_per_cycle": 2,
+            "direction_confirmation_mode": "direction",
             "direction_min_progress_bps": 3.0,
             "direction_max_adverse_bps": 50.0,
-            "direction_required_confirmations": 2,
+            "direction_required_confirmations": 1,
         },
         "FUTURES_SHORT": {
             "enabled": True,
@@ -726,10 +726,11 @@ class Settings(BaseSettings):
     # M1: Minimum strength to inject a symbol into the futures signal pool (filters weak HOLDs)
     futures_min_inject_strength: float = Field(default=0.50)  # concentrated: evitar rebotes (lección AAVE -5.88%)
     # Futures Kelly dynamic cap
-    futures_kelly_cap_pct: float = Field(default=0.30)  # concentrated: ~30% del margen disponible
+    futures_kelly_cap_pct: float = Field(default=0.90)  # aggressive calibration: use up to 90% of available futures margin
     # Futures signal filtering: minimum probability and vol spike (backtest-optimizable)
-    futures_min_prob: float = Field(default=0.499)  # jun29: 0.527â†’0.499 (run_0677)
+    futures_min_prob: float = Field(default=0.45)  # aggressive calibration: lower probability threshold
     futures_vol_spike_min: float = Field(default=0.91)  # jun29: 0.83â†’0.91 (run_0677)
+    futures_entry_max_rsi_4h: float = Field(default=50.0)  # FIX-F6: block new SHORTs when RSI 4h â‰¥ 50 (avoid oversold bounces)
     # Futures category thresholds — keys MUST match token_categories market_behavior values
     futures_category_thresholds: Dict[str, Any] = Field(default={
         "LARGE_CAP":  {"min_prob": 0.499, "stop_loss_pct": 1.20, "take_profit_pct": 2.40, "trailing_activation_pct": 1.5, "trailing_distance_pct": 1.0},  # s65: diferenciado — SL más ajustado para large cap
@@ -748,9 +749,9 @@ class Settings(BaseSettings):
     futures_capital_bridge_min_transfer: float = Field(default=10.0)  # min USDT to trigger transfer
     # Unified Portfolio Manager: PortfolioManager as capital director for both SPOT and Futures
     use_unified_portfolio_manager: bool = Field(default=False)  # feature flag â€” false = legacy behavior
-    futures_kelly_base_usdt: float = Field(default=150.0)  # concentrated: base igualada a SPOT
-    futures_kelly_max_usdt: float = Field(default=1500.0)    # concentrated: cap por short elevado
-    futures_kelly_max_pct_liquid: float = Field(default=0.85)  # concentrated: consistente con SPOT
+    futures_kelly_base_usdt: float = Field(default=200.0)  # aggressive calibration: larger futures base ticket
+    futures_kelly_max_usdt: float = Field(default=2500.0)    # aggressive calibration: larger futures per-position cap
+    futures_kelly_max_pct_liquid: float = Field(default=0.90)  # aggressive calibration: consistent with SPOT 90%
     futures_kelly_min_usdt: float = Field(default=0.0)  # min absolute futures margin ticket; 0 disables floor
 
     # Anti-ghost / reconciliation controls

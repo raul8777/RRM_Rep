@@ -66,6 +66,7 @@ unified_governance_supervisor.py → UG: árbitro final — consolida advisories
 
 ：**Feature flags (s80) — entry-profile gate redesign:**
 - Ver detalle completo en `.windsurf/plans/calibracion_entradas-db0300.md`.
+- Plan maestro de calibración agresiva actualizado: `.windsurf/plans/Calibracion_Entradas-a20ab8-v3.md` (merge con v2; v2 eliminado).
 - `entry_profile_gate_enabled`: bool (default True) — gate A/B/C basado en umbrales calibrados sobre outcomes reales
 - `entry_profile_gate_thresholds_path`: ruta a `Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json`
 - **SPOT_BULL quality-score model**: `Dev/benchmarks/entry_profile_calibration/quality_score_model_spot_bull.pkl` se carga lazy en `entry_profile_gate.compute_quality_score()` y predice `realized_net_pnl_pct` cuando todas las features requeridas están presentes. Si no, se usa fallback heurístico.

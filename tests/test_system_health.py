@@ -121,9 +121,9 @@ class TestCat1_ConfigIntegrity:
             "kelly_base_usdt must be < kelly_max_usdt"
 
     def test_kelly_max_pct_liquid_matches_backtest(self):
-        """Concentrated: kelly_max_pct_liquid raised to 85% of liquid capital."""
-        assert self.s.kelly_max_pct_liquid == 0.85, \
-            f"kelly_max_pct_liquid={self.s.kelly_max_pct_liquid} != 0.85 (concentrated policy)"
+        """Aggressive calibration: kelly_max_pct_liquid raised to 90% of liquid capital."""
+        assert self.s.kelly_max_pct_liquid == 0.90, \
+            f"kelly_max_pct_liquid={self.s.kelly_max_pct_liquid} != 0.90 (aggressive calibration policy)"
 
     def test_futures_breakeven_lt_trailing_activation(self):
         """Breakeven must activate BEFORE trailing to preserve gains correctly."""
