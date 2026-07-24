@@ -498,21 +498,25 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
     near_sl = _distance_guard(context.distance_to_sl_pct, distance_min)
 
     # s78-fix: fast loss cut / peak drawdown / soft supervisor escalation before age/near-sl guards
+    # These are suppressed when the USD loss guard is active to avoid premature cuts on large positions.
     _regime_upper = str(context.regime_mode or "").strip().upper()
     _fast_loss_threshold = -0.0075 if _regime_upper == "RANGE_SCALP" else -0.0150
-    if context.pnl_pct <= _fast_loss_threshold and (context.pnl_velocity_1h or 0) < 0:
+    if (bool(get_param(settings, "ug_fast_loss_cut_enabled", False))
+            and context.pnl_pct <= _fast_loss_threshold and (context.pnl_velocity_1h or 0) < 0):
         action = "close"
         reason = "unified_governance_loss_fast_cut"
         should_close = True
         close_pct = 1.0
         priority = 96
-    elif context.peak_pnl_pct >= 0.002 and (context.peak_pnl_pct - context.pnl_pct) > 0.0015:
+    elif (bool(get_param(settings, "ug_peak_drawdown_cut_enabled", False))
+            and context.peak_pnl_pct >= 0.002 and (context.peak_pnl_pct - context.pnl_pct) > 0.0015):
         action = "close"
         reason = "unified_governance_peak_drawdown_cut"
         should_close = True
         close_pct = 1.0
         priority = 96
-    elif (context.sso_advisory_should_close or context.prs_advisory_should_close) and context.pnl_pct < 0:
+    elif (bool(get_param(settings, "ug_soft_supervisor_loss_escalation_enabled", False))
+            and (context.sso_advisory_should_close or context.prs_advisory_should_close) and context.pnl_pct < 0):
         action = "close"
         reason = "unified_governance_soft_supervisor_escalated"
         should_close = True
@@ -536,12 +540,18 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
             should_close = False
             close_pct = 0.0
             priority = 35
-        elif deterioration or held_min >= escalation_age:
+        elif (deterioration or held_min >= escalation_age) and abs(context.pnl_usdt) >= float(get_param(settings, "max_loss_usd_per_trade", 18.0)) * 0.8:
             action = "close"
             reason = "unified_governance_loss_defensive_close"
             should_close = True
             close_pct = 1.0
             priority = 92
+        elif deterioration or held_min >= escalation_age:
+            action = "watchdog"
+            reason = "unified_governance_loss_watchdog_guarded"
+            should_close = False
+            close_pct = 0.0
+            priority = 40
         else:
             action = "watchdog"
             reason = "unified_governance_loss_watchdog"

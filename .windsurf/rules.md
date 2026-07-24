@@ -78,7 +78,18 @@ unified_governance_supervisor.py → UG: árbitro final — consolida advisories
 - `volspike_override_enabled`: bool (default False) — override narrative desactivado bajo el nuevo gate
 - Rollback inmediato: `PATCH /config/kelly {"entry_profile_gate_enabled": false, "entry_quality_gate_mode": "blocking", "predictor_gate_mode": "advisory"}`
 
-**Tablas DB clave** (SQLite `trades.db`):
+**Datos de investigación y calidad (s91):**
+- Autoridad canónica: `canonical/calibrar_datos.md`. Producción (`trades_closed` neto agrupado por posición) es la única fuente para afirmar edge desplegable; peaks/MIMIC/backtests son auxiliares y conservan `source` separado.
+- Linaje mínimo: `entry_selection_candidates` → `ready_candidates` → `ready_candidate_checks` → `metadata.ready_candidate_id` en posiciones/cierres. No unir históricos por símbolo sin etiquetarlos `unlinked_legacy`/heurísticos.
+- `range_scalp_live_v1` se captura antes de `entry_profile_gate` y se persiste como schema, values, missingness y completeness. No imputar un faltante a cero para decisión o entrenamiento.
+- RANGE_SCALP permanece `shadow` hasta completeness >=95% y holdouts temporales con PnL neto >0, PF>=1.15, cobertura>=5%, DD no peor y n>=30 para tier A. Rollback: `range_scalp_quality_model_mode=shadow`; no toca posiciones, sizing ni lifecycle.
+- Extractores reproducibles: `Dev/scripts/build_research_manifest.py` y `Dev/scripts/build_research_outcomes.py`; sus artefactos viven en `Dev/benchmarks/research_data/`.
+- Observabilidad operativa: `GET /metrics/entry-evidence` alimenta la tarjeta Evidence Shadow con funnel, cobertura `range_scalp_live_v1`, lineage exacto/legacy/roto, outcomes netos y gates; es estrictamente read-only.
+- Descubrimiento agnóstico: `pair_screener.opportunity_shadow` clasifica el ticker USDT en exclusión estructural, `OBSERVE` y `ELIGIBLE`; `GET /screener/opportunity-shadow` es lectura autenticada. El shadow no modifica universo de órdenes, QUBO, staging, Kelly, SL/TP ni routing.
+- Labels de oportunidad: `opportunity_labels.py` y `Dev/scripts/build_opportunity_forward_labels.py` son la fuente reproducible de `forward_gross/net/mfe/mae_2h|4h`. Son oportunidad direccional con fricción versionada, no PnL/fill real; siempre separar LONG/SHORT, SPOT/FUTURES y coste 1x/1.5x/2x.
+- Resolución RANGE_SCALP: setup primario `1h`, contexto `4h`; `range_scalp_timing_shadow` 15m es telemetría de timing sólo para candidatas finalistas. No se usa como feature requerida, ranking, gate o autorización de orden hasta completar comparación prospectiva/walk-forward purgado contra baseline 1h.
+
+**Tablas DB clave** (PostgreSQL `crypto_agent`):
 - `trades_open` — posiciones activas + metadata JSON (`_smart_meta`: trailing, breakeven, SSO state)
 - `trades_closed` — historial con PnL neto, comisiones, `regime_at_entry`, `profile_at_entry`
 - `trades_audit` — log inmutable de TODA decisión de riesgo (entry, exit, SSO, breakeven, governance)
@@ -123,7 +134,8 @@ unified_governance_supervisor.py → UG: árbitro final — consolida advisories
 9. Un único retroceso limitado cambia a `recovery_pending` sin sumar checks positivos ni autorizar una orden. Solo se recupera al recapturar el setup y completar otro avance consecutivo. Un segundo retroceso, stop/drawdown, precio/referencia ausente, target inválido o expiración descarta terminalmente.
 10. Todo check persiste `ready_candidate_checks.input_features.direction`. Un descarte terminal tiene `decision="negative"`, razón `DIRECTION_*` y copia su contexto en `ready_candidates.data.last_rejection`; `recovery_pending` se registra como `decision="pending"`.
 11. La posición abierta conserva `ready_candidate_id` y `staged_direction` en metadata para atribuir el PnL realizado a su cadena de validación.
-12. Defaults activos: `direction_min_progress_bps=3.0`, `direction_max_adverse_bps=50.0`, `direction_required_confirmations=2`. Ajustar los dos espejos canónicos (`config.py` y `config_helpers.py`) y comparar por régimen/ventana, no por una racha aislada.
+12. Defaults activos: `direction_min_progress_bps=3.0`, `direction_max_adverse_bps=50.0`, `direction_required_confirmations=2`. En todo régimen de entrada, `direction_confirmation_mode="enforced"`; una candidata no puede permanecer `validated` sin `state="confirmed"` y dos confirmaciones. Ajustar los dos espejos canónicos (`config.py` y `config_helpers.py`) y comparar por régimen/ventana, no por una racha aislada.
+13. La validación staged no reemplaza el preflight final. Cada rechazo final se persiste como `data.last_execution_gate`; dashboard muestra `Pendiente de preflight` o `Dirección sin confirmar`, nunca `Lista para abrir` en esos estados.
 
 **Monitoreo obligatorio de dirección:** por cada ventana de 24 h, medir staged, `recovery_pending`, validadas, abiertas, descartadas, razones `DIRECTION_*`, cobertura de aperturas y PnL neto de posiciones con `ready_candidate_id`. Si el rechazo terminal supera 90% o la cobertura cae materialmente, analizar `progress_bps`, `base_progress_bps` y `target_progress` antes de cambiar umbrales o desactivar la guarda.
 

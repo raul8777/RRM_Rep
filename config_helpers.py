@@ -107,6 +107,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     # Entry profile gate (A/B/C tiered selection based on calibrated historical outcomes)
     'entry_profile_gate_enabled': True,
     'entry_profile_gate_thresholds_path': 'Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json',
+    'range_scalp_quality_model_mode': 'shadow',
+    'range_scalp_quality_model_path': 'Dev/benchmarks/entry_profile_calibration/quality_score_model_range_scalp.pkl',
     'peaks_first_enabled': True,
     'predictor_gate_mode': 'blocking',  # 'blocking' | 'advisory' | 'disabled'
     'entry_quality_gate_mode': 'disabled',  # superseded by entry_profile_gate; 'blocking' kept for legacy overrides
@@ -290,6 +292,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'range_scalp_tp_pct': 1.8,          # s70: 1.5→1.8
     'range_scalp_min_rsi': 25.0,        # s70: new
     'range_scalp_breakeven_pct': 0.40,  # s70: new
+    'spot_bull_breakeven_pct': 0.25,
     'preservation_sl_pct': 1.5,
     'preservation_tp_pct': 3.0,
     'spot_bull_pnl_boost_enabled': True,
@@ -596,6 +599,12 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'unified_governance_monitor_only_force_loss_pct': 2.0,
     'unified_governance_monitor_only_force_age_minutes': 90.0,
     'unified_governance_loss_min_usdt': 7.50,  # concentrated: 0.5% de $1,500 = umbral real
+    # USD loss guard — dynamic SL cap per trade without reducing Kelly sizing
+    'max_loss_usd_per_trade': 18.0,
+    'emergency_gap_loss_multiplier': 1.5,
+    'ug_fast_loss_cut_enabled': False,
+    'ug_peak_drawdown_cut_enabled': False,
+    'ug_soft_supervisor_loss_escalation_enabled': False,
     'futures_binance_verify_interval_cycles': 3,
 
     # Futures capital bridge
@@ -736,6 +745,9 @@ def get_staged_entry_regime_config(settings, regime: str) -> Dict[str, Any]:
     if settings is not None:
         enabled_global = bool(getattr(settings, 'staged_entry_enabled', True))
     merged['enabled'] = bool(merged.get('enabled', False)) and enabled_global
+    if regime in {"SPOT_BULL", "RANGE_SCALP", "FUTURES_SHORT", "PRESERVATION"}:
+        merged['direction_confirmation_mode'] = 'enforced'
+        merged['direction_required_confirmations'] = max(2, int(merged.get('direction_required_confirmations', 2) or 2))
     return merged
 
 

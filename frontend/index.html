@@ -220,6 +220,29 @@
                 <div id="selectionObservabilityData"><p class="loading">Cargando...</p></div>
             </div>
 
+            <div class="card evidence-shadow-card" id="entryEvidenceCard">
+                <div class="card-header evidence-header">
+                    <h2>🧪 Evidencia Shadow</h2>
+                    <div class="evidence-filters">
+                        <select id="entryEvidenceDays" onchange="updateEntryEvidence()" aria-label="Periodo de evidencia">
+                            <option value="7">7d</option>
+                            <option value="30" selected>30d</option>
+                            <option value="90">90d</option>
+                        </select>
+                        <select id="entryEvidenceProfile" onchange="updateEntryEvidence()" aria-label="Perfil de evidencia">
+                            <option value="">A/B/C</option>
+                            <option value="A">A</option>
+                            <option value="B">B</option>
+                            <option value="C">C</option>
+                        </select>
+                        <label class="evidence-legacy-toggle" title="Los enlaces legacy no cuentan para promoción">
+                            <input id="entryEvidenceLegacy" type="checkbox" onchange="updateEntryEvidence()"> Legacy
+                        </label>
+                    </div>
+                </div>
+                <div id="entryEvidenceData"><p class="loading">Cargando evidencia...</p></div>
+            </div>
+
         </div>
 
         <!-- RIGHT COLUMN -->

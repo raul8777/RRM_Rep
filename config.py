@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     # Entry profile gate (A/B/C tiered selection based on calibrated historical outcomes)
     entry_profile_gate_enabled: bool = Field(default=True)
     entry_profile_gate_thresholds_path: str = Field(default="Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json")
+    range_scalp_quality_model_mode: str = Field(default="shadow")
+    range_scalp_quality_model_path: str = Field(default="Dev/benchmarks/entry_profile_calibration/quality_score_model_range_scalp.pkl")
     # Calibrated thresholds from the shadow-log sweep (2026-07-18).
     evidence_gate_min_posterior_per_regime: Dict[str, float] = Field(default={
         "SPOT_BULL": 0.60,
@@ -269,6 +271,13 @@ class Settings(BaseSettings):
     unified_governance_monitor_only_force_loss_pct: float = Field(default=2.0)
     unified_governance_monitor_only_force_age_minutes: float = Field(default=90.0)
     unified_governance_loss_min_usdt: float = Field(default=7.50)  # concentrated: 0.5% de $1,500 = umbral real
+    # USD loss guard — dynamic SL cap per trade without reducing Kelly sizing
+    max_loss_usd_per_trade: float = Field(default=18.0)  # nominal cap; target realized ≤ $20 after fees/slippage
+    emergency_gap_loss_multiplier: float = Field(default=1.5)  # market-order emergency stop if loss exceeds 1.5× cap
+    # UG loss branch selective enablement (fast/peak/soft escalations are noisy with USD guard)
+    ug_fast_loss_cut_enabled: bool = Field(default=False)
+    ug_peak_drawdown_cut_enabled: bool = Field(default=False)
+    ug_soft_supervisor_loss_escalation_enabled: bool = Field(default=False)
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True)
     wr_screener_consecutive_sl_block: int = Field(default=5)  # block after N consecutive SL
@@ -611,7 +620,7 @@ class Settings(BaseSettings):
         "SPOT_BULL": {
             "enabled": True,
             "checks_per_cycle": 3,
-            "required_positive_checks": 1,
+            "required_positive_checks": 2,
             "max_cycles": 3,
             "max_age_min": 60,
             "intra_mode": "predictor",  # 'predictor' | 'price_ratio' | 'disabled'
@@ -622,16 +631,16 @@ class Settings(BaseSettings):
             "require_predictor_valid": True,
             "min_expected_pnl": 0.0,
             "policy_version": "v1",
-            "max_open_per_cycle": 2,
-            "direction_confirmation_mode": "direction",
+            "max_open_per_cycle": 1,
+            "direction_confirmation_mode": "enforced",
             "direction_min_progress_bps": 5.0,
             "direction_max_adverse_bps": 50.0,
-            "direction_required_confirmations": 1,
+            "direction_required_confirmations": 2,
         },
         "RANGE_SCALP": {
             "enabled": True,
             "checks_per_cycle": 2,
-            "required_positive_checks": 1,
+            "required_positive_checks": 2,
             "max_cycles": 3,
             "max_age_min": 20,
             "intra_mode": "predictor",
@@ -641,11 +650,11 @@ class Settings(BaseSettings):
             "require_inter_positive": False,
             "require_predictor_valid": True,
             "policy_version": "v1",
-            "max_open_per_cycle": 2,
-            "direction_confirmation_mode": "direction",
+            "max_open_per_cycle": 1,
+            "direction_confirmation_mode": "enforced",
             "direction_min_progress_bps": 3.0,
             "direction_max_adverse_bps": 50.0,
-            "direction_required_confirmations": 1,
+            "direction_required_confirmations": 2,
         },
         "FUTURES_SHORT": {
             "enabled": True,
@@ -797,6 +806,7 @@ class Settings(BaseSettings):
     range_scalp_min_rsi: float = Field(default=25.0)  # s70: new — avoid free-fall entries
     range_scalp_require_bb_lower: bool = Field(default=True)
     range_scalp_breakeven_pct: float = Field(default=0.40)  # s70: new — fast breakeven on micro-bounce
+    spot_bull_breakeven_pct: float = Field(default=0.25)  # move SL to net breakeven once +0.25% profit
     range_scalp_max_bb_position: float = Field(default=0.40)  # s72: max relative position in BB range (0=lower, 1=upper)
 
     # ── SSO timing per regime (s70: replaces hardcoded *0.8/*1.5 multipliers in smart_scale_out.py) ──

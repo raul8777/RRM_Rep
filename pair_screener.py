@@ -21,6 +21,7 @@ Every screening result is persisted to `screener_decisions` for full auditabilit
 """
 
 import json
+import math
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -424,27 +425,30 @@ def get_screened_pairs(
     except Exception:
         _cached_all = {}
 
-    # ── Parse and rank ────────────────────────────────────────────────────────
+    # ── Parse, tier, and rank ─────────────────────────────────────────────────
     candidates = []
+    observe_candidates = []
+    structural_excluded = 0
     for t in tickers:
         symbol = t.get("symbol", "")
         try:
-            price   = float(t.get("lastPrice", 0))
-            vol     = float(t.get("quoteVolume", 0))   # volume in USDT
+            price = float(t.get("lastPrice", 0))
+            vol = float(t.get("quoteVolume", 0))
             chg_pct = float(t.get("priceChangePercent", 0))
         except (ValueError, TypeError):
+            structural_excluded += 1
             continue
 
         if not _is_valid_pair(symbol, price):
-            continue
-        if vol < spot_min_vol:
+            structural_excluded += 1
             continue
 
         cached_ind = _cached_all.get(symbol, {}).get("indicators", {}) if _cached_all else {}
         scores = _score_for_regime(
             {"vol_usdt": vol, "chg_pct": chg_pct}, regime_mode, cached_indicators=cached_ind
         )
-        candidates.append({
+        opportunity_score = abs(chg_pct) * max(1.0, math.log10(max(vol, 1.0)))
+        candidate = {
             "symbol": symbol,
             "vol_usdt": round(vol),
             "chg_pct": round(chg_pct, 2),
@@ -452,7 +456,13 @@ def get_screened_pairs(
             "futures_score": scores["futures_score"],
             "futures_short_score": scores["futures_short_score"],
             "range_score": scores["range_score"],
-        })
+            "opportunity_score": round(opportunity_score, 4),
+            "tier": "ELIGIBLE" if vol >= spot_min_vol else "OBSERVE",
+            "execution_enabled": False,
+        }
+        observe_candidates.append(candidate)
+        if vol >= spot_min_vol:
+            candidates.append(candidate)
 
     # Spot ranking depends on regime: bear modes avoid new longs
     if regime_mode in ("PRESERVATION", "FUTURES_SHORT"):
@@ -494,11 +504,17 @@ def get_screened_pairs(
     )[:5]
     top_bullish = sorted(candidates, key=lambda x: x["score"], reverse=True)[:5]
 
+    opportunity_shadow = sorted(
+        observe_candidates,
+        key=lambda candidate: candidate["opportunity_score"],
+        reverse=True,
+    )[:80]
     fetched_at = datetime.now(timezone.utc).isoformat()
     result = {
-        "spot":    spot_pairs,
+        "spot": spot_pairs,
         "futures": futures_pairs,
-        "all":     [c["symbol"] for c in candidates],
+        "all": [c["symbol"] for c in candidates],
+        "opportunity_shadow": opportunity_shadow,
         "_meta": {
             "regime_mode": regime_mode,
             "profile_label": (str(profile_label).strip().upper() if profile_label else None),
@@ -507,6 +523,16 @@ def get_screened_pairs(
             "total_candidates": len(candidates),
             "spot_count": len(spot_pairs),
             "futures_count": len(futures_pairs),
+            "universe_funnel": {
+                "ticker_rows": len(tickers),
+                "structural_excluded": structural_excluded,
+                "observe": len(observe_candidates),
+                "liquid_eligible": len(candidates),
+                "futures_volume_eligible": sum(1 for candidate in candidates if candidate["vol_usdt"] >= futures_min_vol),
+                "shadow_ranked": len(opportunity_shadow),
+                "execution_enabled": 0,
+            },
+            "opportunity_shadow_status": "shadow_only_no_order_routing",
             "top_bearish": [
                 {"symbol": c["symbol"], "chg_pct": c["chg_pct"], "score": c["futures_short_score"]}
                 for c in top_bearish

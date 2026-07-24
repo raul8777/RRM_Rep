@@ -415,15 +415,15 @@ def test_stage_ready_candidates_creates_record(fake_db, settings):
     rows = fake_db.ready
     assert len(rows) == 1
     assert rows[0]["status"] == "ready"
-    assert rows[0]["positive_checks"] == 1
+    assert rows[0]["positive_checks"] == 0
     assert rows[0]["total_checks"] == 1
     assert rows[0]["data"]["cycles_active"] == 1
 
     checks = fake_db.checks
     assert len(checks) == 1
     assert checks[0]["check_type"] == "inter"
-    assert checks[0]["positive"] is True
-    assert checks[0]["decision"] == "positive"
+    assert checks[0]["positive"] is False
+    assert checks[0]["decision"] == "setup"
 
 
 def test_stage_existing_is_skipped(fake_db, settings):
@@ -441,14 +441,13 @@ def test_evaluate_inter_cycle_validates_after_required(fake_db, settings):
     top = [_make_signal("BTCUSDT")]
     staged_entry.stage_ready_candidates(top, {}, meta, "SPOT_BULL", fake_db, settings=settings)
 
-    # First inter-cycle positive check should move to validated (required=2).
     result = staged_entry.evaluate_inter_cycle(
         fake_db, None, settings, "SPOT_BULL", top, {}, meta, cycle_id="c2", news_client=None,
     )
-    assert "BTCUSDT" in result["validated"]
+    assert "BTCUSDT" in result["kept"]
     row = fake_db.ready[0]
-    assert row["status"] == "validated"
-    assert row["positive_checks"] == 2
+    assert row["status"] == "ready"
+    assert row["positive_checks"] == 0
     assert row["total_checks"] == 2
     assert row["data"]["cycles_active"] == 2
 
@@ -482,13 +481,14 @@ def test_get_openable_candidates_returns_best_validated_ev_globally(fake_db, set
         fake_db, None, settings, "SPOT_BULL", top, {}, meta, cycle_id="c2", news_client=None,
     )
     btc_row, eth_row = fake_db.ready
-    btc_row["data"]["policy"].update({"expected_pnl": 1.0, "quality_score": 0.5, "success_probability": 0.6})
-    eth_row["data"]["policy"].update({"expected_pnl": 2.0, "quality_score": 0.4, "success_probability": 0.7})
+    for row, expected_pnl, quality_score, probability in ((btc_row, 1.0, 0.5, 0.6), (eth_row, 2.0, 0.4, 0.7)):
+        row["status"] = "validated"
+        row["data"]["policy"].update({"expected_pnl": expected_pnl, "quality_score": quality_score, "success_probability": probability})
+        row["data"]["direction"].update({"state": "confirmed", "directional_confirmations": 2})
 
     openable = staged_entry.get_openable_candidates(fake_db, "SPOT_BULL", ["BTCUSDT"], settings=settings)
-    assert len(openable) == 2
+    assert len(openable) == 1
     assert openable[0]["symbol"] == "ETHUSDT"  # higher expected_pnl first
-    assert openable[1]["symbol"] == "BTCUSDT"
     assert eth_row["data"]["global_validated_rank"] == 1
     assert eth_row["data"]["global_validated_universe_size"] == 2
 
@@ -499,10 +499,10 @@ def test_perform_intra_cycle_check_validates(fake_db, settings):
     staged_entry.stage_ready_candidates(top, {}, meta, "SPOT_BULL", fake_db, settings=settings)
 
     validated = staged_entry.perform_intra_cycle_check(fake_db, None, settings, "SPOT_BULL", news_client=None)
-    assert "BTCUSDT" in validated
+    assert validated == []
     row = fake_db.ready[0]
-    assert row["status"] == "validated"
-    assert row["positive_checks"] == 2
+    assert row["status"] == "ready"
+    assert row["positive_checks"] == 0
     assert any(c["check_type"] == "intra" for c in fake_db.checks)
 
 

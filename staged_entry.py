@@ -136,6 +136,8 @@ def _classify_with_gate(
             symbol=symbol,
             thresholds_path=thresholds_path,
             fear_greed_value=fear_greed_value,
+            range_scalp_model_mode=getattr(settings, "range_scalp_quality_model_mode", "shadow"),
+            range_scalp_model_path=getattr(settings, "range_scalp_quality_model_path", None),
         )
         return profile, float(info.get("score", 0.0)), info
     except Exception as exc:
@@ -614,6 +616,26 @@ def _update_ready_status(
         logger.warning(f"[StagedEntry] _update_ready_status failed for ready_id={ready_id}: {exc}")
 
 
+def record_execution_gate(
+    db_client: Any,
+    ready_id: Optional[int],
+    passed: bool,
+    reason: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not db_client or ready_id is None:
+        return
+    payload = {
+        "last_execution_gate": {
+            "passed": bool(passed),
+            "reason": str(reason),
+            "details": _to_native(details or {}),
+            "checked_at": _now().isoformat(),
+        }
+    }
+    _update_ready_status(db_client, int(ready_id), data_update=payload)
+
+
 def _fetch_one(db_client: Any, sql: str, params: Tuple[Any, ...]) -> Optional[Dict[str, Any]]:
     try:
         rows = db_client.execute_query(sql, params)
@@ -659,6 +681,12 @@ def stage_ready_candidates(
         meta = _build_meta_for_symbol(symbol, signal_meta, predictions, cand)
         meta["trade_type"] = trade_type
         meta["expected_side"] = _side_for_regime(regime_mode)
+        if str(regime_mode or "").upper() == "RANGE_SCALP":
+            try:
+                from range_scalp_data_contract import attach_snapshot
+                attach_snapshot(meta)
+            except Exception as exc:
+                logger.warning(f"[StagedEntry] RANGE_SCALP feature contract failed for {symbol}: {exc}")
 
         # Ensure we capture the gate result; if the pipeline did not set it,
         # classify locally using the same metadata.
@@ -1075,6 +1103,27 @@ def get_openable_candidates(
             ready_at = row.get("ready_at")
             if max_age and ready_at and (_now() - ready_at).total_seconds() / 60.0 >= max_age:
                 _discard_ready(db_client, row["id"], "MAX_AGE_EXPIRED")
+                continue
+            direction = (row.get("data") or {}).get("direction") or {}
+            required_confirmations = max(2, int(cfg.get("direction_required_confirmations", 2) or 2))
+            if _direction_mode(cfg) == "enforced" and (
+                str(direction.get("state") or "") != "confirmed"
+                or int(direction.get("directional_confirmations", 0) or 0) < required_confirmations
+            ):
+                _update_ready_status(
+                    db_client,
+                    row["id"],
+                    status="ready",
+                    positive_checks=0,
+                    data_update={
+                        "direction_requeue": {
+                            "reason": "DIRECTION_NOT_CONFIRMED",
+                            "required_confirmations": required_confirmations,
+                            "recorded_confirmations": int(direction.get("directional_confirmations", 0) or 0),
+                            "requeued_at": _now().isoformat(),
+                        }
+                    },
+                )
                 continue
             active_rows.append(row)
 

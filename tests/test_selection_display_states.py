@@ -19,6 +19,8 @@ def test_selection_display_state_labels_each_operational_condition():
     assert app._selection_display_state({**base, "status": "ready"}, "SPOT_BULL", set(), set())["display_status"] == "validating"
     assert app._selection_display_state(base, "SPOT_BULL", set(), {1})["display_status"] == "ready_to_open"
     assert app._selection_display_state(base, "SPOT_BULL", set(), set())["display_status"] == "validated_queue"
+    assert app._selection_display_state({**base, "data": {"last_execution_gate": {"passed": False, "reason": "RANGE_BB"}}}, "SPOT_BULL", set(), {1})["display_status"] == "preflight_pending"
+    assert app._selection_display_state({**base, "data": {"direction": {"state": "awaiting_confirmation"}}}, "SPOT_BULL", set(), {1})["display_status"] == "direction_pending"
     assert app._selection_display_state({**base, "regime_mode": "SPOT_BULL"}, "RANGE_SCALP", set(), {1})["display_status"] == "blocked_regime"
     assert app._selection_display_state(base, "SPOT_BULL", {"BTCUSDT"}, {1})["display_status"] == "duplicate_position"
     assert app._selection_display_state({**base, "status": "discarded"}, "SPOT_BULL", set(), set())["display_status"] == "discarded"

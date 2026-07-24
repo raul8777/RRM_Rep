@@ -154,6 +154,13 @@ services:
       - BNB_EXTRA_BUFFER_USD=10.0
       - BNB_MAX_RESERVE_USD=100.0
       - FUTURES_MAX_ESCALAMIENTOS=2
+      # USD loss guardrail (activado en producción 23 jul 2026): cap nominal + emergency gap
+      - MAX_LOSS_USD_PER_TRADE=18.0
+      - EMERGENCY_GAP_LOSS_MULTIPLIER=1.5
+      # UG loss cuts desactivados para evitar interferencia con el USD loss guardrail
+      - UG_FAST_LOSS_CUT_ENABLED=false
+      - UG_PEAK_DRAWDOWN_CUT_ENABLED=false
+      - UG_SOFT_SUPERVISOR_LOSS_ESCALATION_ENABLED=false
       # PV (Profit Velocity) sesion 17 jun21 2026 — scale-out + momentum reversal
       - FUTURES_SCALE_OUT_PCT=1.5
       - FUTURES_SCALE_OUT_FRACTION=0.5

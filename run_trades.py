@@ -266,6 +266,16 @@ def _selection_capture_candidates(candidates: List[Any], predictions: Dict[str, 
             "bb_upper": reversion_input["bb_upper"],
             "range_reversion_input": reversion_input,
             "range_reversion_input_complete": reversion_input_complete,
+            "entry_model_features": {
+                key: signal.get(key, prediction.get(key))
+                for key in (
+                    "expected_pnl_pct", "expected_pnl_percentage", "expected_pnl", "position_size_usdt",
+                    "peak_quality", "composite_score", "confluence", "short_term_score",
+                    "success_probability", "signal_strength", "strength", "range_score", "vol_score",
+                    "rsi_score", "pnl_score", "symbol_quality_score", "rsi_4h", "rsi",
+                    "vol_spike", "range_position", "bb_position", "trend_4h", "higher_tf_trend", "atr",
+                )
+            },
         }
         if db_client:
             try:
@@ -886,6 +896,8 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'kelly_conviction_max_pct': 'kelly_conviction_max_pct',
             'min_signal_strength': 'min_signal_strength',
             'min_success_probability': 'min_success_probability',
+            'range_scalp_quality_model_mode': 'range_scalp_quality_model_mode',
+            'range_scalp_quality_model_path': 'range_scalp_quality_model_path',
             'vol_spike_min': 'vol_spike_min',
             'futures_min_prob': 'futures_min_prob',
             'futures_vol_spike_min': 'futures_vol_spike_min',
@@ -1034,6 +1046,12 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'sso_flat_stagnation_timeout_hours_range_scalp': 'sso_flat_stagnation_timeout_hours_range_scalp',
             'sso_flat_stagnation_timeout_pnl_pct': 'sso_flat_stagnation_timeout_pnl_pct',
             'sso_flat_stagnation_timeout_pnl_pct_range_scalp': 'sso_flat_stagnation_timeout_pnl_pct_range_scalp',
+            # USD loss guard — dynamic SL cap per trade without reducing Kelly sizing
+            'max_loss_usd_per_trade': 'max_loss_usd_per_trade',
+            'emergency_gap_loss_multiplier': 'emergency_gap_loss_multiplier',
+            'ug_fast_loss_cut_enabled': 'ug_fast_loss_cut_enabled',
+            'ug_peak_drawdown_cut_enabled': 'ug_peak_drawdown_cut_enabled',
+            'ug_soft_supervisor_loss_escalation_enabled': 'ug_soft_supervisor_loss_escalation_enabled',
             'slippage_pct': 'slippage_pct',
             'use_bnb_for_commission': 'use_bnb_for_commission',
             'hybrid_optimizer_enabled': 'hybrid_optimizer_enabled',
@@ -1077,6 +1095,7 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             # s70: RANGE_SCALP new fields
             'range_scalp_min_rsi':          'range_scalp_min_rsi',
             'range_scalp_breakeven_pct':    'range_scalp_breakeven_pct',
+            'spot_bull_breakeven_pct':        'spot_bull_breakeven_pct',
             'range_scalp_sl_pct':           'range_scalp_sl_pct',
             'range_scalp_tp_pct':           'range_scalp_tp_pct',
             # s72: RANGE_SCALP entry gate new fields — fully DB-governable per profile
@@ -3509,6 +3528,74 @@ def _spot_net_pnl_aggregate(pos_list, current_price: float, settings) -> tuple[f
     return gross_pnl_usdt, net_pnl_usdt, net_pnl_pct
 
 
+def _apply_usd_loss_cap_to_sl(
+    symbol: str,
+    qty: float,
+    entry_price: float,
+    sl_price: float,
+    tp_price: Optional[float],
+    settings,
+    side: str,
+    metadata: Dict[str, Any],
+    trade_type: str = 'spot',
+) -> Tuple[float, Optional[float], Dict[str, Any]]:
+    """
+    Cap the effective stop-loss so that the maximum nominal USD loss per trade
+    does not exceed `max_loss_usd_per_trade`. The SL is never loosened (moved
+    further from price) by this function.
+
+    Returns (effective_sl_price, effective_tp_price, updated_metadata).
+    """
+    max_loss = float(getattr(settings, 'max_loss_usd_per_trade', 18.0) or 0.0)
+    if max_loss <= 0 or qty <= 0 or entry_price <= 0:
+        return sl_price, tp_price, metadata
+    position_value = qty * entry_price
+    if position_value <= 0:
+        return sl_price, tp_price, metadata
+
+    price_move = max_loss / qty
+    side_upper = str(side).upper()
+    sl_source = metadata.get('sl_source', 'category_pct')
+
+    if side_upper in ('BUY', 'LONG'):
+        usd_sl = entry_price - price_move
+        effective_sl = max(sl_price, usd_sl)
+        if usd_sl > sl_price:
+            sl_source = 'usd_cap'
+        # Preserve reward:risk ratio using the new, tighter SL
+        if tp_price is not None and effective_sl < entry_price and sl_price < entry_price:
+            old_risk = entry_price - sl_price
+            new_risk = entry_price - effective_sl
+            if old_risk > 0 and new_risk > 0:
+                reward = tp_price - entry_price
+                tp_price = entry_price + reward * (new_risk / old_risk)
+                if tp_price <= entry_price:
+                    tp_price = None
+    elif side_upper in ('SELL', 'SHORT'):
+        usd_sl = entry_price + price_move
+        effective_sl = min(sl_price, usd_sl)
+        if usd_sl < sl_price:
+            sl_source = 'usd_cap'
+        if tp_price is not None and effective_sl > entry_price and sl_price > entry_price:
+            old_risk = sl_price - entry_price
+            new_risk = effective_sl - entry_price
+            if old_risk > 0 and new_risk > 0:
+                reward = entry_price - tp_price
+                tp_price = entry_price - reward * (new_risk / old_risk)
+                if tp_price >= entry_price:
+                    tp_price = None
+    else:
+        return sl_price, tp_price, metadata
+
+    metadata['max_loss_usd_per_trade'] = max_loss
+    metadata['effective_sl_usd'] = min(max_loss, position_value * 0.95)
+    metadata['effective_sl_price'] = effective_sl
+    metadata['sl_source'] = sl_source
+    if tp_price is not None:
+        metadata['effective_tp_price'] = tp_price
+    return effective_sl, tp_price, metadata
+
+
 def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, news_client=None, regime: str = None, monitor_only: bool = False, sso7_candidate_cache: Optional[Dict] = None) -> List[Dict]:
     """
     Check all open positions against Stop-Loss, Take-Profit, and Trailing Stop rules.
@@ -3669,6 +3756,12 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
             _rs_be = min(_rs_be, 0.15)
             if _rs_be > 0:
                 trail_activate = min(trail_activate, _rs_be / 100.0)
+        # SPOT_BULL fast breakeven — move SL to net BE once +0.25% profit is reached
+        if regime == 'SPOT_BULL' and hasattr(settings, 'spot_bull_breakeven_pct'):
+            _sb_be = float(getattr(settings, 'spot_bull_breakeven_pct', 0.25))
+            _sb_be = min(_sb_be, 0.50)
+            if _sb_be > 0:
+                trail_activate = min(trail_activate, _sb_be / 100.0)
         # M1: override sl_pct with ATR-based dynamic SL (prevents premature stops on volatile tokens)
         sl_pct = _calc_atr_sl_pct(client, symbol, settings, sl_pct)
 
@@ -3705,6 +3798,13 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 supervisor_decision = None
                 supervisor_close_pct = 1.0
                 supervisor_force_close = False
+
+                # ── Emergency gap stop: market-order protection beyond the USD loss cap ──
+                _max_loss_usd = float(getattr(settings, 'max_loss_usd_per_trade', 18.0) or 0.0)
+                _emergency_mult = float(getattr(settings, 'emergency_gap_loss_multiplier', 1.5) or 0.0)
+                if _max_loss_usd > 0 and _emergency_mult > 0 and pnl_usdt_net <= -(_max_loss_usd * _emergency_mult):
+                    close_reason = f"emergency_gap_stop ({pnl_usdt_net:.2f} USD)"
+
                 metadata = getattr(pos, 'metadata', {}) or {}
                 _entry_context_unknown = str(metadata.get('entry_context_status') or '').strip().lower() == 'unknown_reconciled'
                 _ctx_signal_strength = None
@@ -4681,7 +4781,23 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 # Prevents SL from retreating when SmartTP EXTEND or Scale-Out moved it forward
                 _sl_floor = entry_price * (1.0 - sl_pct)
                 _sl_saved = float(pos.stop_loss) if pos.stop_loss and float(pos.stop_loss) > 0 else _sl_floor
-                _effective_sl_price = max(_sl_floor, _sl_saved)
+
+                # USD loss guard: recompute effective SL from position size; never loosen it
+                _pos_qty_sl = float(pos.quantity or 0)
+                _pos_metadata = getattr(pos, 'metadata', {}) or {}
+                _usd_sl, _, _pos_metadata = _apply_usd_loss_cap_to_sl(
+                    symbol, _pos_qty_sl, entry_price, _sl_floor, None,
+                    settings, 'BUY', _pos_metadata, trade_type='spot'
+                )
+                _effective_sl_price = max(_usd_sl, _sl_saved)
+                # Persist the cap metadata/SL if it tightened beyond the saved value
+                if _effective_sl_price > _sl_saved + 1e-12:
+                    try:
+                        position_manager.update_position_sl(pos.position_id, round(_effective_sl_price, 8))
+                        position_manager.update_position_metadata(pos.position_id, _pos_metadata)
+                    except Exception:
+                        pass
+
                 if close_reason is None and current_price <= _effective_sl_price:
                     close_reason = f"stop_loss ({pnl_pct*100:.2f}%, sl={_effective_sl_price:.6f})"
                     _spot_sl_count_this_cycle[0] += 1  # B3: track mass-SL events this cycle
@@ -4833,10 +4949,13 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                 # Prevents any trailing-active position from going negative
                 if close_reason is None and trailing_enabled and pnl_pct_net >= trail_activate:
                     _cur_sl_val = float(pos.stop_loss or 0)
-                    if _cur_sl_val < entry_price:
+                    # Net breakeven price: entry + round-trip fees + slippage so realized PnL >= 0
+                    _net_be_pct = 2.0 * commission_rate + float(getattr(settings, 'slippage_pct', 0.00052) or 0.0)
+                    _net_be_price = entry_price * (1.0 + _net_be_pct)
+                    if _cur_sl_val < _net_be_price:
                         try:
-                            position_manager.update_position_sl(pos.position_id, round(entry_price, 8))
-                            print(f"[Breakeven] {symbol}: SL → entry={entry_price:.6f} (PnL net={pnl_pct_net*100:.2f}%)")
+                            position_manager.update_position_sl(pos.position_id, round(_net_be_price, 8))
+                            print(f"[Breakeven] {symbol}: SL → net_BE={_net_be_price:.6f} (PnL net={pnl_pct_net*100:.2f}%)")
                             # H3: trazabilidad en BD — registrar activación de breakeven
                             try:
                                 if _db_client_ref:
@@ -4892,6 +5011,13 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             position_manager.update_position_metadata(pos.position_id, metadata)
                         except Exception:
                             pass
+                    # USD loss guard: trailing distance can never allow a > $18 drop from the peak
+                    _pos_qty_trail = float(pos.quantity or 0)
+                    if _max_loss_usd > 0 and _pos_qty_trail > 0 and peak_price > 0:
+                        _max_trail_dist_price = _max_loss_usd / _pos_qty_trail
+                        _max_trail_dist = _max_trail_dist_price / peak_price
+                        if _max_trail_dist > 0:
+                            trail_dist = min(trail_dist, _max_trail_dist)
                     trail_stop_price = peak_price * (1.0 - trail_dist)
                     # FIX-H2: Persist trailing SL to PositionManager so it survives restarts
                     try:
@@ -5697,6 +5823,8 @@ def _filter_buy_candidates(
                     _profile, _pinfo = entry_profile_gate.classify(
                         meta, regime_mode, meta.get("expected_side", "LONG"), symbol,
                         fear_greed_value=_fng_value,
+                        range_scalp_model_mode=getattr(settings, "range_scalp_quality_model_mode", "shadow"),
+                        range_scalp_model_path=getattr(settings, "range_scalp_quality_model_path", None),
                     )
                     meta["peak_quality_profile"] = _profile
                     meta["peak_quality_score"] = _pinfo["score"]
@@ -5719,6 +5847,10 @@ def _filter_buy_candidates(
             "peak_quality_profile": _profile if _profile in ("A", "B", "C") else None,
             "peak_quality_score": _profile_score,
             "entry_profile_gate_info": _profile_info,
+            "entry_model_version": _profile_info.get("model_version"),
+            "entry_model_score": _profile_info.get("model_score"),
+            "entry_model_shadow_profile": _profile_info.get("shadow_profile"),
+            "entry_model_missing_features": _profile_info.get("missing_features", []),
         })
         if _profile not in ("A", "B", "C"):
             print(f"[FilterBuy] Rejected {symbol}: PEAK_QUALITY_DISCARDED (profile={_profile})")
@@ -5771,6 +5903,10 @@ def _filter_buy_candidates(
             "peak_quality_profile": _profile,
             "peak_quality_score": _profile_score,
             "entry_profile_gate_info": _profile_info,
+            "entry_model_version": _profile_info.get("model_version"),
+            "entry_model_score": _profile_info.get("model_score"),
+            "entry_model_shadow_profile": _profile_info.get("shadow_profile"),
+            "entry_model_missing_features": _profile_info.get("missing_features", []),
             "entry_decision": _entry_decision,
         })
         if isinstance(cand, dict):
@@ -5780,6 +5916,10 @@ def _filter_buy_candidates(
                 "peak_quality_profile": _profile,
                 "peak_quality_score": meta.get("peak_quality_score"),
                 "entry_profile_gate_info": meta.get("entry_profile_gate_info"),
+                "entry_model_version": _profile_info.get("model_version"),
+                "entry_model_score": _profile_info.get("model_score"),
+                "entry_model_shadow_profile": _profile_info.get("shadow_profile"),
+                "entry_model_missing_features": _profile_info.get("missing_features", []),
                 "entry_decision": _entry_decision,
             })
         if not _entry_decision["eligible"]:
@@ -6607,6 +6747,24 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     _bb_ok = bool(_meta_bb_near) or (_meta_bb_touch is not False) or _bb_pos_ok
                     if not _bb_ok and _meta_bb_touch is False:
                         print(f"Skipping buy {symbol}: RANGE_SCALP — price not near BB lower band (bb_pos={_meta_bb_pos})")
+                        _ready_id = _sym_meta.get("ready_candidate_id")
+                        try:
+                            staged_entry.record_execution_gate(
+                                _db_client_ref,
+                                int(_ready_id) if _ready_id is not None else None,
+                                False,
+                                "RANGE_BB",
+                                {
+                                    "bb_position": _meta_bb_pos,
+                                    "bb_lower_touch": _meta_bb_touch,
+                                    "bb_near_lower": _meta_bb_near,
+                                    "max_bb_position": _rs_max_bb_pos,
+                                    "current_price": price,
+                                    "regime_mode": _regime_mode,
+                                },
+                            )
+                        except (TypeError, ValueError):
+                            pass
                         update_signal_decision(symbol, "rejected", "RANGE_BB")
                         continue
                 # B2: s70 — minimum RSI floor to avoid free-fall entries
@@ -7294,6 +7452,25 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "strength": float(_signal_for_symbol.get('strength', strength)),
                         "peak_quality_profile": _peak_quality_profile if _peak_quality_profile in ('A', 'B', 'C') else None,
                         "peak_quality": _peak_quality_score,
+                        "entry_model_version": (_signal_for_symbol.get('entry_profile_gate_info') or {}).get('model_version'),
+                        "entry_model_score": (_signal_for_symbol.get('entry_profile_gate_info') or {}).get('model_score'),
+                        "entry_model_shadow_profile": (_signal_for_symbol.get('entry_profile_gate_info') or {}).get('shadow_profile'),
+                        "entry_model_missing_features": (_signal_for_symbol.get('entry_profile_gate_info') or {}).get('missing_features', []),
+                        "entry_model_mode": (_signal_for_symbol.get('entry_profile_gate_info') or {}).get('model_mode'),
+                        "entry_model_features": {
+                            key: _signal_for_symbol.get(key, prediction.get(key) if prediction else None)
+                            for key in (
+                                "expected_pnl_pct", "expected_pnl_percentage", "expected_pnl", "position_size_usdt",
+                                "peak_quality", "composite_score", "confluence", "short_term_score",
+                                "success_probability", "signal_strength", "strength", "range_score", "vol_score",
+                                "rsi_score", "pnl_score", "symbol_quality_score", "rsi_4h", "rsi",
+                                "vol_spike", "range_position", "bb_position", "trend_4h", "higher_tf_trend", "atr",
+                            )
+                        },
+                        "entry_feature_schema_version": _signal_for_symbol.get("entry_feature_schema_version"),
+                        "entry_live_features": _signal_for_symbol.get("entry_live_features", {}),
+                        "entry_live_feature_missing": _signal_for_symbol.get("entry_live_feature_missing", []),
+                        "entry_live_feature_completeness": _signal_for_symbol.get("entry_live_feature_completeness"),
                         "entry_regime": _regime_mode,
                         "entry_profile_label": _kelly_profile,
                         "regime_mode": _regime_mode,
@@ -7318,6 +7495,12 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "ready_candidate_id": _signal_for_symbol.get('ready_candidate_id'),
                         "staged_direction": _signal_for_symbol.get('staged_direction') or {},
                     }
+                    # USD loss guard: cap effective SL without reducing Kelly sizing
+                    _entry_price_for_sl = float(_fill.get('avg_price', price) or price)
+                    sl_price, tp_price, metadata = _apply_usd_loss_cap_to_sl(
+                        symbol, qty, _entry_price_for_sl, sl_price, tp_price,
+                        settings, 'BUY', metadata, trade_type='spot'
+                    )
                     metadata['entry_decision'] = _preflight_decision
                     # Persist gate_warnings collected during advisory mode
                     _gate_warnings_for_sym = _signal_for_symbol.get('gate_warnings', [])

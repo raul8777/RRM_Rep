@@ -40,6 +40,7 @@ from binance_truth_guard import (
     auto_reconcile_futures,
 )
 from trade_utils import get_min_notional_delta, get_symbol_filters
+from entry_evidence import build_entry_evidence
 
 settings = get_settings()
 app = FastAPI(title="Binance Trading Agent")
@@ -101,6 +102,8 @@ _HEALTH_RESULTS_CACHE: Dict[str, Any] = {
 }
 _HEALTH_RESULTS_EVENT = asyncio.Event()
 _HEALTH_RESULTS_LEVEL = {"ok": 0, "inconclusive": 1, "warning": 2, "critical": 3, "error": 3}
+_ENTRY_EVIDENCE_CACHE: Dict[tuple, Dict[str, Any]] = {}
+_ENTRY_EVIDENCE_CACHE_TTL_SECONDS = 15
 
 # Wire db_client into Signal Store
 if db_client:
@@ -5363,6 +5366,42 @@ async def get_rollout_readiness(_auth=Depends(_require_api_key)) -> Dict:
     return _get_rollout_readiness_snapshot()
 
 
+@app.get("/metrics/entry-evidence")
+async def get_entry_evidence(
+    regime: str = Query("RANGE_SCALP", min_length=1, max_length=32),
+    days: int = Query(30, ge=1, le=365),
+    profile: Optional[str] = Query(None, max_length=1),
+    trade_type: Optional[str] = Query(None, max_length=16),
+    include_legacy: bool = False,
+    _auth=Depends(_require_api_key),
+) -> Dict:
+    normalized_regime = regime.strip().upper()
+    normalized_profile = profile.strip().upper() if profile else None
+    normalized_trade_type = trade_type.strip().lower() if trade_type else None
+    if normalized_profile not in (None, "A", "B", "C"):
+        raise HTTPException(status_code=400, detail="profile must be A, B, or C")
+    if normalized_trade_type not in (None, "spot", "futures"):
+        raise HTTPException(status_code=400, detail="trade_type must be spot or futures")
+    cache_key = (normalized_regime, days, normalized_profile, normalized_trade_type, include_legacy)
+    cached = _ENTRY_EVIDENCE_CACHE.get(cache_key)
+    now_monotonic = time.monotonic()
+    if cached and now_monotonic - cached["created_at"] < _ENTRY_EVIDENCE_CACHE_TTL_SECONDS:
+        return cached["payload"]
+    try:
+        payload = build_entry_evidence(
+            db_client,
+            regime=normalized_regime,
+            days=days,
+            profile=normalized_profile,
+            trade_type=normalized_trade_type,
+            include_legacy=include_legacy,
+        )
+        _ENTRY_EVIDENCE_CACHE[cache_key] = {"created_at": now_monotonic, "payload": payload}
+        return payload
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "filters": {"regime": normalized_regime, "days": days}}
+
+
 @app.get("/metrics/transition-health")
 async def get_transition_health(_auth=Depends(_require_api_key)) -> Dict:
     """Return lightweight transition-health KPIs from runtime state and orchestrator memory."""
@@ -7797,6 +7836,7 @@ _KELLY_EDITABLE_FIELDS = {
     "futures_min_prob", "futures_vol_spike_min",
     "futures_entry_max_rsi_4h",
     "min_success_probability",
+    "range_scalp_quality_model_mode", "range_scalp_quality_model_path",
     "max_positions_spot_bull", "max_positions_range_scalp", "max_positions_preservation", "max_positions_futures_short",
     "portfolio_concentration_enabled", "portfolio_concentration_alpha",
     "portfolio_concentration_min_mult", "portfolio_concentration_max_mult",
@@ -7862,6 +7902,13 @@ _KELLY_EDITABLE_FIELDS = {
     # phased staged entry flags
     "staged_entry_enabled",
     "staged_entry_regime_config",
+    # USD loss guard — dynamic SL cap per trade without reducing Kelly sizing
+    "max_loss_usd_per_trade",
+    "emergency_gap_loss_multiplier",
+    "ug_fast_loss_cut_enabled",
+    "ug_peak_drawdown_cut_enabled",
+    "ug_soft_supervisor_loss_escalation_enabled",
+    "spot_bull_breakeven_pct",
 }
 
 _REGIME_MODES = {"SPOT_BULL", "RANGE_SCALP", "PRESERVATION", "FUTURES_SHORT"}
@@ -8692,6 +8739,13 @@ def _selection_display_state(
         return {"display_status": "duplicate_position", "display_label": "Duplicada · posición abierta", "actionable": False, "display_reason": "El símbolo ya tiene una posición abierta"}
     if status == "ready":
         return {"display_status": "validating", "display_label": "En validación", "actionable": False, "display_reason": reason}
+    execution_gate = (candidate.get("data") or {}).get("last_execution_gate") or {}
+    direction = (candidate.get("data") or {}).get("direction") or {}
+    if status == "validated" and execution_gate.get("passed") is False:
+        gate_reason = str(execution_gate.get("reason") or "PREFLIGHT_BLOCKED")
+        return {"display_status": "preflight_pending", "display_label": "Pendiente de preflight", "actionable": False, "display_reason": gate_reason}
+    if status == "validated" and str(direction.get("state") or "") in {"awaiting_confirmation", "recovery_pending", "recovery_confirming"}:
+        return {"display_status": "direction_pending", "display_label": "Dirección sin confirmar", "actionable": False, "display_reason": "DIRECTION_NOT_CONFIRMED"}
     if status == "validated" and candidate.get("id") in actionable_ids:
         return {"display_status": "ready_to_open", "display_label": "Lista para abrir", "actionable": True, "display_reason": reason}
     if status == "validated":
@@ -8825,6 +8879,8 @@ def _build_selection_observability(db, limit: int = 100, active_regime: Optional
             "entry_decision": (row.get("data") or {}).get("policy") or {},
             "expected_pnl": ((row.get("data") or {}).get("policy") or {}).get("expected_pnl"),
             "range_reversion_shadow": ((row.get("data") or {}).get("policy") or {}).get("range_reversion_shadow"),
+            "execution_gate": ((row.get("data") or {}).get("last_execution_gate") or {}),
+            "direction": ((row.get("data") or {}).get("direction") or {}),
         })
 
     actionable_ids: set[int] = set()
@@ -8894,6 +8950,36 @@ async def get_selection_observability(limit: int = 100, _auth=Depends(_require_a
         )
     except Exception as exc:
         return {"available": False, "error": str(exc), "candidates": []}
+
+
+@app.get("/screener/opportunity-shadow")
+async def get_screener_opportunity_shadow(
+    limit: int = Query(80, ge=1, le=80),
+    _auth=Depends(_require_api_key),
+) -> Dict:
+    try:
+        rows = db_client.execute_query(
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key = %s",
+            ("screener_snapshot",),
+        )
+        if not rows:
+            return {"ok": False, "reason": "snapshot_unavailable", "candidates": []}
+        row = rows[0]
+        snapshot = row.get("value") or {}
+        if isinstance(snapshot, str):
+            snapshot = json.loads(snapshot)
+        meta = snapshot.get("_meta") or {}
+        return {
+            "ok": True,
+            "mode": "shadow_only_no_order_routing",
+            "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+            "regime_mode": meta.get("regime_mode"),
+            "profile_label": meta.get("profile_label"),
+            "universe_funnel": meta.get("universe_funnel") or {},
+            "candidates": (snapshot.get("opportunity_shadow") or [])[:limit],
+        }
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc), "candidates": []}
 
 
 @app.get("/screener/decisions")
@@ -9465,6 +9551,10 @@ def _check_config_drift(settings) -> List[Dict]:
         'min_signal_strength', 'min_success_probability',
         'futures_min_prob', 'futures_entry_max_rsi_4h',
         'staged_entry_regime_config',
+        # USD loss guard — hot-config controlled
+        'max_loss_usd_per_trade', 'emergency_gap_loss_multiplier',
+        'ug_fast_loss_cut_enabled', 'ug_peak_drawdown_cut_enabled', 'ug_soft_supervisor_loss_escalation_enabled',
+        'spot_bull_breakeven_pct',
     }
     # Canonical default drift (SPOT+FUTURES parameters) — skip keys already covered by baseline
     for k, expected in _PARAM_DEFAULTS.items():
@@ -10780,6 +10870,10 @@ async def post_config_verify(body: Dict = None, _auth=Depends(_require_api_key))
             'entry_quality_vol_spike_min_spot_bull', 'entry_quality_vol_spike_floor_spot_bull',
             'portfolio_concentration_min_mult',
             'sso_stagnant_min_hours', 'sso_decay_min_hours',
+            # USD loss guard — hot-config controlled
+            'max_loss_usd_per_trade', 'emergency_gap_loss_multiplier',
+            'ug_fast_loss_cut_enabled', 'ug_peak_drawdown_cut_enabled', 'ug_soft_supervisor_loss_escalation_enabled',
+            'spot_bull_breakeven_pct',
         }
         if body and isinstance(body, dict):
             _exclude.update(body.get('exclude', []))

@@ -5,20 +5,31 @@ url = os.environ.get('DB_URL', 'postgresql://crypto_agent:crypto_agent_password@
 conn = psycopg2.connect(url)
 cur = conn.cursor()
 
-# Keys to restore to canonical defaults (config_helpers.py)
+# Keys to restore to canonical defaults (config_helpers.py) under aggressive entry calibration
 RESTORE = {
-    "min_signal_strength": 0.60,
-    "min_success_probability": 0.60,
+    "min_signal_strength": 0.40,
+    "min_success_probability": 0.50,
     "stop_loss_pct": 3.36,
     "take_profit_pct": 4.14,
     "kelly_base_usdt": 150.0,
-    "kelly_max_usdt": 1500.0,
-    "kelly_max_pct_liquid": 0.85,
+    "kelly_max_usdt": 2500.0,
+    "kelly_max_pct_liquid": 0.90,
     "kelly_max_pct_cap": 0.30,
+    "kelly_dynamic_base_pct": 0.22,
+    "kelly_conviction_max_pct": 0.22,
     "futures_sl_pct": 2.0,
     "futures_tp_pct": 4.0,
-    "entry_quality_vol_spike_min_spot_bull": 0.85,
-    "entry_quality_vol_spike_floor_spot_bull": 0.70,
+    "futures_kelly_base_usdt": 200.0,
+    "futures_kelly_max_usdt": 2500.0,
+    "futures_kelly_max_pct_liquid": 0.90,
+    "futures_kelly_cap_pct": 0.90,
+    "futures_min_prob": 0.45,
+    "futures_max_new_per_cycle": 3,
+    "max_positions_spot_bull": 8,
+    "max_positions_range_scalp": 6,
+    "max_positions_preservation": 6,
+    "entry_quality_vol_spike_min_spot_bull": 0.45,
+    "entry_quality_vol_spike_floor_spot_bull": 0.45,
 }
 
 # Load current override

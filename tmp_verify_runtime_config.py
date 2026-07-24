@@ -27,6 +27,10 @@ _EXCLUDED = {
     'min_hold_minutes', 'max_rebalance_per_cycle',
     'btc_dominance_altcoin_threshold', 'use_unified_portfolio_manager',
     'futures_overflow_min_strength',
+    # Aggressive entry calibration — intentionally tuned per deployment
+    'min_signal_strength', 'min_success_probability',
+    'futures_min_prob', 'futures_entry_max_rsi_4h',
+    'staged_entry_regime_config',
 }
 
 mismatches = {}

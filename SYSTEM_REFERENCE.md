@@ -1,7 +1,65 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 22 2026 | s90: Calibración agresiva alineada y protegida contra perfiles de régimen
+> Última actualización: jul 23 2026 | s92: Opportunity shadow 2h/4h y timing RANGE_SCALP 15m
+
+---
+
+## 🟡 Estado del Sistema — jul 23 2026 — s92: Opportunity shadow 2h/4h y timing RANGE_SCALP 15m
+
+### Objetivo
+
+Ampliar descubrimiento de oportunidades sin ampliar ejecución, construir labels netos reproducibles para 2h/4h y medir si el timing 15m mejora RANGE_SCALP frente al baseline 1h.
+
+### Cambios implementados
+
+- `pair_screener.py` mantiene un `opportunity_shadow` de hasta 80 activos, separado entre exclusión estructural, `OBSERVE` y `ELIGIBLE`; no cambia la lista de órdenes ni el routing SPOT/FUTURES.
+- `GET /screener/opportunity-shadow` expone el embudo y candidatas en modo `shadow_only_no_order_routing`.
+- `opportunity_labels.py` y `Dev/scripts/build_opportunity_forward_labels.py` generan `forward_gross/net/mfe/mae_2h|4h` por lado desde OHLCV 1h, descontando fricción round-trip. La primera generación contiene 399,647 filas de 40 símbolos, LONG y coste SPOT-BNB de 0.204%.
+- RANGE_SCALP conserva setup `1h` y contexto `4h`. `autonomous_signals.py` adjunta `range_scalp_timing_shadow` de 15m para candidatas finalistas: RSI, BB, volumen y retornos 15m/1h; no interviene en ranking, gate, staging ni orden.
+- `canonical/calibracion_entradas-a20ab8-v3.md` y `canonical/calibrar_datos.md` registran el contrato, la jerarquía de evidencia y la condición de no-promoción.
+
+### Estado y guardas
+
+- El modelo RANGE_SCALP continúa `shadow`; los labels forward representan oportunidad, no PnL ejecutado.
+- No se modificaron thresholds, Kelly, universo de órdenes, límites de posición, SL/TP, lifecycle ni routing.
+- `15m` no se promueve como feature o gate hasta superar comparación prospectiva y walk-forward purgado contra baseline 1h, con PnL neto, PF, MAE, DD, cobertura y fricción 1x/1.5x/2x.
+
+### Validación
+
+- `tests/test_opportunity_labels.py`, `tests/test_range_scalp_data_contract.py`, `tests/test_autonomous_signals_ranking.py` y `tests/test_screener.py`: **19 passed**.
+- Compilación de `autonomous_signals.py`, `opportunity_labels.py` y el generador de labels: correcta.
+- Contenedor `app` reiniciado; no hubo habilitación de órdenes adicionales.
+
+---
+
+## 🟡 Estado del Sistema — jul 23 2026 — s91: Fundación canónica de datos y RANGE_SCALP en shadow
+
+### Objetivo
+
+Separar evidencia de producción, peaks y MIMIC; reconstruir outcomes netos por posición; y reparar la observabilidad de features sin cambiar sizing, gates de entrada ni lifecycle.
+
+### Cambios implementados
+
+- `canonical/calibrar_datos.md` es la referencia de ubicación, autoridad, labels, linaje, exclusiones y gates de calidad para históricos, DB, peaks, MIMIC y backtests.
+- `Dev/scripts/build_research_manifest.py` genera un inventario con hashes de insumos de investigación; ejecución actual: 385 artefactos catalogados.
+- `Dev/scripts/build_research_outcomes.py` agrupa cierres parciales por posición y enlaza `ready_candidate_id` cuando está disponible. La extracción de 180 días produjo 1,038 posiciones, 814 elegibles, 10 enlaces exactos y 1,028 cohortes legacy sin enlace.
+- `range_scalp_data_contract.py` define `range_scalp_live_v1`; `autonomous_signals.py`, `staged_entry.py` y `run_trades.py` lo capturan antes del gate y lo conservan hasta metadata de fill sin imputar faltantes.
+- El dataset RANGE v2 generado contiene 286 filas (276 real closed grouped + 10 MIMIC), separado por `source`.
+- `GET /metrics/entry-evidence` y la tarjeta Evidence Shadow exponen funnel, cobertura live_v1, lineage exacto/legacy/roto, outcomes netos y gates de promoción sin modificar decisiones. La lectura actual confirma una brecha de instrumentación histórica: no hay cierres con `entry_live_features` en la ventana previa; el endpoint queda bloqueado hasta recibir snapshots prospectivos.
+- La validación staged volvió a ser fail-closed: los cuatro regímenes fuerzan confirmación direccional (`enforced`, dos avances); candidatas sin dirección confirmada se reencolan. El preflight final persiste `last_execution_gate`, y la UI/Evidence Shadow distingue bloqueo de preflight de una candidata realmente lista.
+
+### Estado y guardas
+
+- El modelo RANGE_SCALP continúa en `shadow`. Walk-forward actual: 306 filas, OOF corr -0.0186 y ninguna threshold A elegible.
+- No se modificaron thresholds, Kelly, límites de posiciones, órdenes, SL/TP ni lifecycle.
+- Promoción requiere completeness shadow >=95%, outcomes agrupados, validación temporal y PnL neto >0, PF>=1.15, cobertura>=5%, DD no peor y n>=30 para A en cada holdout.
+
+### Validación
+
+- `tests/test_range_scalp_data_contract.py`, `tests/test_range_scalp_quality_model.py` y `tests/test_staged_entry.py`: **20 passed**.
+- Compilación de extractores, contrato y pipeline de señales: correcta.
+- `git diff --check`: correcto.
 
 ---
 

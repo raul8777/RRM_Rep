@@ -917,9 +917,15 @@ def auto_manage_bnb_discount(
             })
 
         # Activate BNB discount only if both wallets have sufficient target buffer
-        # and no recent top-up failed (avoid paying standard fees while believing discount is active)
+        # and no recent top-up failed (avoid paying standard fees while believing discount is active).
+        # Tolerate one BNB lot step (0.001) below the USD target: the excess-sell logic
+        # rounds the post-sell quantity down to the lot size, so the remaining value can
+        # be slightly under target_spot_usd/target_futures_usd. Without this tolerance the
+        # discount flips OFF right after a sell and back ON next cycle.
+        _bnb_lot_value_usd = result['bnb_price'] * 0.001
         _topup_failed = result['spot_action'].endswith('_failed') or result['futures_action'].endswith('_failed')
-        if (spot_bnb_usd >= target_spot_usd and futures_bnb_usd >= target_futures_usd
+        if (spot_bnb_usd >= target_spot_usd - _bnb_lot_value_usd
+                and futures_bnb_usd >= target_futures_usd - _bnb_lot_value_usd
                 and spot_bnb_usd > 0 and futures_bnb_usd > 0 and not _topup_failed):
             result['use_bnb'] = True
 

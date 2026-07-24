@@ -1653,6 +1653,75 @@ function renderExpectativaVsRealidad(data) {
     `;
 }
 
+function renderEntryEvidence(data) {
+    const el = document.getElementById('entryEvidenceData');
+    if (!el) return;
+    if (!data || data.ok === false) {
+        el.innerHTML = '<p class="loading">No se pudo cargar la evidencia.</p>';
+        return;
+    }
+    const promotion = data.promotion || {};
+    const instrumentation = data.instrumentation || {};
+    const lineage = data.lineage || {};
+    const outcomes = (data.outcomes || {}).exact_only || {};
+    const funnel = data.funnel || {};
+    const status = String(promotion.overall_status || 'blocked').toUpperCase();
+    const statusClass = status === 'READY_FOR_REVIEW' ? 'status-positive' : status === 'COLLECTING' ? 'status-pending' : 'status-negative';
+    const gates = (promotion.gates || []).map(gate => {
+        const actual = gate.actual == null ? '—' : gate.actual;
+        const required = gate.required == null ? '—' : gate.required;
+        const numericActual = Number(gate.actual);
+        const numericRequired = Number(gate.required);
+        const width = Number.isFinite(numericActual) && Number.isFinite(numericRequired) && numericRequired > 0
+            ? Math.max(0, Math.min(100, (numericActual / numericRequired) * 100)) : (gate.status === 'passed' ? 100 : 0);
+        const color = gate.status === 'passed' ? '#4ecca3' : '#f39c12';
+        return `<div class="evidence-gate" title="${gate.reason || ''}">
+            <div class="evidence-gate-head"><span>${gate.name}</span><b>${actual} / ${required}</b></div>
+            <div class="evidence-progress"><i style="width:${width}%;background:${color}"></i></div>
+        </div>`;
+    }).join('');
+    const alerts = (data.alerts || []).map(alert => `<div class="evidence-alert evidence-alert-${alert.severity === 'critical' ? 'critical' : 'warning'}">
+        <b>${alert.code}</b> — ${alert.message}<small>${alert.remediation || ''}</small>
+    </div>`).join('');
+    const pf = outcomes.profit_factor == null ? '—' : fmt(outcomes.profit_factor);
+    const latest = instrumentation.last_snapshot_at ? new Date(instrumentation.last_snapshot_at).toLocaleString('es-MX') : 'Sin snapshot';
+    el.innerHTML = `
+        <div class="evidence-status">
+            <strong class="selection-col-status ${statusClass}">${status.replaceAll('_', ' ')}</strong>
+            <small>${(promotion.next_requirements || [])[0] || 'Todos los gates están completos.'}</small>
+        </div>
+        <div class="evidence-gates">${gates || '<p class="loading">Sin gates disponibles.</p>'}</div>
+        <div class="evidence-grid">
+            <div><span>Schema live</span><strong>${fmt(instrumentation.snapshot_coverage_pct || 0, 1)}%</strong></div>
+            <div><span>Último snapshot</span><strong title="${latest}">${instrumentation.fresh ? 'Fresco' : 'Pendiente'}</strong></div>
+            <div><span>Linaje exacto</span><strong>${lineage.exact || 0} / ${(lineage.exact || 0) + (lineage.legacy || 0) + (lineage.broken || 0)}</strong></div>
+            <div><span>PF exacto</span><strong>${pf}</strong></div>
+            <div><span>PnL neto exacto</span><strong class="${(outcomes.pnl_net_usdt || 0) >= 0 ? 'positive' : 'negative'}">${(outcomes.pnl_net_usdt || 0) >= 0 ? '+' : ''}$${fmt(outcomes.pnl_net_usdt || 0)}</strong></div>
+            <div><span>Funnel cierre</span><strong>${funnel.closed || 0} / ${funnel.selection || 0}</strong></div>
+            <div><span>Preflight bloqueadas</span><strong>${funnel.validated_blocked_by_execution_gate || 0}</strong></div>
+        </div>
+        ${alerts}
+    `;
+}
+
+async function updateEntryEvidence() {
+    const el = document.getElementById('entryEvidenceData');
+    if (!el) return;
+    const days = document.getElementById('entryEvidenceDays')?.value || '30';
+    const profile = document.getElementById('entryEvidenceProfile')?.value || '';
+    const legacy = document.getElementById('entryEvidenceLegacy')?.checked ? 'true' : 'false';
+    const params = new URLSearchParams({ regime: 'RANGE_SCALP', days, include_legacy: legacy });
+    if (profile) params.set('profile', profile);
+    try {
+        const response = await fetch(`${API_BASE}/metrics/entry-evidence?${params.toString()}`, { headers: _authHeaders() });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        renderEntryEvidence(await response.json());
+    } catch (error) {
+        console.error('Entry evidence fetch error:', error);
+        el.innerHTML = '<p class="loading">No se pudo cargar la evidencia shadow.</p>';
+    }
+}
+
 function switchSelectionTab(tab) {
     _selectionObservabilityTab = tab || 'under_review';
     if (_lastSelectionObservabilityData) {
@@ -1674,6 +1743,8 @@ function renderSelectionObservability(data) {
     const statusClass = {
         validating: 'status-pending',
         ready_to_open: 'status-positive',
+        preflight_pending: 'status-pending',
+        direction_pending: 'status-pending',
         validated_queue: 'status-neutral',
         blocked_regime: 'status-negative',
         duplicate_position: 'status-neutral',
@@ -1701,7 +1772,7 @@ function renderSelectionObservability(data) {
         <div class="selection-summary">
             <div><span>En validación</span><strong>${displayCounts.validating ?? 0}</strong></div>
             <div><span>Listas para abrir</span><strong>${displayCounts.ready_to_open ?? 0}</strong></div>
-            <div><span>En cola / bloqueadas</span><strong>${(displayCounts.validated_queue ?? 0) + (displayCounts.blocked_regime ?? 0) + (displayCounts.duplicate_position ?? 0)}</strong></div>
+            <div><span>En cola / bloqueadas</span><strong>${(displayCounts.validated_queue ?? 0) + (displayCounts.preflight_pending ?? 0) + (displayCounts.direction_pending ?? 0) + (displayCounts.blocked_regime ?? 0) + (displayCounts.duplicate_position ?? 0)}</strong></div>
             <div><span>Finalizadas</span><strong>${(displayCounts.opened ?? 0) + (displayCounts.discarded ?? 0) + (displayCounts.expired ?? 0)}</strong></div>
         </div>`;
 
@@ -4615,6 +4686,7 @@ async function updateDashboard() {
     renderOpenPositions(data.open_positions);
     renderExpectativaVsRealidad(data);
     renderSelectionObservability(data.selection_observability);
+    updateEntryEvidence();
     renderVolSpikeAudit();  // Auditoría VolSpike Override
     _syncFuturesUnrealPnl();  // Keep _futuresUnrealPnl fresh for KPI (no separate card)
     renderClosedPositions(data.closed_positions);

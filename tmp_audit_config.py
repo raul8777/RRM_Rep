@@ -65,6 +65,14 @@ _AUDIT_EXCLUDED = {
     'entry_quality_vol_spike_min_range_scalp',
     'min_hold_for_prediction_exit_futures_short',
     'sso_target_contribution_pct_range_scalp',  # s73 C2: DB-governed per profile
+    # Aggressive entry calibration — intentionally tuned per deployment
+    'min_signal_strength', 'min_success_probability',
+    'futures_min_prob', 'futures_entry_max_rsi_4h',
+    'staged_entry_regime_config',
+    # Legitimate fallback sentinels / not canonical defaults
+    'futures_category_thresholds', 'rebalance_excluded_symbols', 'signal_cache_ttl_seconds',
+    # Env-specific DB credentials — fallback values differ from canonical empty/localhost
+    'db_user', 'db_host',
 }
 
 import ast

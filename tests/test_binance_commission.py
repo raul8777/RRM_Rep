@@ -288,3 +288,16 @@ def test_auto_manage_bnb_discount_transfers_futures_excess_to_spot():
     # Final per-wallet reserves should be near $100 each
     assert fut._bnb < 0.2  # ~0.167 BNB in futures
     assert spot._bnb < 0.2  # ~0.167 BNB in spot
+
+
+def test_auto_manage_bnb_discount_keeps_use_bnb_after_lot_rounding():
+    # When BNB value is above the $100 max reserve, the sell logic rounds the
+    # remaining quantity down to the 0.001 BNB lot size. At $600/BNB, 0.167 BNB
+    # is only $99.60 -- slightly under the $100 target. The lot-step tolerance
+    # must keep use_bnb True to avoid an OFF/ON flip every cycle.
+    spot = FakeSpotClient(bnb=5.0, usdt=1000.0)
+    fut = FakeFuturesClient(bnb=0.17, usdt=0.0, spot_client=spot)
+    db = MagicMock()
+    res = auto_manage_bnb_discount(BNBAutoSettings(), spot_client=spot, futures_client=fut, db_client=db, regime_mode='SPOT_BULL')
+    assert res['spot_action'].startswith('sold_excess')
+    assert res['use_bnb'] is True

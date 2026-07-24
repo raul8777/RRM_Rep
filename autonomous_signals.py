@@ -152,6 +152,32 @@ class AutonomousSignalGenerator:
         """Remove symbol from cache (e.g. after a trade is executed)."""
         _signal_cache.pop(symbol, None)
 
+    def analyze_range_scalp_timing(self, symbol: str) -> Dict:
+        klines = self.fetch_klines(symbol, '15m', limit=100)
+        if len(klines) < 30:
+            return {"interval": "15m", "data_complete": False, "reason": "insufficient_klines"}
+        closes = [k['close'] for k in klines]
+        highs = [k['high'] for k in klines]
+        lows = [k['low'] for k in klines]
+        volumes = [k['volume'] for k in klines]
+        analysis = TechnicalIndicators.analyze_signal(closes, highs, lows, volumes)
+        rsi_values = TechnicalIndicators.rsi(closes, 14)
+        upper, middle, lower = TechnicalIndicators.bollinger_bands(closes, period=20, std_dev=2.0)
+        span = upper[-1] - lower[-1] if upper and lower else 0.0
+        volume_base = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else 0.0
+        return {
+            "interval": "15m",
+            "data_complete": bool(rsi_values and upper and middle and lower and span > 0 and volume_base > 0),
+            "timestamp": klines[-1]['close_time'],
+            "signal": analysis.get('signal'),
+            "strength": analysis.get('strength'),
+            "rsi_15m": round(float(rsi_values[-1]), 4) if rsi_values else None,
+            "bb_position_15m": round(float((closes[-1] - lower[-1]) / span), 4) if span > 0 else None,
+            "vol_spike_15m": round(volumes[-1] / volume_base, 4) if volume_base > 0 else None,
+            "return_15m_pct": round((closes[-1] / closes[-2] - 1.0) * 100.0, 4) if closes[-2] > 0 else None,
+            "return_1h_pct": round((closes[-1] / closes[-5] - 1.0) * 100.0, 4) if closes[-5] > 0 else None,
+        }
+
     def analyze_symbol(self, symbol: str, interval: str = '1h',
                        use_multi_timeframe: bool = True,
                        news_client=None) -> Dict:
@@ -583,12 +609,20 @@ class AutonomousSignalGenerator:
         # model (which is frequently absent and generates noisy warnings).
         _pq_regime = str(regime_mode or 'SPOT_BULL').strip().upper()
         for _sig in buy_signals:
+            if _pq_regime == 'RANGE_SCALP':
+                try:
+                    from range_scalp_data_contract import attach_snapshot
+                    attach_snapshot(_sig)
+                except Exception as _contract_err:
+                    logger.warning(f"RANGE_SCALP feature contract failed for {_sig.get('symbol')}: {_contract_err}")
             # New calibrated entry-profile gate: A/B/C based on realized outcomes.
             # If the signal cannot reach profile C it is marked as discarded.
             try:
                 import entry_profile_gate
                 _profile, _pinfo = entry_profile_gate.classify(
-                    _sig, _pq_regime, _sig.get('expected_side', 'LONG'), _sig.get('symbol', '')
+                    _sig, _pq_regime, _sig.get('expected_side', 'LONG'), _sig.get('symbol', ''),
+                    range_scalp_model_mode=getattr(settings, 'range_scalp_quality_model_mode', 'shadow'),
+                    range_scalp_model_path=getattr(settings, 'range_scalp_quality_model_path', None),
                 )
                 _sig['peak_quality_profile'] = _profile if _profile else 'discarded'
                 _sig['peak_quality_score'] = _pinfo['score']
@@ -630,8 +664,17 @@ class AutonomousSignalGenerator:
         _regime = str(regime_mode or 'SPOT_BULL').strip().upper() or 'SPOT_BULL'
         buy_signals.sort(key=lambda s: _regime_signal_score(s, _regime), reverse=True)
         logger.info(f"[Regime] {_regime} ranking applied (contract-v1)")
+        selected = buy_signals[:limit]
+        if _regime == 'RANGE_SCALP':
+            for signal in selected:
+                try:
+                    signal['range_scalp_timing_shadow'] = self.analyze_range_scalp_timing(signal['symbol'])
+                except Exception as exc:
+                    signal['range_scalp_timing_shadow'] = {
+                        "interval": "15m", "data_complete": False, "reason": str(exc),
+                    }
 
-        return buy_signals[:limit]
+        return selected
 
     def get_top_sell_signals(self, interval: str = '1h', min_strength: float = 0.6,
                              limit: int = 5, use_multi_timeframe: bool = True) -> List[Dict]:

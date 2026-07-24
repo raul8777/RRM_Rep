@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 _DEFAULT_STATS_PATH = Path("Dev/benchmarks/super_mimic/predictive_sweep/peak_quality_stats.json")
 _DEFAULT_THRESHOLDS_PATH = Path("Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json")
 _QUALITY_MODEL_PATH = Path("Dev/benchmarks/entry_profile_calibration/quality_score_model_spot_bull.pkl")
+_QUALITY_MODEL_PATHS = {
+    "SPOT_BULL": _QUALITY_MODEL_PATH,
+    "RANGE_SCALP": Path("Dev/benchmarks/entry_profile_calibration/quality_score_model_range_scalp.pkl"),
+}
 
 _CATEGORIES = {
     "LARGE_CAP": {"bonus": -0.02},
@@ -38,8 +42,8 @@ _CATEGORIES = {
 
 _stats_cache: Optional[Dict[str, Any]] = None
 _thresholds_cache: Optional[Dict[str, Any]] = None
-_model_cache: Optional[Any] = None
-_model_load_attempted = False
+_model_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+_model_load_attempted: Dict[str, bool] = {}
 
 
 _QUALITY_SCORE_FEATURES = [
@@ -63,22 +67,42 @@ _QUALITY_SCORE_FEATURES = [
 ]
 
 
-def _load_quality_score_model() -> Optional[Any]:
-    """Lazy-load the SPOT_BULL quality score model artifact."""
+def _load_quality_score_artifact(regime: str, path: Optional[str] = None) -> Optional[Dict[str, Any]]:
     global _model_cache, _model_load_attempted
-    if _model_load_attempted:
-        return _model_cache
-    _model_load_attempted = True
-    if not _QUALITY_MODEL_PATH.exists():
+    regime = str(regime or "SPOT_BULL").upper()
+    if not isinstance(_model_cache, dict):
+        _model_cache = {}
+    if not isinstance(_model_load_attempted, dict):
+        _model_load_attempted = {}
+    cache_key = f"{regime}:{path or ''}"
+    if _model_load_attempted.get(cache_key):
+        return _model_cache.get(cache_key)
+    _model_load_attempted[cache_key] = True
+    model_path = Path(path) if path else (_QUALITY_MODEL_PATH if regime == "SPOT_BULL" else _QUALITY_MODEL_PATHS.get(regime))
+    if model_path is None or not model_path.exists():
+        _model_cache[cache_key] = None
         return None
     try:
         import joblib
-        artifact = joblib.load(_QUALITY_MODEL_PATH)
-        _model_cache = artifact["model"] if isinstance(artifact, dict) else artifact
-        return _model_cache
+        artifact = joblib.load(model_path)
+        if not isinstance(artifact, dict) or artifact.get("model") is None:
+            artifact = {"model": artifact, "features": _QUALITY_SCORE_FEATURES, "regime": regime}
+        artifact.setdefault("features", _QUALITY_SCORE_FEATURES)
+        artifact.setdefault("regime", regime)
+        _model_cache[cache_key] = artifact
+        return artifact
     except Exception as e:
-        logger.warning(f"Could not load quality score model: {e}")
+        message = f"Could not load quality score model: {e}" if regime == "SPOT_BULL" else f"Could not load {regime} quality score model: {e}"
+        logger.warning(message)
+        _model_cache[cache_key] = None
         return None
+
+
+def _load_quality_score_model(regime: Optional[str] = None, path: Optional[str] = None) -> Optional[Any]:
+    artifact = _load_quality_score_artifact(regime or "SPOT_BULL", path)
+    if regime is None and path is None:
+        return artifact.get("model") if artifact else None
+    return artifact
 
 
 def _has_quality_signal_features(signal_meta: Dict[str, Any]) -> bool:
@@ -106,35 +130,39 @@ def _has_quality_signal_features(signal_meta: Dict[str, Any]) -> bool:
     return any(k in signal_meta and signal_meta.get(k) is not None for k in quality_keys)
 
 
-def _model_quality_score(signal_meta: Dict[str, Any]) -> Optional[float]:
-    """Return a model-predicted realized return for SPOT_BULL if the model exists and features are present."""
-    model = _load_quality_score_model()
-    if model is None:
-        return None
+def _model_quality_score(
+    signal_meta: Dict[str, Any], regime: str = "SPOT_BULL", path: Optional[str] = None,
+) -> Tuple[Optional[float], List[str], Optional[str]]:
+    artifact = _load_quality_score_artifact(regime, path)
+    if artifact is None:
+        return None, [], None
     if not _has_quality_signal_features(signal_meta):
-        return None
+        return None, list(artifact.get("features") or _QUALITY_SCORE_FEATURES), artifact.get("trained_at")
     try:
         import numpy as np
     except Exception:
-        return None
+        return None, [], artifact.get("trained_at")
     values = []
-    for k in _QUALITY_SCORE_FEATURES:
-        if k == "expected_pnl_pct":
-            v = _expected_return_pct(signal_meta)
-            if v is None or math.isnan(v):
-                v = 0.0
-        else:
-            v = signal_meta.get(k, 0.0)
+    missing = []
+    features = list(artifact.get("features") or _QUALITY_SCORE_FEATURES)
+    for key in features:
+        value = _expected_return_pct(signal_meta) if key == "expected_pnl_pct" else signal_meta.get(key)
+        if value is None:
+            missing.append(key)
+            value = 0.0
         try:
-            values.append(float(v) if v is not None else 0.0)
-        except Exception:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            missing.append(key)
             values.append(0.0)
+    if missing:
+        return None, sorted(set(missing)), artifact.get("trained_at")
     try:
-        score = float(model.predict(np.array([values]))[0])
+        score = float(artifact["model"].predict(np.array([values]))[0])
     except Exception as e:
-        logger.debug(f"Model prediction failed: {e}")
-        return None
-    return score
+        logger.debug(f"{regime} model prediction failed: {e}")
+        return None, [], artifact.get("trained_at")
+    return score, [], artifact.get("trained_at")
 
 
 def _as_float(v: Any, default: float = 0.0) -> float:
@@ -406,7 +434,7 @@ def compute_quality_score(
     regime = str(regime or "SPOT_BULL").strip().upper() or "SPOT_BULL"
     if regime == "SPOT_BULL":
         if not model_score_resolved:
-            model_score = _model_quality_score(signal_meta)
+            model_score, _, _ = _model_quality_score(signal_meta, regime)
         if model_score is not None:
             return model_score
 
@@ -429,6 +457,8 @@ def classify(
     symbol: str = "",
     thresholds_path: Optional[str] = None,
     fear_greed_value: Optional[float] = None,
+    range_scalp_model_mode: str = "shadow",
+    range_scalp_model_path: Optional[str] = None,
 ) -> Tuple[Optional[str], Dict[str, Any]]:
     """Classify a candidate into A/B/C or None (discard).
 
@@ -456,19 +486,25 @@ def classify(
         if adjustment != 0.0:
             thresholds["C"] = min(thresholds["B"] - 1e-6, thresholds["C"] + adjustment)
 
-    model_score = _model_quality_score(signal_meta) if regime == "SPOT_BULL" else None
-    score = compute_quality_score(
-        signal_meta, regime, direction, symbol,
-        model_score=model_score, model_score_resolved=True,
+    model_score, missing_features, model_version = _model_quality_score(
+        signal_meta, regime, range_scalp_model_path if regime == "RANGE_SCALP" else None,
     )
-    score_source = "model" if model_score is not None else "fallback"
+    baseline_score = _fallback_score(signal_meta, regime, symbol) if regime == "RANGE_SCALP" else None
+    model_mode = str(range_scalp_model_mode or "shadow").lower()
+    use_range_model = regime == "RANGE_SCALP" and model_mode == "enforced" and model_score is not None
+    score = model_score if (regime == "SPOT_BULL" or use_range_model) and model_score is not None else compute_quality_score(
+        signal_meta, regime, direction, symbol, model_score=model_score, model_score_resolved=True,
+    )
+    score_source = "model" if model_score is not None and (regime == "SPOT_BULL" or use_range_model) else "fallback"
 
-    profile = None
-    for tier in ("A", "B", "C"):
-        if score >= thresholds.get(tier, float("inf")):
-            profile = tier
-            break
+    def profile_for(candidate_score: float) -> Optional[str]:
+        for candidate_tier in ("A", "B", "C"):
+            if candidate_score >= thresholds.get(candidate_tier, float("inf")):
+                return candidate_tier
+        return None
 
+    profile = profile_for(score)
+    shadow_profile = profile_for(model_score) if regime == "RANGE_SCALP" and model_score is not None else None
     return profile, {
         "score": score,
         "score_source": score_source,
@@ -476,6 +512,12 @@ def classify(
         "regime": regime,
         "direction": direction,
         "fear_greed_value": fear_greed_value,
+        "model_score": model_score,
+        "baseline_score": baseline_score,
+        "shadow_profile": shadow_profile,
+        "model_mode": model_mode if regime == "RANGE_SCALP" else None,
+        "model_version": model_version,
+        "missing_features": missing_features,
     }
 
 

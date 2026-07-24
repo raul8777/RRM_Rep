@@ -107,6 +107,16 @@ class TestGetScreenedPairs:
         # A falling but volatile symbol is still ranked high in range mode
         assert "SOLUSDT" in result["spot"]
 
+    def test_opportunity_shadow_retains_observe_assets_without_order_routing(self):
+        with patch("pair_screener.urllib.request.urlopen", _mock_urlopen(TICKERS)):
+            result = get_screened_pairs(spot_min_vol=10_000_000, regime_mode="SPOT_BULL")
+        shadow = {candidate["symbol"]: candidate for candidate in result["opportunity_shadow"]}
+        assert shadow["LOWVOLUSDT"]["tier"] == "OBSERVE"
+        assert shadow["LOWVOLUSDT"]["execution_enabled"] is False
+        assert result["_meta"]["universe_funnel"]["observe"] == 8
+        assert result["_meta"]["universe_funnel"]["liquid_eligible"] == 7
+        assert result["_meta"]["universe_funnel"]["execution_enabled"] == 0
+
     def test_persistence_writes_to_db(self):
         db = MagicMock()
         with patch("pair_screener.urllib.request.urlopen", _mock_urlopen(TICKERS)):

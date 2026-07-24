@@ -1837,6 +1837,14 @@ class FuturesClient:
             )
             return None
 
+        # USD loss guard: cap effective stop-loss based on nominal USD loss per trade
+        _fut_settings = getattr(self, 'settings', None) or getattr(self, '_cached_settings', None)
+        _max_loss_usd = float(getattr(_fut_settings, 'max_loss_usd_per_trade', 18.0) or 0.0) if _fut_settings else 18.0
+        if _max_loss_usd > 0 and actual_notional > 0:
+            _usd_sl_pct = _max_loss_usd / actual_notional * 100.0
+            sl_pct = min(sl_pct, _usd_sl_pct)
+            print(f"[Futures/USDGuard] SHORT {symbol}: SL% capped to {sl_pct:.3f}% (${_max_loss_usd:.2f} / ${actual_notional:.2f})")
+
         tick = self._get_tick_size(symbol)
         sl_price = self._align_price(price * (1 + sl_pct / 100), tick)
         tp_price = self._align_price(price * (1 - tp_pct / 100), tick)
@@ -1964,6 +1972,11 @@ class FuturesClient:
                     pass
             if signal_id:
                 pos._smart_meta['signal_id'] = signal_id
+            # USD loss guard audit fields
+            pos._smart_meta['max_loss_usd_per_trade'] = _max_loss_usd
+            pos._smart_meta['effective_sl_usd'] = min(_max_loss_usd, actual_notional * 0.95) if _max_loss_usd > 0 else None
+            pos._smart_meta['effective_sl_price'] = sl_price
+            pos._smart_meta['sl_source'] = 'usd_cap' if (_max_loss_usd > 0 and actual_notional > 0 and sl_pct < (_max_loss_usd / actual_notional * 100.0) * (1 + 1e-12)) else 'category_pct'
             self._open_positions[self._pos_key(symbol, "SHORT")] = pos
             self._save_futures_open(pos)  # FIX-G+P2: persist to DB with prediction
             print(f"[Futures] SHORT {symbol} OPEN: entry={filled_price:.4f}, "
@@ -2023,6 +2036,14 @@ class FuturesClient:
                 f"(qty={qty}, price={price:.6f}) — rejected"
             )
             return None
+
+        # USD loss guard: cap effective stop-loss based on nominal USD loss per trade
+        _fut_settings = getattr(self, 'settings', None) or getattr(self, '_cached_settings', None)
+        _max_loss_usd = float(getattr(_fut_settings, 'max_loss_usd_per_trade', 18.0) or 0.0) if _fut_settings else 18.0
+        if _max_loss_usd > 0 and actual_notional > 0:
+            _usd_sl_pct = _max_loss_usd / actual_notional * 100.0
+            sl_pct = min(sl_pct, _usd_sl_pct)
+            print(f"[Futures/USDGuard] LONG {symbol}: SL% capped to {sl_pct:.3f}% (${_max_loss_usd:.2f} / ${actual_notional:.2f})")
 
         tick     = self._get_tick_size(symbol)
         sl_price = self._align_price(price * (1 - sl_pct / 100), tick)  # below entry
@@ -2141,6 +2162,11 @@ class FuturesClient:
                     pass
             if signal_id:
                 pos._smart_meta['signal_id'] = signal_id
+            # USD loss guard audit fields
+            pos._smart_meta['max_loss_usd_per_trade'] = _max_loss_usd
+            pos._smart_meta['effective_sl_usd'] = min(_max_loss_usd, actual_notional * 0.95) if _max_loss_usd > 0 else None
+            pos._smart_meta['effective_sl_price'] = sl_price
+            pos._smart_meta['sl_source'] = 'usd_cap' if (_max_loss_usd > 0 and actual_notional > 0 and sl_pct < (_max_loss_usd / actual_notional * 100.0) * (1 + 1e-12)) else 'category_pct'
             self._open_positions[self._pos_key(symbol, "LONG")] = pos
             self._save_futures_open(pos)  # FIX-G: persist to DB
             print(f"[Futures] LONG {symbol} OPEN: entry={filled_price:.4f}, "
@@ -2858,6 +2884,19 @@ class FuturesClient:
                     f"entry={entry:.4f}, unr_pnl=${unr:.2f} ({pnl_pct*100:.2f}%), "
                     f"SL={pos.sl_price:.4f}, TP={pos.tp_price:.4f}"
                 )
+
+                # ── Emergency USD gap stop ──────────────────────────────────────
+                _fut_guard_settings = settings or getattr(self, '_cached_settings', None) or getattr(self, 'settings', None)
+                _max_loss_usd_f = float(getattr(_fut_guard_settings, 'max_loss_usd_per_trade', 18.0) or 0.0) if _fut_guard_settings else 18.0
+                _emergency_mult_f = float(getattr(_fut_guard_settings, 'emergency_gap_loss_multiplier', 1.5) or 0.0) if _fut_guard_settings else 1.5
+                if _max_loss_usd_f > 0 and _emergency_mult_f > 0 and unr <= -(_max_loss_usd_f * _emergency_mult_f):
+                    _gap_reason = f"emergency_gap_stop ({unr:.2f} USD)"
+                    _gap_close = self.close_long(symbol, reason=_gap_reason) if pos.side == "LONG" else self.close_short(symbol, reason=_gap_reason)
+                    if _gap_close:
+                        closed.append({"symbol": symbol, "side": pos.side, "reason": _gap_reason, "pnl": pos.pnl or unr})
+                        self._audit(symbol, _gap_reason, {'side': pos.side, 'pnl_usdt': round(unr, 4), 'pnl_pct': round(pnl_pct * 100, 4)})
+                        print(f"[Futures/Emergency] {symbol} {pos.side}: closed by {_gap_reason}")
+                    continue
 
                 # ── 0a. Adverse signal early-exit (loss containment before hard SL) ──
                 _adv_enabled = bool(get_param(settings, 'futures_adverse_exit_enabled')) if settings else True
