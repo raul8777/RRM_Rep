@@ -19,6 +19,7 @@ import config_helpers
 from signal_store import add_signal, get_signals, get_recent_signals, set_db_client
 from strategy import parse_signal
 import run_trades
+import sr_pool_scanner
 import analysis_cycle
 from analysis_cache import analysis_cache
 from universe_selector import select_analysis_universe
@@ -758,6 +759,121 @@ async def audit_consistency(limit: int = 100, _auth: None = Depends(_require_api
     """Check that recent signal decisions are mirrored in trades_audit."""
     comp = get_components()
     return check_signal_audit_consistency(comp.db_client, limit=limit)
+
+
+@app.get("/range_scalp/dual_stats")
+async def range_scalp_dual_stats(_auth: None = Depends(_require_api_key)) -> Dict:
+    """Summary of RANGE_SCALP bidirectional re-classifications in the last 24h."""
+    if not db_client:
+        return {"ok": False, "error": "db_client unavailable"}
+    try:
+        sql = """
+        SELECT
+            COUNT(*) FILTER (WHERE data->>'reclassified_as_short' IS NOT NULL) AS evaluated,
+            COUNT(*) FILTER (WHERE data->'reclassified_as_short'->>'execution_enabled' = 'true') AS execution_enabled,
+            COUNT(*) FILTER (
+                WHERE data->'reclassified_as_short'->>'execution_enabled' = 'true'
+                  AND EXISTS (
+                      SELECT 1 FROM trades_open to2
+                      WHERE to2.symbol = rc.symbol
+                        AND to2.side = 'SELL'
+                        AND COALESCE(to2.metadata->>'trade_type', 'spot') = 'futures'
+                        AND to2.opened_at >= rc.discarded_at
+                  )
+            ) AS opened_shorts
+        FROM ready_candidates rc
+        WHERE rc.regime_mode = 'RANGE_SCALP'
+          AND rc.status = 'discarded'
+          AND rc.discarded_at >= NOW() - INTERVAL '24 hours'
+        """
+        rows = db_client.execute_query(sql, ()) or [{}]
+        row = rows[0] if rows else {}
+        return {
+            "ok": True,
+            "evaluated": int(row.get("evaluated", 0) or 0),
+            "execution_enabled_count": int(row.get("execution_enabled", 0) or 0),
+            "opened_shorts": int(row.get("opened_shorts", 0) or 0),
+            "flags": {
+                "range_scalp_bidirectional_enabled": _cfg_param(settings, "range_scalp_bidirectional_enabled"),
+                "range_scalp_short_execution_enabled": _cfg_param(settings, "range_scalp_short_execution_enabled"),
+            },
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@app.get("/sr_pool/status")
+async def sr_pool_status(_auth: None = Depends(_require_api_key)) -> Dict:
+    """Runtime status of the SR-pool monitor."""
+    try:
+        import run_trades as _rt
+        _live_s = get_components().settings
+        _last_scan = getattr(_rt, "_SR_POOL_LAST_FULL_SCAN", None)
+        _symbols = getattr(_rt, "_SR_POOL_SYMBOLS", [])
+        _signals = getattr(_rt, "_SR_POOL_LAST_SIGNALS", [])
+        _signals_out = [
+            {
+                "symbol": s.get("symbol"),
+                "side": s.get("side"),
+                "profile": s.get("sr_pool_profile"),
+                "score": round(float(s.get("sr_quality_score", 0)), 4),
+                "regime": s.get("regime"),
+                "category": s.get("category"),
+                "ts": s.get("timestamp"),
+            }
+            for s in _signals[-20:]
+        ]
+        _analysis = sr_pool_scanner._LAST_POOL_ANALYSIS[-25:]
+        return {
+            "ok": True,
+            "flags": {
+                "sr_pool_enabled": _cfg_param(_live_s, "sr_pool_enabled"),
+                "sr_pool_trade_enabled": _cfg_param(_live_s, "sr_pool_trade_enabled"),
+                "sr_pool_intra_cycle_enabled": _cfg_param(_live_s, "sr_pool_intra_cycle_enabled"),
+            },
+            "settings": {
+                "sr_pool_full_scan_minutes": _cfg_param(_live_s, "sr_pool_full_scan_minutes"),
+                "sr_pool_lookback_minutes": _cfg_param(_live_s, "sr_pool_lookback_minutes"),
+                "sr_pool_max_open_per_cycle": _cfg_param(_live_s, "sr_pool_max_open_per_cycle"),
+            },
+            "last_full_scan": _last_scan.isoformat() if _last_scan else None,
+            "pool_symbols_count": len(_symbols),
+            "pool_analysis": _analysis,
+            "recent_signals": _signals_out,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@app.get("/range_scalp/recent_reclassifications")
+async def range_scalp_recent_reclassifications(limit: int = 20, _auth: None = Depends(_require_api_key)) -> Dict:
+    """Recent RANGE_SCALP LONG candidates re-classified as SHORT futures."""
+    if not db_client:
+        return {"ok": False, "error": "db_client unavailable"}
+    try:
+        sql = """
+        SELECT
+            rc.id,
+            rc.symbol,
+            rc.signal_price,
+            rc.discard_reason,
+            rc.discarded_at,
+            rc.data->'reclassified_as_short' AS reclass
+        FROM ready_candidates rc
+        WHERE rc.regime_mode = 'RANGE_SCALP'
+          AND rc.status = 'discarded'
+          AND rc.data->>'reclassified_as_short' IS NOT NULL
+        ORDER BY rc.discarded_at DESC
+        LIMIT %s
+        """
+        rows = db_client.execute_query(sql, (limit,)) or []
+        return {
+            "ok": True,
+            "count": len(rows),
+            "items": [dict(r) for r in rows],
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 @app.post("/webhook")
@@ -1573,9 +1689,20 @@ async def get_closed_positions(limit: int = 20) -> Dict:
         _runtime_ctx = _get_dashboard_context_reference()
         
         for pos in closed_positions:
+            _closed_meta = getattr(pos, 'metadata', {}) or {}
+            _closed_trade_type = _closed_meta.get('trade_type', 'spot')
+            _closed_is_short = str(pos.side or '').upper() in ('SELL', 'SHORT')
+            _closed_position_mode = (
+                'FUTURES_SHORT' if _closed_trade_type == 'futures' and _closed_is_short
+                else 'FUTURES_LONG' if _closed_trade_type == 'futures'
+                else 'SPOT_LONG'
+            )
             positions_data.append({
                 "symbol": pos.symbol,
+                "position_id": f"{pos.symbol}:{pos.entry_time}:{pos.exit_time}:{_closed_position_mode}",
                 "side": pos.side,
+                "trade_type": _closed_trade_type,
+                "position_mode": _closed_position_mode,
                 "quantity": pos.quantity,
                 "entry_price": pos.entry_price,
                 "exit_price": pos.exit_price,
@@ -2155,19 +2282,19 @@ def _build_unified_system_status(
 
 
 def _get_effective_runtime_selection(summary_mode: Optional[str] = None) -> Dict[str, Any]:
-    """Return effective mode/profile used by the live engine whenever possible."""
+    """Return effective mode used by the live engine.
+
+    s95: profiles are per-operation (peak_quality_profile at entry); there is no
+    system-wide active profile. profile_label is always None in this summary.
+    """
     _fallback_mode = str(summary_mode or "SPOT_BULL").strip().upper() or "SPOT_BULL"
     _mode = str(getattr(orchestrator, 'current_regime_mode', '') or '').strip().upper()
     _mode_source = "orchestrator" if _mode else "summary"
-    _profile = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper()
-    _profile_source = "settings" if _profile else "runtime_state"
-    _profile_updated_at = None
 
     try:
         _rows = db_client.execute_query(
             "SELECT key, value, updated_at FROM trading_runtime_state "
-            "WHERE key IN ('effective_runtime_selection_snapshot', 'smart_total_active_mode', %s)",
-            (f"regime_profile_active_{_mode or _fallback_mode}",),
+            "WHERE key IN ('effective_runtime_selection_snapshot', 'smart_total_active_mode')",
         )
         _state = {str(r.get('key') or ''): r for r in (_rows or [])}
         _snapshot = _state.get('effective_runtime_selection_snapshot')
@@ -2180,12 +2307,6 @@ def _get_effective_runtime_selection(summary_mode: Optional[str] = None) -> Dict
                 if _snapshot_mode:
                     _mode = _snapshot_mode
                     _mode_source = "effective_runtime_selection_snapshot"
-                _snapshot_profile = str(_snapshot_value.get('selected_profile') or '').strip().upper()
-                if _snapshot_profile:
-                    _profile = _snapshot_profile
-                    _profile_source = "effective_runtime_selection_snapshot"
-                    _profile_ts = _snapshot.get('updated_at')
-                    _profile_updated_at = _profile_ts.isoformat() if _profile_ts else None
 
         if not _mode and _state.get('smart_total_active_mode'):
             _mv = _decode_runtime_state_value(_state['smart_total_active_mode'].get('value'))
@@ -2194,49 +2315,19 @@ def _get_effective_runtime_selection(summary_mode: Optional[str] = None) -> Dict
             elif isinstance(_mv, str):
                 _mode = _mv.strip().upper()
             _mode_source = "runtime_state" if _mode else _mode_source
-
-        if not _mode:
-            _mode = _fallback_mode
-
-        _profile_key = f"regime_profile_active_{_mode}"
-        _pr_row = _state.get(_profile_key)
-        if _pr_row is None:
-            _pr_rows = db_client.execute_query(
-                "SELECT value, updated_at FROM trading_runtime_state WHERE key=%s",
-                (_profile_key,),
-            )
-            if _pr_rows:
-                _pr_row = _pr_rows[0]
-        if _pr_row:
-            _pv = _decode_runtime_state_value(_pr_row.get('value'))
-            if isinstance(_pv, dict):
-                _profile = str(_pv.get('profile') or _pv.get('label') or '').strip().upper()
-            elif isinstance(_pv, str):
-                _profile = _pv.strip().upper()
-            _profile_source = "runtime_state" if _profile else _profile_source
-            _ts = _pr_row.get('updated_at')
-            _profile_updated_at = _ts.isoformat() if _ts else None
     except Exception:
-        if not _mode:
-            _mode = _fallback_mode
+        pass
 
-    if not _profile:
-        _profile = "A"
-        _profile_source = "default"
-
-    # NOTE: do not apply harmony to the app-level settings singleton here.
-    # The dashboard only needs the effective mode/profile labels; applying the
-    # harmony multipliers in this read-only path would mutate settings and
-    # produce false drift in _get_mode_profile_harmony_drift. The drift check
-    # recomputes expected values from a fresh base settings object when needed.
+    if not _mode:
+        _mode = _fallback_mode
 
     return {
         "mode": _mode,
         "mode_source": _mode_source,
-        "profile_label": _profile,
-        "profile_alias": _PROFILE_ALIAS.get(_profile, _profile),
-        "profile_source": _profile_source,
-        "profile_updated_at": _profile_updated_at,
+        "profile_label": None,
+        "profile_alias": "Per operation",
+        "profile_source": "per_operation_profiles",
+        "profile_updated_at": None,
     }
 
 
@@ -2264,7 +2355,7 @@ def _build_operator_focus(
     _overall = str((health or {}).get("overall") or "unknown").lower()
     _hr_overall = str((health_results or {}).get("overall") or "unknown").lower()
     _mode = str((effective_runtime or {}).get("mode") or "SPOT_BULL").upper()
-    _profile = str((effective_runtime or {}).get("profile_label") or "A").upper()
+    _profile = (effective_runtime or {}).get("profile_label")  # s95: per-operation profiles, no global active profile
     _harmony_drift = (health_results or {}).get("harmony_drift") or {}
     _drift_count = int(_harmony_drift.get("drift_count") or 0)
     _parity_validation = (health_results or {}).get("parity_validation") or {}
@@ -2422,7 +2513,7 @@ def _build_operator_focus(
             "all_clear",
             "ok",
             "Sistema estable",
-            f"Modo {_mode} / Perfil {_profile} sin bloqueos críticos activos.",
+            f"Modo {_mode} / Perfil por operación (perfil asignado en entrada) sin bloqueos críticos activos.",
             "Mantener ejecución normal con monitoreo periódico.",
         )
 
@@ -2502,34 +2593,15 @@ def _get_market_regime() -> Dict:
 
 def _get_active_profile_summary(mode: str) -> Dict[str, Any]:
     _mode = str(mode or "SPOT_BULL").strip().upper()
-    _profile = "A"
-    _updated_at = None
-    try:
-        _rows = db_client.execute_query(
-            "SELECT value, updated_at FROM trading_runtime_state WHERE key=%s",
-            (f"regime_profile_active_{_mode}",),
-        )
-        if _rows:
-            _val = _rows[0].get("value")
-            if isinstance(_val, str):
-                try:
-                    _val = json.loads(_val)
-                except Exception:
-                    _val = {"raw": _val}
-            if isinstance(_val, dict):
-                _profile = str(_val.get("profile") or _profile).strip().upper() or "A"
-            _ts = _rows[0].get("updated_at")
-            _updated_at = _ts.isoformat() if _ts else None
-    except Exception:
-        pass
-
+    # s95: no global active profile; profiles are determined per-operation.
     return {
         "mode": _mode,
-        "label": _profile,
-        "alias": _PROFILE_ALIAS.get(_profile, _profile or "N/A"),
+        "label": None,
+        "alias": "Per operation",
         "legend": _PROFILE_ALIAS,
-        "legend_text": "A=Agresivo | B=Balance | C=Defensa",
-        "updated_at": _updated_at,
+        "legend_text": "A=Agresivo | B=Balance | C=Defensa (per position / entry)",
+        "updated_at": None,
+        "note": "Active profile is set at entry via peak_quality_profile; there is no system-wide active profile.",
     }
 
 
@@ -2543,7 +2615,8 @@ def _get_dashboard_context_reference() -> Dict[str, Any]:
         _effective = {}
 
     _mode = str(_effective.get('mode') or _summary_mode).strip().upper() or 'SPOT_BULL'
-    _profile = str(_effective.get('profile_label') or _effective.get('profile') or 'A').strip().upper() or 'A'
+    # s95: profiles are per-operation; no global active profile.
+    _profile = None
     _snapshot_id = None
     try:
         if db_client:
@@ -2563,7 +2636,7 @@ def _get_dashboard_context_reference() -> Dict[str, Any]:
         "mode": _mode,
         "profile": _profile,
         "snapshot_id": _snapshot_id,
-        "profile_alias": _PROFILE_ALIAS.get(_profile, _profile or "N/A"),
+        "profile_alias": "Per operation",
     }
 
 
@@ -2613,16 +2686,15 @@ def _normalize_transaction_context(meta: Any, current_ctx: Optional[Dict[str, An
     current_profile = str(current_ctx.get('profile') or '').strip().upper() or None
     current_snapshot_id = str(current_ctx.get('snapshot_id') or '').strip() or None
 
-    has_entry_signal = any((entry_mode, entry_profile, entry_snapshot_id))
-    has_current_signal = any((current_mode, current_profile, current_snapshot_id))
+    # s95: no global active profile; per-position profile does not determine context match.
+    has_entry_signal = any((entry_mode, entry_snapshot_id))
+    has_current_signal = any((current_mode, current_snapshot_id))
     mismatch_reasons = []
 
     if entry_snapshot_id and current_snapshot_id and entry_snapshot_id != current_snapshot_id:
         mismatch_reasons.append('snapshot')
     if entry_mode and current_mode and entry_mode != current_mode:
         mismatch_reasons.append('mode')
-    if entry_profile and current_profile and entry_profile != current_profile:
-        mismatch_reasons.append('profile')
 
     if mismatch_reasons:
         state = 'legacy'
@@ -3492,6 +3564,7 @@ async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
             _cl_meta = pos.metadata if isinstance(pos.metadata, dict) else {}
             _cl_flat.append({
                 "symbol": pos.symbol,
+                "position_id": f"{pos.symbol}:{pos.entry_time}:{pos.exit_time}:{_cl_meta.get('trade_type', 'spot')}",
                 "side": pos.side,
                 "category": _cl_cat.get("market_behavior", "MIDCAP_ALT"),
                 "quantity": float(pos.quantity) if pos.quantity else 0.0,
@@ -3508,6 +3581,13 @@ async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
                 "pnl_prediction": pos.pnl_prediction,
                 "prediction_accuracy": float(pos.prediction_accuracy) if pos.prediction_accuracy else None,
                 "trade_type": _cl_meta.get('trade_type', 'spot'),
+                "position_mode": (
+                    'FUTURES_SHORT'
+                    if _cl_meta.get('trade_type') == 'futures' and str(pos.side or '').upper() in ('SELL', 'SHORT')
+                    else 'FUTURES_LONG'
+                    if _cl_meta.get('trade_type') == 'futures'
+                    else 'SPOT_LONG'
+                ),
                 "trailing_peak": _cl_meta.get('trailing_peak'),
                 "tp_decisions": _cl_meta.get('tp_decisions', []),
                 "scale_out_done": bool(_cl_meta.get('scale_out_done', False)),
@@ -3724,7 +3804,7 @@ async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
         result["market_regime"] = _mr
         result["effective_runtime"] = _effective
     except Exception as e:
-        result["effective_runtime"] = {"mode": "SPOT_BULL", "profile_label": "A", "error": str(e)}
+        result["effective_runtime"] = {"mode": "SPOT_BULL", "profile_label": None, "profile_alias": "Per operation", "error": str(e)}
 
     # Active regime profile shown in dashboard status bar (A/B/C + compact semantic alias)
     try:
@@ -4779,7 +4859,8 @@ def _get_mode_profile_harmony_drift() -> Dict[str, Any]:
             snapshot = {}
         effective = _get_effective_runtime_selection(str(snapshot.get("selected_mode") or "SPOT_BULL"))
         _mode = str(effective.get("mode") or "SPOT_BULL").strip().upper() or "SPOT_BULL"
-        _profile = str(effective.get("profile_label") or "A").strip().upper() or "A"
+        # s95: profiles are per-operation; use neutral 'B' for the regime-only harmony baseline.
+        _profile = str(effective.get("profile_label") or "B").strip().upper() or "B"
 
         # Recompute the expected harmonized values from a fresh base settings object.
         # This avoids comparing the persisted snapshot against the app-level settings
@@ -4807,8 +4888,7 @@ def _get_mode_profile_harmony_drift() -> Dict[str, Any]:
 
         if str(snapshot.get("selected_mode") or "").strip().upper() != str(effective.get("mode") or "").strip().upper():
             mismatches.append({"field": "selected_mode", "expected": snapshot.get("selected_mode"), "actual": effective.get("mode")})
-        if str(snapshot.get("selected_profile") or "").strip().upper() != str(effective.get("profile_label") or "").strip().upper():
-            mismatches.append({"field": "selected_profile", "expected": snapshot.get("selected_profile"), "actual": effective.get("profile_label")})
+        # s95: no system-wide selected_profile; per-operation profiles are not compared here.
 
         _compare_float("trailing_stop_activation_pct", snapshot.get("harmony_result", {}).get("applied", {}).get("trailing_stop_activation_pct", {}).get("new"), getattr(_expected_settings, 'trailing_stop_activation_pct', None))
         _compare_float("trailing_stop_distance_pct", snapshot.get("harmony_result", {}).get("applied", {}).get("trailing_stop_distance_pct", {}).get("new"), getattr(_expected_settings, 'trailing_stop_distance_pct', None))
@@ -5360,10 +5440,286 @@ async def get_unified_governance_metrics(_auth=Depends(_require_api_key)) -> Dic
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/metrics/lifecycle-structure")
+async def get_lifecycle_structure_metrics(_auth=Depends(_require_api_key)) -> Dict:
+    try:
+        rows = db_client.execute_query(
+            """
+            SELECT
+                detail->>'trade_type' AS trade_type,
+                detail->'decision'->>'state' AS state,
+                detail->'decision'->>'action' AS action,
+                COUNT(*) AS n
+            FROM trades_audit
+            WHERE event='lifecycle_structure_decision'
+              AND ts >= NOW() - INTERVAL '24 hours'
+            GROUP BY 1, 2, 3
+            ORDER BY 1, 2, 3
+            """
+        )
+        return {
+            "ok": True,
+            "window_hours": 24,
+            "decisions": rows or [],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @app.get("/metrics/rollout-readiness")
 async def get_rollout_readiness(_auth=Depends(_require_api_key)) -> Dict:
     """Return a single operational verdict for rollout based on health, drift, and changepoint."""
     return _get_rollout_readiness_snapshot()
+
+
+def _shadow_readiness_state(mode: str, gates: List[Dict[str, Any]]) -> str:
+    normalized = str(mode or "shadow").lower()
+    if normalized == "active":
+        return "ACTIVE"
+    if normalized == "retired":
+        return "RETIRED"
+    if normalized == "disabled":
+        return "DISABLED"
+    return "READY_TO_IMPLEMENT" if gates and all(gate["passed"] for gate in gates) else "COLLECTING"
+
+
+def _shadow_readiness_gate(name: str, actual: Any, required: Any, passed: bool, remediation: str) -> Dict[str, Any]:
+    return {
+        "name": name,
+        "actual": actual,
+        "required": required,
+        "passed": passed,
+        "remediation": remediation,
+    }
+
+
+@app.get("/metrics/shadow-readiness")
+async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
+    source_errors: List[Dict[str, str]] = []
+
+    def _query(source: str, sql: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
+        try:
+            return db_client.execute_query(sql, params) or []
+        except Exception as exc:
+            source_errors.append({"source": source, "error": str(exc)})
+            return []
+
+    try:
+        components = get_components()
+        live_settings = getattr(components, "settings", None) or settings
+        try:
+            evidence = build_entry_evidence(db_client, regime="RANGE_SCALP", days=30)
+        except Exception as exc:
+            source_errors.append({"source": "entry_evidence", "error": str(exc)})
+            evidence = {}
+        lifecycle_rows = _query("lifecycle_audit",
+            """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE detail->'decision'->>'state' != 'unavailable') AS available,
+                COUNT(*) FILTER (WHERE detail->'decision'->>'action' IN ('hold_loss', 'partial_profit')) AS actionable
+            FROM trades_audit
+            WHERE event='lifecycle_structure_decision'
+              AND ts >= NOW() - INTERVAL '7 days'
+            """
+        )
+        lifecycle = lifecycle_rows[0] if lifecycle_rows else {}
+        lifecycle_total = int(lifecycle.get("total") or 0)
+        lifecycle_available = int(lifecycle.get("available") or 0)
+        lifecycle_coverage = lifecycle_available / lifecycle_total if lifecycle_total else 0.0
+        lifecycle_gates = [
+            _shadow_readiness_gate("snapshot_coverage", round(lifecycle_coverage * 100, 2), 95.0, lifecycle_coverage >= 0.95, "Reparar fetch/persistencia de velas cerradas."),
+            _shadow_readiness_gate("decision_sample", lifecycle_total, 30, lifecycle_total >= 30, "Recolectar decisiones lifecycle auditadas."),
+        ]
+
+        range_rows = _query("range_candidates", """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE signal_meta->'range_scalp_timing_shadow' IS NOT NULL) AS timing,
+                COUNT(*) FILTER (WHERE signal_meta->'range_reversion_prediction'->>'valid' = 'true') AS reversion_valid,
+                COUNT(*) FILTER (WHERE signal_meta->>'entry_feature_schema_version'='range_scalp_live_v1') AS schema_v1
+            FROM ready_candidates
+            WHERE regime_mode='RANGE_SCALP'
+              AND created_at >= NOW() - INTERVAL '30 days'
+            """
+        )
+        range_data = range_rows[0] if range_rows else {}
+        range_total = int(range_data.get("total") or 0)
+        timing_count = int(range_data.get("timing") or 0)
+        reversion_valid = int(range_data.get("reversion_valid") or 0)
+        schema_v1 = int(range_data.get("schema_v1") or 0)
+        entry_promotion = (evidence.get("promotion") or {})
+        entry_gates = entry_promotion.get("gates") or []
+
+        sr_rows = _query("sr_audit", """
+            SELECT
+                COUNT(*) FILTER (WHERE event LIKE %s) AS pool_events,
+                COUNT(*) FILTER (WHERE detail::text LIKE %s) AS entry_rejections
+            FROM trades_audit
+            WHERE ts >= NOW() - INTERVAL '30 days'
+            """, ("sr_pool%", "%sr_entry_shadow_rejected%")
+        )
+        sr_data = sr_rows[0] if sr_rows else {}
+        pool_events = int(sr_data.get("pool_events") or 0)
+        entry_rejections = int(sr_data.get("entry_rejections") or 0)
+
+        opportunity_rows = _query(
+            "screener_snapshot", "SELECT value, updated_at FROM trading_runtime_state WHERE key=%s", ("screener_snapshot",)
+        )
+        opportunity_snapshot = (opportunity_rows[0].get("value") if opportunity_rows else {}) or {}
+        if isinstance(opportunity_snapshot, str):
+            opportunity_snapshot = json.loads(opportunity_snapshot)
+        opportunity_count = len(opportunity_snapshot.get("opportunity_shadow") or [])
+        opportunity_updated = opportunity_rows[0].get("updated_at") if opportunity_rows else None
+        opportunity_updated_label = opportunity_updated.isoformat() if hasattr(opportunity_updated, "isoformat") else str(opportunity_updated or "sin snapshot")
+
+        directional_rows = _query("directional_v2_shadow", """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE input_features->'directional_shadow' IS NOT NULL) AS observed,
+                COUNT(*) FILTER (WHERE input_features->'directional_shadow'->>'would_change_execution' = 'true') AS divergent
+            FROM ready_candidate_checks
+            WHERE created_at >= NOW() - INTERVAL '7 days'
+        """)
+        directional_data = directional_rows[0] if directional_rows else {}
+        directional_total = int(directional_data.get("total") or 0)
+        directional_observed = int(directional_data.get("observed") or 0)
+        directional_divergent = int(directional_data.get("divergent") or 0)
+        directional_gates = [
+            _shadow_readiness_gate("decision_coverage", directional_observed, directional_total or 1, directional_total > 0 and directional_observed == directional_total, "Persistir directional_v2 en cada re-chequeo staged."),
+            _shadow_readiness_gate("decision_sample", directional_observed, 30, directional_observed >= 30, "Recolectar al menos 30 decisiones directional_v2 antes de calibrar."),
+        ]
+
+        ug_rows = _query("ug_loss_v2_shadow", """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE detail->>'policy_version' = 'ug_loss_v2') AS observed,
+                COUNT(*) FILTER (WHERE detail->>'would_change_execution' = 'true') AS divergent
+            FROM trades_audit
+            WHERE event = 'unified_governance_shadow_decision'
+              AND ts >= NOW() - INTERVAL '7 days'
+        """)
+        ug_data = ug_rows[0] if ug_rows else {}
+        ug_total = int(ug_data.get("total") or 0)
+        ug_observed = int(ug_data.get("observed") or 0)
+        ug_divergent = int(ug_data.get("divergent") or 0)
+        ug_gates = [
+            _shadow_readiness_gate("decision_coverage", ug_observed, ug_total or 1, ug_total > 0 and ug_observed == ug_total, "Auditar ug_loss_v2 para cada evaluación UG."),
+            _shadow_readiness_gate("decision_sample", ug_observed, 50, ug_observed >= 50, "Recolectar 50 decisiones UG shadow antes de activar una política nueva."),
+        ]
+
+        entries = [
+            {
+                "id": "directional_v2",
+                "name": "Confirmación direccional v2",
+                "mode": _cfg_param(live_settings, "directional_policy_mode", "shadow"),
+                "state": _shadow_readiness_state(_cfg_param(live_settings, "directional_policy_mode", "shadow"), directional_gates),
+                "summary": f"Decisiones: {directional_observed}/{directional_total}; divergencias sin ejecución: {directional_divergent}.",
+                "gates": directional_gates,
+            },
+            {
+                "id": "ug_loss_v2",
+                "name": "Unified Governance pérdida v2",
+                "mode": _cfg_param(live_settings, "ug_loss_policy_mode", "shadow"),
+                "state": _shadow_readiness_state(_cfg_param(live_settings, "ug_loss_policy_mode", "shadow"), ug_gates),
+                "summary": f"Decisiones: {ug_observed}/{ug_total}; divergencias contrafactuales: {ug_divergent}.",
+                "gates": ug_gates,
+            },
+            {
+                "id": "lifecycle_structure",
+                "name": "Lifecycle S/R jerárquico",
+                "mode": _cfg_param(live_settings, "lifecycle_structure_mode", "shadow"),
+                "state": _shadow_readiness_state(_cfg_param(live_settings, "lifecycle_structure_mode", "shadow"), lifecycle_gates),
+                "summary": f"{lifecycle_available}/{lifecycle_total} snapshots disponibles; {int(lifecycle.get('actionable') or 0)} decisiones estructurales.",
+                "gates": lifecycle_gates,
+            },
+            {
+                "id": "range_quality_model",
+                "name": "Modelo de calidad RANGE_SCALP",
+                "mode": _cfg_param(live_settings, "range_scalp_quality_model_mode", "shadow"),
+                "state": _shadow_readiness_state(_cfg_param(live_settings, "range_scalp_quality_model_mode", "shadow"), [
+                    _shadow_readiness_gate(gate["name"], gate.get("actual"), gate.get("required"), gate.get("status") == "passed", gate.get("reason", "")) for gate in entry_gates
+                ]),
+                "summary": f"Schema v1: {schema_v1}/{range_total}; promoción de evidencia: {entry_promotion.get('overall_status', 'blocked')}.",
+                "gates": [
+                    _shadow_readiness_gate(gate["name"], gate.get("actual"), gate.get("required"), gate.get("status") == "passed", gate.get("reason", "")) for gate in entry_gates
+                ],
+            },
+            {
+                "id": "range_reversion",
+                "name": "Predictor de reversión RANGE_SCALP",
+                "mode": _cfg_param(live_settings, "range_reversion_predictor_mode", "shadow"),
+                "state": _shadow_readiness_state(_cfg_param(live_settings, "range_reversion_predictor_mode", "shadow"), [
+                    _shadow_readiness_gate("valid_predictions", reversion_valid, 30, reversion_valid >= 30, "Persistir y comparar predicciones válidas contra outcomes netos."),
+                    _shadow_readiness_gate("schema_completeness", evidence.get("instrumentation", {}).get("snapshot_coverage_pct", 0), 95.0, evidence.get("instrumentation", {}).get("snapshot_coverage_pct", 0) >= 95.0, "Completar features requeridas sin imputación."),
+                ]),
+                "summary": f"Predicciones válidas persistidas: {reversion_valid}/{range_total}.",
+                "gates": [
+                    _shadow_readiness_gate("valid_predictions", reversion_valid, 30, reversion_valid >= 30, "Persistir y comparar predicciones válidas contra outcomes netos."),
+                    _shadow_readiness_gate("schema_completeness", evidence.get("instrumentation", {}).get("snapshot_coverage_pct", 0), 95.0, evidence.get("instrumentation", {}).get("snapshot_coverage_pct", 0) >= 95.0, "Completar features requeridas sin imputación."),
+                ],
+            },
+            {
+                "id": "timing_15m",
+                "name": "Timing 15m RANGE_SCALP",
+                "mode": "shadow",
+                "state": _shadow_readiness_state("shadow", [
+                    _shadow_readiness_gate("persistence", timing_count, range_total, range_total > 0 and timing_count == range_total, "Propagar timing shadow hasta candidatas y outcomes."),
+                    _shadow_readiness_gate("prospective_sample", timing_count, 30, timing_count >= 30, "Comparar contra baseline 1h con costes y holdout temporal."),
+                ]),
+                "summary": f"Timing persistido: {timing_count}/{range_total} candidatas RANGE_SCALP.",
+                "gates": [
+                    _shadow_readiness_gate("persistence", timing_count, range_total, range_total > 0 and timing_count == range_total, "Propagar timing shadow hasta candidatas y outcomes."),
+                    _shadow_readiness_gate("prospective_sample", timing_count, 30, timing_count >= 30, "Comparar contra baseline 1h con costes y holdout temporal."),
+                ],
+            },
+            {
+                "id": "sr_pool",
+                "name": "SR Pool 1m/5m",
+                "mode": "disabled" if not _cfg_param(live_settings, "sr_pool_enabled", False) else ("active" if _cfg_param(live_settings, "sr_pool_trade_enabled", False) else "shadow"),
+                "state": _shadow_readiness_state("disabled" if not _cfg_param(live_settings, "sr_pool_enabled", False) else ("active" if _cfg_param(live_settings, "sr_pool_trade_enabled", False) else "shadow"), [
+                    _shadow_readiness_gate("trigger_sample", pool_events, 30, pool_events >= 30, "Ejecutar discovery shadow y persistir triggers/outcomes."),
+                ]),
+                "summary": f"Eventos SR Pool auditados: {pool_events}; rechazos SR shadow auditados: {entry_rejections}.",
+                "gates": [_shadow_readiness_gate("trigger_sample", pool_events, 30, pool_events >= 30, "Ejecutar discovery shadow y persistir triggers/outcomes.")],
+            },
+            {
+                "id": "opportunity_shadow",
+                "name": "Universo de oportunidad 2h/4h",
+                "mode": "shadow",
+                "state": "COLLECTING",
+                "summary": f"{opportunity_count} activos OBSERVE; actualización: {opportunity_updated_label}.",
+                "gates": [
+                    _shadow_readiness_gate("universe_snapshot", opportunity_count, 1, opportunity_count > 0, "Esperar snapshot del screener."),
+                    _shadow_readiness_gate("executable_model", "absent", "validated", False, "Entrenar/validar retorno neto 2h/4h antes de routing."),
+                ],
+            },
+            {
+                "id": "retired_gates",
+                "name": "Gates supersedidos",
+                "mode": "retired",
+                "state": "RETIRED",
+                "summary": "Bayesian evidence y entry-quality legacy permanecen desactivados para evitar vetos no calibrados.",
+                "gates": [],
+            },
+        ]
+        return {
+            "ok": True,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "regime": "RANGE_SCALP",
+            "components": entries,
+            "source_errors": source_errors,
+            "summary": {
+                "ready_to_implement": sum(item["state"] == "READY_TO_IMPLEMENT" for item in entries),
+                "collecting": sum(item["state"] == "COLLECTING" for item in entries),
+                "active": sum(item["state"] == "ACTIVE" for item in entries),
+                "retired": sum(item["state"] == "RETIRED" for item in entries),
+                "disabled": sum(item["state"] == "DISABLED" for item in entries),
+            },
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "components": []}
 
 
 @app.get("/metrics/entry-evidence")
@@ -5883,7 +6239,7 @@ async def get_futures_positions() -> Dict:
 
 
 @app.get("/price-history/{symbol}")
-async def get_price_history(symbol: str, start_time: str, end_time: str):
+async def get_price_history(symbol: str, start_time: str, end_time: str, trade_type: str = "spot"):
     """
     Get historical price data for a symbol between start_time and end_time.
     Times should be ISO format strings or Unix timestamps in milliseconds.
@@ -5911,7 +6267,6 @@ async def get_price_history(symbol: str, start_time: str, end_time: str):
         num_intervals = min(1000, max(1, duration_ms // interval_ms))
         
         # Build URL for Binance public API
-        base_url = "https://api.binance.com/api/v3/klines"
         params = {
             "symbol": symbol,
             "interval": "5m",
@@ -5921,12 +6276,59 @@ async def get_price_history(symbol: str, start_time: str, end_time: str):
         }
         
         # Fetch klines data
-        _klines_timeout = aiohttp.ClientTimeout(total=10)
+        _klines_timeout = aiohttp.ClientTimeout(total=3)
+        preferred_futures = str(trade_type or "spot").strip().lower() == "futures"
+        endpoints = (
+            ["https://fapi.binance.com/fapi/v1/klines", "https://api.binance.com/api/v3/klines"]
+            if preferred_futures
+            else ["https://api.binance.com/api/v3/klines", "https://fapi.binance.com/fapi/v1/klines"]
+        )
+        klines = []
+        errors = []
         async with aiohttp.ClientSession(timeout=_klines_timeout) as session:
-            async with session.get(base_url, params=params) as response:
-                if response.status != 200:
-                    return {"error": f"Binance API error: {response.status}", "symbol": symbol, "data": []}
-                klines = await response.json()
+            for base_url in endpoints:
+                try:
+                    async with session.get(base_url, params=params) as response:
+                        if response.status == 200:
+                            payload = await response.json()
+                            if isinstance(payload, list) and payload:
+                                klines = payload
+                                break
+                        errors.append(f"{base_url}:{response.status}")
+                except Exception as endpoint_error:
+                    errors.append(f"{base_url}:{endpoint_error}")
+        if not klines:
+            try:
+                components = get_components()
+                sdk_client = components.binance_client.client
+                methods = (
+                    ["futures_klines", "get_klines"]
+                    if preferred_futures
+                    else ["get_klines", "futures_klines"]
+                )
+                for method_name in methods:
+                    try:
+                        method = getattr(sdk_client, method_name)
+                        payload = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                method,
+                                symbol=symbol,
+                                interval="5m",
+                                startTime=start_ms,
+                                endTime=end_ms,
+                                limit=num_intervals,
+                            ),
+                            timeout=3.0,
+                        )
+                        if payload:
+                            klines = payload
+                            break
+                    except Exception as sdk_error:
+                        errors.append(f"sdk:{method_name}:{sdk_error}")
+            except Exception as components_error:
+                errors.append(f"sdk:init:{components_error}")
+        if not klines and errors:
+            return {"error": "; ".join(errors), "symbol": symbol, "data": []}
         
         if not klines:
             return {"symbol": symbol, "data": [], "interval": "5m"}
@@ -7848,6 +8250,7 @@ _KELLY_EDITABLE_FIELDS = {
     "max_rebalance_per_cycle",
     "rebalance_max_abs_pnl_pct",
     "min_hold_minutes_spot_bull", "min_hold_for_prediction_exit",
+    "lifecycle_structure_mode", "lifecycle_structure_partial_close_pct",
     "profit_predexit_early_protection_mode", "profit_predexit_early_active_regimes", "profit_predexit_early_min_peak_pct", "profit_predexit_early_min_giveback_pct",
     "loss_focus_enabled", "loss_focus_threshold_usdt", "loss_focus_reset_usdt",
     "min_cycles_before_close_shorts",
@@ -7869,7 +8272,7 @@ _KELLY_EDITABLE_FIELDS = {
     "volspike_override_enabled", "volspike_override_min_spike", "volspike_override_max_rsi", "volspike_override_trend_required",
     "volspike_override_narrative_only", "volspike_override_min_strength", "volspike_override_max_positions", "volspike_override_daily_limit",
     "btc_dominance_filter_enabled", "btc_dominance_altcoin_threshold",
-    "liquidity_filter_enabled", "min_liquidity_vol_usdt",
+    "liquidity_filter_enabled", "min_liquidity_vol_usdt", "min_liquidity_vol_usdt_range_scalp",
     "wr_screener_enabled", "wr_screener_consecutive_sl_block",
     "sso_target_daily_usd",
     "sl_confirmation_candles",
@@ -7901,7 +8304,21 @@ _KELLY_EDITABLE_FIELDS = {
     "category_max_positions_enabled",
     # phased staged entry flags
     "staged_entry_enabled",
+    "staged_entry_fast_path_enabled",
     "staged_entry_regime_config",
+    "hard_risk_monitor_enabled",
+    "hard_risk_monitor_interval_seconds",
+    "hard_risk_breakeven_enabled",
+    "range_scalp_short_first_enabled",
+    "range_scalp_short_priority_bonus",
+    "range_scalp_short_preferred",
+    "range_scalp_long_entries_enabled",
+    "range_scalp_long_superiority_delta",
+    "range_scalp_direction_min_probability",
+    "range_scalp_short_min_probability",
+    "range_scalp_short_resistance_threshold",
+    "directional_policy_mode",
+    "ug_loss_policy_mode",
     # USD loss guard — dynamic SL cap per trade without reducing Kelly sizing
     "max_loss_usd_per_trade",
     "emergency_gap_loss_multiplier",
@@ -7909,6 +8326,17 @@ _KELLY_EDITABLE_FIELDS = {
     "ug_peak_drawdown_cut_enabled",
     "ug_soft_supervisor_loss_escalation_enabled",
     "spot_bull_breakeven_pct",
+    # SR-pool runtime switches
+    "sr_pool_enabled",
+    "sr_pool_trade_enabled",
+    "sr_pool_full_scan_minutes",
+    "sr_pool_lookback_minutes",
+    "sr_pool_max_open_per_cycle",
+    "sr_pool_intra_cycle_enabled",
+    # PnL predictor micro-candle calibration
+    "predictor_use_real_candles",
+    "predictor_interval",
+    "predictor_horizon_minutes",
 }
 
 _REGIME_MODES = {"SPOT_BULL", "RANGE_SCALP", "PRESERVATION", "FUTURES_SHORT"}
@@ -8502,6 +8930,13 @@ def _apply_kelly_config_patch(body: Dict[str, Any]) -> Dict[str, Any]:
             _current = getattr(_s, field, None)
             setattr(_s, field, type(_current)(value) if _current is not None else value)
             applied[field] = {"old": _current, "new": value}
+            # Keep the module-level settings singleton in sync with components.settings.
+            _app_settings = globals().get('settings')
+            if _app_settings is not None and _app_settings is not _s:
+                try:
+                    setattr(_app_settings, field, type(_current)(value) if _current is not None else value)
+                except Exception:
+                    pass
         except Exception as _fe:
             rejected[field] = str(_fe)
 
@@ -8881,6 +9316,8 @@ def _build_selection_observability(db, limit: int = 100, active_regime: Optional
             "range_reversion_shadow": ((row.get("data") or {}).get("policy") or {}).get("range_reversion_shadow"),
             "execution_gate": ((row.get("data") or {}).get("last_execution_gate") or {}),
             "direction": ((row.get("data") or {}).get("direction") or {}),
+            "arbiter_mode": ((row.get("signal_meta") or {}).get("directional_arbitration") or {}).get("selected_mode"),
+            "expected_side": (row.get("signal_meta") or {}).get("expected_side"),
         })
 
     actionable_ids: set[int] = set()
@@ -9546,6 +9983,7 @@ def _check_config_drift(settings) -> List[Dict]:
         'kelly_min_usdt', 'futures_kelly_min_usdt',
         'entry_quality_vol_spike_min_spot_bull', 'entry_quality_vol_spike_floor_spot_bull',
         'portfolio_concentration_min_mult',
+        'range_scalp_long_entries_enabled',
         'sso_stagnant_min_hours', 'sso_decay_min_hours',
         # Aggressive entry calibration — intentionally tuned per deployment
         'min_signal_strength', 'min_success_probability',
@@ -9555,6 +9993,10 @@ def _check_config_drift(settings) -> List[Dict]:
         'max_loss_usd_per_trade', 'emergency_gap_loss_multiplier',
         'ug_fast_loss_cut_enabled', 'ug_peak_drawdown_cut_enabled', 'ug_soft_supervisor_loss_escalation_enabled',
         'spot_bull_breakeven_pct',
+        # SR-pool runtime switches — intentionally controlled via hot-config
+        'sr_pool_enabled', 'sr_pool_trade_enabled', 'sr_pool_full_scan_minutes',
+        'sr_pool_lookback_minutes', 'sr_pool_max_open_per_cycle', 'sr_pool_intra_cycle_enabled',
+        'lifecycle_structure_mode', 'lifecycle_structure_partial_close_pct',
     }
     # Canonical default drift (SPOT+FUTURES parameters) — skip keys already covered by baseline
     for k, expected in _PARAM_DEFAULTS.items():
@@ -10869,11 +11311,16 @@ async def post_config_verify(body: Dict = None, _auth=Depends(_require_api_key))
             'kelly_min_usdt', 'futures_kelly_min_usdt',
             'entry_quality_vol_spike_min_spot_bull', 'entry_quality_vol_spike_floor_spot_bull',
             'portfolio_concentration_min_mult',
+            'range_scalp_long_entries_enabled',
             'sso_stagnant_min_hours', 'sso_decay_min_hours',
             # USD loss guard — hot-config controlled
             'max_loss_usd_per_trade', 'emergency_gap_loss_multiplier',
             'ug_fast_loss_cut_enabled', 'ug_peak_drawdown_cut_enabled', 'ug_soft_supervisor_loss_escalation_enabled',
             'spot_bull_breakeven_pct',
+            # SR-pool runtime switches — intentionally controlled via hot-config
+            'sr_pool_enabled', 'sr_pool_trade_enabled', 'sr_pool_full_scan_minutes',
+            'sr_pool_lookback_minutes', 'sr_pool_max_open_per_cycle', 'sr_pool_intra_cycle_enabled',
+            'lifecycle_structure_mode', 'lifecycle_structure_partial_close_pct',
         }
         if body and isinstance(body, dict):
             _exclude.update(body.get('exclude', []))

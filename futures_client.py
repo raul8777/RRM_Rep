@@ -41,6 +41,8 @@ from unified_governance_supervisor import (
     UnifiedGovernanceContext,
     evaluate as _evaluate_unified_governance,
 )
+from ug_loss_policy import evaluate_shadow as _evaluate_ug_loss_shadow
+from market_structure import build_snapshot as _build_lifecycle_structure_snapshot, evaluate as _evaluate_lifecycle_structure
 from binance_truth_guard import (
     evaluate_futures_parity,
     auto_reconcile_futures,
@@ -467,29 +469,36 @@ class FuturesClient:
                 if opened_at and int(t.get("time", 0) or 0) < int(opened_at.timestamp() * 1000):
                     continue
                 relevant.append(t)
-            for t in sorted(relevant, key=lambda x: -int(x.get("time", 0))):
-                pnl = float(t.get("realizedPnl", 0))
-                if pnl == 0:
-                    continue
-                commission = sum(abs(float(row.get("commission", 0) or 0)) for row in relevant)
-                funding = 0.0
-                try:
-                    params = {"symbol": symbol, "incomeType": "FUNDING_FEE", "limit": "100"}
-                    if opened_at:
-                        params["startTime"] = str(int(opened_at.timestamp() * 1000))
-                    income_rows = self._get("/fapi/v1/income", params, signed=True)
-                    funding = sum(float(row.get("income", 0) or 0) for row in income_rows or [])
-                except Exception as funding_error:
-                    print(f"[Futures] funding reconciliation unavailable for {symbol}: {funding_error}")
-                return {
-                    "exit_price": float(t.get("price", 0)),
-                    "pnl": pnl - commission + funding,
-                    "realized_pnl": pnl,
-                    "commission": commission,
-                    "funding": funding,
-                    "pnl_accounting_mode": "binance_user_trade_verified",
-                    "reason": "trailing_sl_binance" if pnl > 0 else "stop_loss_binance",
-                }
+            closing_trades = [t for t in relevant if float(t.get("realizedPnl", 0) or 0) != 0]
+            if not closing_trades:
+                return {"exit_price": 0, "pnl": 0, "reason": "binance_safety_close"}
+            closing_time = max(int(t.get("time", 0) or 0) for t in closing_trades)
+            closing_trades = [t for t in closing_trades if int(t.get("time", 0) or 0) == closing_time]
+            realized_pnl = sum(float(t.get("realizedPnl", 0) or 0) for t in closing_trades)
+            close_qty = sum(float(t.get("qty", 0) or 0) for t in closing_trades)
+            exit_price = (
+                sum(float(t.get("price", 0) or 0) * float(t.get("qty", 0) or 0) for t in closing_trades) / close_qty
+                if close_qty > 0 else 0
+            )
+            commission = sum(abs(float(row.get("commission", 0) or 0)) for row in relevant)
+            funding = 0.0
+            try:
+                params = {"symbol": symbol, "incomeType": "FUNDING_FEE", "limit": "100"}
+                if opened_at:
+                    params["startTime"] = str(int(opened_at.timestamp() * 1000))
+                income_rows = self._get("/fapi/v1/income", params, signed=True)
+                funding = sum(float(row.get("income", 0) or 0) for row in income_rows or [])
+            except Exception as funding_error:
+                print(f"[Futures] funding reconciliation unavailable for {symbol}: {funding_error}")
+            return {
+                "exit_price": exit_price,
+                "pnl": realized_pnl - commission + funding,
+                "realized_pnl": realized_pnl,
+                "commission": commission,
+                "funding": funding,
+                "pnl_accounting_mode": "binance_user_trade_verified",
+                "reason": "trailing_sl_binance" if realized_pnl > 0 else "stop_loss_binance",
+            }
         except Exception as e:
             print(f"[Futures] _get_realized_pnl_from_trades {symbol}: {e}")
         return {"exit_price": 0, "pnl": 0, "reason": "binance_safety_close"}
@@ -601,6 +610,21 @@ class FuturesClient:
         url = f"{FAPI_BASE}{path}?{query}" if query else f"{FAPI_BASE}{path}"
         req = urllib.request.Request(url, headers={"X-MBX-APIKEY": self.api_key})
         return json.loads(self._request_with_retry(req, timeout, path))
+
+    def _evaluate_lifecycle_structure(self, symbol: str, current_price: float, side: str, settings) -> Dict[str, Any]:
+        mode = str(get_param(settings, 'lifecycle_structure_mode', 'shadow') or 'shadow').lower()
+
+        def _fetch(target_symbol: str, interval: str, limit: int) -> List[List]:
+            return self._get('/fapi/v1/klines', {'symbol': target_symbol, 'interval': interval, 'limit': limit}) or []
+
+        snapshot = _build_lifecycle_structure_snapshot(_fetch, symbol, current_price)
+        decision = _evaluate_lifecycle_structure(snapshot, side).to_dict()
+        return {
+            'mode': mode,
+            'snapshot': snapshot,
+            'decision': decision,
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+        }
 
     def _post(self, path: str, params: dict, timeout: int = 8) -> dict:
         params["timestamp"] = int(time.time() * 1000)
@@ -1540,6 +1564,7 @@ class FuturesClient:
         """
         Check futures balance and auto-transfer from spot if needed.
         Only transfers if futures balance < required_usdt.
+        Transfers shortfall + 10% buffer (not 2×) to avoid over-draining spot.
         Returns True if futures wallet has sufficient funds after check.
         """
         available = self.get_available_usdt()
@@ -1547,9 +1572,9 @@ class FuturesClient:
             print(f"[Futures] Wallet funded: ${available:.2f} USDT available (need ${required_usdt:.2f})")
             return True
         shortfall = required_usdt - available
-        # Transfer a bit more to allow multiple positions (2× required)
-        transfer_amount = round(required_usdt * 2, 2)
-        print(f"[Futures] Insufficient balance: ${available:.2f} < ${required_usdt:.2f} — transferring ${transfer_amount:.2f} from spot")
+        # Transfer shortfall + 10% buffer (enough for this position, not more)
+        transfer_amount = round(shortfall * 1.1, 2)
+        print(f"[Futures] Insufficient balance: ${available:.2f} < ${required_usdt:.2f} — transferring ${transfer_amount:.2f} from spot (shortfall=${shortfall:.2f})")
         ok = self.transfer_to_futures(transfer_amount, spot_api_key, spot_api_secret)
         if ok:
             # Small delay for balance to reflect
@@ -1571,6 +1596,7 @@ class FuturesClient:
         spot_api_key: str = None,
         spot_api_secret: str = None,
         min_transfer: float = 10.0,
+        futures_arbiter_active: bool = False,
     ) -> dict:
         """
         Bidirectional autonomous capital bridge: spot ↔ futures.
@@ -1640,6 +1666,35 @@ class FuturesClient:
                         if shortfall > 0:
                             print(f"[CapBridge] futures shortfall ${shortfall:.2f} < min_transfer ${min_transfer:.0f} — skipping")
 
+            # ── Case 1b: Arbiter active in RANGE_SCALP — ensure futures has min 1 kelly_margin ─
+            elif futures_arbiter_active and regime in ("RANGE_SCALP", "SPOT_BULL"):
+                futures_usdt = futures_available
+                # Ensure futures wallet can open at least one position
+                needed_futures = kelly_margin
+                shortfall = needed_futures - futures_usdt
+                if shortfall >= min_transfer:
+                    transferable_from_spot = max(0.0, spot_usdt - spot_min_reserve)
+                    transfer_amount = round(min(shortfall, transferable_from_spot), 2)
+                    if transfer_amount >= min_transfer:
+                        reason = (f"ARBITER_ACTIVE ({regime}): futures need ${needed_futures:.0f} "
+                                  f"for 1 position, have ${futures_usdt:.0f} "
+                                  f"→ transfer ${transfer_amount:.2f} spot→futures")
+                        print(f"[CapBridge] {reason}")
+                        ok = self.transfer_to_futures(transfer_amount, spot_api_key, spot_api_secret)
+                        result["direction"] = "spot->futures"
+                        result["amount"] = transfer_amount
+                        result["reason"] = reason
+                        result["success"] = ok
+                        if ok:
+                            time.sleep(1.0)
+                            new_bal = self.get_available_usdt()
+                            print(f"[CapBridge] Post-transfer futures balance: ${new_bal:.2f} USDT")
+                        else:
+                            err_msg = "transfer_to_futures returned False (arbiter)"
+                            result["error"] = err_msg
+                            print(f"[CapBridge] ERROR: spot→futures transfer failed — {err_msg}")
+                        return result
+
             # ── Case 2: Spot needs capital (non-bear regime, spot has open slots) ─
             elif regime in ("SPOT_BULL", "RANGE_SCALP"):
                 from config import get_settings as _gs
@@ -1677,7 +1732,8 @@ class FuturesClient:
                             return result
 
             # ── Case 3: Idle futures capital — no open shorts, return excess ────
-            if open_shorts == 0 and regime not in ("FUTURES_SHORT", "PRESERVATION"):
+            # Skip if arbiter is active — futures capital is needed for FUTURES_LONG/SHORT decisions
+            if open_shorts == 0 and regime not in ("FUTURES_SHORT", "PRESERVATION") and not futures_arbiter_active:
                 # s77b: only transfer available USDT — futures_total includes non-USDT (e.g. BNB) which
                 # cannot be sent via /sapi/v1/futures/transfer. Non-USDT assets must be handled separately.
                 excess = futures_available - futures_min_reserve
@@ -1962,8 +2018,8 @@ class FuturesClient:
                 except Exception as _ce:
                     print(f"[Futures/WARN] SHORT {symbol}: cleanup close also failed: {_ce}")
                 return None
-            pos._smart_meta['regime_at_entry'] = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
-            pos._smart_meta['profile_at_entry'] = str(peak_quality_profile or getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
+            pos._smart_meta['regime_at_entry'] = str(getattr(_fut_settings, 'current_regime_mode', '') or '').strip().upper() or None
+            pos._smart_meta['profile_at_entry'] = str(peak_quality_profile or 'B').strip().upper() or None
             pos._smart_meta['peak_quality_profile'] = str(peak_quality_profile or '').strip().upper() or None
             if peak_quality_score is not None:
                 try:
@@ -2153,7 +2209,7 @@ class FuturesClient:
                     print(f"[Futures/WARN] LONG {symbol}: cleanup close also failed: {_ce}")
                 return None
             pos._smart_meta['regime_at_entry'] = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
-            pos._smart_meta['profile_at_entry'] = str(peak_quality_profile or getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
+            pos._smart_meta['profile_at_entry'] = str(peak_quality_profile or 'B').strip().upper() or None
             pos._smart_meta['peak_quality_profile'] = str(peak_quality_profile or '').strip().upper() or None
             if peak_quality_score is not None:
                 try:
@@ -2574,6 +2630,9 @@ class FuturesClient:
                 return
             metadata = pos._smart_meta if isinstance(pos._smart_meta, dict) else {}
             metadata['trade_type'] = 'futures'
+            _pos_profile = str(
+                metadata.get('peak_quality_profile') or metadata.get('profile_at_entry') or 'B'
+            ).strip().upper()
             state, event = evaluate_loss_focus(
                 metadata,
                 pnl_usdt_net,
@@ -2602,7 +2661,7 @@ class FuturesClient:
                 pnl_usdt_gross=pnl_usdt_gross,
                 current_price=price,
                 regime_mode=getattr(settings, 'current_regime_mode', None) if settings else None,
-                runtime_profile=getattr(settings, 'current_regime_profile_label', None) if settings else None,
+                runtime_profile=_pos_profile,
                 signal_strength=signal_strength,
                 signal_direction=signal_direction,
                 pnl_velocity_1h=pnl_velocity_1h,
@@ -2662,7 +2721,7 @@ class FuturesClient:
                         continue
                     if _gk not in _binance_keys:
                         print(f"[Futures/Ghost-L1] {_gp.symbol} {_gp.side}: position gone from Binance — closed externally")
-                        _real = self._get_realized_pnl_from_trades(_gp.symbol, _gp.side)
+                        _real = self._get_realized_pnl_from_trades(_gp.symbol, _gp.side, _gp.opened_at)
                         _gp.closed = True
                         _gp.closed_at = datetime.now(timezone.utc)
                         _gp.exit_price = _real.get('exit_price') or _gp.sl_price
@@ -2694,7 +2753,11 @@ class FuturesClient:
                                 continue  # already handled by L1 above
                             # Ghost: symbol not in Binance but has DB record(s)
                             print(f"[Futures/Ghost-L2] {_sym} {_side}: {len(_db_rows)} DB record(s) not in Binance — cleaning up")
-                            _real = self._get_realized_pnl_from_trades(_sym, _side)
+                            _opened_at = min(
+                                (_parse_utc_datetime(row.get('entry_time')) for row in _db_rows),
+                                key=lambda value: value or datetime.max.replace(tzinfo=timezone.utc),
+                            )
+                            _real = self._get_realized_pnl_from_trades(_sym, _side, _opened_at)
                             _exit_p = _real.get('exit_price', 0)
                             _total_pnl = float(_real.get('pnl', 0))
                             _close_reason = _real.get('reason', 'binance_closed_untracked')
@@ -2836,6 +2899,11 @@ class FuturesClient:
             if pos.closed:
                 continue
             symbol = pos.symbol
+            _pos_profile = str(
+                (pos._smart_meta or {}).get('peak_quality_profile')
+                or (pos._smart_meta or {}).get('profile_at_entry')
+                or 'B'
+            ).strip().upper()
             try:
                 price   = self.get_price(symbol)
                 entry   = pos.entry_price
@@ -3073,7 +3141,7 @@ class FuturesClient:
                             daily_target=getattr(settings, 'sso_target_daily_usd', 40.0) if settings else 40.0,
                             trade_type="futures",
                             regime_mode=getattr(settings, 'current_regime_mode', None) if settings else None,
-                            profile_label=getattr(settings, 'current_regime_profile_label', None) if settings else None,
+                            profile_label=_pos_profile,
                             bounce_entry=_bounce_entry_flag,
                             rescue_prediction_ev=_rescue_pred_ev,
                             rescue_signal=_rescue_signal,
@@ -3276,7 +3344,7 @@ class FuturesClient:
                         pnl_velocity_1h=_ctx_pnl_velocity,
                         current_signal_strength=_ctx_signal_strength,
                         regime_mode=getattr(settings, 'current_regime_mode', None) if settings else None,
-                        profile_label=getattr(settings, 'current_regime_profile_label', None) if settings else None,
+                        profile_label=_pos_profile,
                         breakeven_done=bool(_pr_meta.get('breakeven_done', False)),
                         trailing_active=bool(_pr_meta.get('trail_best_price')),
                         tp_extensions=int(_pr_meta.get('tp_extensions_count', 0) or 0),
@@ -3333,6 +3401,21 @@ class FuturesClient:
                         else:
                             _ug_distance_to_sl = ((price - pos.sl_price) / price) * 100.0
 
+                    try:
+                        _lifecycle_structure = self._evaluate_lifecycle_structure(symbol, price, pos.side, settings)
+                        _ug_meta['lifecycle_structure_last'] = _lifecycle_structure
+                        self._persist_smart_meta(pos)
+                        self._audit(symbol, 'lifecycle_structure_decision', {
+                            'side': pos.side,
+                            'trade_type': 'futures',
+                            **_lifecycle_structure,
+                        })
+                    except Exception as _structure_error:
+                        _lifecycle_structure = {
+                            'mode': str(get_param(settings, 'lifecycle_structure_mode', 'shadow')),
+                            'decision': {'state': 'unavailable', 'action': 'allow_exit', 'reason': str(_structure_error)},
+                        }
+
                     # W2: SSO and PRS advisories — variables initialized as None before their blocks
                     _ug_sso_close = bool(_sso_action and _sso_action.should_close)
                     _ug_sso_pct = float(_sso_action.close_pct if _sso_action and _sso_action.should_close else 0.0)
@@ -3355,7 +3438,7 @@ class FuturesClient:
                         opened_at=pos.opened_at,
                         metadata=_ug_meta,
                         regime_mode=getattr(settings, 'current_regime_mode', None) if settings else None,
-                        profile_label=getattr(settings, 'current_regime_profile_label', None) if settings else None,
+                        profile_label=_pos_profile,
                         distance_to_sl_pct=_ug_distance_to_sl,
                         pnl_velocity_1h=_ctx_pnl_velocity,
                         current_signal_strength=_ctx_signal_strength,
@@ -3376,9 +3459,18 @@ class FuturesClient:
                         prs_advisory_close_pct=_ug_prs_pct,
                         prs_advisory_reason=_ug_prs_reason,
                         prs_advisory_detail=_ug_prs_detail,
+                        lifecycle_structure_mode=str(_lifecycle_structure.get('mode', 'shadow')),
+                        lifecycle_structure_decision=dict(_lifecycle_structure.get('decision') or {}),
                         fear_greed_value=_ug_fng_value,
                     )
                     _ug_decision = _evaluate_unified_governance(_ug_ctx, settings)
+                    _ug_shadow = _evaluate_ug_loss_shadow(_ug_ctx, _ug_decision)
+                    _ug_meta['unified_governance_shadow_last'] = _ug_shadow
+                    self._audit(symbol, 'unified_governance_shadow_decision', {
+                        'side': pos.side,
+                        'trade_type': 'futures',
+                        **_ug_shadow,
+                    })
                     if _ug_decision.state_patch:
                         pos._smart_meta.update(_ug_decision.state_patch)
                         self._persist_smart_meta(pos)
@@ -3391,6 +3483,7 @@ class FuturesClient:
                         'priority': _ug_decision.priority,
                         'diagnostics': _ug_decision.diagnostics,
                         'close_pct': float(_ug_decision.close_pct or 0.0),
+                        'lifecycle_structure': _lifecycle_structure.get('decision') or {},
                     })
 
                     if _ug_decision.should_close:

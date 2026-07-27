@@ -28,16 +28,16 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'kelly_enabled': True,
     'kelly_base_usdt': 150.0,
     'kelly_max_usdt': 1500.0,
-    'kelly_max_pct_liquid': 0.85,
+    'kelly_max_pct_liquid': 0.90,  # aggressive calibration: up to 90% of liquid
     'kelly_max_pct_cap': 0.30,
     'kelly_min_usdt': 0.0,
-    'kelly_dynamic_base_pct': 0.20,
+    'kelly_dynamic_base_pct': 0.22,
     'max_per_trade_usdt': 1500.0,
 
     # FUTURES Kelly
     'futures_kelly_base_usdt': 150.0,
     'futures_kelly_max_usdt': 1500.0,
-    'futures_kelly_max_pct_liquid': 0.85,
+    'futures_kelly_max_pct_liquid': 0.90,  # aggressive calibration: consistent with SPOT
     'futures_kelly_cap_pct': 0.30,
     'futures_kelly_min_usdt': 0.0,
 
@@ -127,10 +127,10 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
         'PRESERVATION': 0.0,
     },
     'entry_decision_min_probability': {
-        'SPOT_BULL': 0.60,
-        'RANGE_SCALP': 0.60,
-        'FUTURES_SHORT': 0.60,
-        'PRESERVATION': 0.60,
+        'SPOT_BULL': 0.50,
+        'RANGE_SCALP': 0.50,
+        'FUTURES_SHORT': 0.50,
+        'PRESERVATION': 0.50,
     },
     # Calibrated thresholds from the shadow-log sweep (2026-07-18).
     'evidence_gate_min_posterior_per_regime': {
@@ -141,14 +141,14 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     },
 
     # Exposure / regime
-    'max_total_exposure_pct': 0.90,
-    'max_positions_spot_bull': 5,
-    'max_positions_range_scalp': 4,    # s71 BUG-8
+    'max_total_exposure_pct': 0.95,  # SR strategy: deploy up to 95% of available capital
+    'max_positions_spot_bull': 12,
+    'max_positions_range_scalp': 8,
     'range_scalp_max_bb_position': 0.40,              # s72: 40% of BB range = lower zone
     'range_scalp_max_rsi': 60.0,                      # s72: 48→60 (lateral RSI normal 45-65)
-    'max_positions_preservation': 1,
-    'max_positions_futures_short': 5,
-    'max_positions': 4,
+    'max_positions_preservation': 4,
+    'max_positions_futures_short': 8,
+    'max_positions': 8,
     # Portfolio concentration policy (slot capacity -> per-position ticket coupling)
     'portfolio_concentration_enabled': True,
     'portfolio_concentration_alpha': 0.90,
@@ -241,21 +241,36 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
 
     # Screener
     'screener_enabled': True,
-    'screener_min_vol_usdt': 10_000_000,
-    'screener_futures_min_vol': 100_000_000,
-    'screener_max_pairs': 50,
+    'hard_risk_monitor_enabled': True,
+    'hard_risk_monitor_interval_seconds': 2.0,
+    'hard_risk_breakeven_enabled': True,
+    'range_scalp_short_first_enabled': True,
+    'range_scalp_short_priority_bonus': 0.05,
+    'range_scalp_short_preferred': True,  # True = select FUTURES_SHORT whenever eligible
+    'range_scalp_long_entries_enabled': True,
+    'range_scalp_long_superiority_delta': 0.10,
+    'range_scalp_direction_min_probability': 0.55,
+    'range_scalp_short_min_probability': 0.40,
+    # TEMP (jul 24 2026, RANGE_SCALP universe expansion to ~100 assets):
+    # lower liquidity floor to broaden the universe while keeping slippage in check.
+    # Execution liquidity filter stays at $3M. Monitor commission vs PnL; rollback if worsens.
+    'screener_min_vol_usdt': 1_000_000,
+    'screener_futures_min_vol': 10_000_000,
+    'screener_max_pairs': 100,
+    'screener_max_futures_pairs': 100,
     'screener_cache_minutes': 15,
     'screener_top_n_enabled': True,
     'screener_top_n_count': 100,
-    'screener_quality_min_vol_usdt': 10_000_000,
+    'screener_quality_min_vol_usdt': 1_000_000,
     'screener_quality_max_volatility': 0.50,
     'screener_quality_min_price_usdt': 0.0001,
     'liquidity_filter_enabled': True,
     'min_liquidity_vol_usdt': 3_000_000.0,
+    'min_liquidity_vol_usdt_range_scalp': 1_000_000.0,
     'max_slippage_tp_ratio': 0.25,
 
     # Category / position limits
-    'category_max_positions_enabled': True,
+    'category_max_positions_enabled': False,
     'category_max_positions': {
         "LARGE_CAP": 1, "MIDCAP_ALT": 2, "NARRATIVE": 1, "MEME": 1,
     },
@@ -342,10 +357,21 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
 
     # Staged multi-cycle entry validation (ready state)
     'staged_entry_enabled': True,
+    'staged_entry_fast_path_enabled': True,
     'staged_entry_price_source': 'avg',
     'staged_entry_persist_checks': True,
+    'directional_policy_mode': 'shadow',
     'range_reversion_predictor_mode': 'shadow',
     'preservation_upgrade_to_futures': False,
+    'range_scalp_bidirectional_enabled': True,
+    'range_scalp_short_resistance_threshold': 0.65,
+    'range_scalp_short_max_per_cycle': 2,
+    'range_scalp_short_execution_enabled': True,
+    'range_scalp_short_min_expected_pnl': 0.0,
+    'range_scalp_short_min_probability': 0.40,
+    'range_scalp_short_usdt_per_trade': 1000.0,
+    'range_scalp_short_sl_pct': 2.0,
+    'range_scalp_short_tp_pct': 4.0,
     'staged_entry_regime_config': {
         'SPOT_BULL': {
             'enabled': True,
@@ -370,8 +396,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
         'RANGE_SCALP': {
             'enabled': True,
             'checks_per_cycle': 2,
-            'required_positive_checks': 2,
-            'max_cycles': 3,
+            'required_positive_checks': 1,
+            'max_cycles': 4,
             'max_age_min': 20,
             'intra_mode': 'predictor',
             'price_source': 'avg',
@@ -380,11 +406,11 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'require_inter_positive': False,
             'require_predictor_valid': True,
             'policy_version': 'v1',
-            'max_open_per_cycle': 1,
+            'max_open_per_cycle': 2,
             'direction_confirmation_mode': 'enforced',
-            'direction_min_progress_bps': 3.0,
-            'direction_max_adverse_bps': 50.0,
-            'direction_required_confirmations': 2,
+            'direction_min_progress_bps': 1.0,
+            'direction_max_adverse_bps': 150.0,
+            'direction_required_confirmations': 1,
         },
         'FUTURES_SHORT': {
             'enabled': True,
@@ -580,6 +606,9 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'profit_realization_futures_max_extensions': 1,
     'unified_governance_enabled': True,
     'unified_governance_profit_enabled': True,
+    'unified_governance_min_profit_hold_minutes': 15.0,
+    'lifecycle_structure_mode': 'shadow',
+    'lifecycle_structure_partial_close_pct': 0.35,
     'unified_governance_loss_enabled': True,
     'unified_governance_loss_min_age_profile_a': 90.0,    # jul07: 30→90 (wolf-hunter: SL lógico primero)
     'unified_governance_loss_min_age_profile_b': 120.0,   # jul07: 60→120
@@ -605,6 +634,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'ug_fast_loss_cut_enabled': False,
     'ug_peak_drawdown_cut_enabled': False,
     'ug_soft_supervisor_loss_escalation_enabled': False,
+    'ug_loss_policy_mode': 'shadow',
     'futures_binance_verify_interval_cycles': 3,
 
     # Futures capital bridge
@@ -648,6 +678,14 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     # Peak protection SPOT_BULL (s66: H7 — ensure get_param() has correct fallback)
     'peak_protection_spot_bull_pct': 0.65,
     'peak_protection_spot_bull_profile_a_pct': 0.70,
+
+    # SR-pool runtime switches
+    'sr_pool_enabled': False,
+    'sr_pool_trade_enabled': False,
+    'sr_pool_full_scan_minutes': 5,
+    'sr_pool_lookback_minutes': 150,
+    'sr_pool_max_open_per_cycle': 2,
+    'sr_pool_intra_cycle_enabled': False,
 }
 
 
@@ -745,9 +783,13 @@ def get_staged_entry_regime_config(settings, regime: str) -> Dict[str, Any]:
     if settings is not None:
         enabled_global = bool(getattr(settings, 'staged_entry_enabled', True))
     merged['enabled'] = bool(merged.get('enabled', False)) and enabled_global
-    if regime in {"SPOT_BULL", "RANGE_SCALP", "FUTURES_SHORT", "PRESERVATION"}:
-        merged['direction_confirmation_mode'] = 'enforced'
+    # Allow RANGE_SCALP to use a single confirmation for fast SR bounces.
+    if regime != "RANGE_SCALP":
         merged['direction_required_confirmations'] = max(2, int(merged.get('direction_required_confirmations', 2) or 2))
+    elif bool(getattr(settings, 'range_scalp_short_first_enabled', True)):
+        merged['direction_confirmation_mode'] = 'enforced'
+        merged['direction_required_confirmations'] = min(max(1, int(merged.get('direction_required_confirmations', 1) or 1)), 1)
+        merged['direction_min_progress_bps'] = min(float(merged.get('direction_min_progress_bps', 1.0) or 1.0), 1.0)
     return merged
 
 

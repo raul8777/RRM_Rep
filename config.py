@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     allow_real_trading: bool = Field(default=False)
     trade_cycle_minutes: int = Field(default=5)
     trade_horizon_minutes: int = Field(default=240)  # realistic hold time for PnL prediction (4h)
+    # PnL predictor micro-candle calibration (1m/5m real candles instead of ATR extrapolation)
+    predictor_use_real_candles: bool = Field(default=True)
+    predictor_interval: str = Field(default="5m")  # 1m or 5m candles used by the PnL predictor
+    predictor_horizon_minutes: Optional[int] = Field(default=None)  # None = dynamic per regime (30 RANGE_SCALP, 120 SPOT_BULL)
     # Kelly dynamic position sizing
     kelly_enabled: bool = Field(default=True)
     kelly_base_usdt: float = Field(default=150.0)  # concentrated: base digna para capital $5,100
@@ -78,6 +82,14 @@ class Settings(BaseSettings):
     entry_profile_gate_thresholds_path: str = Field(default="Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json")
     range_scalp_quality_model_mode: str = Field(default="shadow")
     range_scalp_quality_model_path: str = Field(default="Dev/benchmarks/entry_profile_calibration/quality_score_model_range_scalp.pkl")
+
+    # SR pool runtime switches
+    sr_pool_enabled: bool = Field(default=False)          # master switch
+    sr_pool_trade_enabled: bool = Field(default=False)   # if False, signals are logged only (shadow mode)
+    sr_pool_full_scan_minutes: int = Field(default=5)     # min cycles between full universe scans
+    sr_pool_lookback_minutes: int = Field(default=150)   # 1m candles kept for SR computation
+    sr_pool_max_open_per_cycle: int = Field(default=2)   # avoid burst of pool trades per cycle
+    sr_pool_intra_cycle_enabled: bool = Field(default=False)
     # Calibrated thresholds from the shadow-log sweep (2026-07-18).
     evidence_gate_min_posterior_per_regime: Dict[str, float] = Field(default={
         "SPOT_BULL": 0.60,
@@ -278,6 +290,7 @@ class Settings(BaseSettings):
     ug_fast_loss_cut_enabled: bool = Field(default=False)
     ug_peak_drawdown_cut_enabled: bool = Field(default=False)
     ug_soft_supervisor_loss_escalation_enabled: bool = Field(default=False)
+    ug_loss_policy_mode: str = Field(default="shadow")
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True)
     wr_screener_consecutive_sl_block: int = Field(default=5)  # block after N consecutive SL
@@ -391,10 +404,10 @@ class Settings(BaseSettings):
     rebalance_skip_if_bullish_signal: bool = Field(default=True)  # require technical negative signal before rebalancing
     rebalance_rsi_overbought: float = Field(default=60.0)  # RSI1h threshold â€” rebalance only if RSI > this OR EMA9 descending
     # Dynamic max positions by regime (replaces single MAX_POSITIONS when regime is known)
-    max_positions_spot_bull: int = Field(default=8)    # aggressive calibration: more simultaneous entries
-    max_positions_range_scalp: int = Field(default=6)                   # aggressive calibration: more range setups
-    max_positions_preservation: int = Field(default=6)  # aggressive calibration: deploy preservation capital
-    max_positions_futures_short: int = Field(default=5)  # concentrated: 3-5 shorts simultáneos
+    max_positions_spot_bull: int = Field(default=12)    # aggressive SR capture: more simultaneous entries
+    max_positions_range_scalp: int = Field(default=8)     # aggressive SR capture: more range setups
+    max_positions_preservation: int = Field(default=4)    # allow limited preservation entries when SR bounce appears
+    max_positions_futures_short: int = Field(default=8)     # aggressive SR breakdown capture
     # Portfolio concentration policy: explicitly couple slot capacity with per-position sizing.
     # Objective: when a mode/profile runs fewer effective slots, increase ticket size in a controlled way.
     portfolio_concentration_enabled: bool = Field(default=True)
@@ -437,10 +450,10 @@ class Settings(BaseSettings):
         "PRESERVATION": 0.0,
     })
     entry_decision_min_probability: Dict[str, float] = Field(default={
-        "SPOT_BULL": 0.60,
-        "RANGE_SCALP": 0.60,
-        "FUTURES_SHORT": 0.60,
-        "PRESERVATION": 0.60,
+        "SPOT_BULL": 0.50,
+        "RANGE_SCALP": 0.50,
+        "FUTURES_SHORT": 0.50,
+        "PRESERVATION": 0.50,
     })
     # Active replacement: swap weakest open position for a better new signal
     replace_only_losing: bool = Field(default=True)  # only replace positions in loss/flat
@@ -463,11 +476,13 @@ class Settings(BaseSettings):
     # â”€â”€ Microestructura: liquidez mÃ­nima y slippage implÃ­cito â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     liquidity_filter_enabled: bool = Field(default=True)
     min_liquidity_vol_usdt: float = Field(default=3_000_000.0)  # vol 24h mÃ­nimo
+    # Regime-specific liquidity override: sideways spot has structurally lower volume.
+    min_liquidity_vol_usdt_range_scalp: float = Field(default=1_000_000.0)
     max_slippage_tp_ratio: float = Field(default=0.25)           # spread/TP max (0.25 = 25% del TP)
     slippage_pct: float = Field(default=0.00052)  # jun29: 0.0005â†’0.00052 (run_0677)
 
     # â”€â”€ Correlaciones: lÃ­mite de posiciones por categorÃ­a â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    category_max_positions_enabled: bool = Field(default=True)
+    category_max_positions_enabled: bool = Field(default=False)  # SR strategy: slot-based global limits, not per-category
     category_max_positions: Dict[str, Any] = Field(default={
         "LARGE_CAP":  1,   # concentrated: máx 1 large cap
         "MIDCAP_ALT": 2,   # concentrated: máx 2 midcaps
@@ -609,18 +624,41 @@ class Settings(BaseSettings):
     loss_focus_reset_usdt: float = Field(default=6.0)
     peak_reconstruction_enabled: bool = Field(default=True)
     peak_reconstruction_lookback_candles: int = Field(default=30)
+    unified_governance_min_profit_hold_minutes: float = Field(default=15.0)
+    lifecycle_structure_mode: str = Field(default="shadow")
+    lifecycle_structure_partial_close_pct: float = Field(default=0.35)
 
     # ── Staged multi-cycle entry validation (ready state) ──────────────────────
     staged_entry_enabled: bool = Field(default=True)
+    staged_entry_fast_path_enabled: bool = Field(default=True)
     staged_entry_price_source: str = Field(default="avg")  # 'avg' (VWAP 5m) or 'ticker'
     staged_entry_persist_checks: bool = Field(default=True)
+    hard_risk_monitor_enabled: bool = Field(default=True)
+    hard_risk_monitor_interval_seconds: float = Field(default=2.0)
+    hard_risk_breakeven_enabled: bool = Field(default=True)
+    directional_policy_mode: str = Field(default="shadow")
     range_reversion_predictor_mode: str = Field(default="shadow")
     preservation_upgrade_to_futures: bool = Field(default=False)
+    range_scalp_bidirectional_enabled: bool = Field(default=True)
+    range_scalp_short_first_enabled: bool = Field(default=True)
+    range_scalp_short_priority_bonus: float = Field(default=0.05)
+    range_scalp_short_preferred: bool = Field(default=True)  # True = select FUTURES_SHORT whenever eligible
+    range_scalp_long_entries_enabled: bool = Field(default=True)
+    range_scalp_long_superiority_delta: float = Field(default=0.10)
+    range_scalp_direction_min_probability: float = Field(default=0.55)
+    range_scalp_short_resistance_threshold: float = Field(default=0.65)
+    range_scalp_short_max_per_cycle: int = Field(default=2)
+    range_scalp_short_execution_enabled: bool = Field(default=True)
+    range_scalp_short_min_expected_pnl: float = Field(default=0.0)
+    range_scalp_short_min_probability: float = Field(default=0.40)
+    range_scalp_short_usdt_per_trade: float = Field(default=1000.0)
+    range_scalp_short_sl_pct: float = Field(default=2.0)
+    range_scalp_short_tp_pct: float = Field(default=4.0)
     staged_entry_regime_config: Dict[str, Any] = Field(default={
         "SPOT_BULL": {
             "enabled": True,
             "checks_per_cycle": 3,
-            "required_positive_checks": 2,
+            "required_positive_checks": 1,
             "max_cycles": 3,
             "max_age_min": 60,
             "intra_mode": "predictor",  # 'predictor' | 'price_ratio' | 'disabled'
@@ -631,17 +669,18 @@ class Settings(BaseSettings):
             "require_predictor_valid": True,
             "min_expected_pnl": 0.0,
             "policy_version": "v1",
-            "max_open_per_cycle": 1,
-            "direction_confirmation_mode": "enforced",
+            "max_open_per_cycle": 2,  # SR strategy: allow multiple SR-confirmed candidates per cycle
+            "direction_confirmation_mode": "disabled",
             "direction_min_progress_bps": 5.0,
             "direction_max_adverse_bps": 50.0,
             "direction_required_confirmations": 2,
+            "direction_max_adverse_observations": 3,
         },
         "RANGE_SCALP": {
             "enabled": True,
             "checks_per_cycle": 2,
-            "required_positive_checks": 2,
-            "max_cycles": 3,
+            "required_positive_checks": 1,
+            "max_cycles": 4,
             "max_age_min": 20,
             "intra_mode": "predictor",
             "price_source": "avg",
@@ -650,11 +689,12 @@ class Settings(BaseSettings):
             "require_inter_positive": False,
             "require_predictor_valid": True,
             "policy_version": "v1",
-            "max_open_per_cycle": 1,
+            "max_open_per_cycle": 2,  # SR strategy: allow multiple SR-confirmed candidates per cycle
             "direction_confirmation_mode": "enforced",
-            "direction_min_progress_bps": 3.0,
-            "direction_max_adverse_bps": 50.0,
-            "direction_required_confirmations": 2,
+            "direction_min_progress_bps": 1.0,
+            "direction_max_adverse_bps": 150.0,
+            "direction_required_confirmations": 1,
+            "direction_max_adverse_observations": 4,
         },
         "FUTURES_SHORT": {
             "enabled": True,
@@ -670,11 +710,12 @@ class Settings(BaseSettings):
             "require_predictor_valid": True,
             "min_expected_pnl": 0.0,
             "policy_version": "v1",
-            "max_open_per_cycle": 1,
+            "max_open_per_cycle": 2,  # SR strategy: allow multiple SR-confirmed candidates per cycle
             "direction_confirmation_mode": "enforced",
             "direction_min_progress_bps": 3.0,
             "direction_max_adverse_bps": 50.0,
             "direction_required_confirmations": 2,
+            "direction_max_adverse_observations": 2,
         },
         "PRESERVATION": {
             "enabled": True,
@@ -690,11 +731,12 @@ class Settings(BaseSettings):
             "require_predictor_valid": True,
             "min_expected_pnl": 0.0,
             "policy_version": "v1",
-            "max_open_per_cycle": 1,
+            "max_open_per_cycle": 2,  # SR strategy: allow multiple SR-confirmed candidates per cycle
             "direction_confirmation_mode": "enforced",
             "direction_min_progress_bps": 3.0,
             "direction_max_adverse_bps": 50.0,
             "direction_required_confirmations": 2,
+            "direction_max_adverse_observations": 3,
         },
     })
 
@@ -721,8 +763,8 @@ class Settings(BaseSettings):
         'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT',
         'NEARUSDT', 'SUIUSDT', 'DOGEUSDT', 'AVAXUSDT', 'LINKUSDT', 'TAOUSDT',
         'UNIUSDT', 'DOTUSDT', 'BCHUSDT', 'AAVEUSDT', 'FILUSDT',
-        'INJUSDT',
-    ])   # symbols eligible for shorting (run_0812 baseline)
+        'INJUSDT', 'WLDUSDT', 'XLMUSDT',
+    ])   # symbols eligible for shorting (run_0812 baseline + WLD/XLM for range scalp)
     futures_largecap_symbols: List[str] = Field(default=[
         'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT',
     ])   # LARGE_CAP futures symbols for category cap
@@ -770,16 +812,17 @@ class Settings(BaseSettings):
 
     # â”€â”€ Dynamic pair screener â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     screener_enabled: bool = Field(default=True)
-    screener_min_vol_usdt: float = Field(default=10_000_000)   # $10M spot min
-    screener_futures_min_vol: float = Field(default=100_000_000)  # $100M futures min
-    screener_max_pairs: int = Field(default=50)           # max dynamic pairs for spot
+    screener_min_vol_usdt: float = Field(default=1_000_000)    # $1M spot min (TEMP jul 24 2026: universe expansion)
+    screener_futures_min_vol: float = Field(default=10_000_000)  # $10M futures min
+    screener_max_pairs: int = Field(default=100)          # max dynamic pairs for spot (TEMP jul 24 2026: universe expansion)
+    screener_max_futures_pairs: int = Field(default=100)
     screener_cache_minutes: int = Field(default=15)   # TTL for screener cache
     screener_merge_with_static: bool = Field(default=True)
 
     # â”€â”€ Screener v2: Top 100 Quality Assets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     screener_top_n_enabled: bool = Field(default=True)
     screener_top_n_count: int = Field(default=100)  # Target: 100 quality assets
-    screener_quality_min_vol_usdt: float = Field(default=10_000_000)  # $10M minimum volume
+    screener_quality_min_vol_usdt: float = Field(default=1_000_000)  # $1M minimum volume (TEMP jul 24 2026: universe expansion)
     screener_quality_max_volatility: float = Field(default=0.50)     # Max 50% 24h volatility
     screener_quality_min_price_usdt: float = Field(default=0.0001)   # Minimum price filter
     screener_quality_min_age_days: int = Field(default=90)             # Minimum token age

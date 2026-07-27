@@ -21,6 +21,7 @@ from binance_commission import get_config as _get_commission_config
 import pnl_service
 import json
 import state_persistence
+import sr_pool_scanner
 from peak_capture_engine import (
     PeakCaptureContext,
     PeakCaptureEngine,
@@ -30,6 +31,7 @@ from peak_capture_engine import (
 from config_helpers import get_param as _get_param
 from loss_focus import build_loss_focus_snapshot, evaluate_loss_focus
 from entry_decision import evaluate as evaluate_entry_decision
+from directional_arbiter import evaluate_range_scalp as evaluate_range_scalp_direction
 import staged_entry
 from profit_realization_supervisor import (
     ProfitRealizationContext,
@@ -41,6 +43,7 @@ from unified_governance_supervisor import (
     UnifiedGovernanceContext,
     evaluate as _evaluate_unified_governance,
 )
+from ug_loss_policy import evaluate_shadow as _evaluate_ug_loss_shadow
 from binance_truth_guard import (
     evaluate_futures_parity,
     evaluate_spot_parity,
@@ -53,6 +56,8 @@ from universe_selector import select_analysis_universe
 from portfolio_selector import Candidate, select_for_regime, get_max_k_for_regime
 from spot_correlation import get_correlation_matrix as _get_spot_correlation_matrix
 from futures_correlation import get_correlation_matrix as _get_futures_correlation_matrix
+from support_resistance import compute_sr_features as _compute_sr_features
+from market_structure import build_snapshot as _build_lifecycle_structure_snapshot, evaluate as _evaluate_lifecycle_structure
 
 
 # Symbols confirmed invalid on Binance (delisted) — skip without API call
@@ -64,6 +69,7 @@ _INVALID_FUTURES_SYMBOLS: set = {
     "1000PEPEUSDT",
 }
 _INVALID_SYMBOLS_STATE_LOADED: bool = False
+_LIFECYCLE_STRUCTURE_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 # VolSpike override cooldown: {symbol: datetime_of_last_override_entry}
 # Prevents re-entering the same narrative token breakout every 5min cycle
@@ -242,6 +248,11 @@ def _selection_capture_candidates(candidates: List[Any], predictions: Dict[str, 
             continue
         prediction = predictions.get(symbol, {}) or {}
         trade_type = str(signal.get("trade_type") or ("futures" if context.get("regime_mode") == "FUTURES_SHORT" else "spot"))
+        expected_side = str(signal.get("expected_side") or ("SHORT" if trade_type == "futures" else "LONG")).upper()
+        decision_id = str(signal.get("decision_id") or f"{cycle_id}:{symbol}:{trade_type}:{expected_side}")
+        signal["decision_id"] = decision_id
+        signal["trade_type"] = trade_type
+        signal["expected_side"] = expected_side
         reversion_input = {
             "current_price": signal.get("current_price", signal.get("price")),
             "bb_lower": signal.get("bb_lower"),
@@ -250,6 +261,8 @@ def _selection_capture_candidates(candidates: List[Any], predictions: Dict[str, 
         }
         reversion_input_complete = all(value is not None for value in reversion_input.values())
         payload = {
+            "decision_id": decision_id,
+            "expected_side": expected_side,
             "strength": signal.get("strength"),
             "score": signal.get("score"),
             "profit_score": signal.get("profit_score"),
@@ -412,6 +425,59 @@ def _cycle_result(
     }
 
 
+def _prepare_range_scalp_staging_candidates(
+    top_signals: List[Any],
+    predictions: Dict[str, Any],
+    signal_meta: Dict[str, Any],
+    regime_mode: str,
+    client: BinanceClient,
+    settings: Any,
+    screened_pairs_cache: Optional[Dict[str, Any]],
+) -> Tuple[List[Any], Dict[str, Any], Dict[str, Any]]:
+    if regime_mode != "RANGE_SCALP" or not bool(getattr(settings, "range_scalp_short_first_enabled", True)):
+        return list(top_signals), dict(predictions), dict(signal_meta)
+    staged_signals: List[Any] = []
+    staged_predictions: Dict[str, Any] = {}
+    staged_meta: Dict[str, Any] = {}
+    for candidate in top_signals:
+        symbol = candidate.get("symbol") if isinstance(candidate, dict) else str(candidate)
+        if not symbol:
+            continue
+        metadata = dict((signal_meta or {}).get(symbol) or (candidate if isinstance(candidate, dict) else {}))
+        try:
+            decision = _range_scalp_direction_decision(
+                symbol,
+                metadata,
+                client,
+                settings,
+                screened_pairs_cache,
+                predictions,
+            )
+        except Exception as exc:
+            print(f"[DirectionArbiter/Staging] {symbol}: fail-closed ({exc})")
+            update_signal_decision(symbol, "rejected", "DIRECTION_ARBITER_STAGING_ERROR", signal_id=metadata.get("signal_id"))
+            continue
+        selected_mode = decision.get("selected_mode")
+        if selected_mode == "ABSTAIN":
+            update_signal_decision(symbol, "rejected", decision.get("reason", "DIRECTION_ARBITER_ABSTAIN"), signal_id=metadata.get("signal_id"))
+            continue
+        metadata["directional_arbitration"] = decision
+        metadata["expected_side"] = "SHORT" if selected_mode == "FUTURES_SHORT" else "LONG"
+        metadata["trade_type"] = "spot" if selected_mode == "SPOT_LONG" else "futures"
+        prepared = dict(candidate) if isinstance(candidate, dict) else {"symbol": symbol}
+        prepared.update(metadata)
+        prepared["symbol"] = symbol
+        staged_signals.append(prepared)
+        staged_meta[symbol] = prepared
+        prediction_key = {
+            "FUTURES_SHORT": "short_prediction",
+            "FUTURES_LONG": "futures_long_prediction",
+            "SPOT_LONG": "long_prediction",
+        }.get(selected_mode)
+        staged_predictions[symbol] = decision.get(prediction_key) or predictions.get(symbol) or {}
+    return staged_signals, staged_predictions, staged_meta
+
+
 def _open_validated_staged_candidates(
     client: BinanceClient,
     settings: Any,
@@ -473,6 +539,441 @@ def _open_validated_staged_candidates(
     except Exception as exc:
         print(f"[StagedEntry] validated-candidate execution error: {exc}")
         return []
+
+
+def _execute_validated_fast_path(
+    client: BinanceClient,
+    settings: Any,
+    regime_mode: str,
+    regime_obj: Optional[MarketRegime],
+    db_client: Any,
+    portfolio_manager: Any,
+    position_manager: Any,
+    rows: List[Dict[str, Any]],
+    futures_client: Any = None,
+) -> List[Dict]:
+    """Fast-path execution for validated staged-entry candidates.
+
+    Bypasses the heavy ``_buy_top_symbols`` gates (BB, RSI, funding, predictor,
+    entry-profile re-evaluation) that are redundant because the staged-entry
+    lifecycle already validated them.  Only structural / safety gates remain:
+
+    1. ``staged_entry_fast_path_enabled`` flag
+    2. Circuit breaker (consecutive API failures)
+    3. Global MAX_POSITIONS per regime
+    4. Per-symbol position limit
+    5. Exposure cap (``max_total_exposure_pct``)
+    6. USDT liquid balance sufficient for order
+
+    Kelly sizing uses the ``position_size_usdt`` / ``expected_pnl`` from the
+    staged validation policy, capped to the current liquid USDT.
+    """
+    if not getattr(settings, "staged_entry_fast_path_enabled", True):
+        return []
+    if not rows:
+        return []
+
+    orders: List[Dict] = []
+    _fast_screened_pairs = None
+    if regime_mode == "RANGE_SCALP" and bool(getattr(settings, "range_scalp_short_first_enabled", True)):
+        try:
+            from pair_screener import get_screened_pairs
+            _fast_screened_pairs = get_screened_pairs(
+                settings=settings,
+                regime_mode=regime_mode,
+                db_client=None,
+            )
+        except Exception as exc:
+            print(f"[FastPath/DirectionArbiter] universe unavailable: {exc}")
+            return []
+
+    # ── Gate 1: Circuit breaker ──────────────────────────────────────────────
+    _cb_enabled = getattr(settings, "circuit_breaker_enabled", True)
+    _cb_threshold = int(getattr(settings, "circuit_breaker_consecutive_failures", 5))
+    if _cb_enabled and _consecutive_failures >= _cb_threshold:
+        print(f"[FastPath] BLOCKED: circuit breaker active ({_consecutive_failures} failures)")
+        return []
+
+    # ── Resolve portfolio state once ─────────────────────────────────────────
+    _regime_max_key = {
+        "SPOT_BULL": "max_positions_spot_bull",
+        "RANGE_SCALP": "max_positions_range_scalp",
+        "PRESERVATION": "max_positions_preservation",
+        "FUTURES_SHORT": "max_positions_futures_short",
+    }.get(regime_mode, "max_positions")
+    _regime_max = int(getattr(settings, _regime_max_key, getattr(settings, "max_positions", 8)))
+
+    total_open = 0
+    if position_manager:
+        total_open = sum(len(v) for v in position_manager.get_all_positions().values())
+
+    # ── Resolve USDT liquid ──────────────────────────────────────────────────
+    usdt_liquid = 0.0
+    _total_portfolio = 0.0
+    try:
+        if portfolio_manager:
+            _use_unified = _get_param(settings, "use_unified_portfolio_manager")
+            if _use_unified:
+                try:
+                    _fc_bal = _get_futures_client(settings, injected_client=futures_client)
+                    balance = portfolio_manager.get_unified_balance(_fc_bal)
+                except Exception:
+                    balance = portfolio_manager.get_total_balance()
+            else:
+                balance = portfolio_manager.get_total_balance()
+            usdt_liquid = float(balance.get("usdt_available_after_reserve", balance.get("usdt_available", 0.0)))
+            _total_portfolio = float(balance.get("total_usdt", usdt_liquid))
+        else:
+            balances = client.get_account_balance()
+            usdt_liquid = float(balances.get("USDT", 0.0))
+            _total_portfolio = usdt_liquid
+    except Exception as _bal_err:
+        print(f"[FastPath] balance error: {_bal_err}")
+        return []
+
+    # ── Gate 2: Exposure cap ─────────────────────────────────────────────────
+    _max_exposure = float(getattr(settings, "max_total_exposure_pct", 0.95))
+    _spot_bnb_value = float(balance.get("spot_bnb_usdt", 0.0)) if portfolio_manager else 0.0
+    _invested = max(0.0, _total_portfolio - usdt_liquid - _spot_bnb_value)
+    _exposure_pct = _invested / _total_portfolio if _total_portfolio > 0 else 0.0
+    if _exposure_pct >= _max_exposure:
+        print(f"[FastPath] BLOCKED: exposure cap ({_exposure_pct:.1%} >= {_max_exposure:.1%})")
+        return []
+
+    for row in rows:
+        symbol = row.get("symbol")
+        if not symbol:
+            continue
+        signal_meta_row = dict(row.get("signal_meta") or {})
+        policy = (row.get("data") or {}).get("policy") or {}
+        ready_id = row.get("id")
+
+        print(f"[FastPath] Evaluating {symbol} (ready_id={ready_id})")
+
+        if _fast_screened_pairs is not None:
+            try:
+                _fast_decision = _range_scalp_direction_decision(
+                    symbol,
+                    signal_meta_row,
+                    client,
+                    settings,
+                    _fast_screened_pairs,
+                    {symbol: policy},
+                )
+            except Exception as exc:
+                print(f"[FastPath/DirectionArbiter] {symbol}: fail-closed ({exc})")
+                _update_fast_path_gate(db_client, ready_id, False, "DIRECTION_ARBITER_ERROR", usdt_liquid)
+                continue
+            if _fast_decision["selected_mode"] == "ABSTAIN":
+                _update_fast_path_gate(db_client, ready_id, False, _fast_decision["reason"], usdt_liquid)
+                continue
+            if _fast_decision["selected_mode"] == "FUTURES_SHORT":
+                _fast_order = _open_arbitrated_range_scalp_short(
+                    symbol,
+                    _fast_decision,
+                    settings,
+                    futures_client,
+                    position_manager,
+                    signal_meta_row.get("signal_id"),
+                    signal_meta_row,
+                )
+                if _fast_order:
+                    orders.append(_fast_order)
+                    staged_entry.mark_opened(db_client, ready_id, None)
+                    _update_fast_path_gate(db_client, ready_id, True, "FAST_PATH_FUTURES_SHORT", usdt_liquid)
+                    total_open += 1
+                # SHORT cannot fall through to SPOT (spot is LONG-only)
+                if not _fast_order:
+                    print(f"[FastPath] {symbol}: FUTURES_SHORT failed, no SPOT fallback (LONG-only)")
+                    _update_fast_path_gate(db_client, ready_id, False, "FUTURES_SHORT_NO_MARGIN", usdt_liquid)
+                continue
+            elif _fast_decision["selected_mode"] == "FUTURES_LONG":
+                _fp_policy_size = float(policy.get("position_size_usdt") or 0)
+                _fast_order = _open_arbitrated_range_scalp_long(
+                    symbol,
+                    _fast_decision,
+                    settings,
+                    futures_client,
+                    position_manager,
+                    signal_meta_row.get("signal_id"),
+                    signal_meta_row,
+                    usdt_override=_fp_policy_size if _fp_policy_size > 0 else None,
+                )
+                if _fast_order:
+                    orders.append(_fast_order)
+                    staged_entry.mark_opened(db_client, ready_id, None)
+                    _update_fast_path_gate(db_client, ready_id, True, "FAST_PATH_FUTURES_LONG", usdt_liquid)
+                    total_open += 1
+                    continue
+                # FUTURES_LONG failed — fall through to SPOT LONG (same direction)
+                print(f"[FastPath] {symbol}: FUTURES_LONG failed, falling through to SPOT LONG")
+
+        # ── Gate 3: MAX_POSITIONS ────────────────────────────────────────────
+        if total_open >= _regime_max:
+            print(f"[FastPath] {symbol}: BLOCKED max_positions ({total_open}/{_regime_max})")
+            _update_fast_path_gate(db_client, ready_id, False, "MAX_POSITIONS", usdt_liquid)
+            continue
+
+        # ── Gate 4: Per-symbol limit ─────────────────────────────────────────
+        if position_manager:
+            count = position_manager.get_positions_count(symbol)
+            max_per = _get_param(settings, "max_positions_per_symbol")
+            if count >= max_per:
+                print(f"[FastPath] {symbol}: BLOCKED per-symbol limit ({count}/{max_per})")
+                _update_fast_path_gate(db_client, ready_id, False, "PER_SYMBOL_LIMIT", usdt_liquid)
+                continue
+
+        # ── Position sizing from staged policy ───────────────────────────────
+        _policy_size = float(policy.get("position_size_usdt") or 0)
+        # If no explicit size, use Kelly base sizing
+        if _policy_size <= 0:
+            strength = float(signal_meta_row.get("signal_strength", signal_meta_row.get("strength", 0.5)))
+            prediction = {
+                "expected_pnl": policy.get("expected_pnl"),
+                "success_probability": policy.get("success_probability"),
+            }
+            sl_pct = float(getattr(settings, "stop_loss_pct", 3.36)) / 100.0
+            tp_pct = float(getattr(settings, "take_profit_pct", 4.14)) / 100.0
+            if regime_obj and regime_obj.confirmed and regime_mode == "RANGE_SCALP":
+                sl_pct = float(getattr(settings, "range_scalp_sl_pct", 0.8)) / 100.0
+                tp_pct = float(getattr(settings, "range_scalp_tp_pct", 1.8)) / 100.0
+            _open_slots = total_open
+            _conc_mult, _ = _compute_portfolio_concentration_multiplier(
+                settings, regime=regime_mode, trade_type="spot",
+                open_slots=_open_slots, effective_slots=_regime_max,
+            )
+            trade_allocation = _kelly_position_size(
+                settings, strength, prediction, usdt_liquid,
+                sl_pct, tp_pct,
+                concentration_multiplier=_conc_mult,
+                db_client=db_client, symbol=symbol,
+                trade_type="spot", regime=regime_mode,
+            )
+            if regime_obj and regime_obj.confirmed and regime_mode != "SPOT_BULL":
+                trade_allocation *= regime_obj.kelly_multiplier
+        else:
+            trade_allocation = _policy_size
+
+        # Cap to available USDT
+        trade_allocation = min(trade_allocation, usdt_liquid * 0.95)
+        if trade_allocation < 10.0:
+            print(f"[FastPath] {symbol}: BLOCKED allocation too small (${trade_allocation:.2f})")
+            _update_fast_path_gate(db_client, ready_id, False, "ALLOCATION_TOO_SMALL", usdt_liquid)
+            continue
+
+        # ── Get price and filters ────────────────────────────────────────────
+        try:
+            price = _get_cycle_price(client, symbol)
+            filters = get_symbol_filters(client, symbol)
+        except Exception as _pf_err:
+            print(f"[FastPath] {symbol}: price/filter error: {_pf_err}")
+            _update_fast_path_gate(db_client, ready_id, False, "PRICE_ERROR", usdt_liquid)
+            continue
+
+        qty = align_quantity_to_step(trade_allocation / price, filters["step"])
+        _entry_notional = qty * price
+        if _entry_notional < 10.0:
+            print(f"[FastPath] {symbol}: BLOCKED notional ${_entry_notional:.4f} < $10")
+            _update_fast_path_gate(db_client, ready_id, False, "NOTIONAL_TOO_SMALL", usdt_liquid)
+            continue
+
+        valid, reason = is_quantity_valid(qty, price, filters)
+        if not valid:
+            print(f"[FastPath] {symbol}: BLOCKED qty invalid: {reason}")
+            _update_fast_path_gate(db_client, ready_id, False, "QTY_INVALID", usdt_liquid)
+            continue
+
+        # ── Gate 5: USDT balance check ───────────────────────────────────────
+        _comm_rate = _get_commission_config(settings).rate_for("spot")
+        cost_estimate = qty * price * (1.0 + _comm_rate + 0.0005)
+        if usdt_liquid < cost_estimate:
+            print(f"[FastPath] {symbol}: BLOCKED insufficient USDT (${usdt_liquid:.2f} < ${cost_estimate:.2f})")
+            _update_fast_path_gate(db_client, ready_id, False, "INSUFFICIENT_USDT", usdt_liquid)
+            continue
+
+        # ── Execute order ────────────────────────────────────────────────────
+        try:
+            print(f"[FastPath] {symbol}: EXECUTING BUY qty={qty} alloc=${trade_allocation:.2f}")
+            order = client.create_market_order(symbol=symbol, side="BUY", quantity=qty)
+            _fill = client.verify_and_fetch_fills(order, f"FastPath BUY {symbol}")
+            if not _fill:
+                print(f"[FastPath] {symbol}: order NOT confirmed filled — skipping")
+                _update_fast_path_gate(db_client, ready_id, False, "FILL_NOT_CONFIRMED", usdt_liquid)
+                continue
+            _record_order_success()
+            _executed_qty = _fill.get("qty", 0.0)
+            if _executed_qty > 0 and abs(_executed_qty - qty) / max(qty, 1e-12) > 0.01:
+                qty = _executed_qty
+            _real_commission = _fill.get("commission", 0.0)
+
+            # Determine SL/TP
+            sl_pct_final = float(getattr(settings, "stop_loss_pct", 3.36)) / 100.0
+            tp_pct_final = float(getattr(settings, "take_profit_pct", 4.14)) / 100.0
+            if regime_obj and regime_obj.confirmed and regime_mode == "RANGE_SCALP":
+                sl_pct_final = float(getattr(settings, "range_scalp_sl_pct", 0.8)) / 100.0
+                tp_pct_final = float(getattr(settings, "range_scalp_tp_pct", 1.8)) / 100.0
+            _fill_price = float(_fill.get("avg_price", price) or price)
+            sl_price = _fill_price * (1 - sl_pct_final)
+            tp_price = _fill_price * (1 + tp_pct_final)
+
+            # Use staged policy target/stop if available
+            if policy.get("target_price") and policy.get("stop_price"):
+                try:
+                    _policy_tp = float(policy["target_price"])
+                    _policy_sl = float(policy["stop_price"])
+                    if _policy_sl < _fill_price < _policy_tp:
+                        tp_price = _policy_tp
+                        sl_price = _policy_sl
+                except (TypeError, ValueError):
+                    pass
+
+            _peak_profile = str(signal_meta_row.get("peak_quality_profile", "")).strip().upper()
+            _peak_score = signal_meta_row.get("peak_quality_score", signal_meta_row.get("peak_quality"))
+            entry_commission = _real_commission if _real_commission > 0 else compute_commission(qty, _fill_price, settings, trade_type="spot")
+
+            orders.append({
+                "symbol": symbol,
+                "side": "BUY",
+                "quantity": qty,
+                "order": order,
+                "position_persistence_confirmed": False,
+                "entry_metadata": {
+                    "regime_mode": regime_mode,
+                    "peak_quality_profile": _peak_profile if _peak_profile in ("A", "B", "C") else None,
+                    "peak_quality": _peak_score,
+                    "predictor_ev": policy.get("expected_pnl"),
+                    "predictor_prob": policy.get("success_probability"),
+                    "fast_path": True,
+                },
+            })
+
+            # ── Track position ───────────────────────────────────────────────
+            if position_manager:
+                try:
+                    from position_manager import Position
+
+                    metadata = {
+                        "order_id": order.get("orderId"),
+                        "signal_id": signal_meta_row.get("signal_id"),
+                        "indicators_at_entry": signal_meta_row.get("indicators_at_entry", {}),
+                        "rsi_at_entry": float(signal_meta_row.get("rsi", 50.0)),
+                        "vol_spike_at_entry": float(signal_meta_row.get("vol_spike", 0.0)),
+                        "override_used": False,
+                        "strength": float(signal_meta_row.get("signal_strength", signal_meta_row.get("strength", 0.5))),
+                        "peak_quality_profile": _peak_profile if _peak_profile in ("A", "B", "C") else None,
+                        "peak_quality": _peak_score,
+                        "entry_model_version": (signal_meta_row.get("entry_profile_gate_info") or {}).get("model_version"),
+                        "entry_regime": regime_mode,
+                        "regime_mode": regime_mode,
+                        "entry_pred_pnl": float(policy.get("expected_pnl") or 0),
+                        "entry_pred_prob": float(policy.get("success_probability") or 0),
+                        "entry_type": "fast_path",
+                        "reevaluation_count": 0,
+                        "spot_total_at_open": usdt_liquid,
+                        "btc_price_at_entry": _get_cycle_price(client, "BTCUSDT") if client else None,
+                        "entry_order_id": str(_fill.get("order_id", order.get("orderId", ""))),
+                        "entry_filled_qty": float(_fill.get("qty", qty)),
+                        "entry_avg_price": _fill_price,
+                        "entry_commission": float(entry_commission),
+                        "binance_entry_confirmed": bool(_fill.get("binance_confirmed", False)),
+                        "ready_candidate_id": ready_id,
+                        "staged_direction": (row.get("data") or {}).get("direction") or {},
+                        "fast_path_execution": True,
+                        "range_reversion_prediction": signal_meta_row.get("range_reversion_prediction") if regime_mode == "RANGE_SCALP" else None,
+                        "sr_zone_position": signal_meta_row.get("sr_zone_position"),
+                        "nearest_support_dist_pct": signal_meta_row.get("nearest_support_dist_pct"),
+                        "nearest_resistance_dist_pct": signal_meta_row.get("nearest_resistance_dist_pct"),
+                        "support_level": signal_meta_row.get("support_level"),
+                        "resistance_level": signal_meta_row.get("resistance_level"),
+                        "pnl_prediction": {
+                            "expected_pnl": policy.get("expected_pnl"),
+                            "success_probability": policy.get("success_probability"),
+                            "target_price": policy.get("target_price"),
+                            "stop_price": policy.get("stop_price"),
+                        },
+                    }
+                    # USD loss guard
+                    sl_price, tp_price, metadata = _apply_usd_loss_cap_to_sl(
+                        symbol, qty, _fill_price, sl_price, tp_price,
+                        settings, "BUY", metadata, trade_type="spot",
+                    )
+                    metadata["entry_decision"] = {
+                        "eligible": True,
+                        "reason": "FAST_PATH_VALIDATED",
+                        "regime": regime_mode,
+                        "profile": _peak_profile,
+                    }
+
+                    position = Position(
+                        symbol=symbol,
+                        side="BUY",
+                        quantity=qty,
+                        entry_price=_fill_price,
+                        entry_time=datetime.utcnow().isoformat(),
+                        stop_loss=sl_price,
+                        take_profit=tp_price,
+                        metadata=metadata,
+                        entry_commission=entry_commission,
+                        pnl_prediction={
+                            "expected_pnl": policy.get("expected_pnl"),
+                            "success_probability": policy.get("success_probability"),
+                        },
+                        indicators_at_entry=signal_meta_row.get("indicators_at_entry", {}),
+                    )
+                    _persisted = bool(position_manager.add_position(position))
+                    orders[-1]["position_persistence_confirmed"] = _persisted
+                    if _persisted:
+                        print(f"[FastPath] {symbol}: position tracked (SL={sl_price:.6f} TP={tp_price:.6f})")
+                    else:
+                        print(f"[FastPath] {symbol}: CRITICAL — Binance fill confirmed but position persistence failed")
+                except Exception as _pm_err:
+                    print(f"[FastPath] {symbol}: position tracking error: {_pm_err}")
+
+            # Mark staged entry as opened
+            if ready_id:
+                staged_entry.mark_opened(
+                    db_client, ready_id,
+                    order.get("orderId") if isinstance(order, dict) else None,
+                )
+            _update_fast_path_gate(db_client, ready_id, True, "FAST_PATH_EXECUTED", usdt_liquid, trade_allocation)
+            update_signal_decision(symbol, "executed", "FAST_PATH")
+
+            usdt_liquid = max(0.0, usdt_liquid - qty * price)
+            total_open += 1
+            print(f"[FastPath] ✅ {symbol}: BUY {qty} @ ~${_fill_price:.4f} (alloc=${trade_allocation:.2f})")
+        except Exception as _exec_err:
+            print(f"[FastPath] {symbol}: order FAILED: {_exec_err}")
+            _record_order_failure(settings)
+            _update_fast_path_gate(db_client, ready_id, False, f"ORDER_FAILED: {_exec_err}", usdt_liquid)
+
+    return orders
+
+
+def _update_fast_path_gate(
+    db_client: Any,
+    ready_id: Optional[int],
+    passed: bool,
+    reason: str,
+    usdt_available: float,
+    position_size: float = 0.0,
+) -> None:
+    """Persist the fast-path gate result into ready_candidates.data for observability."""
+    if not db_client or not ready_id:
+        return
+    try:
+        gate_data = {
+            "last_execution_gate": {
+                "passed": passed,
+                "reason": reason,
+                "timestamp": datetime.utcnow().isoformat(),
+                "usdt_available": round(usdt_available, 2),
+                "position_size_usdt": round(position_size, 2),
+                "path": "fast_path",
+            }
+        }
+        staged_entry._update_ready_status(db_client, ready_id, data_update=gate_data)
+    except Exception:
+        pass
 
 
 def _audit_screener_selection(db_client, regime_mode: str, screened: dict, profile_label: Optional[str] = None) -> None:
@@ -624,6 +1125,11 @@ _SPOT_MASS_SL_COOLDOWN_UNTIL: Optional[datetime] = None  # UTC — None = not pa
 # Format: {"symbol": str, "strength": float, "prob": float, "vol_spike": float, "ev": float}
 _SSO7_BEST_CANDIDATE_CACHE: Optional[Dict] = None
 
+# SR-pool runtime state.
+_SR_POOL_LAST_FULL_SCAN: Optional[datetime] = None
+_SR_POOL_SYMBOLS: List[str] = []
+_SR_POOL_LAST_SIGNALS: List[Dict[str, Any]] = []
+
 # ── Circuit breaker: consecutive order failures (technical errors only) ──────
 _consecutive_failures: int = 0
 _circuit_breaker_until: datetime = None  # UTC — None = not paused
@@ -668,29 +1174,31 @@ def _get_spot_daily_pnl() -> float:
 
 
 def _get_active_profile_label(db_client, regime: str) -> Optional[str]:
-    """Read active regime profile label (A/B/C) from runtime state."""
-    if db_client is None or not regime:
-        return None
-    try:
-        _rows = db_client.execute_query(
-            "SELECT value FROM trading_runtime_state WHERE key=%s",
-            (f"regime_profile_active_{regime}",),
-        )
-        if not _rows:
-            return None
-        _v = _rows[0].get('value')
-        if isinstance(_v, str):
-            try:
-                _v = json.loads(_v)
-            except Exception:
-                _v = _v.strip() if isinstance(_v, str) else _v
-        if isinstance(_v, dict):
-            _p = str(_v.get('profile') or _v.get('label') or '').strip().upper()
-            return _p or None
-        _p = str(_v or '').strip().upper()
-        return _p or None
-    except Exception:
-        return None
+    """DEPRECATED: active regime profile label is no longer used for trading decisions.
+
+    Profiles are now determined per-operation by entry_profile_gate (peak_quality_profile).
+    Kept as a stub for backward compatibility with legacy dashboard/audit code.
+    """
+    return None
+
+
+def _get_position_profile_label(pos, default: str = 'B') -> str:
+    """Return the effective A/B/C profile for an open position.
+
+    Preference order:
+      1. peak_quality_profile stored at entry
+      2. entry_profile_label stored at entry
+      3. profile_label stored at entry
+      4. default
+    """
+    if pos is None:
+        return default
+    metadata = getattr(pos, 'metadata', {}) or {}
+    for key in ('peak_quality_profile', 'entry_profile_label', 'profile_label'):
+        _p = str(metadata.get(key) or '').strip().upper()
+        if _p in ('A', 'B', 'C'):
+            return _p
+    return default
 
 
 def _set_cooldown(symbol: str, cooldown_type: str, hours: float, metadata: dict = None) -> None:
@@ -815,52 +1323,23 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
     if db_client is None:
         return {"applied": {}, "skipped": True, "reason": "no_db_client"}
 
+    # Profiles are now per-operation (peak_quality_profile from entry_profile_gate).
+    # Regime parameter overrides are loaded without an active global profile.
+    _profile_token = "__default__"
+    if regime == _last_applied_regime_mode and _profile_token == (_last_applied_regime_profile or "__default__"):
+        return {"applied": {}, "skipped": True, "reason": "already_active"}
+
     try:
         import json as _json
-        _active_profile = None
-        _active_profile_key = f"regime_profile_active_{regime}"
-        _active_rows = db_client.execute_query(
-            "SELECT value FROM trading_runtime_state WHERE key=%s", (_active_profile_key,)
-        )
-        if _active_rows and _active_rows[0].get('value') is not None:
-            _av = _active_rows[0]['value']
-            if isinstance(_av, str):
-                try:
-                    _av = _json.loads(_av)
-                except Exception:
-                    pass
-            if isinstance(_av, dict):
-                _active_profile = str(_av.get('profile') or _av.get('label') or '').strip() or None
-            elif isinstance(_av, (int, float, bool)):
-                _active_profile = str(_av)
-            elif isinstance(_av, str):
-                _active_profile = _av.strip() or None
-
-        _profile_token = _active_profile or "__default__"
-        if regime == _last_applied_regime_mode and _profile_token == (_last_applied_regime_profile or "__default__"):
-            return {"applied": {}, "skipped": True, "reason": "already_active"}
-
         _state_key = f"regime_params_{regime}"
         _raw = None
 
-        # New profile-aware source (preferred): regime_profile_<REGIME>_<LABEL>
-        if _active_profile:
-            _profile_key = f"regime_profile_{regime}_{_active_profile}"
-            _profile_rows = db_client.execute_query(
-                "SELECT value FROM trading_runtime_state WHERE key=%s", (_profile_key,)
-            )
-            if _profile_rows and _profile_rows[0].get('value') is not None:
-                _raw = _profile_rows[0]['value']
-                _state_key = _profile_key
-
-        # Legacy fallback: regime_params_<REGIME>
-        if _raw is None:
-            _rows = db_client.execute_query(
-                "SELECT value FROM trading_runtime_state WHERE key=%s", (_state_key,)
-            )
-            if not _rows or _rows[0].get('value') is None:
-                return {"applied": {}, "skipped": True, "reason": "no_regime_params_stored", "profile": _active_profile}
-            _raw = _rows[0]['value']
+        _rows = db_client.execute_query(
+            "SELECT value FROM trading_runtime_state WHERE key=%s", (_state_key,)
+        )
+        if not _rows or _rows[0].get('value') is None:
+            return {"applied": {}, "skipped": True, "reason": "no_regime_params_stored", "profile": None}
+        _raw = _rows[0]['value']
 
         if isinstance(_raw, str):
             _raw = _json.loads(_raw)
@@ -898,6 +1377,9 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'min_success_probability': 'min_success_probability',
             'range_scalp_quality_model_mode': 'range_scalp_quality_model_mode',
             'range_scalp_quality_model_path': 'range_scalp_quality_model_path',
+            'range_scalp_long_entries_enabled': 'range_scalp_long_entries_enabled',
+            'lifecycle_structure_mode': 'lifecycle_structure_mode',
+            'lifecycle_structure_partial_close_pct': 'lifecycle_structure_partial_close_pct',
             'vol_spike_min': 'vol_spike_min',
             'futures_min_prob': 'futures_min_prob',
             'futures_vol_spike_min': 'futures_vol_spike_min',
@@ -1239,7 +1721,7 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             "VALUES ('__config__', 'system', 'regime_params_applied', %s, false)",
             (_json.dumps({
                 "regime": regime,
-                "profile": _active_profile,
+                "profile": None,
                 "applied": _applied,
                 "rejected": _rejected,
                 "state_key": _state_key,
@@ -1249,7 +1731,7 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
         _last_applied_regime_mode = regime
         _last_applied_regime_profile = _profile_token
         print(f"[RegimeParams] Applied {len(_applied)} overrides for {regime}")
-        return {"applied": _applied, "rejected": _rejected, "skipped": False, "profile": _active_profile, "raw_params": _raw}
+        return {"applied": _applied, "rejected": _rejected, "skipped": False, "profile": None, "raw_params": _raw}
 
     except Exception as _re_err:
         print(f"[RegimeParams] Error applying regime params for {regime}: {_re_err}")
@@ -1265,9 +1747,13 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _get_kelly_context_multiplier(settings, regime: str = None, trade_type: str = 'spot') -> float:
-    """Return a conservative profile/mode multiplier for Kelly sizing."""
-    _profile = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or 'B'
+def _get_kelly_context_multiplier(settings, regime: str = None, trade_type: str = 'spot', profile_label: Optional[str] = None) -> float:
+    """Return a conservative profile/mode multiplier for Kelly sizing.
+
+    Uses the per-position/profile_label when provided; falls back to neutral 'B'.
+    s95: no global active profile is consulted.
+    """
+    _profile = str(profile_label or '').strip().upper() or 'B'
     _regime = str(regime or getattr(settings, 'current_regime_mode', '') or '').strip().upper()
 
     _profile_mult = {
@@ -2465,7 +2951,8 @@ def _get_funding_rate(symbol: str, settings) -> float:
 
 
 def _check_liquidity_and_slippage(symbol: str, vol_24h_usdt: float,
-                                   price: float, tp_pct: float, settings) -> tuple:
+                                   price: float, tp_pct: float, settings,
+                                   regime_mode: Optional[str] = None) -> tuple:
     """R3: Microestructura — returns (ok: bool, reason: str).
     Filters:
       1. vol_24h_usdt < min_liquidity_vol_usdt → illiquid, skip
@@ -2474,7 +2961,10 @@ def _check_liquidity_and_slippage(symbol: str, vol_24h_usdt: float,
     """
     if not getattr(settings, 'liquidity_filter_enabled', True):
         return True, ""
-    min_vol = getattr(settings, 'min_liquidity_vol_usdt', 3_000_000.0)
+    if str(regime_mode or "").upper() == "RANGE_SCALP":
+        min_vol = getattr(settings, 'min_liquidity_vol_usdt_range_scalp', 1_000_000.0)
+    else:
+        min_vol = getattr(settings, 'min_liquidity_vol_usdt', 3_000_000.0)
     if vol_24h_usdt > 0 and vol_24h_usdt < min_vol:
         return False, f"BAJA_LIQUIDEZ vol24h=${vol_24h_usdt/1e6:.1f}M < ${min_vol/1e6:.0f}M"
     max_ratio = getattr(settings, 'max_slippage_tp_ratio', 0.25)
@@ -2527,7 +3017,7 @@ def _check_category_limit(symbol: str, position_manager, settings) -> tuple:
     Enforces per-category position limits to avoid over-concentration in
     correlated buckets (e.g. 4 MEMEs crashing together).
     """
-    if not getattr(settings, 'category_max_positions_enabled', True):
+    if not getattr(settings, 'category_max_positions_enabled', False):
         return True, ""
     if position_manager is None:
         return True, ""
@@ -2825,7 +3315,7 @@ def _try_replace_weakest_position(
                 commission_rate,
                 exit_context={
                     'regime_mode': regime_mode,
-                    'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                    'profile_label': 'B',
                 },
             )
             _overflow_positions.discard(_worst_sym)   # INEF-4: free overflow slot if used
@@ -3078,12 +3568,38 @@ def _normalize_autonomous_signal(signal: Dict[str, Any], regime: str, volume_24h
         "vol_spike": signal.get("vol_spike", indicators.get("vol_spike", 0.0)),
         "breakout_12h": signal.get("breakout_12h", False),
         "rsi": indicators.get("rsi", signal.get("rsi", 50.0)),
+        # Forward the exact features the universal quality model expects.
+        # Without these keys _extract_universal_features falls back to weaker proxies
+        # (ema_cross for trend, bb_position for range_position, same rsi for both
+        # timeframes), which systematically lowers the quality score for RANGE_SCALP.
+        "range_position": signal.get("range_position", indicators.get("range_position")),
+        "rsi_1h": signal.get("rsi_1h", indicators.get("rsi_1h", indicators.get("rsi", signal.get("rsi", 50.0)))),
+        "rsi_4h": signal.get("rsi_4h", indicators.get("rsi_4h", indicators.get("rsi", signal.get("rsi", 50.0)))),
+        "trend_1h": signal.get("trend_1h", indicators.get("trend_1h", indicators.get("ema_cross"))),
+        "trend_4h": signal.get("trend_4h", indicators.get("trend_4h")),
+        # Support/Resistance features for the predictive engine and gate.
+        "sr_zone_position": signal.get("sr_zone_position", indicators.get("sr_zone_position")),
+        "nearest_support_dist_pct": signal.get("nearest_support_dist_pct", indicators.get("nearest_support_dist_pct")),
+        "nearest_resistance_dist_pct": signal.get("nearest_resistance_dist_pct", indicators.get("nearest_resistance_dist_pct")),
+        "sr_support_dist_pct": signal.get("sr_support_dist_pct", indicators.get("sr_support_dist_pct")),
+        "sr_resistance_dist_pct": signal.get("sr_resistance_dist_pct", indicators.get("sr_resistance_dist_pct")),
+        "support_level": signal.get("support_level", indicators.get("support_level")),
+        "resistance_level": signal.get("resistance_level", indicators.get("resistance_level")),
+        "sr_bounce": signal.get("sr_bounce", False),
+        "sr_breakout": signal.get("sr_breakout", False),
+        "sr_breakdown": signal.get("sr_breakdown", False),
+        "support_bounce_buy": signal.get("support_bounce_buy", False),
+        "support_breakout_buy": signal.get("support_breakout_buy", False),
+        "support_breakdown_sell": signal.get("support_breakdown_sell", False),
+        "support_strength": signal.get("support_strength", 0.0),
+        "support_volume_ratio": signal.get("support_volume_ratio", 1.0),
+        "range_scalp_timing_shadow": signal.get("range_scalp_timing_shadow"),
         "volume_24h_usdt": volume_24h_usdt,
     }
 
 
 def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClient, portfolio_manager=None, regime: str = "SPOT_BULL", db_client=None) -> List[Dict]:
-    _active_profile_label = _get_active_profile_label(db_client or _db_client_ref, regime)
+    # Profiles are per-operation (peak_quality_profile); no active global profile is used here.
     # Expire autonomous signals — TTL aligned to regime cycle (B-v2)
     _regime_for_ttl = regime if regime else "SPOT_BULL"
     _ttl_by_regime = {"SPOT_BULL": 45, "RANGE_SCALP": 15, "PRESERVATION": 90, "FUTURES_SHORT": 24}
@@ -3122,7 +3638,6 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
             _universe = select_analysis_universe(
                 settings=settings,
                 regime_mode=regime,
-                profile_label=_active_profile_label,
                 db_client=db_client,
             )
             _static_symbols = _universe.get('static_symbols') or getattr(settings, 'analysis_symbols', [
@@ -3168,7 +3683,6 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
                 news_client=news_client,
                 regime_mode=regime,
                 settings=settings,
-                profile_label=_active_profile_label,
             )
             
             # Convert autonomous signals to expected format and add to signal store
@@ -3231,7 +3745,8 @@ def _get_top_buy_symbols(settings, news_client: NewsClient, client: BinanceClien
             return top_signals
             
         except Exception as e:
-            print(f"Error in autonomous signal generation: {e}")
+            import traceback as _rtb
+            print(f"Error in autonomous signal generation: {e}\n{_rtb.format_exc()}")
             return []
     
     # Use external signals if available
@@ -3675,7 +4190,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
         if not bool(_get_param(settings, 'loss_focus_enabled', True)):
             return
         entry_context_status = str(metadata.get('entry_context_status') or 'canonical').strip().lower()
-        runtime_profile = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
+        runtime_profile = _get_position_profile_label(pos)
         if entry_context_status == 'unknown_reconciled':
             if metadata.get('loss_focus_unknown_baseline_alerted'):
                 return
@@ -3806,6 +4321,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                     close_reason = f"emergency_gap_stop ({pnl_usdt_net:.2f} USD)"
 
                 metadata = getattr(pos, 'metadata', {}) or {}
+                _pos_profile = _get_position_profile_label(pos)
                 _entry_context_unknown = str(metadata.get('entry_context_status') or '').strip().lower() == 'unknown_reconciled'
                 _ctx_signal_strength = None
                 _ctx_signal_direction = None
@@ -3890,7 +4406,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             current_pnl_pct=pnl_pct_net,
                             peak_pnl_pct=_early_peak_pnl_pct_net,
                             regime_mode=regime,
-                            profile_label=str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                            profile_label=_pos_profile,
                             signal_strength=float(_ctx_signal_strength or 0.0),
                             signal_direction=_ctx_signal_direction or 'HOLD',
                             pnl_velocity_1h=_ctx_pnl_velocity,
@@ -3972,6 +4488,26 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 elif pnl_pct_net > 0 and getattr(settings, 'profit_predexit_enabled', True):
                                     # Wolf Hunter: decide whether to take profit or wait for larger peak
                                     _pc_indicators = _ind_exit or {}
+                                    try:
+                                        _structure_eval = _evaluate_spot_lifecycle_structure(
+                                            client, symbol, current_price, 'LONG', settings
+                                        )
+                                        metadata['lifecycle_structure_last'] = _structure_eval
+                                        _pc_indicators = {
+                                            **_pc_indicators,
+                                            **(_structure_eval['snapshot'].get('structure_1h') or {}),
+                                        }
+                                        position_manager._audit(symbol, 'lifecycle_structure_decision', {
+                                            'side': 'BUY',
+                                            'trade_type': 'spot',
+                                            **_structure_eval,
+                                        })
+                                    except Exception as _structure_error:
+                                        metadata['lifecycle_structure_last'] = {
+                                            'mode': str(_get_param(settings, 'lifecycle_structure_mode', 'shadow')),
+                                            'decision': {'state': 'unavailable', 'action': 'allow_exit', 'reason': str(_structure_error)},
+                                            'updated_at': datetime.now(timezone.utc).isoformat(),
+                                        }
                                     _pc_signal_strength = _ctx_signal_strength or 0.0
                                     _pc_signal_direction = _ctx_signal_direction or 'HOLD'
 
@@ -4014,7 +4550,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                         current_pnl_pct=pnl_pct_net,
                                         peak_pnl_pct=_peak_pnl_pct_real,
                                         regime_mode=regime,
-                                        profile_label=str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                        profile_label=_pos_profile,
                                         signal_strength=_pc_signal_strength,
                                         signal_direction=_pc_signal_direction,
                                         pnl_velocity_1h=_ctx_pnl_velocity,
@@ -4046,7 +4582,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                             'pnl_velocity_1h': float(_ctx_pnl_velocity or 0.0),
                                             'fear_greed_value': float(_pc_fng_value),
                                             'regime_mode': regime,
-                                            'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                            'profile_label': _pos_profile,
                                             'metrics': _normal_peak_advisory.metrics,
                                         })
                                     except Exception:
@@ -4261,7 +4797,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             daily_target=getattr(settings, 'sso_target_daily_usd', 40.0),
                             trade_type="spot",
                             regime_mode=regime,
-                            profile_label=str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                            profile_label=_pos_profile,
                             bounce_entry=_spot_bounce_entry_flag,
                             rescue_prediction_ev=_sp_rescue_pred_ev,
                             rescue_signal=_sp_rescue_signal,
@@ -4301,7 +4837,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 'current_signal_strength': float(_sp_rescue_signal_str or 0.0),
                                 'fear_greed_value': float(_ug_fng_value or 50.0),
                                 'regime_mode': regime,
-                                'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                'profile_label': _pos_profile,
                                 'bounce_entry': bool(_spot_bounce_entry_flag),
                                 'sso_levels_done': metadata.get('sso_levels_done', []),
                             })
@@ -4433,7 +4969,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                                     'pnl_usdt': round(_sso_sym_pnl_usdt, 4),
                                                     'diagnosis': (_sso_s_action.diagnosis or '')[:500],
                                                     'regime': regime,
-                                                    'profile': str(getattr(settings, 'current_regime_profile_label', '') or '').upper(),
+                                                    'profile': _pos_profile,
                                                     'ts': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
                                                 }),
                                                 False,
@@ -4498,7 +5034,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                             qty_closed=_sso_s_qty_sold,
                                             exit_context={
                                                 'regime_mode': regime,
-                                                'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').upper(),
+                                                'profile_label': _pos_profile,
                                             },
                                             exit_fill=_sso_s_fill,
                                         )
@@ -4551,7 +5087,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                                             'pnl_usdt': round(_sso_sym_pnl_usdt, 4),
                                                             'diagnosis': (_sso_s_action.diagnosis or '')[:500],
                                                             'regime': regime,
-                                                            'profile': str(getattr(settings, 'current_regime_profile_label', '') or '').upper(),
+                                                            'profile': _pos_profile,
                                                             'ts': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
                                                         }),
                                                         False,
@@ -4612,7 +5148,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         pnl_velocity_1h=_ctx_pnl_velocity,
                         current_signal_strength=_ctx_signal_strength,
                         regime_mode=regime,
-                        profile_label=str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                        profile_label=_pos_profile,
                         breakeven_done=bool(trailing_enabled and pnl_pct_net >= trail_activate and float(pos.stop_loss or 0) >= entry_price),
                         trailing_active=bool(trailing_enabled and pnl_pct_net >= trail_activate and float(pos.stop_loss or 0) > 0),
                         tp_extensions=_tp_ext_count,
@@ -4636,11 +5172,29 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             'current_signal_strength': float(_ctx_signal_strength or 0.0),
                             'fear_greed_value': float(_ug_fng_value or 50.0),
                             'regime_mode': regime,
-                            'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                            'profile_label': _pos_profile,
                             'tp_extensions': _tp_ext_count,
                         })
                     except Exception:
                         pass
+
+                _lifecycle_structure = metadata.get('lifecycle_structure_last') or {}
+                try:
+                    _lifecycle_structure = _evaluate_spot_lifecycle_structure(
+                        client, symbol, current_price, 'LONG', settings
+                    )
+                    metadata['lifecycle_structure_last'] = _lifecycle_structure
+                    position_manager._audit(symbol, 'lifecycle_structure_decision', {
+                        'side': 'BUY',
+                        'trade_type': 'spot',
+                        **_lifecycle_structure,
+                    })
+                    position_manager.update_position_metadata(pos.position_id, metadata)
+                except Exception as _structure_error:
+                    _lifecycle_structure = {
+                        'mode': str(_get_param(settings, 'lifecycle_structure_mode', 'shadow')),
+                        'decision': {'state': 'unavailable', 'action': 'allow_exit', 'reason': str(_structure_error)},
+                    }
 
                 # ── Unified Governance Supervisor (single arbiter: profit + loss) ─
                 _soft_reason_pre_ug = close_reason
@@ -4667,7 +5221,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             opened_at=getattr(pos, 'entry_time', None) or getattr(pos, 'created_at', None),
                             metadata=metadata,
                             regime_mode=regime,
-                            profile_label=str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                            profile_label=_pos_profile,
                             distance_to_sl_pct=_ug_distance_to_sl,
                             pnl_velocity_1h=_ctx_pnl_velocity,
                             current_signal_strength=_ctx_signal_strength,
@@ -4694,9 +5248,21 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             peak_capture_detail=str(_peak_capture_advisory.detail if _peak_capture_advisory and _peak_capture_advisory.should_close else ''),
                             peak_capture_prob_higher_peak=float(_peak_capture_advisory.prob_higher_peak if _peak_capture_advisory else 0.0),
                             peak_capture_expected_future_pnl=float(_peak_capture_advisory.expected_future_pnl if _peak_capture_advisory else 0.0),
+                            lifecycle_structure_mode=str(_lifecycle_structure.get('mode', 'shadow')),
+                            lifecycle_structure_decision=dict(_lifecycle_structure.get('decision') or {}),
                             fear_greed_value=_ug_fng_value,
                         )
                         _ug_decision = _evaluate_unified_governance(_ug_ctx, settings)
+                        _ug_shadow = _evaluate_ug_loss_shadow(_ug_ctx, _ug_decision)
+                        metadata["unified_governance_shadow_last"] = _ug_shadow
+                        try:
+                            position_manager._audit(symbol, 'unified_governance_shadow_decision', {
+                                'side': 'BUY',
+                                'trade_type': 'spot',
+                                **_ug_shadow,
+                            })
+                        except Exception:
+                            pass
                         if _ug_decision.state_patch:
                             metadata.update(_ug_decision.state_patch)
                             try:
@@ -4719,7 +5285,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 'current_signal_strength': float(_ctx_signal_strength or 0.0),
                                 'fear_greed_value': float(_ug_fng_value or 50.0),
                                 'regime_mode': regime,
-                                'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                'profile_label': _pos_profile,
+                                'lifecycle_structure': _lifecycle_structure.get('decision') or {},
                                 'sso_advisory_should_close': bool(_sso_s_action and _sso_s_action.should_close and _sso_s_action.close_pct >= 1.0),
                                 'prs_advisory_should_close': bool(_prs_advisory and _prs_advisory.should_close),
                                 'prs_advisory_close_pct': float(_prs_advisory.close_pct if _prs_advisory and _prs_advisory.should_close else 0.0),
@@ -4753,7 +5320,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                     'current_signal_strength': float(_ctx_signal_strength or 0.0),
                                     'fear_greed_value': float(_ug_fng_value or 50.0),
                                     'regime_mode': regime,
-                                    'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                    'profile_label': _pos_profile,
                                     'prs_advisory_should_close': bool(_prs_advisory and _prs_advisory.should_close),
                                     'prs_advisory_close_pct': float(_prs_advisory.close_pct if _prs_advisory and _prs_advisory.should_close else 0.0),
                                     'prs_advisory_reason': str(_prs_advisory.reason if _prs_advisory and _prs_advisory.should_close else ''),
@@ -4893,7 +5460,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             metadata['early_peak_protection'] = _early_meta
                         _exit_ctx = {
                             'regime_mode': regime,
-                            'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                            'profile_label': _pos_profile,
                             'exit_order_id': str(_prs_fill.get('order_id', '')),
                             'exit_filled_qty': float(_prs_qty_sold),
                             'exit_avg_price': float(_prs_fill.get('avg_price', current_price)),
@@ -5249,7 +5816,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                             symbol, current_price, close_reason.split(" ")[0], commission_rate,
                             exit_context={
                                 'regime_mode': regime,
-                                'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                'profile_label': _pos_profile,
                                 'exit_order_id': str(_sell_fill.get('order_id', '')),
                                 'exit_filled_qty': float(_sold_qty),
                                 'exit_avg_price': float(_sell_fill.get('avg_price', current_price)),
@@ -5403,7 +5970,8 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
                          concentration_multiplier: float = 1.0,
                          db_client=None, symbol: str = None,
                          trade_type: str = 'spot', regime: str = None,
-                         action: str = 'open', extra_multipliers: dict = None) -> float:
+                         action: str = 'open', extra_multipliers: dict = None,
+                         profile_label: Optional[str] = None) -> float:
     """
     Half-Kelly position sizing scaled by signal quality.  (K1: bases subidas)
 
@@ -5463,7 +6031,7 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
         scaled = amount * min(1.0, kelly_f * 10)
         sized = max(base * 0.5, scaled)  # floor at 50% of base, not full base
 
-    _context_mult = _get_kelly_context_multiplier(settings, regime=regime, trade_type=trade_type)
+    _context_mult = _get_kelly_context_multiplier(settings, regime=regime, trade_type=trade_type, profile_label=profile_label)
     _kpi_mult = _get_kpi_context_multiplier(db_client)
     _context_mult *= _kpi_mult
     if _context_mult != 1.0:
@@ -5498,7 +6066,7 @@ def _kelly_position_size(settings, strength: float, prediction: dict,
             _mults.setdefault('concentration_multiplier', round(_conc_mult, 4))
             _mults.setdefault('min_usdt', round(_min_usdt, 2))
             _mults.setdefault('current_regime_mode', str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None)
-            _mults.setdefault('current_regime_profile_label', str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None)
+            _mults.setdefault('kelly_profile', str(profile_label).strip().upper() if profile_label else None)
             db_client.execute_update(
                 "INSERT INTO kelly_sizing_log "
                 "(symbol, trade_type, regime, prob, strength, tier, "
@@ -5630,13 +6198,7 @@ def _check_entry_quality(
             return False, f"RANGE_VOL (vol_spike={vol_spike:.2f} < {_min_vol:.2f})"
         _bb_pos_ok = bb_position is not None and float(bb_position) <= _max_bb_pos
         _bb_touch_ok = bb_lower_touch or bb_near_lower
-        # s78: if bb_position is None AND no touch/near flags, skip gate — missing
-        # data should not reject an otherwise valid signal (autonomous signals may
-        # not carry bb_position). Only reject when we have data that shows price is
-        # NOT at the lower band.
-        if bb_position is None and not _bb_touch_ok:
-            pass  # gate skipped: no BB data available
-        elif not (_bb_pos_ok or _bb_touch_ok):
+        if not (_bb_pos_ok or _bb_touch_ok):
             _bb_pos_str = f"{float(bb_position):.2f}" if bb_position is not None else "?"
             return False, f"RANGE_BB (bb_pos={_bb_pos_str} > {_max_bb_pos:.2f}, touch={bb_lower_touch}, near={bb_near_lower})"
         if strength < float(getattr(settings, "entry_quality_min_strength", 0.40)):
@@ -5757,7 +6319,6 @@ def _filter_buy_candidates(
     signal_meta: Dict[str, Any],
     settings,
     regime_mode: str,
-    active_profile_label: Optional[str] = None,
     predictions: Optional[Dict[str, Dict]] = None,
     news_client: Optional[Any] = None,
 ) -> List[Any]:
@@ -5853,10 +6414,24 @@ def _filter_buy_candidates(
             "entry_model_missing_features": _profile_info.get("missing_features", []),
         })
         if _profile not in ("A", "B", "C"):
-            print(f"[FilterBuy] Rejected {symbol}: PEAK_QUALITY_DISCARDED (profile={_profile})")
-            _selection_record_filter_rejection("PEAK_QUALITY_DISCARDED", profile_rejected=True)
-            update_signal_decision(symbol, "rejected", "PEAK_QUALITY_DISCARDED")
-            continue
+            # Bypass the pre-filter for confirmed support/resistance events:
+            # bounce at support, breakout above resistance, or breakdown below support.
+            # The staged-entry lifecycle and predictor remain the real validators.
+            _sr_confirmed = bool(
+                meta.get("support_bounce_buy") or meta.get("sr_bounce")
+                or meta.get("support_breakout_buy") or meta.get("sr_breakout")
+                or meta.get("support_breakdown_sell") or meta.get("sr_breakdown")
+            )
+            if _sr_confirmed:
+                print(f"[FilterBuy] SR bypass {symbol}: gate discarded, but confirmed SR event present")
+                _profile = "C"
+                meta["peak_quality_profile"] = _profile
+                meta["peak_quality_score"] = max(float(meta.get("peak_quality_score", 0.0) or 0.0), 0.45)
+            else:
+                print(f"[FilterBuy] Rejected {symbol}: PEAK_QUALITY_DISCARDED (profile={_profile})")
+                _selection_record_filter_rejection("PEAK_QUALITY_DISCARDED", profile_rejected=True)
+                update_signal_decision(symbol, "rejected", "PEAK_QUALITY_DISCARDED")
+                continue
 
         _selection_context["profile_pass_count"] = int(_selection_context.get("profile_pass_count", 0)) + 1
         if regime_mode == "RANGE_SCALP":
@@ -5956,7 +6531,7 @@ def _filter_buy_candidates(
         _eq_mode = str(getattr(settings, "entry_quality_gate_mode", "disabled")).lower()
         if _eq_mode in ("blocking", "advisory"):
             _ok, _reason = _check_entry_quality(
-                symbol, signal_meta, settings, regime_mode, active_profile_label
+                symbol, signal_meta, settings, regime_mode, _profile
             )
             if not _ok:
                 if _eq_mode == "blocking":
@@ -5973,7 +6548,7 @@ def _filter_buy_candidates(
         # Optional Bayesian evidence gate (disabled by default until calibrated).
         if getattr(settings, "evidence_gate_enabled", False):
             posterior = _evidence_gate_posterior(
-                meta, signal_meta, settings, regime_mode, active_profile_label
+                meta, signal_meta, settings, regime_mode, _profile
             )
             per_regime = getattr(settings, "evidence_gate_min_posterior_per_regime", {
                 "SPOT_BULL": 0.60, "FUTURES_SHORT": 0.80, "RANGE_SCALP": 0.52, "PRESERVATION": 0.80
@@ -5992,6 +6567,298 @@ def _filter_buy_candidates(
 
         passed.append(cand)
     return passed
+
+
+def _range_scalp_direction_decision(
+    symbol: str,
+    metadata: Dict[str, Any],
+    client: BinanceClient,
+    settings: Any,
+    screened_pairs_cache: Optional[Dict[str, Any]],
+    precomputed_predictions: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    futures_symbols = set((screened_pairs_cache or {}).get("futures") or [])
+    futures_executable = symbol in futures_symbols and symbol not in _INVALID_FUTURES_SYMBOLS
+    _precomputed_is_spot_long = bool(
+        str(metadata.get("trade_type") or "").strip().lower() == "spot"
+        and str(metadata.get("expected_side") or "").strip().upper() == "LONG"
+    )
+    long_prediction = (precomputed_predictions or {}).get(symbol) if _precomputed_is_spot_long else None
+    if not isinstance(long_prediction, dict):
+        long_prediction, _ = pnl_service.predict_for_symbol(
+            symbol,
+            client,
+            settings,
+            position_size_usdt=float(getattr(settings, "max_per_trade_usdt", 500.0)),
+            trade_type="spot",
+            trade_side="LONG",
+            precomputed_signal={"indicators": metadata.get("indicators", {})},
+        )
+    short_prediction = None
+    futures_long_prediction = None
+    if futures_executable:
+        short_prediction, _ = pnl_service.predict_for_symbol(
+            symbol,
+            client,
+            settings,
+            position_size_usdt=float(getattr(settings, "range_scalp_short_usdt_per_trade", 1000.0)),
+            trade_type="futures",
+            trade_side="SHORT",
+            precomputed_signal={"indicators": metadata.get("indicators", {})},
+        )
+        futures_long_prediction, _ = pnl_service.predict_for_symbol(
+            symbol,
+            client,
+            settings,
+            position_size_usdt=float(getattr(settings, "futures_usdt_per_trade", 150.0)),
+            trade_type="futures",
+            trade_side="LONG",
+            precomputed_signal={"indicators": metadata.get("indicators", {})},
+        )
+    decision = evaluate_range_scalp_direction(
+        symbol=symbol,
+        metadata=metadata,
+        long_prediction=long_prediction,
+        futures_long_prediction=futures_long_prediction,
+        short_prediction=short_prediction,
+        futures_executable=futures_executable,
+        settings=settings,
+    ).to_dict()
+    decision["routing_intent"] = metadata.get("routing_intent")
+    try:
+        if _db_client_ref:
+            _db_client_ref.execute_update(
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, false)",
+                (symbol, "system", "range_scalp_direction_arbitration", json.dumps(decision)),
+            )
+    except Exception as exc:
+        print(f"[DirectionArbiter] audit failed for {symbol}: {exc}")
+    return decision
+
+
+def _open_arbitrated_range_scalp_short(
+    symbol: str,
+    decision: Dict[str, Any],
+    settings: Any,
+    futures_client: Any,
+    position_manager: Any,
+    signal_id: Optional[str],
+    metadata: Dict[str, Any],
+    usdt_override: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    if position_manager and position_manager.get_positions_count(symbol) > 0:
+        return None
+    fc = _get_futures_client(settings, injected_client=futures_client)
+    if any(not pos.closed and pos.symbol == symbol for pos in fc._open_positions.values()):
+        return None
+    available = float(fc.get_available_usdt()) if not fc.dry_run else float(getattr(settings, "range_scalp_short_usdt_per_trade", 1000.0))
+
+    if usdt_override and usdt_override > 0:
+        # Fast-path: use staged policy Kelly size (already computed at validation time)
+        amount = usdt_override
+        print(f"[Futures/SHORT] {symbol}: target Kelly=${amount:.2f} (futures avail=${available:.2f})")
+    else:
+        # Normal path: full Kelly sizing (analogous to FUTURES_LONG)
+        _fs_sl = float(getattr(settings, "range_scalp_short_sl_pct", 2.0))
+        _fs_tp = float(getattr(settings, "range_scalp_short_tp_pct", 4.0))
+        _fs_lev = int(getattr(settings, "futures_leverage", 10))
+        _fs_profile = str(metadata.get("peak_quality_profile") or "B").strip().upper()
+        if _fs_profile not in ("A", "B", "C"):
+            _fs_profile = "B"
+        _fs_prediction = decision.get("short_prediction") or {
+            "success_probability": float(metadata.get("success_probability", 0.55) or 0.55),
+            "expected_pnl": 1.0,
+        }
+        _fs_strength = float(metadata.get("strength", metadata.get("signal_strength", 0.5)) or 0.5)
+        _fs_open_shorts = sum(1 for p in fc._open_positions.values() if not p.closed and p.side == "SHORT")
+        _fs_max_shorts = int(getattr(settings, "futures_max_shorts", 5))
+        _fs_conc_mult, _fs_conc_diag = _compute_portfolio_concentration_multiplier(
+            settings, regime="RANGE_SCALP", trade_type="futures",
+            open_slots=_fs_open_shorts, effective_slots=_fs_max_shorts,
+        )
+        _fs_kelly_liquid = available
+        _fs_base_ov = getattr(settings, "futures_kelly_base_usdt", None)
+        _fs_max_ov = getattr(settings, "futures_kelly_max_usdt", None)
+        _fs_cap_ov = getattr(settings, "futures_kelly_max_pct_liquid", None)
+        amount = _kelly_position_size(
+            settings, strength=_fs_strength,
+            prediction=_fs_prediction, usdt_liquid=_fs_kelly_liquid,
+            sl_pct=_fs_sl / _fs_lev / 100, tp_pct=_fs_tp / _fs_lev / 100,
+            base_override=_fs_base_ov, max_override=_fs_max_ov,
+            cap_pct_override=_fs_cap_ov,
+            concentration_multiplier=_fs_conc_mult,
+            trade_type="futures", regime="RANGE_SCALP",
+            extra_multipliers={"portfolio_concentration": _fs_conc_diag},
+            profile_label=_fs_profile,
+        )
+        print(f"[Futures/SHORT] {symbol}: Kelly=${amount:.2f} (futures_avail=${available:.2f} conc={_fs_conc_mult:.2f})")
+
+    if amount < 10.0:
+        print(f"[Futures/SHORT] {symbol}: amount ${amount:.2f} < $10 minimum — skip")
+        return None
+
+    # ── Just-in-time capital transfer: if futures wallet insufficient, pull from spot ──
+    reserve = max(2.0, available * 0.02)
+    avail_net = available - reserve
+    if amount > avail_net and not fc.dry_run:
+        print(f"[Futures/SHORT] {symbol}: need ${amount:.2f} but futures has ${avail_net:.2f} — requesting transfer from spot")
+        funded = fc.check_and_fund(
+            amount + 2.0,
+            spot_api_key=getattr(settings, "binance_api_key", None),
+            spot_api_secret=getattr(settings, "binance_api_secret", None),
+        )
+        if funded:
+            available = float(fc.get_available_usdt())
+            avail_net = available - max(2.0, available * 0.02)
+            amount = min(amount, avail_net)
+            print(f"[Futures/SHORT] {symbol}: post-transfer avail=${available:.2f}, final amount=${amount:.2f}")
+        else:
+            amount = min(amount, avail_net)
+            print(f"[Futures/SHORT] {symbol}: transfer failed, capped to avail=${amount:.2f}")
+    else:
+        amount = min(amount, avail_net)
+
+    if amount < 10.0:
+        print(f"[Futures/SHORT] {symbol}: final amount ${amount:.2f} < $10 after funding — skip")
+        return None
+    profile = str(metadata.get("peak_quality_profile") or "B").strip().upper()
+    position = fc.open_short(
+        symbol,
+        usdt_amount=amount,
+        sl_pct=float(getattr(settings, "range_scalp_short_sl_pct", 2.0)),
+        tp_pct=float(getattr(settings, "range_scalp_short_tp_pct", 4.0)),
+        leverage=int(getattr(settings, "futures_leverage", 10)),
+        pnl_prediction=decision.get("short_prediction"),
+        indicators_at_entry=metadata.get("indicators"),
+        signal_id=signal_id,
+        peak_quality_profile=profile if profile in {"A", "B", "C"} else "B",
+        peak_quality_score=metadata.get("peak_quality"),
+    )
+    if position is None:
+        return None
+    return {
+        "symbol": symbol,
+        "side": "SHORT_FUTURES",
+        "qty": position.qty,
+        "entry_price": position.entry_price,
+        "sl": position.sl_price,
+        "tp": position.tp_price,
+        "position_persistence_confirmed": True,
+        "directional_arbitration": decision,
+    }
+
+
+def _open_arbitrated_range_scalp_long(
+    symbol: str,
+    decision: Dict[str, Any],
+    settings: Any,
+    futures_client: Any,
+    position_manager: Any,
+    signal_id: Optional[str],
+    metadata: Dict[str, Any],
+    usdt_override: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    if position_manager and position_manager.get_positions_count(symbol) > 0:
+        return None
+    fc = _get_futures_client(settings, injected_client=futures_client)
+    if any(not pos.closed and pos.symbol == symbol for pos in fc._open_positions.values()):
+        return None
+    available = float(fc.get_available_usdt()) if not fc.dry_run else float(getattr(settings, "futures_usdt_per_trade", 150.0))
+
+    if usdt_override and usdt_override > 0:
+        # Fast-path: use staged policy Kelly size (already computed at validation time)
+        amount = usdt_override
+        print(f"[Futures/LONG] {symbol}: target Kelly=${amount:.2f} (futures avail=${available:.2f})")
+    else:
+        # Normal path: full Kelly sizing (analogous to FUTURES_SHORT)
+        _fl_sl = float(getattr(settings, "futures_long_sl_pct", 2.5))
+        _fl_tp = float(getattr(settings, "futures_long_tp_pct", 5.0))
+        _fl_lev = int(getattr(settings, "futures_leverage", 10))
+        _fl_profile = str(metadata.get("peak_quality_profile") or "B").strip().upper()
+        if _fl_profile not in ("A", "B", "C"):
+            _fl_profile = "B"
+        _fl_prediction = decision.get("futures_long_prediction") or {
+            "success_probability": float(metadata.get("success_probability", 0.55) or 0.55),
+            "expected_pnl": 1.0,
+        }
+        _fl_strength = float(metadata.get("strength", metadata.get("signal_strength", 0.5)) or 0.5)
+        _fl_open_longs = sum(1 for p in fc._open_positions.values() if not p.closed and p.side == "LONG")
+        _fl_max_longs = int(getattr(settings, "futures_max_longs", getattr(settings, "futures_max_shorts", 5)))
+        _fl_conc_mult, _fl_conc_diag = _compute_portfolio_concentration_multiplier(
+            settings, regime="RANGE_SCALP", trade_type="futures",
+            open_slots=_fl_open_longs, effective_slots=_fl_max_longs,
+        )
+        # Kelly liquid = total portfolio available (spot+futures) for proper sizing
+        _fl_kelly_liquid = available
+        _fl_base_ov = getattr(settings, "futures_kelly_base_usdt", None)
+        _fl_max_ov = getattr(settings, "futures_kelly_max_usdt", None)
+        _fl_cap_ov = getattr(settings, "futures_kelly_max_pct_liquid", None)
+        amount = _kelly_position_size(
+            settings, strength=_fl_strength,
+            prediction=_fl_prediction, usdt_liquid=_fl_kelly_liquid,
+            sl_pct=_fl_sl / _fl_lev / 100, tp_pct=_fl_tp / _fl_lev / 100,
+            base_override=_fl_base_ov, max_override=_fl_max_ov,
+            cap_pct_override=_fl_cap_ov,
+            concentration_multiplier=_fl_conc_mult,
+            trade_type="futures", regime="RANGE_SCALP",
+            extra_multipliers={"portfolio_concentration": _fl_conc_diag},
+            profile_label=_fl_profile,
+        )
+        print(f"[Futures/LONG] {symbol}: Kelly=${amount:.2f} (futures_avail=${available:.2f} conc={_fl_conc_mult:.2f})")
+
+    if amount < 10.0:
+        print(f"[Futures/LONG] {symbol}: amount ${amount:.2f} < $10 minimum — skip")
+        return None
+
+    # ── Just-in-time capital transfer: if futures wallet insufficient, pull from spot ──
+    reserve = max(2.0, available * 0.02)
+    avail_net = available - reserve
+    if amount > avail_net and not fc.dry_run:
+        shortfall = round(amount - avail_net + 2.0, 2)  # +$2 buffer for Binance rounding
+        print(f"[Futures/LONG] {symbol}: need ${amount:.2f} but futures has ${avail_net:.2f} — transferring ${shortfall:.2f} from spot")
+        funded = fc.check_and_fund(
+            amount + 2.0,
+            spot_api_key=getattr(settings, "binance_api_key", None),
+            spot_api_secret=getattr(settings, "binance_api_secret", None),
+        )
+        if funded:
+            available = float(fc.get_available_usdt())
+            avail_net = available - max(2.0, available * 0.02)
+            amount = min(amount, avail_net)
+            print(f"[Futures/LONG] {symbol}: post-transfer avail=${available:.2f}, final amount=${amount:.2f}")
+        else:
+            # Transfer failed — use what we have
+            amount = min(amount, avail_net)
+            print(f"[Futures/LONG] {symbol}: transfer failed, capped to avail=${amount:.2f}")
+    else:
+        amount = min(amount, avail_net)
+
+    if amount < 10.0:
+        print(f"[Futures/LONG] {symbol}: final amount ${amount:.2f} < $10 after funding attempt — skip")
+        return None
+    profile = str(metadata.get("peak_quality_profile") or "B").strip().upper()
+    position = fc.open_long(
+        symbol,
+        usdt_amount=amount,
+        sl_pct=float(getattr(settings, "futures_long_sl_pct", 2.5)),
+        tp_pct=float(getattr(settings, "futures_long_tp_pct", 5.0)),
+        leverage=int(getattr(settings, "futures_leverage", 10)),
+        signal_id=signal_id,
+        peak_quality_profile=profile if profile in {"A", "B", "C"} else "B",
+        peak_quality_score=metadata.get("peak_quality"),
+    )
+    if position is None:
+        return None
+    return {
+        "symbol": symbol,
+        "side": "LONG_FUTURES",
+        "qty": position.qty,
+        "entry_price": position.entry_price,
+        "sl": position.sl_price,
+        "tp": position.tp_price,
+        "position_persistence_confirmed": True,
+        "directional_arbitration": decision,
+    }
 
 
 def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: List, portfolio_manager=None, position_manager=None, precomputed_predictions: Dict = None, news_client=None, regime_obj: "MarketRegime" = None, regime_mode_override: str = None, screened_pairs_cache: dict = None, pre_switch_state: Optional[Dict[str, Any]] = None, futures_client=None) -> List[Dict]:
@@ -6034,24 +6901,22 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     elif _regime is not None:
         print(f"[Regime/cached] {_regime_mode} | {_regime.regime} | confirmed={_regime.confirmed}")
 
-    _active_profile_label = _get_active_profile_label(_db_client_ref, _regime_mode)
-
     # Persist active regime so the screener/dashboard always see the current mode
     if settings is not None:
         try:
             settings.current_regime_mode = _regime_mode
-            settings.current_regime_profile_label = _active_profile_label
         except Exception:
             pass
 
     # ── Entry-profile gate (secondary pass) ─────────────────────────────────
     # Always run the profile gate when this function is called directly; it is a
     # no-op duplicate if execute_once() already filtered the same symbols.
-    top_signals_with_meta = _filter_buy_candidates(
-        top_signals_with_meta, signal_meta, settings, _regime_mode, _active_profile_label,
-        precomputed_predictions,
-        news_client,
-    )
+    if not (_regime_mode == "RANGE_SCALP" and bool(getattr(settings, "range_scalp_short_first_enabled", True))):
+        top_signals_with_meta = _filter_buy_candidates(
+            top_signals_with_meta, signal_meta, settings, _regime_mode,
+            precomputed_predictions,
+            news_client,
+        )
     if top_signals_with_meta and isinstance(top_signals_with_meta[0], dict):
         top_symbols = [s['symbol'] for s in top_signals_with_meta]
     else:
@@ -6198,6 +7063,89 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         volspike_override = False
         if isinstance(signal_meta, dict):
             _signal_id = signal_meta.get(symbol, {}).get('signal_id')
+        if _regime_mode == "RANGE_SCALP" and bool(getattr(settings, "range_scalp_short_first_enabled", True)):
+            _arb_meta = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
+            try:
+                _arb_decision = _range_scalp_direction_decision(
+                    symbol,
+                    _arb_meta,
+                    client,
+                    settings,
+                    screened_pairs_cache,
+                    precomputed_predictions,
+                )
+            except Exception as exc:
+                print(f"[DirectionArbiter] {symbol}: fail-closed ({exc})")
+                update_signal_decision(symbol, "rejected", "DIRECTION_ARBITER_ERROR", signal_id=_signal_id)
+                continue
+            _arb_meta["directional_arbitration"] = _arb_decision
+            if _arb_decision["selected_mode"] == "FUTURES_SHORT":
+                _arb_meta["expected_side"] = "SHORT"
+                _arb_meta["trade_type"] = "futures"
+            elif _arb_decision["selected_mode"] == "FUTURES_LONG":
+                _arb_meta["expected_side"] = "LONG"
+                _arb_meta["trade_type"] = "futures"
+            elif _arb_decision["selected_mode"] == "SPOT_LONG":
+                _arb_meta["expected_side"] = "LONG"
+                _arb_meta["trade_type"] = "spot"
+            if _arb_decision["selected_mode"] == "ABSTAIN":
+                update_signal_decision(symbol, "rejected", _arb_decision["reason"], signal_id=_signal_id)
+                continue
+            if _arb_decision["selected_mode"] == "FUTURES_SHORT":
+                try:
+                    _arb_order = _open_arbitrated_range_scalp_short(
+                        symbol,
+                        _arb_decision,
+                        settings,
+                        futures_client,
+                        position_manager,
+                        _signal_id,
+                        _arb_meta,
+                    )
+                except Exception as exc:
+                    print(f"[DirectionArbiter] SHORT {symbol} failed: {exc}")
+                    _arb_order = None
+                if _arb_order:
+                    orders.append(_arb_order)
+                    update_signal_decision(symbol, "executed", "RANGE_SCALP_SHORT_FIRST", signal_id=_signal_id, trade_type="futures", binance_confirmed=True)
+                else:
+                    update_signal_decision(symbol, "rejected", "RANGE_SCALP_SHORT_EXECUTION_FAILED", signal_id=_signal_id, trade_type="futures")
+                continue
+            if _arb_decision["selected_mode"] == "FUTURES_LONG":
+                _long_passed = _filter_buy_candidates(
+                    [_arb_meta], {symbol: _arb_meta}, settings, _regime_mode,
+                    {symbol: _arb_decision.get("futures_long_prediction")}, news_client,
+                )
+                if not _long_passed:
+                    update_signal_decision(symbol, "rejected", "FUTURES_LONG_GATES_REJECTED", signal_id=_signal_id, trade_type="futures")
+                    continue
+                try:
+                    _arb_order = _open_arbitrated_range_scalp_long(
+                        symbol,
+                        _arb_decision,
+                        settings,
+                        futures_client,
+                        position_manager,
+                        _signal_id,
+                        _arb_meta,
+                    )
+                except Exception as exc:
+                    print(f"[DirectionArbiter] FUTURES LONG {symbol} failed: {exc}")
+                    _arb_order = None
+                if _arb_order:
+                    orders.append(_arb_order)
+                    update_signal_decision(symbol, "executed", "RANGE_SCALP_FUTURES_LONG", signal_id=_signal_id, trade_type="futures", binance_confirmed=True)
+                else:
+                    update_signal_decision(symbol, "rejected", "RANGE_SCALP_LONG_EXECUTION_FAILED", signal_id=_signal_id, trade_type="futures")
+                continue
+            if _arb_decision["selected_mode"] == "SPOT_LONG":
+                _long_passed = _filter_buy_candidates(
+                    [_arb_meta], {symbol: _arb_meta}, settings, _regime_mode,
+                    {symbol: _arb_decision.get("long_prediction")}, news_client,
+                )
+                if not _long_passed:
+                    update_signal_decision(symbol, "rejected", "SPOT_LONG_GATES_REJECTED", signal_id=_signal_id, trade_type="spot")
+                    continue
         # ── FUTURES_SHORT mode — evaluated BEFORE spot position limits ────────
         # Futures positions are in a separate wallet — they must NOT be blocked
         # by the spot max_positions counter (which fills up with open spot trades).
@@ -6225,7 +7173,6 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                             _futures_symbols + get_screened_pairs(
                                 settings=settings,
                                 regime_mode=_regime_mode,
-                                profile_label=_active_profile_label,
                                 db_client=_db_client_ref,
                             ).get("futures", [])
                         ))
@@ -6319,6 +7266,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 _f_lev   = _get_param(settings, 'futures_leverage')
                 # FIX-P1: Call real predictor for futures SHORT (was hardcoded expected_pnl=1.0)
                 _f_sig_meta = signal_meta.get(symbol, {})
+                _f_profile = str(_f_sig_meta.get('peak_quality_profile', '') or '').strip().upper()
+                if _f_profile not in ('A', 'B', 'C'):
+                    _f_profile = 'B'
                 # FIX-F6: do not short into 4h RSI >= 50 (avoid oversold bounces)
                 _f_rsi_4h = float(_f_sig_meta.get('rsi_4h', _f_sig_meta.get('rsi', 50.0)) or 50.0)
                 _f_rsi_4h_max = float(_get_param(settings, 'futures_entry_max_rsi_4h', 50.0))
@@ -6376,6 +7326,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     db_client=_db_client_ref, symbol=symbol,
                     trade_type='futures', regime='FUTURES_SHORT',
                     extra_multipliers={'portfolio_concentration': _f_conc_diag},
+                    profile_label=_f_profile,
                 )
                 if _get_param(settings, 'kelly_conviction_enabled'):
                     _f_vs = float(_f_sig_meta.get('vol_spike', 0.0))
@@ -6518,7 +7469,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "tp": _pos.tp_price,
                         "entry_metadata": {
                             "regime_mode": _regime_mode,
-                            "profile_label": _active_profile_label,
+                            "profile_label": _f_profile,
                             "peak_quality_profile": _f_sig_meta.get("peak_quality_profile"),
                             "peak_quality": _f_sig_meta.get("peak_quality"),
                             "expected_gain": _f_sig_meta.get("expected_gain"),
@@ -6682,7 +7633,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         # ── R3: Microestructura — liquidez y slippage implícito ──────────────
         _vol_24h = float(signal_meta.get(symbol, {}).get('volume_24h_usdt', 0))
         _tp_pct_filter = float(signal_meta.get(symbol, {}).get('tp_pct', 0.025))
-        _liq_ok, _liq_reason = _check_liquidity_and_slippage(symbol, _vol_24h, price, _tp_pct_filter, settings)
+        _liq_ok, _liq_reason = _check_liquidity_and_slippage(symbol, _vol_24h, price, _tp_pct_filter, settings, _regime_mode)
         if not _liq_ok:
             print(f"Skipping buy {symbol}: {_liq_reason}")
             update_signal_decision(symbol, "rejected", "LIQUIDEZ")
@@ -6789,7 +7740,6 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                 _f_sym_list + get_screened_pairs(
                                     settings=settings,
                                     regime_mode=_regime_mode,
-                                    profile_label=_active_profile_label,
                                     db_client=_db_client_ref,
                                 ).get("futures", [])
                             ))
@@ -6820,7 +7770,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                                 "tp": _lpos.tp_price,
                                 "entry_metadata": {
                                     "regime_mode": _regime_mode,
-                                    "profile_label": _active_profile_label,
+                                    "profile_label": _l_profile,
                                     "peak_quality_profile": _l_sig_meta.get("peak_quality_profile"),
                                     "peak_quality": _l_sig_meta.get("peak_quality"),
                                     "expected_gain": _l_sig_meta.get("expected_gain"),
@@ -6850,7 +7800,6 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                             _l_sym_list + get_screened_pairs(
                                 settings=settings,
                                 regime_mode=_regime_mode,
-                                profile_label=_active_profile_label,
                                 db_client=_db_client_ref,
                             ).get("futures", [])
                         ))
@@ -6863,6 +7812,9 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     _l_lev  = getattr(settings, 'futures_leverage', 10)
                     # MEJO-D: Kelly sizing para LONG (igual que SHORT), cap futures_usdt_per_trade
                     _l_pred_sb = {'success_probability': 0.55}  # oversold en uptrend = mayor prob
+                    _l_profile = str(signal_meta.get(symbol, {}).get('peak_quality_profile', '') or '').strip().upper()
+                    if _l_profile not in ('A', 'B', 'C'):
+                        _l_profile = 'B'
                     # UnifiedPM: use futures wallet as Kelly reference when enabled
                     _l_base_ov = _l_max_ov = _l_cap_ov = None
                     if _get_param(settings, 'use_unified_portfolio_manager') and portfolio_manager:
@@ -6899,6 +7851,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         db_client=_db_client_ref, symbol=symbol,
                         trade_type='futures', regime=_regime_mode,
                         extra_multipliers={'portfolio_concentration': _l_conc_diag},
+                        profile_label=_l_profile,
                     )
                     if _get_param(settings, 'kelly_conviction_enabled'):
                         _l_vs = float(signal_meta.get(symbol, {}).get('vol_spike', 0.0))
@@ -6938,7 +7891,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                             "tp": _lpos_sb.tp_price,
                             "entry_metadata": {
                                 "regime_mode": _regime_mode,
-                                "profile_label": _active_profile_label,
+                                "profile_label": _l_profile,
                                 "peak_quality_profile": _l_sig_meta.get("peak_quality_profile"),
                                 "peak_quality": _l_sig_meta.get("peak_quality"),
                                 "expected_gain": _l_sig_meta.get("expected_gain"),
@@ -7245,6 +8198,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 'portfolio_concentration': _spot_conc_diag,
                 'predictive_profile': _kelly_profile,
             },
+            profile_label=_kelly_profile,
         )
         # C2: Kelly reducido para prediction_add (segunda entrada en mismo par)
         if position_manager and position_manager.get_positions_count(symbol) >= 1:
@@ -7471,6 +8425,12 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         "entry_live_features": _signal_for_symbol.get("entry_live_features", {}),
                         "entry_live_feature_missing": _signal_for_symbol.get("entry_live_feature_missing", []),
                         "entry_live_feature_completeness": _signal_for_symbol.get("entry_live_feature_completeness"),
+                        "range_scalp_timing_shadow": _signal_for_symbol.get("range_scalp_timing_shadow"),
+                        "sr_zone_position": _signal_for_symbol.get("sr_zone_position"),
+                        "nearest_support_dist_pct": _signal_for_symbol.get("nearest_support_dist_pct"),
+                        "nearest_resistance_dist_pct": _signal_for_symbol.get("nearest_resistance_dist_pct"),
+                        "support_level": _signal_for_symbol.get("support_level"),
+                        "resistance_level": _signal_for_symbol.get("resistance_level"),
                         "entry_regime": _regime_mode,
                         "entry_profile_label": _kelly_profile,
                         "regime_mode": _regime_mode,
@@ -7783,6 +8743,18 @@ def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, 
             _side = str((_pre_sig or {}).get('expected_side', _default_side) or _default_side).strip().upper()
             if _side not in ('LONG', 'SHORT'):
                 _side = _default_side
+            _signal_trade_type = str((_pre_sig or {}).get('trade_type', trade_type) or trade_type).strip().lower()
+            if _signal_trade_type not in ('spot', 'futures'):
+                _signal_trade_type = trade_type
+            _position_size = alloc_per
+            if str(regime_mode or '').strip().upper() == 'RANGE_SCALP' and _signal_trade_type == 'futures':
+                _position_size = float(
+                    getattr(
+                        settings,
+                        'range_scalp_short_usdt_per_trade' if _side == 'SHORT' else 'futures_usdt_per_trade',
+                        alloc_per,
+                    )
+                )
             _current_price = _get_cycle_price(client, symbol)
             if isinstance(_pre_sig, dict) and _current_price:
                 _pre_sig["current_price"] = _current_price
@@ -7790,9 +8762,9 @@ def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, 
                 symbol,
                 client,
                 settings,
-                alloc_per,
+                _position_size,
                 precomputed_signal=_pre_sig,
-                trade_type=trade_type,
+                trade_type=_signal_trade_type,
                 trade_side=_side,
                 current_price=_current_price,
             )
@@ -8012,7 +8984,7 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
                         commission_rate=_get_commission_config(settings).rate_for('spot'),
                         exit_context={
                             'regime_mode': regime_mode,
-                            'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                            'profile_label': _get_position_profile_label(pos),
                         },
                     )
                 _overflow_positions.discard(sym)
@@ -8185,7 +9157,7 @@ def _persist_safepoint(db_client, settings, position_manager) -> None:
         _snapshot = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "regime": str(getattr(settings, 'current_regime_mode', '') or '').strip().upper(),
-            "profile": str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper(),
+            "profile": "B",  # s95: no global active profile; safepoint stores neutral baseline
             "pause_new_entries": bool(_is_new_entries_paused(db_client)),
             "health_critical": bool(_is_health_results_critical(db_client)),
             "open_positions": {
@@ -8203,9 +9175,608 @@ def _persist_safepoint(db_client, settings, position_manager) -> None:
         print(f"[Safepoint] failed to persist: {e}")
 
 
+def _fetch_sr_features_for_symbol(client, symbol: str) -> Dict[str, Any]:
+    """Compute support/resistance features from 1h klines for a single symbol.
+
+    Tries spot klines first, then futures klines. Returns an empty dict if data is
+    insufficient or the client is unavailable.
+    """
+    if not client:
+        return {}
+    try:
+        for method in ("get_klines", "futures_klines"):
+            klines = None
+            try:
+                fn = getattr(client.client, method)
+                klines = fn(symbol=symbol, interval="1h", limit=120)
+            except Exception:
+                continue
+            if not klines or len(klines) < 50:
+                continue
+            closes = [float(k[4]) for k in klines]
+            highs = [float(k[2]) for k in klines]
+            lows = [float(k[3]) for k in klines]
+            volumes = [float(k[5]) for k in klines]
+            atr = (
+                sum(h - l for h, l in zip(highs[-20:], lows[-20:])) / 20
+                if len(highs) >= 20 else None
+            )
+            return _compute_sr_features(
+                closes, highs, lows, volumes,
+                current_price=closes[-1],
+                atr=atr,
+                lookback=min(96, len(closes)),
+            )
+    except Exception as exc:
+        print(f"[RangeScalpShort] SR compute failed for {symbol}: {exc}")
+    return {}
+
+
+def _evaluate_spot_lifecycle_structure(client, symbol: str, current_price: float, side: str, settings) -> Dict[str, Any]:
+    mode = str(_get_param(settings, 'lifecycle_structure_mode', 'shadow') or 'shadow').lower()
+    cache_key = f'{symbol}:{str(side or "LONG").upper()}'
+    cached = _LIFECYCLE_STRUCTURE_CACHE.get(cache_key)
+    if cached and time.time() - cached[0] < 30.0:
+        return cached[1]
+
+    def _fetch(target_symbol: str, interval: str, limit: int) -> List[List]:
+        for method in ('get_klines', 'futures_klines'):
+            try:
+                return getattr(client.client, method)(symbol=target_symbol, interval=interval, limit=limit) or []
+            except Exception:
+                continue
+        return []
+
+    snapshot = _build_lifecycle_structure_snapshot(_fetch, symbol, current_price)
+    decision = _evaluate_lifecycle_structure(snapshot, side).to_dict()
+    result = {
+        'mode': mode,
+        'snapshot': snapshot,
+        'decision': decision,
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+    }
+    _LIFECYCLE_STRUCTURE_CACHE[cache_key] = (time.time(), result)
+    return result
+
+
+def _audit_range_scalp_short_decision(
+    db_client,
+    symbol: str,
+    ready_id: Optional[int],
+    decision: str,
+    reason: str,
+    details: Optional[Dict[str, Any]] = None,
+    binance_confirmed: bool = False,
+) -> None:
+    if not db_client:
+        return
+    try:
+        db_client.execute_update(
+            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (
+                symbol,
+                "futures",
+                "range_scalp_short_decision",
+                json.dumps({
+                    "ready_id": ready_id,
+                    "decision": decision,
+                    "reason": reason,
+                    **(details or {}),
+                }),
+                binance_confirmed,
+            ),
+        )
+    except Exception as exc:
+        print(f"[RangeScalpShort] audit decision failed for {symbol}: {exc}")
+
+
+def _maybe_open_range_scalp_shorts(
+    db_client,
+    client,
+    settings,
+    futures_client,
+    position_manager,
+    portfolio_manager,
+    regime_mode: str,
+    cycle_id: Optional[str],
+) -> List[Dict]:
+    """Open SHORT futures on recently discarded RANGE_SCALP LONG candidates at resistance/breakdown.
+
+    This bridges the dual-direction RANGE_SCALP regime: when a LONG candidate is discarded
+    because price is already at resistance (or support broke down), re-evaluate it as a
+    SHORT futures trade and open it if enabled.
+    """
+    opened: List[Dict] = []
+    if not db_client:
+        return opened
+    if regime_mode != "RANGE_SCALP":
+        return opened
+    if not getattr(settings, "range_scalp_bidirectional_enabled", True):
+        return opened
+    if not getattr(settings, "futures_enabled", True):
+        return opened
+    try:
+        _fc = _get_futures_client(settings, injected_client=futures_client)
+    except Exception as exc:
+        print(f"[RangeScalpShort] futures client unavailable: {exc}")
+        return opened
+
+    threshold = float(getattr(settings, "range_scalp_short_resistance_threshold", 0.65))
+    max_per_cycle = int(getattr(settings, "range_scalp_short_max_per_cycle", 2))
+    execution_enabled = bool(getattr(settings, "range_scalp_short_execution_enabled", True))
+    futures_symbols = set(getattr(settings, "futures_symbols", []) or [])
+    if client is not None:
+        try:
+            from pair_screener import get_screened_pairs
+            futures_symbols.update(
+                get_screened_pairs(
+                    settings=settings,
+                    regime_mode=regime_mode,
+                    db_client=db_client,
+                ).get("futures", [])
+            )
+        except Exception as exc:
+            print(f"[RangeScalpShort] dynamic futures universe unavailable: {exc}")
+    if not futures_symbols:
+        return opened
+
+    # Global futures safety gates must also apply to reclassified RANGE_SCALP shorts.
+    global _FUTURES_MASS_SL_COOLDOWN_UNTIL, _INVALID_FUTURES_SYMBOLS
+    if _FUTURES_MASS_SL_COOLDOWN_UNTIL and datetime.now(timezone.utc) < _FUTURES_MASS_SL_COOLDOWN_UNTIL:
+        _cd_rem = (_FUTURES_MASS_SL_COOLDOWN_UNTIL - datetime.now(timezone.utc)).total_seconds() / 3600
+        print(f"[RangeScalpShort] global mass-SL cooldown active ({_cd_rem:.1f}h remaining)")
+        return opened
+
+    rows: List[Dict] = []
+    try:
+        rows = db_client.execute_query(
+            """
+            SELECT id, symbol, signal_meta, data, discarded_at, discard_reason
+            FROM ready_candidates
+            WHERE regime_mode = 'RANGE_SCALP'
+              AND status = 'discarded'
+              AND (data->>'reclassified_as_short' IS NULL)
+              AND discarded_at >= NOW() - INTERVAL '10 minutes'
+            ORDER BY discarded_at DESC
+            """,
+            (),
+        ) or []
+    except Exception as exc:
+        print(f"[RangeScalpShort] DB query failed: {exc}")
+        return opened
+
+    opened_count = 0
+    for row in rows:
+        if opened_count >= max_per_cycle:
+            break
+        symbol = row.get("symbol")
+        if not symbol:
+            continue
+
+        if symbol in _INVALID_FUTURES_SYMBOLS:
+            print(f"[RangeScalpShort] {symbol} skipped: invalid futures symbol")
+            _audit_range_scalp_short_decision(db_client, symbol, row.get("id"), "rejected", "INVALID_FUTURES_SYMBOL")
+            continue
+
+        # Avoid hedging a LONG position in the same symbol.
+        if position_manager:
+            try:
+                if position_manager.get_positions_count(symbol) > 0:
+                    _audit_range_scalp_short_decision(db_client, symbol, row.get("id"), "rejected", "SPOT_POSITION_EXISTS")
+                    continue
+            except Exception:
+                pass
+
+        # Avoid duplicating an existing SHORT futures position.
+        existing_short = False
+        try:
+            for p in _fc._open_positions.values():
+                if not p.closed and p.symbol == symbol and p.side == "SHORT":
+                    existing_short = True
+                    break
+        except Exception:
+            pass
+        if existing_short:
+            _audit_range_scalp_short_decision(db_client, symbol, row.get("id"), "rejected", "FUTURES_SHORT_EXISTS")
+            continue
+
+        data = row.get("data") or {}
+        discard_reason = row.get("discard_reason") or ""
+        sr_zone = data.get("sr_zone_position")
+        support_breakdown = bool(data.get("support_breakdown_sell") or data.get("sr_breakdown"))
+        long_structure = bool(
+            data.get("support_bounce_buy") or data.get("sr_bounce")
+            or data.get("support_breakout_buy") or data.get("sr_breakout")
+        )
+        if sr_zone is None:
+            sm = row.get("signal_meta") or {}
+            if isinstance(sm, str):
+                try:
+                    sm = json.loads(sm)
+                except Exception:
+                    sm = {}
+            sr_zone = sm.get("sr_zone_position")
+            if not support_breakdown:
+                support_breakdown = bool(sm.get("support_breakdown_sell") or sm.get("sr_breakdown"))
+            if not long_structure:
+                long_structure = bool(
+                    sm.get("support_bounce_buy") or sm.get("sr_bounce")
+                    or sm.get("support_breakout_buy") or sm.get("sr_breakout")
+                )
+        # On-demand SR computation when persisted features are missing. This closes the gap
+        # when staging did not receive SR features from the upstream signal source.
+        if sr_zone is None and client is not None:
+            _computed_sr = _fetch_sr_features_for_symbol(client, symbol)
+            if _computed_sr:
+                sr_zone = _computed_sr.get("sr_zone_position")
+                if not support_breakdown:
+                    support_breakdown = bool(
+                        _computed_sr.get("support_breakdown_sell") or _computed_sr.get("sr_breakdown")
+                    )
+                if not long_structure:
+                    long_structure = bool(
+                        _computed_sr.get("support_bounce_buy") or _computed_sr.get("sr_bounce")
+                        or _computed_sr.get("support_breakout_buy") or _computed_sr.get("sr_breakout")
+                    )
+                # Persist computed features back into the row data for audit/visibility.
+                try:
+                    db_client.execute_update(
+                        "UPDATE ready_candidates SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb WHERE id = %s",
+                        (json.dumps({
+                            "sr_zone_position": sr_zone,
+                            "support_breakdown_sell": support_breakdown,
+                            "support_level": _computed_sr.get("support_level"),
+                            "resistance_level": _computed_sr.get("resistance_level"),
+                            "nearest_support_dist_pct": _computed_sr.get("nearest_support_dist_pct"),
+                            "nearest_resistance_dist_pct": _computed_sr.get("nearest_resistance_dist_pct"),
+                            "sr_features_computed_on_demand": True,
+                        }), row.get("id")),
+                    )
+                except Exception:
+                    pass
+        try:
+            sr_zone = float(sr_zone) if sr_zone is not None else None
+        except Exception:
+            sr_zone = None
+
+        long_structure = bool(long_structure and not support_breakdown)
+        if long_structure:
+            _audit_range_scalp_short_decision(
+                db_client, symbol, row.get("id"), "rejected", "LONG_STRUCTURE_CONFIRMED",
+                {"sr_zone_position": sr_zone, "resistance_threshold": threshold},
+            )
+            continue
+
+        if discard_reason not in (
+            "DIRECTION_TARGET_MISSING",
+            "DIRECTION_NOT_CONFIRMED",
+            "DIRECTION_DRAWDOWN_LIMIT",
+            "EV_NON_POSITIVE",
+            "PROBABILITY_BELOW_THRESHOLD",
+            "DIRECTION_TARGET_INVALID",
+        ):
+            _audit_range_scalp_short_decision(
+                db_client, symbol, row.get("id"), "rejected", "DISCARD_REASON_NOT_RECLASSIFIABLE",
+                {"discard_reason": discard_reason},
+            )
+            continue
+
+        if symbol not in futures_symbols:
+            print(f"[RangeScalpShort] {symbol} skipped: not in futures_symbols")
+            _audit_range_scalp_short_decision(db_client, symbol, row.get("id"), "rejected", "NOT_FUTURES_SYMBOL")
+            continue
+
+        # Margin check.
+        try:
+            _avail = _fc.get_available_usdt() if not _fc.dry_run else 10000.0
+            if _avail < 20.0:
+                print(f"[RangeScalpShort] insufficient margin (${_avail:.2f})")
+                _audit_range_scalp_short_decision(
+                    db_client, symbol, row.get("id"), "rejected", "INSUFFICIENT_FUTURES_MARGIN",
+                    {"available_usdt": _avail},
+                )
+                break
+        except Exception as exc:
+            print(f"[RangeScalpShort] margin check failed: {exc}")
+            _audit_range_scalp_short_decision(db_client, symbol, row.get("id"), "rejected", "FUTURES_MARGIN_UNAVAILABLE")
+            continue
+
+        sm = row.get("signal_meta") or {}
+        if isinstance(sm, str):
+            try:
+                sm = json.loads(sm)
+            except Exception:
+                sm = {}
+        short_meta = dict(sm)
+        short_meta["trade_type"] = "futures"
+        short_meta["expected_side"] = "SHORT"
+        short_meta["decision_id"] = str(short_meta.get("decision_id") or f"{cycle_id}:{symbol}:futures:SHORT")
+        short_meta["range_scalp_reclassified_from_long"] = True
+        short_meta["range_scalp_ready_id"] = row.get("id")
+        short_meta["sr_zone_position_at_rejection"] = sr_zone
+        short_meta["discard_reason"] = discard_reason
+
+        # Predictor check for SHORT.
+        _pred: Optional[Dict] = None
+        _ind: Optional[Dict] = None
+        try:
+            _pred, _ind = pnl_service.predict_for_symbol(
+                symbol,
+                client,
+                settings,
+                position_size_usdt=getattr(settings, "range_scalp_short_usdt_per_trade", 1000.0),
+                trade_type="futures",
+                trade_side="SHORT",
+                precomputed_signal={"indicators": short_meta.get("indicators", {})},
+            )
+        except Exception as exc:
+            print(f"[RangeScalpShort] predictor failed for {symbol}: {exc}")
+
+        if not _pred or _pred.get("degenerate_output"):
+            _audit_range_scalp_short_decision(
+                db_client, symbol, row.get("id"), "rejected", "PREDICTOR_INVALID",
+                {"discard_reason": discard_reason, "sr_zone_position": sr_zone},
+            )
+            continue
+        try:
+            _expected_pnl = float(_pred.get("expected_pnl"))
+            _probability = float(_pred.get("success_probability"))
+            _target_price = float(_pred.get("target_price"))
+            _stop_price = float(_pred.get("stop_price"))
+        except (TypeError, ValueError):
+            _audit_range_scalp_short_decision(
+                db_client, symbol, row.get("id"), "rejected", "PREDICTOR_FIELDS_MISSING",
+                {"discard_reason": discard_reason, "prediction": _pred},
+            )
+            continue
+        _min_ev = float(getattr(settings, "range_scalp_short_min_expected_pnl", 0.0))
+        _min_probability = float(getattr(settings, "range_scalp_short_min_probability", 0.55))
+        if _expected_pnl <= _min_ev:
+            _audit_range_scalp_short_decision(
+                db_client, symbol, row.get("id"), "rejected", "EV_NON_POSITIVE",
+                {"expected_pnl": _expected_pnl, "minimum": _min_ev},
+            )
+            continue
+        if _probability < _min_probability:
+            _audit_range_scalp_short_decision(
+                db_client, symbol, row.get("id"), "rejected", "PROBABILITY_BELOW_THRESHOLD",
+                {"success_probability": _probability, "minimum": _min_probability},
+            )
+            continue
+        if _target_price <= 0 or _stop_price <= 0 or _target_price >= _stop_price:
+            _audit_range_scalp_short_decision(
+                db_client, symbol, row.get("id"), "rejected", "SHORT_TARGET_STOP_INVALID",
+                {"target_price": _target_price, "stop_price": _stop_price},
+            )
+            continue
+        try:
+            _current_price = float(_fc.get_price(symbol))
+        except Exception:
+            _audit_range_scalp_short_decision(
+                db_client, symbol, row.get("id"), "rejected", "SHORT_PRICE_UNAVAILABLE",
+                {"target_price": _target_price, "stop_price": _stop_price},
+            )
+            continue
+        if _target_price >= _current_price or _stop_price <= _current_price:
+            _audit_range_scalp_short_decision(
+                db_client, symbol, row.get("id"), "rejected", "SHORT_TARGET_STOP_INVALID",
+                {
+                    "current_price": _current_price,
+                    "target_price": _target_price,
+                    "stop_price": _stop_price,
+                },
+            )
+            continue
+        short_meta["expected_pnl"] = _expected_pnl
+        short_meta["success_probability"] = _probability
+        short_meta["entry_decision_prediction"] = _pred
+
+        # Always audit the reclassification decision.
+        _audit = {
+            "ready_id": row.get("id"),
+            "symbol": symbol,
+            "sr_zone_position": sr_zone,
+            "support_breakdown_sell": support_breakdown,
+            "long_structure": long_structure,
+            "short_resistance_setup": bool(support_breakdown or (sr_zone is not None and sr_zone >= threshold)),
+            "discard_reason": discard_reason,
+            "execution_enabled": execution_enabled,
+            "expected_pnl": _expected_pnl,
+            "success_probability": _probability,
+            "current_price": _current_price,
+            "target_price": _target_price,
+            "stop_price": _stop_price,
+        }
+        try:
+            db_client.execute_update(
+                "UPDATE ready_candidates SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb WHERE id = %s",
+                (json.dumps({"reclassified_as_short": _audit}), row.get("id")),
+            )
+        except Exception as exc:
+            print(f"[RangeScalpShort] audit update failed: {exc}")
+
+        if not execution_enabled:
+            print(f"[RangeScalpShort] SHADOW: {symbol} would open SHORT (zone={sr_zone:.2f}, reason={discard_reason})")
+            continue
+
+        # Open short position.
+        _sl = float(getattr(settings, "range_scalp_short_sl_pct", 2.0))
+        _tp = float(getattr(settings, "range_scalp_short_tp_pct", 4.0))
+        _lev = int(getattr(settings, "futures_leverage", 10))
+        _usdt = float(getattr(settings, "range_scalp_short_usdt_per_trade", 1000.0))
+        _usdt = min(_usdt, _avail * 0.95)
+        try:
+            _pos = _fc.open_short(
+                symbol,
+                usdt_amount=_usdt,
+                sl_pct=_sl,
+                tp_pct=_tp,
+                leverage=_lev,
+                pnl_prediction=_pred,
+                indicators_at_entry=_ind,
+                signal_id=short_meta["decision_id"],
+                peak_quality_profile="B",
+                peak_quality_score=0.5,
+            )
+            if _pos:
+                opened.append({
+                    "symbol": symbol,
+                    "side": "SHORT_FUTURES",
+                    "qty": _pos.qty,
+                    "entry_price": _pos.entry_price,
+                    "sl": _pos.sl_price,
+                    "tp": _pos.tp_price,
+                    "range_scalp_reclassified_from_long": True,
+                    "range_scalp_ready_id": row.get("id"),
+                    "pnl_prediction": _pred,
+                })
+                opened_count += 1
+                print(f"[RangeScalpShort] OPENED SHORT {symbol}: margin=${_usdt:.2f}, entry={_pos.entry_price}")
+                try:
+                    db_client.execute_update(
+                        "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (
+                            symbol,
+                            "futures",
+                            "range_scalp_short_opened",
+                            json.dumps({
+                                "ready_id": row.get("id"),
+                                "decision_id": short_meta["decision_id"],
+                                "side": "SHORT",
+                                "qty": _pos.qty,
+                                "entry_price": _pos.entry_price,
+                                "sl": _pos.sl_price,
+                                "tp": _pos.tp_price,
+                                "margin_usdt": _usdt,
+                                "leverage": _lev,
+                                "sr_zone_position": sr_zone,
+                                "discard_reason": discard_reason,
+                                "expected_pnl": short_meta.get("expected_pnl"),
+                                "success_probability": short_meta.get("success_probability"),
+                            }),
+                            not _fc.dry_run,
+                        ),
+                    )
+                except Exception as _aud_err:
+                    print(f"[RangeScalpShort] audit insert failed for {symbol}: {_aud_err}")
+        except Exception as exc:
+            print(f"[RangeScalpShort] failed to open SHORT {symbol}: {exc}")
+
+    return opened
+
+
+def _maybe_open_sr_pool_shorts(
+    settings,
+    futures_client,
+    short_signals: List[Dict[str, Any]],
+    position_manager=None,
+) -> List[Dict[str, Any]]:
+    """Open SHORT futures for confirmed SR-pool breakdown triggers.
+
+    Execution is gated by sr_pool_trade_enabled and futures_enabled.
+    """
+    opened: List[Dict[str, Any]] = []
+    if not short_signals:
+        return opened
+    if not getattr(settings, "sr_pool_trade_enabled", False):
+        for sig in short_signals:
+            print(f"[SRPool/Shadow] SHORT {sig['symbol']} would open (profile={sig.get('sr_pool_profile')}, score={sig.get('sr_pool_score'):.4f})")
+        return opened
+    if not getattr(settings, "futures_enabled", True):
+        print("[SRPoolShort] futures disabled")
+        return opened
+
+    global _FUTURES_MASS_SL_COOLDOWN_UNTIL, _INVALID_FUTURES_SYMBOLS
+    if _FUTURES_MASS_SL_COOLDOWN_UNTIL and datetime.now(timezone.utc) < _FUTURES_MASS_SL_COOLDOWN_UNTIL:
+        return opened
+
+    try:
+        _fc = _get_futures_client(settings, injected_client=futures_client)
+    except Exception as exc:
+        print(f"[SRPoolShort] futures client unavailable: {exc}")
+        return opened
+
+    futures_symbols = set(getattr(settings, "futures_symbols", []) or [])
+    max_open = int(getattr(settings, "sr_pool_max_open_per_cycle", 2))
+    opened_count = 0
+
+    for sig in short_signals:
+        if opened_count >= max_open:
+            break
+        symbol = sig.get("symbol")
+        if not symbol or symbol in _INVALID_FUTURES_SYMBOLS or symbol not in futures_symbols:
+            continue
+
+        # A direct short must never hedge an already-open spot LONG in the same symbol.
+        if position_manager:
+            try:
+                if position_manager.get_positions_count(symbol) > 0:
+                    print(f"[SRPoolShort] {symbol} skipped: spot position exists")
+                    continue
+            except Exception:
+                pass
+
+        # Avoid duplicating existing SHORT.
+        try:
+            existing = any(
+                not p.closed and p.symbol == symbol and p.side == "SHORT"
+                for p in _fc._open_positions.values()
+            )
+            if existing:
+                continue
+        except Exception:
+            pass
+
+        try:
+            _avail = _fc.get_available_usdt() if not _fc.dry_run else 10000.0
+            if _avail < 20.0:
+                print(f"[SRPoolShort] insufficient margin (${_avail:.2f})")
+                break
+        except Exception:
+            continue
+
+        profile = sig.get("sr_pool_profile", "B")
+        size_map = {"A": 1500.0, "B": 1000.0, "C": 500.0}
+        _usdt = min(size_map.get(profile, 1000.0), _avail * 0.95)
+        _sl = float(getattr(settings, "futures_sl_pct", 2.0))
+        _tp = float(getattr(settings, "futures_tp_pct", 4.0))
+        _lev = int(getattr(settings, "futures_leverage", 10))
+
+        try:
+            _pos = _fc.open_short(
+                symbol,
+                usdt_amount=_usdt,
+                sl_pct=_sl,
+                tp_pct=_tp,
+                leverage=_lev,
+                signal_id=str(sig.get("decision_id") or f"{sig.get('cycle_id') or 'sr_pool'}:{symbol}:futures:SHORT"),
+                peak_quality_profile=profile,
+                peak_quality_score=sig.get("sr_pool_score"),
+            )
+            if _pos:
+                opened.append({
+                    "symbol": symbol,
+                    "side": "SHORT_FUTURES",
+                    "qty": _pos.qty,
+                    "entry_price": _pos.entry_price,
+                    "sl": _pos.sl_price,
+                    "tp": _pos.tp_price,
+                    "sr_pool_signal": True,
+                })
+                opened_count += 1
+                print(f"[SRPoolShort] OPENED SHORT {symbol}: margin=${_usdt:.2f}, entry={_pos.entry_price}, profile={profile}")
+        except Exception as exc:
+            print(f"[SRPoolShort] failed to open SHORT {symbol}: {exc}")
+
+    return opened
+
+
 def execute_once(monitor_only: bool = False, components=None):
     global _db_client_ref, _FUTURES_MASS_SL_COOLDOWN_UNTIL, _VOLSPIKE_POSITIONS, _OVERRIDE_DAILY_COUNT
     global _consecutive_failures, _circuit_breaker_until, _SSO7_BEST_CANDIDATE_CACHE
+    global _SR_POOL_LAST_FULL_SCAN, _SR_POOL_SYMBOLS, _SR_POOL_LAST_SIGNALS
     if components is None:
         from init_components import get_components
         comp = get_components()
@@ -8428,7 +9999,6 @@ def execute_once(monitor_only: bool = False, components=None):
     _regime_exe: MarketRegime = None
     _regime_mode = "SPOT_BULL"
     _active_mode_before = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
-    _active_profile_before = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
     _transition_policy: Dict[str, Any] = {}
     _pre_switch_state: Dict[str, Any] = {
         "active": False,
@@ -8509,29 +10079,12 @@ def execute_once(monitor_only: bool = False, components=None):
         except Exception as _mse:
             print(f"[SMART-Total/Mode] selector failed: {_mse}")
 
+        # s95: Global active profile is deprecated; per-operation peak_quality_profile is used.
+        # Keep a neutral placeholder for transitional snapshots/harmony callers.
+        _active_profile_label = 'B'
+
         # ── Regime-specific parameter auto-loading (only on confirmed regime change) ─
         if _regime_exe and _regime_exe.confirmed:
-            _selected_profile_label = None
-            try:
-                _profile_regime_obj = _regime_exe
-                if _regime_mode != str(getattr(_regime_exe, 'mode', '') or '').strip().upper():
-                    _profile_regime_obj = types.SimpleNamespace(
-                        mode=_regime_mode,
-                        confirmed=bool(getattr(_regime_exe, 'confirmed', False)),
-                        confidence=_safe_float(getattr(_regime_exe, 'confidence', 0.0), 0.0),
-                    )
-                _selector_result = _run_regime_profile_auto_selector(settings, _profile_regime_obj, _db_client_ref)
-                if _selector_result.get('ok') and not _selector_result.get('skipped'):
-                    _selected_profile_label = str(_selector_result.get('selected_profile') or '').strip().upper() or None
-                    print(
-                        f"[RegimeSelector] {_selector_result.get('regime')} "
-                        f"{_selector_result.get('active_before')} -> {_selector_result.get('selected_profile')} "
-                        f"switched={_selector_result.get('switched')} reason={_selector_result.get('reason')}"
-                    )
-                elif _selector_result.get('reason') not in ('selector_disabled', 'no_profiles_for_regime', 'regime_unconfirmed'):
-                    print(f"[RegimeSelector] skipped: {_selector_result.get('reason')}")
-            except Exception as _rse:
-                print(f"[RegimeSelector] execute_once selector failed: {_rse}")
             try:
                 _regime_apply_result = _apply_regime_params(settings, _regime_mode, _db_client_ref)
                 if not _regime_apply_result.get('skipped'):
@@ -8539,27 +10092,20 @@ def execute_once(monitor_only: bool = False, components=None):
                 if settings is not None:
                     try:
                         settings.current_regime_mode = _regime_mode
-                        _active_profile_label = str(
-                            _regime_apply_result.get('profile')
-                            or _selected_profile_label
-                            or _get_active_profile_label(_db_client_ref, _regime_mode)
-                            or 'A'
-                        ).strip().upper() or 'A'
-                        settings.current_regime_profile_label = _active_profile_label
                     except Exception:
                         pass
                 _harmony_result = _apply_mode_profile_harmony(
-                    settings, _regime_mode, getattr(settings, 'current_regime_profile_label', None),
+                    settings, _regime_mode, _active_profile_label,
                     profile_params=_regime_apply_result.get('raw_params') or {},
                 )
                 _persist_runtime_selection_snapshot(
                     _db_client_ref,
                     {
                         "selected_mode": _regime_mode,
-                        "selected_profile": str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                        "selected_profile": None,
                         "detected_mode": str(getattr(_regime_exe, 'mode', '') or '').strip().upper() or None,
                         "mode_selector": _mode_selector_result if isinstance(_mode_selector_result, dict) else {},
-                        "profile_selector": _selector_result if isinstance(_selector_result, dict) else {},
+                        "profile_selector": {"note": "s95: per-operation profiles; no system-wide profile selector"},
                         "apply_result": {
                             "skipped": bool(_regime_apply_result.get('skipped')),
                             "applied_keys": list((_regime_apply_result.get('applied') or {}).keys()),
@@ -8576,7 +10122,7 @@ def execute_once(monitor_only: bool = False, components=None):
                         _db_client_ref,
                         {
                             "selected_mode": _regime_mode,
-                            "selected_profile": str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                            "selected_profile": None,
                             "detected_mode": str(getattr(_regime_exe, 'mode', '') or '').strip().upper() or None,
                             "kelly_context_multiplier": round(_kelly_ctx_mult, 4),
                             "kpi_multiplier": round(_kpi_ctx_mult, 4),
@@ -8631,15 +10177,15 @@ def execute_once(monitor_only: bool = False, components=None):
                     print(f"[Harmony] execute_once snapshot failed: {_harmony_err}")
                 _switch_id = None
                 _mode_changed = bool(_active_mode_before and _active_mode_before != _regime_mode)
-                _profile_changed = bool(_active_profile_before and _active_profile_before != settings.current_regime_profile_label)
-                if _mode_changed or _profile_changed:
-                    _switch_id = _build_transition_id(_active_mode_before, _regime_mode, settings.current_regime_profile_label)
+                if _mode_changed:
+                    # Per-operation profiles are captured at entry; only mode changes trigger re-evaluation.
+                    _switch_id = _build_transition_id(_active_mode_before, _regime_mode, None)
                     _transition_policy = _get_transition_policy(_active_mode_before, _regime_mode)
                     _updated_positions = _reevaluate_open_spot_positions(
                         position_manager,
                         settings,
                         _regime_mode,
-                        settings.current_regime_profile_label,
+                        'B',
                         switch_id=_switch_id,
                     )
                     _updated_futures_positions = 0
@@ -8648,7 +10194,7 @@ def execute_once(monitor_only: bool = False, components=None):
                         _updated_futures_positions = _fc_reval.reevaluate_open_positions(
                             settings,
                             _regime_mode,
-                            settings.current_regime_profile_label,
+                            'B',
                             switch_id=_switch_id,
                             transition_policy=_transition_policy,
                         )
@@ -8661,8 +10207,8 @@ def execute_once(monitor_only: bool = False, components=None):
                             "switch_id": _switch_id,
                             "from_mode": _active_mode_before,
                             "to_mode": _regime_mode,
-                            "from_profile": _active_profile_before,
-                            "to_profile": getattr(settings, 'current_regime_profile_label', None),
+                            "from_profile": None,
+                            "to_profile": None,
                             "policy": _transition_policy,
                             "updated_positions": _updated_positions,
                             "updated_futures_positions": _updated_futures_positions,
@@ -8671,7 +10217,7 @@ def execute_once(monitor_only: bool = False, components=None):
                     )
                     print(
                         f"[Transition] switch_id={_switch_id} mode_changed={_mode_changed} "
-                        f"profile_changed={_profile_changed} updated_spot_positions={_updated_positions} "
+                        f"updated_spot_positions={_updated_positions} "
                         f"updated_futures_positions={_updated_futures_positions}"
                     )
             except Exception as _rpe:
@@ -8742,7 +10288,7 @@ def execute_once(monitor_only: bool = False, components=None):
                                 'excluded_symbol_cleanup',
                                 exit_context={
                                     'regime_mode': _regime_mode,
-                                    'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                    'profile_label': 'B',
                                 },
                             )
                         _overflow_positions.discard(_excl_sym)
@@ -8794,10 +10340,12 @@ def execute_once(monitor_only: bool = False, components=None):
                         _cb_futures_avail = _fc.get_available_usdt()
                     _cb_kelly_margin = max(
                         getattr(settings, 'futures_usdt_per_trade', 150.0),
+                        float(_get_param(settings, 'kelly_base_usdt') or 200.0),
                         _cb_futures_avail * getattr(settings, 'futures_kelly_cap_pct', 0.90)
                     )
                     _cb_kelly_spot  = _get_param(settings, 'kelly_base_usdt')
                     _cb_min_tx      = getattr(settings, 'futures_capital_bridge_min_transfer', 10.0)
+                    _cb_arbiter_active = bool(getattr(settings, 'range_scalp_short_first_enabled', True)) and _regime_mode in ("RANGE_SCALP", "SPOT_BULL")
                     _cb_result = _fc.smart_rebalance_capital(
                         spot_usdt        = _cb_spot_usdt,
                         open_shorts      = _cb_open_shorts,
@@ -8809,6 +10357,7 @@ def execute_once(monitor_only: bool = False, components=None):
                         spot_api_key     = settings.binance_api_key,
                         spot_api_secret  = settings.binance_api_secret,
                         min_transfer     = _cb_min_tx,
+                        futures_arbiter_active = _cb_arbiter_active,
                     )
                     if _cb_result.get('error'):
                         print(f"[CapBridge] ERROR logged for analysis: dir={_cb_result['direction']} "
@@ -8901,7 +10450,7 @@ def execute_once(monitor_only: bool = False, components=None):
                                         _commission_rate_b2,
                                         exit_context={
                                             'regime_mode': _regime_mode,
-                                            'profile_label': str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None,
+                                            'profile_label': 'B',
                                         },
                                     )
                                     _overflow_positions.discard(_b2_sym)
@@ -9082,7 +10631,7 @@ def execute_once(monitor_only: bool = False, components=None):
     _selection_begin_cycle(
         comp.db_client,
         _regime_mode,
-        _get_active_profile_label(comp.db_client, _regime_mode),
+        None,
     )
     top_signals = _select_symbols(settings, news_client, client, portfolio_manager, regime=_regime_mode, db_client=comp.db_client)
 
@@ -9094,11 +10643,9 @@ def execute_once(monitor_only: bool = False, components=None):
     if getattr(settings, 'screener_enabled', True):
         try:
             from pair_screener import get_screened_pairs as _gsp
-            _active_profile_label = _get_active_profile_label(_db_client_ref, _regime_mode)
             _cached_screened_pairs = _gsp(
                 settings=settings,
                 regime_mode=_regime_mode,
-                profile_label=_active_profile_label,
                 db_client=comp.db_client,
             )
             # Persist screener candidate selection for full traceability
@@ -9106,7 +10653,7 @@ def execute_once(monitor_only: bool = False, components=None):
                 comp.db_client,
                 _regime_mode,
                 _cached_screened_pairs,
-                profile_label=_active_profile_label,
+                profile_label=None,
             )
         except Exception:
             pass
@@ -9212,9 +10759,8 @@ def execute_once(monitor_only: bool = False, components=None):
     # ── Peaks-first: apply the entry-profile gate before QUBO ────────────────
     # The old behavior-first entry_quality gate is superseded by the calibrated
     # entry_profile_gate and is disabled by default; see entry_quality_gate_mode.
-    _active_profile_label_exec = _get_active_profile_label(_db_client_ref, _regime_mode)
     top_signals = _filter_buy_candidates(
-        top_signals, _step2_signal_meta, settings, _regime_mode, _active_profile_label_exec,
+        top_signals, _step2_signal_meta, settings, _regime_mode,
         predictions,
         news_client,
     )
@@ -9270,6 +10816,19 @@ def execute_once(monitor_only: bool = False, components=None):
     # that are still in the QUBO top become _buy_signals; new QUBO candidates are
     # staged as `ready` for future cycles.
     _buy_signals = top_signals
+    _staged_top_signals, _staged_predictions, _staged_signal_meta = _prepare_range_scalp_staging_candidates(
+        top_signals,
+        predictions,
+        _step2_signal_meta,
+        _regime_mode,
+        client,
+        settings,
+        _cached_screened_pairs,
+    )
+    _staged_top_symbols = [
+        signal.get("symbol") if isinstance(signal, dict) else str(signal)
+        for signal in _staged_top_signals
+    ]
     _openable_ready_ids_by_symbol: Dict[str, int] = {}
     if _db_client_ref and getattr(settings, 'staged_entry_enabled', True):
         try:
@@ -9279,7 +10838,7 @@ def execute_once(monitor_only: bool = False, components=None):
                 # 1. Re-evaluate existing ready/validated candidates across cycles.
                 _staged_status = staged_entry.evaluate_inter_cycle(
                     _db_client_ref, client, settings, _regime_mode,
-                    top_signals, predictions, _step2_signal_meta,
+                    _staged_top_signals, _staged_predictions, _staged_signal_meta,
                     cycle_id=_cycle_id, news_client=news_client,
                 )
                 if _staged_status.get('validated') or _staged_status.get('discarded') or _staged_status.get('kept'):
@@ -9287,7 +10846,7 @@ def execute_once(monitor_only: bool = False, components=None):
                           f"discarded={_staged_status.get('discarded')} kept={_staged_status.get('kept')}")
                 # 2. Stage new QUBO-selected candidates (initial positive check).
                 _staged_new = staged_entry.stage_ready_candidates(
-                    top_signals, predictions, _step2_signal_meta, _regime_mode,
+                    _staged_top_signals, _staged_predictions, _staged_signal_meta, _regime_mode,
                     _db_client_ref, cycle_id=_cycle_id, settings=settings,
                     news_client=news_client, client=client,
                 )
@@ -9295,7 +10854,7 @@ def execute_once(monitor_only: bool = False, components=None):
                     print(f"[StagedEntry] staged new: {[_s.get('symbol') for _s in _staged_new]}")
                 # 3. Only pass validated candidates that are still QUBO-selected to execution.
                 _openable_rows = staged_entry.get_openable_candidates(
-                    _db_client_ref, _regime_mode, top_symbols, settings=settings,
+                    _db_client_ref, _regime_mode, _staged_top_symbols, settings=settings,
                 )
                 if _openable_rows:
                     _buy_signals = [dict(_r.get('signal_meta', {})) for _r in _openable_rows]
@@ -9356,8 +10915,81 @@ def execute_once(monitor_only: bool = False, components=None):
         balances = client.get_account_balance()
         print("Balances after sells:", balances)
 
+    # ── SR-pool monitor: detect confirmed 1m/5m breaks in the pool/universe ───
+    _sr_pool_long_signals: List[Dict[str, Any]] = []
+    _sr_pool_short_signals: List[Dict[str, Any]] = []
+    if getattr(settings, "sr_pool_enabled", False) and not monitor_only:
+        try:
+            now = datetime.now(timezone.utc)
+            full_scan_minutes = int(getattr(settings, "sr_pool_full_scan_minutes", 5))
+            do_full_scan = (
+                _SR_POOL_LAST_FULL_SCAN is None
+                or (now - _SR_POOL_LAST_FULL_SCAN).total_seconds() >= full_scan_minutes * 60
+            )
+            _sr_pool_symbols = _SR_POOL_SYMBOLS
+            if do_full_scan:
+                _analysis = list(getattr(settings, "analysis_symbols", []) or [])
+                _futures = list(getattr(settings, "futures_symbols", []) or [])
+                _universe = list(dict.fromkeys(_analysis + _futures))
+                _stable = {"USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT", "FDUSDUSDT", "USDPUSDT", "USD1USDT"}
+                _universe = [s for s in _universe if s not in _stable]
+                _sr_pool_symbols = sr_pool_scanner.scan_universe_for_pool(client, _universe, _regime_mode, settings)
+                _SR_POOL_LAST_FULL_SCAN = now
+                _SR_POOL_SYMBOLS = _sr_pool_symbols
+                print(f"[SRPool] full scan: {len(_sr_pool_symbols)} symbols near SR levels")
+
+            _pool_signals = sr_pool_scanner.detect_sr_pool_breaks(
+                client,
+                _sr_pool_symbols,
+                _regime_mode,
+                settings,
+                intra_cycle=True,
+                pool_symbols=_sr_pool_symbols,
+            )
+            for sig in _pool_signals:
+                if sig.get("side") == "LONG":
+                    _sr_pool_long_signals.append(sig)
+                elif sig.get("side") == "SHORT":
+                    _sr_pool_short_signals.append(sig)
+            print(f"[SRPool] signals: {len(_pool_signals)} (LONG={len(_sr_pool_long_signals)}, SHORT={len(_sr_pool_short_signals)})")
+            if _pool_signals:
+                _SR_POOL_LAST_SIGNALS = (_SR_POOL_LAST_SIGNALS + _pool_signals)[-50:]
+
+            # Append LONG pool signals to the buy list; they carry peak_quality_profile so
+            # the entry-profile gate will pass them through unchanged.
+            _buy_signals.extend(_sr_pool_long_signals)
+        except Exception as _sr_pool_err:
+            print(f"[SRPool] scan error: {_sr_pool_err}")
+
+    _sr_pool_short_orders: List[Dict] = []
+    if _sr_pool_short_signals:
+        try:
+            _sr_pool_short_orders = _maybe_open_sr_pool_shorts(
+                settings, comp.futures_client, _sr_pool_short_signals, position_manager
+            )
+        except Exception as _sr_pool_short_err:
+            print(f"[SRPoolShort] error: {_sr_pool_short_err}")
+
+    _range_scalp_short_orders: List[Dict] = []
+    try:
+        _range_scalp_short_orders = _maybe_open_range_scalp_shorts(
+            _db_client_ref, client, settings, comp.futures_client, position_manager, portfolio_manager,
+            _regime_mode, _cycle_id,
+        )
+    except Exception as _rs_err:
+        print(f"[RangeScalpShort] dual-direction hook error: {_rs_err}")
+    _priority_short_orders = _sr_pool_short_orders + _range_scalp_short_orders
+    if _priority_short_orders:
+        _short_symbols = {order.get("symbol") for order in _priority_short_orders if order.get("symbol")}
+        _buy_signals = [
+            signal for signal in _buy_signals
+            if (signal.get("symbol") if isinstance(signal, dict) else signal) not in _short_symbols
+        ]
+        print(f"[RangeScalpShort] priority applied; removed LONG routing for {sorted(_short_symbols)}")
+
     # ── Step 5: Buy top symbols — pass full signal dicts for aggressive mode ───
-    buy_orders = _buy_top_symbols(client, settings, _buy_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client, regime_obj=_regime_exe, regime_mode_override=_regime_mode, screened_pairs_cache=_cached_screened_pairs, pre_switch_state=_pre_switch_state, futures_client=comp.futures_client)
+    buy_orders = list(_priority_short_orders)
+    buy_orders.extend(_buy_top_symbols(client, settings, _buy_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client, regime_obj=_regime_exe, regime_mode_override=_regime_mode, screened_pairs_cache=_cached_screened_pairs, pre_switch_state=_pre_switch_state, futures_client=comp.futures_client))
 
     # Mark staged-entry candidates as opened when the trade filled.
     if _openable_ready_ids_by_symbol and buy_orders:

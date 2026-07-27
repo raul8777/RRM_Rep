@@ -303,6 +303,131 @@ class AutonomousSignalGenerator:
             analysis['higher_tf_trend']  = higher_trend
             analysis['volume_confirmed'] = volume_confirmed
 
+            # ── Universal-model feature fixes (GAP-U) ─────────────────────────
+            # The universal quality model was trained on rsi_1h, rsi_4h,
+            # range_position, trend_1h and trend_4h. Expose them live so the
+            # model does not fall back to neutral defaults.
+            try:
+                _rsi_1h_vals = TechnicalIndicators.rsi(closes, 14)
+                if _rsi_1h_vals:
+                    analysis['rsi_1h'] = round(float(_rsi_1h_vals[-1]), 4)
+            except Exception:
+                pass
+
+            try:
+                _4h_klines = self.fetch_klines(symbol, '4h', limit=80)
+                if _4h_klines and len(_4h_klines) >= 30:
+                    _4h_closes = [k['close'] for k in _4h_klines]
+                    _rsi_4h_vals = TechnicalIndicators.rsi(_4h_closes, 14)
+                    if _rsi_4h_vals:
+                        analysis['rsi_4h'] = round(float(_rsi_4h_vals[-1]), 4)
+            except Exception:
+                pass
+
+            try:
+                _lookback = min(168, len(closes))
+                _recent_closes = closes[-_lookback:]
+                _range_low = min(_recent_closes)
+                _range_high = max(_recent_closes)
+                if _range_high > _range_low:
+                    analysis['range_position'] = round((closes[-1] - _range_low) / (_range_high - _range_low), 4)
+                else:
+                    analysis['range_position'] = 0.5
+            except Exception:
+                analysis.setdefault('range_position', 0.5)
+
+            try:
+                _ema_f, _ema_s, _ = TechnicalIndicators.ema_cross(closes, fast=9, slow=21)
+                if _ema_f and _ema_s and _ema_f[-1] and _ema_s[-1]:
+                    analysis['trend_1h'] = 1.0 if _ema_f[-1] > _ema_s[-1] else -1.0
+            except Exception:
+                pass
+
+            try:
+                analysis['trend_4h'] = 1.0 if str(higher_trend).upper() == 'UP' else (
+                    -1.0 if str(higher_trend).upper() == 'DOWN' else 0.0
+                )
+            except Exception:
+                pass
+
+            # ── Support/Resistance features (shadow, no-look-ahead) ───────────
+            try:
+                from support_resistance import compute_sr_features as _compute_sr
+                _atr_for_sr = analysis.get('indicators', {}).get('atr')
+                _sr = _compute_sr(
+                    closes, highs, lows, volumes,
+                    current_price=closes[-1],
+                    atr=_atr_for_sr,
+                    lookback=min(96, len(closes)),
+                )
+                for _k, _v in _sr.items():
+                    analysis.setdefault(_k, _v)
+                # Model feature aliases
+                _cp = float(closes[-1])
+                if analysis.get('support_level') is not None and _cp > 0:
+                    analysis.setdefault(
+                        'sr_support_dist_pct',
+                        round((_cp - float(analysis['support_level'])) / _cp * 100.0, 6)
+                    )
+                if analysis.get('resistance_level') is not None and _cp > 0:
+                    analysis.setdefault(
+                        'sr_resistance_dist_pct',
+                        round((float(analysis['resistance_level']) - _cp) / _cp * 100.0, 6)
+                    )
+                if 'sr_zone_position' not in analysis:
+                    analysis.setdefault('sr_zone_position', 0.5)
+            except Exception as _sr_err:
+                logger.debug(f"SR features failed for {symbol}: {_sr_err}")
+
+            # ── SR entry advisory (no-look-ahead) ─────────────────────────────
+            # Reject/dampen BUY signals that are already pressing against the
+            # nearest resistance zone. Operates in shadow unless configured active.
+            if analysis.get('signal') == 'BUY':
+                try:
+                    _cfg = getattr(self, '_settings', None) or getattr(self, 'settings', None)
+                    _sr_mode = getattr(_cfg, 'sr_entry_filter_mode', 'shadow') if _cfg is not None else 'shadow'
+                    _sr_zone = analysis.get('sr_zone_position')
+                    _res_dist = analysis.get('nearest_resistance_dist_pct')
+                    _atr = analysis.get('indicators', {}).get('atr')
+                    _atr_pct = (_atr / analysis['current_price'] * 100.0) if _atr and analysis.get('current_price') else None
+                    _at_resistance = (
+                        (_sr_zone is not None and _sr_zone > 0.85)
+                        or (_res_dist is not None and _atr_pct is not None and _res_dist <= _atr_pct)
+                    )
+                    if _at_resistance:
+                        if _sr_mode == 'active':
+                            analysis['signal'] = 'HOLD'
+                            analysis['strength'] = 0
+                            analysis['reason'] += f' [SR entry rejected: zone={_sr_zone:.2f}, res_dist={_res_dist:.2f}%]'
+                            logger.info(f"SR entry REJECTED {symbol}: zone={_sr_zone:.2f}, res_dist={_res_dist:.2f}%")
+                        else:
+                            analysis['sr_entry_shadow_rejected'] = True
+                            analysis['reason'] += f' [SR shadow reject: zone={_sr_zone:.2f}, res_dist={_res_dist:.2f}%]'
+                            logger.debug(f"SR entry SHADOW-REJECTED {symbol}: zone={_sr_zone:.2f}, res_dist={_res_dist:.2f}%")
+                except Exception:
+                    pass
+
+            # ── SR event entry signals ────────────────────────────────────────────
+            # A confirmed bounce at support or breakout above resistance becomes an
+            # actionable BUY; a breakdown below support becomes an actionable SELL.
+            if analysis.get('signal') != 'BUY':
+                _sr_zone_pos = float(analysis.get('sr_zone_position', 0.5))
+                if analysis.get('support_bounce_buy') and _sr_zone_pos <= 0.45:
+                    analysis['signal'] = 'BUY'
+                    analysis['strength'] = max(float(analysis.get('strength', 0.5)), 0.65)
+                    analysis['reason'] += ' [SR bounce buy]'
+                    logger.info(f"SR BOUNCE BUY {symbol}: zone={_sr_zone_pos:.2f}")
+                elif analysis.get('support_breakout_buy') and _sr_zone_pos >= 0.55:
+                    analysis['signal'] = 'BUY'
+                    analysis['strength'] = max(float(analysis.get('strength', 0.5)), 0.70)
+                    analysis['reason'] += ' [SR breakout buy]'
+                    logger.info(f"SR BREAKOUT BUY {symbol}: zone={_sr_zone_pos:.2f}")
+            if analysis.get('support_breakdown_sell') and float(analysis.get('sr_zone_position', 0.5)) >= 0.55:
+                analysis['signal'] = 'SELL'
+                analysis['strength'] = max(float(analysis.get('strength', 0.5)), 0.65)
+                analysis['reason'] += ' [SR breakdown sell]'
+                logger.info(f"SR BREAKDOWN SELL {symbol}")
+
             # Always compute vol_spike ratio so signal payload always has a real value
             # (M4 breakout block may overwrite with its own ratio if breakout detected)
             try:
@@ -589,9 +714,40 @@ class AutonomousSignalGenerator:
             for _sig in buy_signals:
                 _sig['expected_side'] = 'SHORT'
                 _sig['trade_type'] = 'futures'
+                _sig['routing_intent'] = 'FUTURES_SHORT'
             logger.info(
-                f"[FUTURES_SHORT] Short candidates: {len(buy_signals)} "
+                f"[{regime_mode}] SHORT-first candidates: {len(buy_signals)} "
                 f"(BUY+SELL+HOLD with strength>={_short_min_strength})"
+            )
+        elif regime_mode == 'RANGE_SCALP':
+            _short_min_strength = min(min_strength, 0.4)
+            buy_signals = [
+                s for s in all_signals
+                if s['strength'] >= (min_strength if s['signal'] == 'BUY' else _short_min_strength)
+            ]
+            short_count = 0
+            for _sig in buy_signals:
+                _zone = float(_sig.get('sr_zone_position', 0.5) or 0.5)
+                _rsi = float(_sig.get('rsi', 50.0) or 50.0)
+                _short_setup = bool(
+                    _sig.get('signal') in ('SELL', 'HOLD')
+                    or _sig.get('support_breakdown_sell') or _sig.get('sr_breakdown')
+                    or _zone >= 0.65
+                    or _sig.get('bb_upper_touch') or _sig.get('bb_near_upper')
+                    or _rsi >= 60.0
+                )
+                if _short_setup:
+                    _sig['expected_side'] = 'SHORT'
+                    _sig['trade_type'] = 'futures'
+                    _sig['routing_intent'] = 'FUTURES_SHORT'
+                    short_count += 1
+                else:
+                    _sig['expected_side'] = 'LONG'
+                    _sig['trade_type'] = 'futures'
+                    _sig['routing_intent'] = 'FUTURES_LONG_ANALYSIS'
+            logger.info(
+                f"[RANGE_SCALP] futures-short cohort={short_count} "
+                f"futures-long-analysis cohort={len(buy_signals) - short_count}"
             )
         else:
             buy_signals = [
@@ -640,26 +796,55 @@ class AutonomousSignalGenerator:
             _trend = str(signal.get('higher_tf_trend', 'FLAT') or 'FLAT').strip().upper()
 
             if _regime == 'FUTURES_SHORT':
-                # Overbought bounces with volume are preferred short setups.
+                # Overbought bounces / breakdowns with volume are preferred short setups.
                 _sell_bonus = 15.0 if signal.get('signal') == 'SELL' else 0.0
-                return (_rsi + _sell_bonus) * 0.7 + min(_vol_spike, 3.0) * 10.0 * 0.3
+                _sr_breakdown_bonus = 25.0 if signal.get('support_breakdown_sell') or signal.get('sr_breakdown') else 0.0
+                _trend_short_bonus = 2.0 if _trend == 'DOWN' else 0.0
+                return (_rsi + _sell_bonus) * 0.7 + min(_vol_spike, 3.0) * 10.0 * 0.3 + _sr_breakdown_bonus + _trend_short_bonus
 
             if _regime == 'RANGE_SCALP':
-                # Preserve historical behavior: BB lower touch priority then low RSI.
+                _routing_intent = str(signal.get('routing_intent') or '').upper()
+                _zone = float(signal.get('sr_zone_position', 0.5) or 0.5)
+                _short_score = (
+                    120.0 * float(signal.get('signal') == 'SELL')
+                    + 100.0 * float(bool(signal.get('support_breakdown_sell') or signal.get('sr_breakdown')))
+                    + 80.0 * float(_zone >= 0.65)
+                    + 70.0 * float(bool(signal.get('bb_upper_touch') or signal.get('bb_near_upper')))
+                    + max(0.0, _rsi - 55.0) * 2.0
+                    + 20.0 * float(_trend in ('DOWN', 'BEARISH', '-1', '-1.0'))
+                    + min(_vol_spike, 3.0) * 5.0
+                    + _strength
+                )
                 _bb_touch = 2 if signal.get('bb_lower_touch') else (1 if signal.get('bb_near_lower') else 0)
-                return _bb_touch * 100.0 + (100.0 - _rsi) + min(_vol_spike, 2.0)
+                _support_score = (
+                    _bb_touch * 100.0
+                    + (100.0 - _rsi)
+                    + min(_vol_spike, 2.0)
+                    + 80.0 * float(bool(signal.get('support_bounce_buy') or signal.get('sr_bounce')))
+                    + _strength
+                )
+                return (
+                    1 if _routing_intent == 'FUTURES_SHORT' else 0,
+                    _short_score if _routing_intent == 'FUTURES_SHORT' else _support_score,
+                )
 
             if _regime == 'PRESERVATION':
-                # Defensive ranking: require quality/confirmation over pure strength.
+                # Defensive ranking: support bounce + quality/confirmation first.
                 _volume_confirmed = 1.0 if signal.get('volume_confirmed') else 0.0
                 _trend_bonus = 1.0 if _trend == 'UP' else (0.3 if _trend == 'FLAT' else -0.8)
                 _rsi_distance = abs(_rsi - 50.0)
                 _rsi_penalty = min(20.0, _rsi_distance) / 50.0
-                return _strength * 2.0 + _volume_confirmed * 1.2 + _trend_bonus - _rsi_penalty
+                _sr_bounce_bonus = 1.5 if signal.get('support_bounce_buy') or signal.get('sr_bounce') else 0.0
+                return _strength * 2.0 + _volume_confirmed * 1.2 + _trend_bonus - _rsi_penalty + _sr_bounce_bonus
 
-            # SPOT_BULL and unknown: trend-following, strength-first.
+            # SPOT_BULL and unknown: confirmed breakout at resistance + trend + strength.
             _trend_bonus = 0.05 if _trend == 'UP' else (-0.05 if _trend == 'DOWN' else 0.0)
-            return _strength * 2.0 + min(_vol_spike, 2.5) * 0.05 + _trend_bonus
+            _sr_bonus = 0.0
+            if signal.get('support_breakout_buy') or signal.get('sr_breakout'):
+                _sr_bonus = 0.5
+            elif signal.get('support_bounce_buy') or signal.get('sr_bounce'):
+                _sr_bonus = 0.3
+            return _strength * 2.0 + min(_vol_spike, 2.5) * 0.05 + _trend_bonus + _sr_bonus
 
         _regime = str(regime_mode or 'SPOT_BULL').strip().upper() or 'SPOT_BULL'
         buy_signals.sort(key=lambda s: _regime_signal_score(s, _regime), reverse=True)

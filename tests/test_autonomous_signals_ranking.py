@@ -35,6 +35,37 @@ def test_range_scalp_prioritizes_bb_touch_then_low_rsi():
     assert top[0]["symbol"] == "TOUCH_MED_RSI"
 
 
+def test_range_scalp_prioritizes_futures_short_cohort_over_support_reversion():
+    signals = [
+        {
+            "symbol": "SUPPORT_BUY",
+            "signal": "BUY",
+            "strength": 0.90,
+            "rsi": 28,
+            "bb_lower_touch": True,
+            "support_bounce_buy": True,
+            "sr_zone_position": 0.10,
+            "vol_spike": 2.0,
+        },
+        {
+            "symbol": "RESISTANCE_SHORT",
+            "signal": "SELL",
+            "strength": 0.45,
+            "rsi": 67,
+            "bb_near_upper": True,
+            "sr_zone_position": 0.80,
+            "higher_tf_trend": "DOWN",
+            "vol_spike": 1.1,
+        },
+    ]
+    gen = _generator_with_signals(signals)
+    top = gen.get_top_buy_signals(regime_mode="RANGE_SCALP", min_strength=0.6, limit=2)
+    assert top[0]["symbol"] == "RESISTANCE_SHORT"
+    assert top[0]["routing_intent"] == "FUTURES_SHORT"
+    assert top[0]["expected_side"] == "SHORT"
+    assert top[1]["routing_intent"] == "FUTURES_LONG_ANALYSIS"
+
+
 def test_preservation_prefers_confirmed_and_balanced_signal():
     signals = [
         {"symbol": "HIGH_BUT_WEAK_QUALITY", "signal": "BUY", "strength": 0.70, "rsi": 80, "higher_tf_trend": "DOWN", "volume_confirmed": False, "vol_spike": 1.0},

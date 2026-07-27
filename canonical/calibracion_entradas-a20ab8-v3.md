@@ -11,7 +11,330 @@ supersedes: Calibracion_Entradas-a20ab8-v2.md
 
 > **Merge note:** `Calibracion_Entradas-a20ab8-v2.md` fue fusionado en este documento. Se conservan las decisiones de dirección del usuario, el análisis por modo y las reglas duras de v2; v3 añade la asignación de capital por modo, la evaluación de datos de terceros y el cronograma de maduración.
 
-## Estado actual del sistema — jul 22 2026
+## Estado del sistema — jul 27 2026 — s100: RANGE_SCALP FUTURES_SHORT-first routing
+
+### Política operativa
+
+- `RANGE_SCALP` separa las señales antes del profile gate y QUBO:
+  - `FUTURES_SHORT`: SELL/HOLD, breakdown, resistencia (`sr_zone_position >= 0.65`), banda superior o RSI >= 60; siempre se ordenan antes que la cohorte residual.
+  - `FUTURES_LONG_ANALYSIS`: candidatas sin setup SHORT; solo se analizan como LONG futures y nunca se enrutan a SPOT.
+- La cohorte SHORT usa predictor `trade_type=futures`, `trade_side=SHORT` y el tamaño `range_scalp_short_usdt_per_trade` antes de profile gate, profit score y QUBO.
+- Se mantiene `range_scalp_long_entries_enabled=false`: los LONG pueden ser auditados, pero no se abren mientras no haya evidencia operativa de fills SHORT consistentes.
+
+### Flujo y garantías
+
+1. `autonomous_signals` genera BUY/SELL/HOLD y adjunta S/R sin look-ahead.
+2. El ranking prioriza absolutamente la cohorte `FUTURES_SHORT`; soporte/reversión queda como fallback de análisis.
+3. Profile A/B/C, predictor, QUBO y staging siguen siendo gates obligatorios; el cambio no altera Kelly, leverage, SL/TP ni umbrales de perfil.
+4. El arbiter evalúa SHORT antes de cualquier LONG; la intención `FUTURES_LONG_ANALYSIS` evita `SPOT_LONG`.
+5. Antes de la apertura se mantienen confirmación direccional, capacidad, preflight y verificación de Binance.
+6. Solo tras fill confirmado se persiste `trades_open`, `ready_candidates.opened` y la auditoría de ejecución.
+
+### Corrección crítica de persistencia
+
+- Se corrigió `FuturesClient.open_short`: después de confirmar el fill de Binance, la persistencia de `regime_at_entry` referenciaba `settings` fuera de alcance y provocaba `NameError`.
+- El error hacía que el ciclo reportara `RANGE_SCALP_SHORT_EXECUTION_FAILED` aunque Binance ya hubiera abierto la posición. La persistencia usa ahora la configuración del propio cliente.
+
+### Observabilidad y aceptación
+
+- `trades_audit.range_scalp_direction_arbitration` conserva `routing_intent`, modo seleccionado, elegibilidad, geometría y predicciones.
+- Medir por side, perfil y cohorte: cobertura, fill confirmado, PnL neto, PF y drawdown frente a baseline/changepoint 3y/60000.
+- Dashboard y `/metrics/entry-evidence` deben mostrar el funnel por `routing_intent`, `selected_mode`, razón de rechazo y resultado de ejecución.
+
+### Rollback
+
+```powershell
+PATCH /config/kelly {"range_scalp_short_preferred": false}
+```
+
+- Revertir el cambio de ranking si la cohorte SHORT deteriora PnL neto, PF, cobertura o drawdown frente al baseline.
+- Mantener `range_scalp_long_entries_enabled=false` independientemente del rollback del ranking hasta validar fills y persistencia SHORT.
+
+---
+
+## Estado del sistema — jul 26 2026 — s99d: FUTURES_SHORT Eligibility Threshold
+
+### Cambio aplicado
+
+- **Umbral independiente para FUTURES_SHORT** (`directional_arbiter.py`):
+  - `range_scalp_short_min_probability=0.40` evalúa la elegibilidad de la predicción SHORT.
+  - LONG spot y LONG futures conservan `range_scalp_direction_min_probability=0.55`.
+  - Se mantiene el requisito de `expected_pnl > 0`, pertenencia al universo futures y todos los gates de ejecución existentes.
+  - Motivo: RANGE_SCALP prioriza candidatos cerca de soporte; el predictor direccional penaliza correctamente los SHORT en esa geometría, por lo que el umbral LONG compartido de 0.55 impedía que un SHORT con EV positivo fuese elegible.
+
+### Configuración y validación
+
+- Default canónico: `range_scalp_short_min_probability=0.40` en `config.py` y `config_helpers.py`.
+- Hot-config permitido: `PATCH /config/kelly {"range_scalp_short_min_probability": 0.40}`.
+- Regresión: `tests/test_directional_arbiter.py` valida que SHORT con probabilidad `0.45` y EV positivo sea `FUTURES_SHORT`, mientras LONG con `0.54` no cumple su umbral de `0.55`.
+- Validación ejecutada: `python -m pytest tests/test_directional_arbiter.py -q` → `8 passed`.
+
+### Rollback
+
+```
+PATCH /config/kelly {"range_scalp_short_min_probability": 0.55}
+```
+
+---
+
+## Estado del sistema — jul 26 2026 — s99c: CapBridge Arbiter-Aware + Just-in-Time Capital Transfer + Kelly FUTURES_LONG
+
+### Cambios aplicados
+
+- **Fast-path arbiter fallback rules** (`run_trades.py`):
+  - `FUTURES_LONG` falla → fallback a SPOT LONG (misma dirección, compatible).
+  - `FUTURES_SHORT` falla → candidato bloqueado con gate `FUTURES_SHORT_NO_MARGIN` (SPOT solo opera LONG).
+  - Root cause ACEUSDT: arbiter decidía `FUTURES_LONG` con wallet vacío → `amount < $10` → candidato atascado.
+
+- **Kelly sizing completo para FUTURES_LONG** (`_open_arbitrated_range_scalp_long`):
+  - Antes: tamaño fijo `futures_usdt_per_trade` ($150). Ahora: `_kelly_position_size()` con concentración, conviction, cap.
+  - Fast-path: usa `policy.position_size_usdt` del staged (Kelly ya calculado en validación).
+  - Path normal: calcula Kelly completo análogo a FUTURES_SHORT.
+
+- **Just-in-time capital transfer** (`_open_arbitrated_range_scalp_long` y `_open_arbitrated_range_scalp_short`):
+  - Si Kelly quiere $1500 y futures tiene $150: `check_and_fund($1502)` transfiere `shortfall × 1.1` de spot→futures.
+  - Post-transfer: refresca balance y abre con el monto Kelly completo.
+  - Si la transferencia falla: graceful degradation (usa lo disponible).
+  - `check_and_fund` corregido: transfiere `shortfall × 1.1` (antes era `required × 2.0`).
+
+- **CapBridge arbiter-aware funding** (`futures_client.py` + `run_trades.py`):
+  - Nuevo parámetro `futures_arbiter_active` en `smart_rebalance_capital`.
+  - **Case 1b**: si arbiter activo y `regime in (RANGE_SCALP, SPOT_BULL)`, asegurar `kelly_margin` en futures (pre-fondeo).
+  - **Case 3 guard**: no drenar idle futures capital cuando arbiter está activo.
+  - `_cb_kelly_margin` ahora usa `max(futures_usdt_per_trade, kelly_base_usdt, avail×cap)` en vez de solo $150.
+
+- **Observabilidad**: `arbiter_mode` (SPOT_LONG/FUTURES_SHORT/FUTURES_LONG) visible en dashboard selection-observability.
+
+### Flujo completo post-fix
+
+```
+CapBridge ciclo N: arbiter_active=True, futures=$10, kelly_margin=$200 → transfiere $190 spot→futures
+Ciclo N+1: Candidato validado → arbiter FUTURES_LONG → Kelly=$1500
+  → futures tiene $200, need $1500 → just-in-time: check_and_fund($1502)
+  → transfiere $1430 de spot → futures=$1632 → abre con $1500 ✅
+Si falla todo → fallback SPOT LONG (misma dirección)
+```
+
+### Rollback
+
+```
+# Revert CapBridge arbiter-aware:
+PATCH /config/kelly {"range_scalp_short_first_enabled": false}
+# Revert just-in-time (volver a cap fijo):
+git revert <commit> -- run_trades.py futures_client.py
+```
+
+---
+
+## Estado del sistema — jul 26 2026 — s99b: Direction Target/Stop Derivation Fix + Dashboard wslrelay Fix
+
+### Cambios aplicados
+
+- **Direction target/stop derivation fix** (`staged_entry.py`):
+  - Bug: `stage_ready_candidates` usaba `policy_data.target_price` y `stop_price` del evaluador LONG genérico incluso cuando el arbiter decidía FUTURES_SHORT → `DIRECTION_TARGET_INVALID` (target arriba del precio para SHORT) → ningún candidato confirmaba dirección → 0 operaciones abrían.
+  - Fix: nueva función `_build_initial_direction()` extrae target/stop de la predicción del arbiter según `selected_mode`:
+    - SHORT: `target = price_range.min`, `stop = price_range.max`
+    - LONG: `target = price_range.max`, `stop = price_range.min`
+    - Sin arbiter: fallback a `policy_data` (comportamiento anterior preservado).
+  - Verificado en producción: LDOUSDT abrió via `FAST_PATH_EXECUTED` en ~90s post-staging.
+  - 3 tests de regresión añadidos en `test_staged_entry.py`.
+
+- **Dashboard wslrelay fix** (`frontend/dashboard.js`):
+  - Bug: `wslrelay.exe` (WSL2) interceptaba conexiones a `[::1]:8000` (IPv6 localhost) → el dashboard nunca recibía respuesta del API.
+  - Fix: `API_BASE` ahora fuerza `127.0.0.1` cuando hostname es `localhost`, bypaseando wslrelay.
+  - URL correcta: `http://127.0.0.1:8000/frontend/index.html`.
+
+### Evidencia diagnóstica
+
+| Candidato | Arbiter | direction.side | target (antes) | target (después) | Resultado |
+|---|---|---|---|---|---|
+| RIFUSDT id=1648 | FUTURES_SHORT | SHORT | 0.083 (LONG, > entry) | — | `DIRECTION_TARGET_INVALID` |
+| RIFUSDT id=1661 | FUTURES_SHORT | SHORT | 0.079 (< entry ✓) | — | discarded (price no favoreció) |
+| LDOUSDT id=1660 | FUTURES_SHORT | SHORT | 0.379 (< entry ✓) | — | **FAST_PATH_EXECUTED** ✅ |
+| HBARUSDT id=1659 | FUTURES_SHORT | SHORT | 0.069 (< entry ✓) | — | **confirmed → validated** ✅ |
+
+### Rollback
+
+```
+# Revert direction derivation (usar policy directamente):
+git revert <commit> -- staged_entry.py
+# Revert dashboard fix:
+git revert <commit> -- frontend/dashboard.js
+```
+
+---
+
+## Estado del sistema — jul 26 2026 — s99: Directional Arbiter, Hard-Risk Monitor, Fast-Path Allocation Fix
+
+### Cambios aplicados
+
+- **Directional Arbiter** (`range_scalp_short_first_enabled=True`):
+  - Antes de abrir spot long en RANGE_SCALP, evalúa si futures SHORT o futures LONG tiene mejor EV.
+  - Nuevo módulo `directional_arbiter.py` con `evaluate_range_scalp()` → decisiones `SPOT_LONG`, `FUTURES_SHORT`, `FUTURES_LONG`, `ABSTAIN`.
+  - Integrado en fast-path y `_buy_top_symbols`; audit en `trades_audit`.
+  - `_open_arbitrated_range_scalp_short()` y `_open_arbitrated_range_scalp_long()` en `run_trades.py`.
+  - Nuevo flag `range_scalp_short_preferred` (default `True`): cuando `True`, el arbiter elige `FUTURES_SHORT` siempre que sea elegible (prob>0.40, EV>0) y el par tenga futuros disponible. Rollback: `PATCH /config/kelly {"range_scalp_short_preferred": false}`.
+  - `pnl_predictor._calculate_expected_pnl()` ahora usa los porcentajes configurados de SL/TP como el payoff real de la posición (no solo como cap sobre el rango estimado). Para FUTURES_SHORT con `range_scalp_short_sl_pct=2.0` y `tp_pct=4.0`, EV>0 requiere `prob > 2/(2+4) ≈ 33%`, haciendo viables shorts con `prob` entre 0.40 y 0.50. `_calculate_risk_metrics()` también refleja el riesgo/recompensa real del SL/TP.
+  - `_open_arbitrated_range_scalp_short()` aplica Kelly sizing y fondeo JIT desde spot igual que el path LONG, en lugar de usar `range_scalp_short_usdt_per_trade` fijo ($1000). Se alinearon los defaults de `futures_leverage` a `10` en ambos paths SHORT/LONG.
+  - `config_helpers.get_staged_entry_regime_config()` fuerza `direction_required_confirmations=1` y `direction_min_progress_bps<=1.0` para RANGE_SCALP, permitiendo confirmación direccional en un solo ciclo.
+  - Cuando activo, `_filter_buy_candidates` se salta para RANGE_SCALP (el arbiter filtra internamente).
+- **Direction confirmation re-enforced para RANGE_SCALP**:
+  - `config_helpers.py` fuerza `direction_confirmation_mode='enforced'` cuando `range_scalp_short_first_enabled=True`.
+  - `direction_required_confirmations=1`, `direction_max_adverse_bps=150.0`.
+- **Hard-Risk Monitor**:
+  - Thread independiente en `orchestrator.py` cada 2s ejecutando `hard_risk_monitor.monitor_spot_hard_stops_once()`.
+  - Config: `hard_risk_monitor_enabled`, `hard_risk_monitor_interval_seconds`.
+- **Fast-path allocation fix**:
+  - Bug: `expected_pnl` (~$3) se usaba como `position_size_usdt` → `ALLOCATION_TOO_SMALL` para todos los candidatos.
+  - Fix: `_policy_size = float(policy.get("position_size_usdt") or 0)` sin fallback a `expected_pnl`.
+- **Screener futures ampliado**: `screener_futures_min_vol=$10M` (era $100M), `screener_max_futures_pairs=100`.
+- **Dashboard**: endpoints `/price-history/{symbol}` acepta `trade_type` (spot/futures); posiciones cerradas incluyen `position_id`, `position_mode`.
+
+### Validación
+
+- Suite completa: **674 passed, 14 skipped**.
+- Re-verificación focalizada jul 27 2026: `test_pnl_predictor_candles.py`, `test_pnl_predictor_side.py`, `test_directional_arbiter.py`, `test_range_scalp_bidirectional.py`, `test_pnl_service_side.py`, `test_staged_entry_fast_path.py`, `test_entry_quality_gate.py`, `test_config_governance.py` — pasados.
+- Operaciones abiertas post-fix: EDUUSDT, QIUSDT ×3 via fast-path.
+
+### Rollback
+
+```
+PATCH /config/kelly {"range_scalp_short_first_enabled": false, "hard_risk_monitor_enabled": false}
+```
+
+---
+
+## Estado del sistema — jul 24 2026 — s94: Inyección completa de features SR, relajación de gates y suite 602 verde
+
+### Cambios aplicados
+
+- **SR features inyectadas en todo el pipeline**:
+  - `pnl_predictor.py`: probabilidad de éxito y rango de precios anclados a SR para LONG/SHORT.
+  - `entry_profile_gate.py`: features de distancia/posición de zona SR en el modelo universal y bonus heurístico por eventos.
+  - `autonomous_signals.py`: extracción, reenvío y señales BUY/SELL por rebote/breakout/breakdown de SR; ranking por régimen bonificado.
+  - `staged_entry.py`: fricción reducida para señales SR confirmadas y filtro por `top_symbols_qubo`.
+  - `run_trades.py`: reenvío de SR features y bypass del descarte inicial de perfil para eventos SR confirmados.
+- **Relajación de gates**:
+  - `entry_decision.py`: `entry_decision_min_probability` default **0.50** para todos los regímenes.
+  - `staged_entry.py`: `required_positive_checks=1`, `direction_required_confirmations=1`, `direction_min_progress_bps=1.0`, `max_cycles>=4` para señales SR confirmadas.
+- **Configuración agresiva de exposición y Kelly**:
+  - `config.py` / `config_helpers.py`: `max_positions_spot_bull=12`, `max_positions_range_scalp=8`, `max_positions_preservation=4`, `max_positions_futures_short=8`, `max_total_exposure_pct=0.95`, `max_positions=8`, `max_open_per_cycle=2`, `category_max_positions_enabled=False`.
+  - `market_regime.py`: `kelly_mult` SPOT_BULL=1.05, RANGE_SCALP=1.0, PRESERVATION=0.7, FUTURES_SHORT base=0.6 con boost por confianza (1.0 si `confidence>=0.80`).
+- **Alineación de defaults canónicos**:
+  - `entry_decision_min_probability`, `category_max_positions_enabled`, `screener_max_pairs` sincronizados entre `config.py`, `config_helpers.py`, `run_trades.py` y `universe_selector.py`.
+  - Tests actualizados: `test_staged_entry.py`, `test_system_health.py`, `test_range_scalp_entry_pipeline.py`, `test_entry_evidence.py`.
+- **Calibración**: `recalibrate_thresholds_v2.py` y `build_universal_quality_model.py` incluyen features SR.
+
+### Validación
+
+- Suite completa: **602 passed, 0 failed**.
+- `tmp_audit_config.py`: 0 critical mismatches.
+
+### Monitorización
+
+- Confirmar aperturas validadas en próximos ciclos con `sr_bounce`, `sr_breakout`, `sr_breakdown`.
+- Auditar `sr_entry_shadow_rejected` para evitar sombrear oportunidades rentables.
+- Seguir PnL/drawdown dados los nuevos límites de exposición y multiplicadores Kelly.
+
+### Rollback
+
+```powershell
+PATCH /config/kelly {"staged_entry_enabled": false}
+# o revertir los cambios en pnl_predictor.py, entry_profile_gate.py, staged_entry.py y config.py
+```
+
+---
+
+## Estado del sistema — jul 24 2026 — s93b: Fix RANGE_SCALP e integración S/R
+
+### Cambios aplicados
+
+- **Fix RANGE_SCALP bloqueado** en `staged_entry.py` + `pnl_predictor.py`:
+  - `staged_entry.build_range_reversion_prediction` lee Bollinger Bands de la forma plana (`lower_band`, `middle_band`, `upper_band`) que produce `analyze_signal`, además de la forma anidada.
+  - `pnl_predictor.predict_range_reversion` ponía el stop estructural exactamente en `lower`, rechazando entradas legítimas sobre soporte (`band_position ≈ 0`) con `invalid_reversion_payoff` → `DIRECTION_TARGET_MISSING`. Si el precio rompía ligeramente por debajo de `lower`, el stop estructural quedaba por encima del precio de entrada.
+  - Root cause combinado: la predicción de reversión fallaba o era inválida; el gate caía al predictor LONG genérico (comportamiento SPOT_BULL) y `staged_entry` descartaba con `DIRECTION_TARGET_MISSING`.
+  - Se corrigió para leer ambas formas de BB keys y para elegir el stop más alto entre el estructural (`lower * (1 - configured_sl/1000)`) y el configurado (`price * (1 - configured_sl)`) que esté estrictamente por debajo del precio actual. Esto permite entradas en soporte/inferior a la banda inferior sin forzar operaciones en el techo del rango.
+- **Fix RANGE_SCALP bloqueado en `entry_profile_gate`** en `run_trades.py`:
+  - `_normalize_autonomous_signal` no reenviaba las features que el modelo universal espera (`range_position`, `rsi_1h`, `rsi_4h`, `trend_1h`, `trend_4h`).
+  - Sin ellas, `_extract_universal_features` usaba proxies débiles (`bb_position` para `range_position`, `ema_cross` para trend, mismo RSI para 1h/4h), bajando sistemáticamente el score de calidad y descartando todos los candidatos `RANGE_SCALP` con `PEAK_QUALITY_DISCARDED`.
+  - Se añadieron esas keys al dict normalizado; tras el fix un candidato `KAITOUSDT` pasó el gate y fue staged en el siguiente ciclo.
+- **Calibración agresiva temporal para RANGE_SCALP** (para desatascar aperturas):
+  - `pnl_predictor.py`: se suavizaron penalizaciones del predictor de reversión por volumen bajo, RSI en sobreventa (<35) y tendencia bajista cuando el precio está cerca de la banda inferior.
+  - `entry_decision.py`: umbral mínimo de probabilidad para `RANGE_SCALP` de 0.60 -> 0.50.
+  - `config_helpers.py`: `required_positive_checks` 2->1, `direction_required_confirmations` 2->1, `direction_min_progress_bps` 3.0->1.0, `max_open_per_cycle` 1->2.
+  - Resultado: 5-7 candidatos ACCEPTED por ciclo y `KAITOUSDT` validado/abierto (`entry_price=0.9472`, size ~$1,970, unrealized -0.51%).
+  - ⚠️ Experimental; rollback documentado.
+- **Overrides runtime re-aplicados** vía `trading_runtime_state.kelly_config_override` y contenedor reiniciado:
+  - `category_max_positions_enabled = False`
+  - `entry_quality_vol_spike_min_range_scalp = 0.20`
+- **Integración Soporte/Resistencia**:
+  - `support_resistance.py`: cálculo sin look-ahead (pivotes locales + clustering).
+  - `autonomous_signals.py`: inyección de niveles SR, distancias, `sr_zone_position` y aliases para el modelo.
+  - Filtro de entrada SR (`shadow` por defecto) y disparador de salida SR en `peak_capture_engine.py` (`profit_predexit_sr_resistance`, prioridad 91).
+- **Modelo universal recalibrado** sobre `cross_symbol_dataset.jsonl` actual (397.081 filas); thresholds A/B/C separados.
+
+### Validación
+
+- Tests relevantes: **63 passed**.
+- Smoke test: `entry_decision.evaluate(..., regime='RANGE_SCALP', profile='A')` retorna `eligible=True` usando el predictor de reversión.
+- Config cargada y verificada tras restart:
+  - `category_max_positions_enabled = False`
+  - `entry_quality_vol_spike_min_range_scalp = 0.2`
+
+### Monitorización
+
+- Confirmar en las próximas 6-12h que `ready_candidates` deja de descartar por `DIRECTION_TARGET_MISSING` y aparecen `validated`/`opened` en RANGE_SCALP.
+- Auditar logs `sr_entry_shadow_rejected` para no bloquear oportunidades rentables.
+- Comparar cohortes con `score_source == "universal_model"`.
+
+### Rollback
+
+```powershell
+# Revertir staged_entry.py
+PATCH /config/kelly {"staged_entry_enabled": false}
+```
+
+---
+
+## Estado del sistema — jul 23 2026 — s93: Umbrales universales desplegados
+
+El Escenario 2 del plan de universalización está **activo en producción**.
+
+### Cambios aplicados
+
+- **`entry_profile_thresholds.json`**: reemplazado por los umbrales universales por **régimen + categoría** (`SPOT_BULL`, `RANGE_SCALP`, `LARGE_CAP`, `NARRATIVE`, `MIDCAP_ALT`). Backup: `entry_profile_thresholds_pre_universal_20260723.json`.
+- **`entry_profile_gate.py`**:
+  - Detecta formato universal por `meta.version` o claves `regime__categoria`.
+  - Carga `quality_score_model_universal_proposal.pkl`.
+  - Extrae features genéricas (`rsi_1h`, `rsi_4h`, `bb_position`, `atr_pct`, `vol_spike`, `range_position`, `trend_1h`, `trend_4h`) de `signal_meta`, `indicators` e `indicators_at_entry`.
+  - Predice probabilidad de `forward_net_4h > 0` y aplica el umbral más específico.
+  - Mantiene compatibilidad con el formato legacy de thresholds y el pipeline SPOT_BULL/RANGE_SCALP anterior.
+- **Tests**: `tests/test_entry_quality_gate.py` actualizado para usar thresholds pre-universales en assertions legacy; suite relevante pasa.
+- **Runtime**: `docker compose restart app` aplicado.
+
+### Validación previa al despliegue
+
+- Walk-forward purgado (76 ventanas): WR medio 69.7%, PF medio 4.55, cobertura 11.6%.
+- MIMIC retrospective sweep ligero (3 ventanas): WR medio 66.2%, PF medio 2.90, cobertura 12.3%.
+
+### Monitorización obligatoria
+
+- Verificar `score_source == "universal_model"` en `entry_profile_gate_info` de `ready_candidates` y `trades_open`.
+- Comparar cobertura real (~8-15%) y PnL neto con proyecciones.
+- Si el PnL real no confirma en 1-2 semanas: restaurar backup thresholds y reiniciar.
+
+### Rollback inmediato
+
+```powershell
+Copy-Item Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds_pre_universal_20260723.json Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json -Force
+# o dentro del contenedor:
+docker compose exec app cp Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds_pre_universal_20260723.json Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json
+docker compose restart app
+```
+
+---
+
+## Estado anterior del sistema — jul 22 2026
 
 La calibración agresiva ya está reflejada en la configuración runtime. Se corrigió el mecanismo por el cual los perfiles de régimen (almacenados en `trading_runtime_state`) revertían los valores globales a configuraciones más conservadoras de sweeps anteriores.
 
@@ -62,8 +385,8 @@ La calibración agresiva ya está reflejada en la configuración runtime. Se cor
 ### Estado de los cambios propuestos (C1-C10)
 
 - **C1 — Armonía de parámetros y auditoría de overrides**: completado. Los valores agresivos están en `docker-compose.override.yml` y protegidos contra perfiles de régimen.
-- **C2 — Propagar `peak_quality_profile`**: parcial; el `entry_profile_gate` ya usa el modelo de calidad entrenado (`quality_score_model_spot_bull.pkl`), pero falta verificar que el perfil real se propaga a `signal_meta` y a la metadata de posición.
-- **C3 — Recalibrar thresholds RANGE_SCALP A/B/C**: pendiente. El archivo `entry_profile_thresholds.json` aún muestra A=1.5, B=1.0, C=0.9 con B/C sin datos (`n=0`).
+- **C2 — Propagar `peak_quality_profile`**: completado en s93. El `entry_profile_gate` registra `score_source`, `category`, `model_version` y `peak_quality_profile` en `signal_meta` y metadata de posición.
+- **C3 — Recalibrar thresholds RANGE_SCALP A/B/C**: completado en s93 mediante el modelo universal. El archivo `entry_profile_thresholds.json` ahora contiene thresholds por régimen + categoría y el gate aplica el modelo universal `quality_score_model_universal_proposal.pkl`.
 - **C4/C5 — Relajar B/C y fricción staged entry**: parcial. `staged_entry_enabled=True`, `required_positive_checks=1`, `max_open_per_cycle=2` en SPOT_BULL/RANGE_SCALP; falta validar el bypass B/C con `confidence >= 0.8`.
 - **C6 — Activar FUTURES_SHORT**: parcial. `futures_enabled=True`, `futures_leverage=2`, `max_positions_futures_short=5`, pero aún no se han abierto shorts reales y los thresholds de shorts no están recalibrados con outcomes reales.
 - **C7 — PRESERVATION más ofensivo**: pendiente; aún no se actualizan `preservation_max_positions`, `preservation_min_vol_spike`, `preservation_max_rsi_entry`, `preservation_kelly_mult`.
