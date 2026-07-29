@@ -1,13 +1,20 @@
-console.log('[dashboard.js] loaded, API_BASE:', window.location.origin);
-const API_BASE = window.location.origin;
+// Force IPv4 (127.0.0.1) when hostname is 'localhost' to avoid wslrelay interception on Windows
+const _origin = window.location.hostname === 'localhost'
+    ? `${window.location.protocol}//127.0.0.1:${window.location.port}`
+    : window.location.origin;
+console.log('[dashboard.js] loaded, API_BASE:', _origin);
+const API_BASE = _origin;
 
 // API key loaded dynamically from backend at startup — never hardcoded in source
 let _API_KEY = '';
+let _resolveApiKey;
+const _apiKeyReady = new Promise(resolve => { _resolveApiKey = resolve; });
 (async () => {
     try {
         const r = await fetch(`${API_BASE}/dashboard/config`);
         if (r.ok) { const d = await r.json(); _API_KEY = d.api_key || ''; }
     } catch (e) { /* silent — no key = local dev mode */ }
+    if (_resolveApiKey) _resolveApiKey();
 })();
 function _authHeaders() {
     const h = { 'Content-Type': 'application/json' };
@@ -34,9 +41,15 @@ async function fetchDashboardData() {
     if (_cachedData && (now - _lastFetch) < CACHE_TTL_MS) return _cachedData;
     _fetchInProgress = true;
     try {
-        const res = await fetch(`${API_BASE}/dashboard/summary?days=${_dashboardDays}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        _cachedData = await res.json();
+        const [summaryRes, controlRes] = await Promise.all([
+            fetch(`${API_BASE}/dashboard/summary?days=${_dashboardDays}`),
+            fetch(`${API_BASE}/control/status`, { headers: _authHeaders() }),
+        ]);
+        if (!summaryRes.ok) throw new Error(`HTTP ${summaryRes.status}`);
+        _cachedData = await summaryRes.json();
+        if (controlRes.ok) {
+            _cachedData.control_status = await controlRes.json();
+        }
         _lastFetch = Date.now();
         _lastSuccessfulFetch = _lastFetch;
         _lastFetchErrorAt = 0;
@@ -237,6 +250,15 @@ function fmtModeBadge(p) {
     return `<span class="badge-mode" style="color:${cfg.color || '#ccc'}" title="${title}">${cfg.icon || ''} ${cfg.label || mode}</span>`;
 }
 
+function fmtTradeDirectionBadge(p) {
+    const side = (p.side || '').toString().toUpperCase();
+    const mode = (p.position_mode || '').toString().toUpperCase();
+    const isShort = side === 'SHORT' || side === 'SELL' || mode === 'FUTURES_SHORT';
+    const isFutures = p.trade_type === 'futures' || mode.startsWith('FUTURES_') || isShort;
+    if (isFutures) return `<span class="badge-futures">FUT ${isShort ? '▼ SHORT' : '▲ LONG'}</span>`;
+    return '<span class="badge-spot">SPOT ▲ LONG</span>';
+}
+
 function fmtPeakTuningBadges(p) {
     const ep = p.exit_policy_params || {};
     let badges = '';
@@ -263,6 +285,109 @@ function fmtContextBadge(p) {
     const reason = p.config_context_reason || 'no_context';
     const title = `Entrada ${entryMode}/${entryProfile} | Actual ${currentMode}/${currentProfile} | ${reason}`;
     return `<span class="badge-context ${cls}" title="${title}">${label}</span>`;
+}
+
+function fmtTruthBadge(label, status) {
+    const sev = String(status?.severity || 'unknown').toLowerCase();
+    const ok = Boolean(status?.ok);
+    const count = parseInt(status?.mismatch_count || 0, 10);
+    const updated = status?.updated_at ? relativeTime(status.updated_at) : '—';
+    const cls = sev === 'critical' ? 'negative' : sev === 'warning' ? 'exec-warn' : ok ? 'positive' : 'exec-warn';
+    const text = `${label}: ${sev.toUpperCase()}${count ? ` · ${count}` : ''}`;
+    const title = `${label} | mismatch=${count} | updated=${updated}`;
+    return `<span class="badge-context ${cls}" title="${title}">${text}</span>`;
+}
+
+function openSymbolChart(symbol, venue = 'tradingview', tradeType = 'spot') {
+    const normalized = String(symbol || '').toUpperCase().replace('/', '');
+    if (!normalized) return;
+    if (venue === 'binance') {
+        if (String(tradeType || '').toLowerCase() === 'futures') {
+            window.open(`https://www.binance.com/en/futures/${normalized}`, '_blank', 'noopener,noreferrer');
+            return;
+        }
+        const spotSymbol = normalized.endsWith('USDT')
+            ? `${normalized.slice(0, -4)}_USDT`
+            : normalized;
+        window.open(`https://www.binance.com/en/trade/${spotSymbol}?type=spot`, '_blank', 'noopener,noreferrer');
+        return;
+    }
+    window.open(`https://www.tradingview.com/chart/?symbol=BINANCE:${normalized}`, '_blank', 'noopener,noreferrer');
+}
+
+async function openSelectionSymbolChart(symbol, tradeType = 'spot', side = 'LONG') {
+    const normalized = String(symbol || '').toUpperCase().replace('/', '');
+    if (!normalized) return;
+
+    const modalId = 'selectionSymbolChartModal';
+    let modal = document.getElementById(modalId);
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = modalId;
+        modal.className = 'modal-detail';
+        document.body.appendChild(modal);
+    }
+
+    modal.innerHTML = `
+        <div class="modal-overlay" onclick="closeSelectionSymbolChartModal()">
+            <div class="modal-content" onclick="event.stopPropagation()">
+                <div class="modal-header">
+                    <h3>${normalized} — Contexto de precio (en espera)</h3>
+                    <button class="modal-close" onclick="closeSelectionSymbolChartModal()">×</button>
+                </div>
+                <div class="modal-body">
+                    <div class="modal-section">
+                        <h4>📊 COMPORTAMIENTO DEL PRECIO</h4>
+                        <div class="modal-price-chart" id="selectionSymbolChartWrap">
+                            <div style="text-align:center;color:#888;padding:20px;">Cargando histórico...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+
+    modal.style.display = 'block';
+    document.body.style.overflow = 'hidden';
+
+    try {
+        const end = new Date();
+        const start = new Date(end.getTime() - 6 * 60 * 60 * 1000);
+        const hist = await loadPriceHistory(normalized, start.toISOString(), end.toISOString(), tradeType || 'spot');
+        const wrap = document.getElementById('selectionSymbolChartWrap');
+        if (!wrap) return;
+        if (!hist || !Array.isArray(hist.data) || hist.data.length < 2) {
+            wrap.innerHTML = '<div style="text-align:center;color:#888;padding:20px;">Sin histórico suficiente para este símbolo.</div>';
+            return;
+        }
+        const first = hist.data[0];
+        const last = hist.data[hist.data.length - 1];
+        const mode = (String(tradeType).toLowerCase() === 'futures' && String(side).toUpperCase() === 'SHORT') ? 'FUTURES_SHORT'
+            : (String(tradeType).toLowerCase() === 'futures' ? 'FUTURES_LONG' : 'SPOT_LONG');
+        const chart = buildTimeSeriesChart(
+            hist.data,
+            parseFloat(first.close || 0),
+            parseFloat(last.close || 0),
+            null,
+            null,
+            null,
+            null,
+            1,
+            mode,
+        );
+        wrap.innerHTML = chart.html;
+        attachTimeSeriesChartHover(chart);
+    } catch (e) {
+        const wrap = document.getElementById('selectionSymbolChartWrap');
+        if (wrap) wrap.innerHTML = `<div style="text-align:center;color:#ff9e9e;padding:20px;">Error cargando histórico: ${e.message}</div>`;
+    }
+}
+
+function closeSelectionSymbolChartModal() {
+    const modal = document.getElementById('selectionSymbolChartModal');
+    if (modal) {
+        modal.style.display = 'none';
+        document.body.style.overflow = '';
+    }
 }
 
 // ── Category helpers (must be before any render function) ───────────────────
@@ -318,6 +443,10 @@ function renderExecutiveSummary(data) {
     const cycle    = data.next_cycle    || {};
     const pnlH     = data.pnl_history   || {};
     const btruth   = data.binance_truth || {};
+    const ctrl     = data.control_status || {};
+    const guard    = ctrl.capital_routing_guard || {};
+    const rollout  = data.rollout_readiness || {};
+    const parity   = data.parity_validation || {};
     const sMeta    = data.snapshot_meta || {};
     const breset   = data.basket_reset_decision || {};
 
@@ -366,6 +495,8 @@ function renderExecutiveSummary(data) {
     if (closeSL.length > 0) alerts.push(`🔴 ${closeSL.length} posición(es) con <1% al SL: ${closeSL.map(p => p.symbol).join(', ')}`);
     if (fng < 20) alerts.push(`😰 Fear &amp; Greed: ${fng} — Miedo Extremo (señales más difíciles de aprobar)`);
     const btSeverity = String(btruth.severity || 'unknown').toLowerCase();
+    const truthFut = btruth.futures || {};
+    const truthSpot = btruth.spot || {};
     if (btSeverity === 'critical') {
         alerts.push(`🧭 Binance Truth CRITICAL: ${btruth.mismatch_count || 0} mismatch(es) runtime↔exchange`);
     } else if (btSeverity === 'warning') {
@@ -381,6 +512,18 @@ function renderExecutiveSummary(data) {
     }
     if (breset.trigger === true) {
         alerts.push(`🧹 Basket reset sugerido: pnl=${(breset.combined_pnl_usd || 0).toFixed ? breset.combined_pnl_usd.toFixed(2) : breset.combined_pnl_usd} usd`);
+    }
+    if (ctrl.pause_new_entries?.active) {
+        alerts.push(`⛔ Entradas pausadas: ${ctrl.pause_new_entries.reason || 'sin motivo'}${ctrl.pause_new_entries.remaining_minutes != null ? ` · ${ctrl.pause_new_entries.remaining_minutes.toFixed(1)}m` : ''}`);
+    }
+    if (guard.active) {
+        alerts.push(`🧱 Capital guard activo (${guard.scope || 'GLOBAL'}): ${guard.reason || 'blocked'}`);
+    }
+    if (rollout.ok === false || String(rollout.status || '').toLowerCase() === 'blocked') {
+        alerts.push(`🛑 Rollout bloqueado: ${rollout.reason || rollout.error || rollout.status || 'pendiente'}`);
+    }
+    if (String(parity.status || '').toLowerCase() === 'critical') {
+        alerts.push(`⚠️ Paridad live/backtest crítica: ${parity.reason || parity.error || 'revisar gates'}`);
     }
     const alertHtml = alerts.length
         ? `<div class="exec-alerts">${alerts.map(a => `<div class="exec-alert">${a}</div>`).join('')}</div>`
@@ -411,6 +554,10 @@ function renderExecutiveSummary(data) {
                     &nbsp; F&amp;G <span style="color:${fng < 25 ? '#e74c3c' : fng < 45 ? '#ff7c4d' : fng < 56 ? '#aaa' : '#4ecca3'}">${fng} ${fngLabel}</span>
                     &nbsp; Binance <span class="${btSeverity === 'critical' ? 'negative' : btSeverity === 'warning' ? 'exec-warn' : 'positive'}">${(btruth.severity || 'unknown').toUpperCase()}</span>
                 </div>
+                <div class="exec-line" style="margin-top:6px;gap:6px;display:flex;flex-wrap:wrap">
+                    ${fmtTruthBadge('Futures truth', truthFut)}
+                    ${fmtTruthBadge('Spot truth', truthSpot)}
+                </div>
             </div>
             <div class="exec-section exec-portfolio">
                 <div class="exec-section-title">💼 SISTEMA</div>
@@ -419,6 +566,11 @@ function renderExecutiveSummary(data) {
                     &nbsp; Exp: <strong>${exposurePct}%</strong> / ${maxExpPct}%
                     &nbsp; Líquido: <strong>$${fmt(liquidUsdt)}</strong>
                     &nbsp; Total: <strong>$${fmt(totalUsdt)}</strong>
+                </div>
+                <div class="exec-line" style="margin-top:6px;gap:6px;display:flex;flex-wrap:wrap">
+                    ${ctrl.pause_new_entries?.active ? `<span class="exec-badge" style="background:#4a1d1d;color:#ffb3b3;border:1px solid #f44336">⏸ Entradas pausadas</span>` : ''}
+                    ${guard.active ? `<span class="exec-badge" style="background:#3d2a12;color:#ffd89b;border:1px solid #f39c12">🧱 Capital guard ${guard.scope || 'GLOBAL'}</span>` : ''}
+                    ${String(rollout.status || '').toLowerCase() === 'ready' || String(rollout.status || '').toLowerCase() === 'ok' ? `<span class="exec-badge" style="background:#14361f;color:#b7ffd0;border:1px solid #4ecca3">🚀 Rollout listo</span>` : ''}
                 </div>
             </div>
             <div class="exec-section exec-actions">
@@ -503,6 +655,8 @@ function renderKPIRow(data) {
     const futMax     = isFutShort ? (futCount > 0 ? Math.max(futCount, 5) : 7) : 0;
     const maxPos     = maxSpot;  // kept for legacy KPI tiles
     const ctx        = data.market_context || {};
+    const btruth     = data.binance_truth || {};
+    const ctrl       = data.control_status || {};
     const fng        = ctx.fear_greed_value ?? 50;
     const fngLabel   = ctx.fear_greed_label || 'Neutral';
     const profileLabel = String(effective.profile_label || activeProfile.label || '').toUpperCase();
@@ -583,6 +737,20 @@ function renderKPIRow(data) {
     if (hUnreal) { hUnreal.textContent = `${unrealPnl>=0?'+':''}$${fmt(unrealPnl)}`; hUnreal.className = `chip-val ${unrealCls}`; }
     const hRegime = document.getElementById('chipRegime');
     if (hRegime) hRegime.textContent = mode;
+    const hTruth = document.getElementById('chipTruth');
+    if (hTruth) {
+        const sev = String((btruth.futures || btruth.spot || {}).severity || 'unknown').toUpperCase();
+        hTruth.textContent = `TRUTH ${sev}`;
+        hTruth.className = `chip-val ${sev === 'CRITICAL' ? 'negative' : sev === 'WARNING' ? 'exec-warn' : 'positive'}`;
+    }
+    const hCtrl = document.getElementById('chipControl');
+    if (hCtrl) {
+        const paused = Boolean(ctrl.pause_new_entries?.active);
+        const guarded = Boolean(ctrl.capital_routing_guard?.active);
+        const label = paused ? 'PAUSED' : guarded ? 'GUARDED' : 'RUNNING';
+        hCtrl.textContent = `CTRL ${label}`;
+        hCtrl.className = `chip-val ${paused || guarded ? 'exec-warn' : 'positive'}`;
+    }
 
     // ── Performance tab KPI cards ─────────────────────────────────────────────
     const setText2 = (id, txt, cls) => {
@@ -608,6 +776,8 @@ function renderKPIRow(data) {
     const kpiPosSub   = document.getElementById('kpiPositionsSub');
     const kpiCd       = document.getElementById('kpiCountdown');
     const kpiCycleSub = document.getElementById('kpiCycleSub');
+    const kpiCtrl     = document.getElementById('kpiControl');
+    const kpiCtrlSub  = document.getElementById('kpiControlSub');
 
     if (kpiTotal)   { kpiTotal.textContent = `$${fmt(totalUsdt)}`; kpiTotal.className = 'kpi-value'; }
     if (kpiLiquid)  kpiLiquid.textContent  = `Líquido: $${fmt(liquidUsdt)}`;
@@ -621,6 +791,21 @@ function renderKPIRow(data) {
     if (kpiPosSub)  kpiPosSub.textContent  = isFutShort ? `Spot: ${spotCount}/${maxSpot} | Fut: ${futCount}/${futMax}` : `Abiertas (max ${maxPos})`;
     if (kpiCd)      kpiCd.textContent      = countdownStr;
     if (kpiCycleSub)kpiCycleSub.textContent = `${mode} · ${cycleMins}min`;
+    if (kpiCtrl) {
+        const paused = Boolean(ctrl.pause_new_entries?.active);
+        const guarded = Boolean(ctrl.capital_routing_guard?.active);
+        kpiCtrl.textContent = paused ? 'PAUSED' : guarded ? 'GUARDED' : 'RUNNING';
+        kpiCtrl.className = `kpi-value ${(paused || guarded) ? 'negative' : 'positive'}`;
+    }
+    if (kpiCtrlSub) {
+        const paused = Boolean(ctrl.pause_new_entries?.active);
+        const guarded = Boolean(ctrl.capital_routing_guard?.active);
+        kpiCtrlSub.textContent = paused
+            ? `Entradas: ${ctrl.pause_new_entries.reason || 'pausadas'}`
+            : guarded
+                ? `Guard: ${ctrl.capital_routing_guard.scope || 'GLOBAL'} · ${ctrl.capital_routing_guard.reason || 'blocked'}`
+                : 'Entradas normales';
+    }
 }
 
 // ── Ops unified card state ────────────────────────────────────────────────────
@@ -632,6 +817,7 @@ let _opsMainTab = 'open';  // 'open' | 'closed'
 let _opsSubFilter = 'all'; // 'all' | 'spot' | 'fut'
 let _selectionObservabilityTab = 'under_review'; // 'under_review' | 'reviewed'
 let _lastSelectionObservabilityData = null;
+let _lastSrPoolStatus = null;
 let _openSortMode = localStorage.getItem('ops_open_sort') || 'entry_desc'; // 'entry_desc' | 'entry_asc' | 'pnl_desc' | 'pnl_asc'
 let _openProfileFilter = 'all';   // 'all' | 'A' | 'B' | 'C'
 let _openModeFilter = 'all';      // 'all' | 'SPOT_BULL' | 'RANGE_SCALP' | 'PRESERVATION' | 'FUTURES_SHORT'
@@ -1224,7 +1410,7 @@ function renderOpenPositions(d) {
         const _bGateVel = p.bounce_gate_last_velocity != null ? ` vel: ${(p.bounce_gate_last_velocity * 100).toFixed(3)}%/h` : '';
         const _bGateTip = _isBounce ? `Entrada en rebote — Rescue Mode${_bGateBlocked ? ' ⏸️GATE BLOQUEADO (' + p.bounce_gate_blocked_count + 'x)' : ' activo'}. Target: pnl ≥ -$0.50${_btcTip}${_bGateSig}${_bGateEv}${_bGateVel}` : '';
         const bounceBadge = _isBounce ? ` <span class="badge-bounce${_bGateBlocked ? ' badge-bounce-gated' : ''}" title="${_bGateTip}">🔄 REBOTE${_bGateBlocked ? '⏸️' : ''}</span>` : '';
-        const typeBadge = p.trade_type === 'futures' ? '<span class="badge-futures">FUT</span>' : '<span class="badge-spot">SPOT</span>';
+        const tradeDirectionBadge = fmtTradeDirectionBadge(p);
         const _escN = p.escalamientos || 0;
         // Max escalonamiento_index from entries (may be >1 even if only 1 entry remains after sync)
         const _maxEscIdx = _escEntries.length > 0
@@ -1276,7 +1462,8 @@ function renderOpenPositions(d) {
             : '';
         rows.push(`
         <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'open')" style="cursor:pointer" data-symbol="${p.symbol}">
-            <td>${typeBadge} <strong>${p.symbol}</strong>${contextBadge}${overflowBadge}${escBadge}${partialBadge}${bounceBadge}${earlyPeakBadge}</td>
+            <td><strong>${p.symbol}</strong>${contextBadge}${overflowBadge}${escBadge}${partialBadge}${bounceBadge}${earlyPeakBadge}<br><div class="ops-row-actions"><button class="ops-action-btn" onclick="event.stopPropagation();openSelectionSymbolChart('${p.symbol}', '${p.trade_type || 'spot'}', '${p.side || 'LONG'}')">Ver gráfico</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'tradingview', '${p.trade_type || 'spot'}')">TV</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'binance', '${p.trade_type || 'spot'}')">BIN</button></div></td>
+            <td class="direction-cell">${tradeDirectionBadge}</td>
             <td class="profile-cell">${profileBadge}</td>
             <td class="mode-cell">${modeBadge}</td>
             <td>$${fmt(entryP)}<br><small class="entry-time">${entryTimeStr}</small></td>
@@ -1304,7 +1491,7 @@ function renderOpenPositions(d) {
                 <span style="color:#888;font-weight:600">Esc${_idx}</span>
                 <small style="color:#555;font-style:italic">&nbsp;(entrada anterior — no disponible tras reinicio)</small>
             </td>
-            <td colspan="11" style="color:#555;font-size:11px;font-style:italic">Datos no recuperables: posición promediada por Binance al sincronizar</td>
+            <td colspan="12" style="color:#555;font-size:11px;font-style:italic">Datos no recuperables: posición promediada por Binance al sincronizar</td>
         </tr>`);
                 }
             }
@@ -1323,6 +1510,7 @@ function renderOpenPositions(d) {
                 &nbsp;$${fmt(esc.entry_price)} × ${fmt(esc.qty,4)}
                 <small style="color:#666">(~$${fmt(escCost)})</small>
             </td>
+            <td></td>
             <td><small class="entry-time">${escEntryFmt}</small></td>
             <td></td>
             <td></td>
@@ -1339,7 +1527,7 @@ function renderOpenPositions(d) {
         }
         } catch (err) {
             console.error(`Open-position render error for ${p?.symbol || 'unknown'}:`, err);
-            rows.push(`<tr><td colspan="12" class="empty">No se pudo renderizar ${p?.symbol || 'una posición'}.</td></tr>`);
+            rows.push(`<tr><td colspan="13" class="empty">No se pudo renderizar ${p?.symbol || 'una posición'}.</td></tr>`);
         }
     }
 
@@ -1357,6 +1545,7 @@ function renderOpenPositions(d) {
             <thead>
                 <tr>
                     <th>Símbolo</th>
+                    <th class="direction-col">Operación</th>
                     <th class="profile-col">Perfil</th>
                     <th class="mode-col">Modo</th>
                     <th>Entrada</th>
@@ -1450,11 +1639,6 @@ function renderClosedPositions(d) {
         } catch(e) { return isoStr; }
     };
 
-    // Helper para badge de tipo de trading
-    const tradeTypeBadge = (type) => {
-        if (type === 'futures') return '<span class="badge-futures">FUT</span>';
-        return '<span class="badge-spot">SPOT</span>';
-    };
 
     // Calcular métricas de accuracy
     const withPred = sortedPositions.filter(p => p.prediction_accuracy != null);
@@ -1478,6 +1662,7 @@ function renderClosedPositions(d) {
             <thead>
                 <tr>
                     <th>Símbolo</th>
+                    <th class="direction-col">Operación</th>
                     <th class="profile-col">Perfil</th>
                     <th class="mode-col">Modo</th>
                     <th>Entrada → Salida</th>
@@ -1499,7 +1684,7 @@ function renderClosedPositions(d) {
                         _ctxCls,
                         actualPnl > 0 ? 'row-pnl-pos' : actualPnl < -0.01 ? 'row-pnl-neg' : ''
                     ].filter(Boolean).join(' ');
-                    const typeBadge = tradeTypeBadge(p.trade_type);
+                    const tradeDirectionBadge = fmtTradeDirectionBadge(p);
                     const contextBadge = fmtContextBadge(p);
                     const profileBadge = fmtProfileBadge(p);
                     const modeBadge = fmtModeBadge(p);
@@ -1539,7 +1724,8 @@ function renderClosedPositions(d) {
 
                     return `
                     <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'closed')" style="cursor:pointer">
-                        <td>${typeBadge} ${catIcon(p.category || 'MIDCAP_ALT')} <strong>${p.symbol}</strong>${contextBadge}</td>
+                        <td>${catIcon(p.category || 'MIDCAP_ALT')} <strong>${p.symbol}</strong>${contextBadge}<br><div class="ops-row-actions"><button class="ops-action-btn" onclick="event.stopPropagation();openSelectionSymbolChart('${p.symbol}', '${p.trade_type || 'spot'}', '${p.side || 'LONG'}')">Ver gráfico</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'tradingview', '${p.trade_type || 'spot'}')">TV</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'binance', '${p.trade_type || 'spot'}')">BIN</button></div></td>
+                        <td class="direction-cell">${tradeDirectionBadge}</td>
                         <td class="profile-cell">${profileBadge}</td>
                         <td class="mode-cell">${modeBadge}</td>
                         <td>$${fmt(p.entry_price)} → $${fmt(p.exit_price)}</td>
@@ -1653,6 +1839,41 @@ function renderExpectativaVsRealidad(data) {
     `;
 }
 
+function renderShadowReadiness(data) {
+    if (!data?.ok) return '<div class="shadow-readiness-error">Inventario shadow no disponible.</div>';
+    const summary = data.summary || {};
+    const sourceErrors = (data.source_errors || []).map(item => `<li><b>${item.source || 'fuente'}</b>: ${item.error || 'sin detalle'}</li>`).join('');
+    const labels = {
+        READY_TO_IMPLEMENT: 'LISTO PARA IMPLEMENTAR',
+        COLLECTING: 'RECOLECTANDO EVIDENCIA',
+        ACTIVE: 'ACTIVO',
+        DISABLED: 'DESACTIVADO',
+        RETIRED: 'RETIRADO',
+    };
+    const rows = (data.components || []).map(component => {
+        const state = String(component.state || 'COLLECTING').toUpperCase();
+        const gates = (component.gates || []).map(gate => {
+            const actual = gate.actual == null ? '—' : gate.actual;
+            const required = gate.required == null ? '—' : gate.required;
+            return `<li class="${gate.passed ? 'shadow-gate-passed' : 'shadow-gate-blocked'}"><b>${gate.name}</b> ${actual}/${required}${gate.passed ? '' : ` · ${gate.remediation || ''}`}</li>`;
+        }).join('');
+        return `<details class="shadow-component shadow-${state.toLowerCase()}" ${state === 'READY_TO_IMPLEMENT' ? 'open' : ''}>
+            <summary>
+                <span>${component.name || component.id}</span>
+                <em>${String(component.mode || 'shadow').toUpperCase()}</em>
+                <b>${labels[state] || state}</b>
+            </summary>
+            <p>${component.summary || 'Sin telemetría adicional.'}</p>
+            ${gates ? `<ul>${gates}</ul>` : '<p class="shadow-no-gates">Sin gates: componente retirado o informativo.</p>'}
+        </details>`;
+    }).join('') || '<p class="loading">Sin componentes shadow reportados.</p>';
+    return `<section class="shadow-readiness">
+        <div class="shadow-readiness-head"><strong>Evidencia Shadow</strong><small>Listos: ${summary.ready_to_implement || 0} · Recolectando: ${summary.collecting || 0} · Activos: ${summary.active || 0} · Desactivados: ${summary.disabled || 0}</small></div>
+        ${sourceErrors ? `<div class="shadow-source-errors"><b>Datos parciales</b><ul>${sourceErrors}</ul></div>` : ''}
+        <div class="shadow-components">${rows}</div>
+    </section>`;
+}
+
 function renderEntryEvidence(data) {
     const el = document.getElementById('entryEvidenceData');
     if (!el) return;
@@ -1701,6 +1922,7 @@ function renderEntryEvidence(data) {
             <div><span>Preflight bloqueadas</span><strong>${funnel.validated_blocked_by_execution_gate || 0}</strong></div>
         </div>
         ${alerts}
+        <div id="shadowReadinessData"><p class="loading">Cargando inventario shadow...</p></div>
     `;
 }
 
@@ -1713,9 +1935,16 @@ async function updateEntryEvidence() {
     const params = new URLSearchParams({ regime: 'RANGE_SCALP', days, include_legacy: legacy });
     if (profile) params.set('profile', profile);
     try {
-        const response = await fetch(`${API_BASE}/metrics/entry-evidence?${params.toString()}`, { headers: _authHeaders() });
+        const [response, readinessResponse] = await Promise.all([
+            fetch(`${API_BASE}/metrics/entry-evidence?${params.toString()}`, { headers: _authHeaders() }),
+            fetch(`${API_BASE}/metrics/shadow-readiness`, { headers: _authHeaders() }),
+        ]);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         renderEntryEvidence(await response.json());
+        const readinessEl = document.getElementById('shadowReadinessData');
+        if (readinessEl) readinessEl.innerHTML = readinessResponse.ok
+            ? renderShadowReadiness(await readinessResponse.json())
+            : '<div class="shadow-readiness-error">No se pudo cargar el inventario shadow.</div>';
     } catch (error) {
         console.error('Entry evidence fetch error:', error);
         el.innerHTML = '<p class="loading">No se pudo cargar la evidencia shadow.</p>';
@@ -1729,10 +1958,108 @@ function switchSelectionTab(tab) {
     }
 }
 
+function _num(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+}
+
+function _renderSRStepCards(title, steps) {
+    return `
+        <div class="sr-flow-block-title">${title}</div>
+        <div class="sr-flow-steps">
+            ${steps.map(step => `<div class="sr-step-card">
+                <div class="sr-step-head">Paso ${step.n}</div>
+                <div class="sr-step-label">${step.label}</div>
+                <div class="sr-step-count">${step.count}</div>
+            </div>`).join('')}
+        </div>`;
+}
+
+function renderSROperationalFlow(srData, selectionData) {
+    const overviewEl = document.getElementById('srFlowOverview');
+    const earlyEl = document.getElementById('srFlowEarly');
+    const lateEl = document.getElementById('srFlowLate');
+    const blockersEl = document.getElementById('srFlowBlockers');
+    if (!overviewEl || !earlyEl || !lateEl || !blockersEl) return;
+
+    const sr = srData && srData.ok ? srData : {};
+    const selection = selectionData && selectionData.available ? selectionData : {};
+    const candidates = Array.isArray(selection.candidates) ? selection.candidates : [];
+    const stageCounts = selection.stage_counts || {};
+    const displayCounts = selection.display_counts || {};
+    const latestCycle = selection.latest_selection_cycle || null;
+
+    const byStage = (...names) => candidates.filter(c => names.includes(String(c.stage_kind || ''))).length;
+    const byDisplay = (...names) => candidates.filter(c => names.includes(String(c.display_status || ''))).length;
+
+    const step1 = _num(sr.recent_signals_count) > 0
+        ? _num(sr.recent_signals_count)
+        : Math.max(_num(sr.pool_analysis_count), candidates.length);
+    const step2 = candidates.filter(c => ['A', 'B', 'C'].includes(String(c.profile_label || '').toUpperCase())).length;
+    const step3 = Math.max(_num(stageCounts.ready), byStage('setup_detected', 'trigger_monitoring'));
+    const step4 = byDisplay('validating', 'direction_pending');
+    const step5 = Math.max(byStage('risk_authorized'), byDisplay('ready_to_open'));
+
+    const step6 = Math.max(_num(stageCounts.validated), byDisplay('validated_queue', 'ready_to_open', 'preflight_pending'));
+    const step7 = byDisplay('validated_queue', 'preflight_pending');
+    const step8 = Math.max(byStage('execution_attempted'), byDisplay('preflight_pending'));
+    const step9 = _num(latestCycle?.executed_count);
+    const step10 = Math.max(_num(stageCounts.opened), byDisplay('opened'));
+
+    const earlySteps = [
+        { n: 1, label: 'Setup detectado', count: step1 },
+        { n: 2, label: 'Gate de calidad A/B/C', count: step2 },
+        { n: 3, label: 'Staged ready', count: step3 },
+        { n: 4, label: 'Espera activa / re-check', count: step4 },
+        { n: 5, label: 'Confirmación direccional', count: step5 },
+    ];
+    const lateSteps = [
+        { n: 6, label: 'Validated', count: step6 },
+        { n: 7, label: 'Validación final EV/prob', count: step7 },
+        { n: 8, label: 'Preflight riesgo/routing', count: step8 },
+        { n: 9, label: 'Orden enviada', count: step9 },
+        { n: 10, label: 'Fill + Opened', count: step10 },
+    ];
+
+    const poolOn = Boolean(sr.flags?.sr_pool_enabled);
+    const tradeOn = Boolean(sr.flags?.sr_pool_trade_enabled);
+    const cycleAt = latestCycle?.completed_at || latestCycle?.started_at;
+    const cycleLabel = cycleAt ? new Date(cycleAt).toLocaleString('es-MX', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' }) : '—';
+    overviewEl.innerHTML = `
+        <div class="sr-flow-overview-grid">
+            <div><span>Pool activo</span><strong>${poolOn ? 'Sí' : 'No'}</strong></div>
+            <div><span>Trade activo</span><strong>${tradeOn ? 'Sí' : 'No'}</strong></div>
+            <div><span>Señales SR recientes</span><strong>${_num(sr.recent_signals_count)}</strong></div>
+            <div><span>Candidatas visibles</span><strong>${candidates.length}</strong></div>
+            <div><span>Finalizadas</span><strong>${_num(displayCounts.opened) + _num(displayCounts.discarded) + _num(displayCounts.expired)}</strong></div>
+            <div><span>Último ciclo</span><strong>${cycleLabel}</strong></div>
+        </div>`;
+
+    earlyEl.innerHTML = _renderSRStepCards('Pasos 1-5 · Setup a confirmación', earlySteps);
+    lateEl.innerHTML = _renderSRStepCards('Pasos 6-10 · Validación a apertura', lateSteps);
+
+    const blockerMap = {};
+    candidates.forEach(c => {
+        const st = String(c.display_status || '');
+        if (!['discarded', 'preflight_pending', 'blocked_regime', 'expired'].includes(st)) return;
+        const key = String(c.stage_reason || c.display_reason || c.reason || st || 'UNKNOWN').toUpperCase();
+        blockerMap[key] = (blockerMap[key] || 0) + 1;
+    });
+    const blockers = Object.entries(blockerMap).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    blockersEl.innerHTML = `
+        <div class="sr-blockers-title">Bloqueos / terminales (top razones)</div>
+        <div class="sr-blockers-list">
+            ${blockers.length
+                ? blockers.map(([reason, count]) => `<span class="sr-blocker-pill">${reason}: <b>${count}</b></span>`).join('')
+                : '<span class="sr-blocker-pill">Sin bloqueos relevantes en el snapshot.</span>'}
+        </div>`;
+}
+
 function renderSelectionObservability(data) {
     const el = document.getElementById('selectionObservabilityData');
     if (!el) return;
     _lastSelectionObservabilityData = data || null;
+    renderSROperationalFlow(_lastSrPoolStatus, _lastSelectionObservabilityData);
     if (!data?.available) {
         el.innerHTML = '<p class="loading">La observabilidad estará disponible después del próximo ciclo.</p>';
         return;
@@ -1753,7 +2080,9 @@ function renderSelectionObservability(data) {
         expired: 'status-neutral'
     };
     const displayCounts = data.display_counts || {};
+    const stageCounts = data.stage_counts || {};
     const latestCycle = data.latest_selection_cycle || null;
+    const latency = data.latency_metrics || {};
 
     const comparePriority = (a, b) => {
         const ap = Array.isArray(a.priority) ? a.priority : [];
@@ -1764,9 +2093,72 @@ function renderSelectionObservability(data) {
         }
         return (a.last_review_at || '').localeCompare(b.last_review_at || '');
     };
+
+    const fmtMoney = v => (v == null || Number.isNaN(Number(v))) ? '—' : Number(v).toFixed(6);
+    const fmtSec = s => {
+        const n = Number(s);
+        if (!Number.isFinite(n) || n < 0) return '—';
+        if (n < 60) return `${Math.round(n)}s`;
+        if (n < 3600) return `${Math.round(n / 60)}m`;
+        return `${(n / 3600).toFixed(1)}h`;
+    };
+    const routeMeta = c => {
+        const status = String(c.status || '').toLowerCase();
+        const stage = String(c.stage_kind || '').toLowerCase();
+        const display = String(c.display_status || '').toLowerCase();
+        if (status === 'opened') return { step: 10, label: 'Fill confirmado', cls: 'status-positive' };
+        if (display === 'preflight_pending' || stage === 'execution_attempted') return { step: 8, label: 'Preflight/Riesgo', cls: 'status-pending' };
+        if (display === 'ready_to_open') return { step: 8, label: 'Lista para orden', cls: 'status-positive' };
+        if (status === 'validated' || display === 'validated_queue') return { step: 7, label: 'Validación final', cls: 'status-neutral' };
+        if (display === 'direction_pending') return { step: 5, label: 'Esperando rompimiento', cls: 'status-pending' };
+        if (status === 'ready' || stage === 'trigger_monitoring' || stage === 'setup_detected') return { step: 4, label: 'En re-check SR', cls: 'status-pending' };
+        if (status === 'discarded') return { step: null, label: 'Descartada', cls: 'status-negative' };
+        if (status === 'expired') return { step: null, label: 'Expirada', cls: 'status-neutral' };
+        return { step: null, label: 'Sin ruta', cls: 'status-neutral' };
+    };
+    const buildCandidateTimeline = c => {
+        const r = routeMeta(c);
+        const status = String(c.status || '').toLowerCase();
+        const terminal = status === 'discarded' ? 'D' : (status === 'expired' ? 'E' : null);
+        const activeStep = Number(r.step);
+        const cells = [];
+        for (let i = 1; i <= 10; i += 1) {
+            let cls = 'sr-pt';
+            if (Number.isFinite(activeStep)) {
+                if (i < activeStep) cls += ' done';
+                else if (i === activeStep) cls += ' active';
+                else cls += ' future';
+            } else {
+                cls += ' future';
+            }
+            cells.push(`<span class="${cls}" title="Paso ${i}">${i}</span>`);
+        }
+        if (terminal) cells.push(`<span class="sr-pt term" title="Terminal">${terminal}</span>`);
+        return `<div class="sr-mini-timeline" aria-label="Timeline 1 a 10">${cells.join('')}</div>`;
+    };
+
     const underReview = candidates.filter(c => c.under_review).sort(comparePriority);
     const reviewed = candidates.filter(c => c.reviewed).sort((a, b) => (b.last_review_at || '') > (a.last_review_at || '') ? 1 : -1);
     const shown = activeTab === 'under_review' ? underReview : reviewed;
+
+    const waitingBreakout = underReview.filter(c => {
+        const st = String(c.display_status || '');
+        const sk = String(c.stage_kind || '');
+        return st === 'validating' || st === 'direction_pending' || sk === 'trigger_monitoring' || sk === 'setup_detected';
+    });
+
+    const acceptedReviewed = reviewed.filter(c => String(c.status || '').toLowerCase() === 'opened');
+    const rejectedReviewed = reviewed.filter(c => {
+        const st = String(c.status || '').toLowerCase();
+        return st === 'discarded' || st === 'expired';
+    });
+
+    const discardReasonMap = {};
+    rejectedReviewed.forEach(c => {
+        const key = String(c.stage_reason || c.display_reason || c.reason || c.discard_reason || 'UNKNOWN').toUpperCase();
+        discardReasonMap[key] = (discardReasonMap[key] || 0) + 1;
+    });
+    const topDiscardReasons = Object.entries(discardReasonMap).sort((a, b) => b[1] - a[1]).slice(0, 8);
 
     const countsSummary = `
         <div class="selection-summary">
@@ -1776,12 +2168,52 @@ function renderSelectionObservability(data) {
             <div><span>Finalizadas</span><strong>${(displayCounts.opened ?? 0) + (displayCounts.discarded ?? 0) + (displayCounts.expired ?? 0)}</strong></div>
         </div>`;
 
+    const funnelSummary = `
+        <div class="selection-summary selection-funnel-summary">
+            <div><span>Detected</span><strong>${data.total ?? candidates.length}</strong></div>
+            <div><span>Ready</span><strong>${stageCounts.ready ?? 0}</strong></div>
+            <div><span>Validated</span><strong>${stageCounts.validated ?? 0}</strong></div>
+            <div><span>Opened</span><strong>${stageCounts.opened ?? 0}</strong></div>
+            <div><span>Discarded</span><strong>${stageCounts.discarded ?? 0}</strong></div>
+            <div><span>Expired</span><strong>${stageCounts.expired ?? 0}</strong></div>
+        </div>`;
+
     const cycleSummary = latestCycle ? `
         <div class="selection-summary">
             <div><span>Última selección</span><strong>${formatTime(latestCycle.completed_at || latestCycle.started_at)}</strong></div>
             <div><span>Régimen</span><strong>${latestCycle.regime_mode || '—'}</strong></div>
             <div><span>Resultado</span><strong>${latestCycle.summary?.reason || latestCycle.summary?.outcome || '—'}</strong></div>
             <div><span>Universo / QUBO / Órdenes</span><strong>${latestCycle.candidate_count ?? 0} / ${latestCycle.selected_count ?? 0} / ${latestCycle.executed_count ?? 0}</strong></div>
+        </div>` : '';
+
+    const cycleTiming = latestCycle ? (() => {
+        const started = latestCycle.started_at ? new Date(latestCycle.started_at).getTime() : null;
+        const completed = latestCycle.completed_at ? new Date(latestCycle.completed_at).getTime() : null;
+        const durationMs = started && completed && completed > started ? (completed - started) : null;
+        const ageMs = started ? (Date.now() - started) : null;
+        const durationLabel = durationMs != null ? `${Math.max(1, Math.round(durationMs / 1000))}s` : '—';
+        const ageLabel = ageMs != null ? `${Math.max(1, Math.round(ageMs / 60000))}m` : '—';
+        return `
+            <div class="selection-summary">
+                <div><span>Duración</span><strong>${durationLabel}</strong></div>
+                <div><span>Edad ciclo</span><strong>${ageLabel}</strong></div>
+                <div><span>Selecciones</span><strong>${latestCycle.selected_count ?? 0}</strong></div>
+                <div><span>Ejecutadas</span><strong>${latestCycle.executed_count ?? 0}</strong></div>
+            </div>`;
+    })() : '';
+
+    const cycleLatency = (latency.cycle_duration_seconds != null || latency.candidates_per_minute != null) ? `
+        <div class="selection-summary selection-latency-summary">
+            <div><span>Ciclo (s)</span><strong>${latency.cycle_duration_seconds != null ? latency.cycle_duration_seconds.toFixed(2) : '—'}</strong></div>
+            <div><span>Edad (s)</span><strong>${latency.cycle_age_seconds != null ? latency.cycle_age_seconds.toFixed(2) : '—'}</strong></div>
+            <div><span>Cand/min</span><strong>${latency.candidates_per_minute != null ? latency.candidates_per_minute.toFixed(2) : '—'}</strong></div>
+            <div><span>Sel/min</span><strong>${latency.selected_per_minute != null ? latency.selected_per_minute.toFixed(2) : '—'}</strong></div>
+            <div><span>Exec/min</span><strong>${latency.executed_per_minute != null ? latency.executed_per_minute.toFixed(2) : '—'}</strong></div>
+        </div>` : '';
+
+    const stageLegend = Object.entries(stageCounts).length ? `
+        <div class="selection-stage-legend">
+            ${Object.entries(stageCounts).map(([stage, count]) => `<span class="selection-stage-pill"><b>${stage}</b> ${count}</span>`).join('')}
         </div>` : '';
 
     const tabs = `
@@ -1794,32 +2226,97 @@ function renderSelectionObservability(data) {
             </button>
         </div>`;
 
+    const waitingBoard = activeTab === 'under_review' ? `
+        <div class="sr-waiting-board">
+            <div class="sr-waiting-head">
+                <strong>En espera de rompimiento (detalle)</strong>
+                <span>${waitingBreakout.length} candidata(s)</span>
+            </div>
+            ${waitingBreakout.length ? `
+                <div class="sr-mini-table">
+                    <div class="sr-mini-row sr-mini-head">
+                        <span>Símbolo</span><span>Estado</span><span>Precio base</span><span>Target</span><span>Stop</span><span>Confirmaciones</span><span>Tiempo etapa</span><span>Razón actual</span>
+                    </div>
+                    ${waitingBreakout.slice(0, 30).map(c => {
+                        const d = c.direction || {};
+                        const conf = Number(d.directional_confirmations || 0);
+                        const req = Number(d.required_confirmations || 0) || Number((c.config_snapshot || {}).direction_required_confirmations || 0) || 1;
+                        const r = routeMeta(c);
+                        return `<div class="sr-mini-row">
+                            <span><b>${c.symbol || '—'}</b></span>
+                            <span><span class="selection-col-status ${r.cls}">${r.step ? `Paso ${r.step}` : 'Terminal'}</span></span>
+                            <span>${fmtMoney(d.base_price)}</span>
+                            <span>${fmtMoney(d.target_price)}</span>
+                            <span>${fmtMoney(d.stop_price)}</span>
+                            <span>${conf}/${req}</span>
+                            <span>${fmtSec(c.time_in_stage_sec)}</span>
+                            <span title="${c.display_reason || c.reason || c.stage_reason || ''}">${c.display_reason || c.reason || c.stage_reason || '—'}</span>
+                        </div>`;
+                    }).join('')}
+                </div>
+            ` : '<p class="loading">No hay candidatas en espera de rompimiento en este ciclo.</p>'}
+        </div>` : '';
+
+    const reviewedBoard = activeTab === 'reviewed' ? `
+        <div class="sr-reviewed-board">
+            <div class="selection-summary">
+                <div><span>Aceptadas con fill</span><strong>${acceptedReviewed.length}</strong></div>
+                <div><span>Rechazadas/expiradas</span><strong>${rejectedReviewed.length}</strong></div>
+                <div><span>Tasa a fill</span><strong>${reviewed.length ? ((acceptedReviewed.length / reviewed.length) * 100).toFixed(1) : '0.0'}%</strong></div>
+                <div><span>Revisión total</span><strong>${reviewed.length}</strong></div>
+            </div>
+            <div class="sr-blockers-title">Razones de descarte (más frecuentes)</div>
+            <div class="sr-blockers-list">
+                ${topDiscardReasons.length
+                    ? topDiscardReasons.map(([reason, count]) => `<span class="sr-blocker-pill">${reason}: <b>${count}</b></span>`).join('')
+                    : '<span class="sr-blocker-pill">Sin descartes en la ventana actual.</span>'}
+            </div>
+        </div>` : '';
+
     const rows = shown.length ? shown.map(c => `
         <div class="selection-candidate-row">
-            <div class="selection-col-symbol">
-                <strong>${c.symbol || '—'}</strong>
-                <span class="selection-sub">${c.regime_mode || '—'} · ${c.trade_type === 'futures' ? 'FUT' : 'SPOT'}</span>
-            </div>
+            <div class="selection-col-symbol"><strong>${c.symbol || '—'}</strong>${buildCandidateTimeline(c)}</div>
+            <div class="selection-col-direction">${fmtTradeDirectionBadge({
+                trade_type: c.trade_type,
+                side: c.expected_side || c.side,
+                position_mode: c.arbiter_mode,
+            })}</div>
+            <div class="selection-col-mode">${c.regime_mode || '—'}</div>
             <div class="selection-col-profile">${c.profile_label ? `Perfil <b>${c.profile_label}</b>` : '—'}</div>
             <div class="selection-col-score">Score <b>${c.quality_score != null ? parseFloat(c.quality_score).toFixed(2) : '—'}</b><br><small>EV ${c.expected_pnl != null ? parseFloat(c.expected_pnl).toFixed(2) : '—'}</small></div>
             <div class="selection-col-checks">${c.positive_checks ?? 0}/${c.total_checks ?? 0} checks</div>
-            <div class="selection-col-status ${statusClass[c.display_status] || 'status-neutral'}">${c.display_label || c.status}</div>
-            <div class="selection-col-decision" title="${c.display_reason || c.reason || ''}">${c.decision || '—'}<br><small>${c.display_reason || c.reason || ''}</small></div>
+            <div class="selection-col-status ${statusClass[c.display_status] || 'status-neutral'}">${c.display_label || c.status}<br><small class="sr-route-note">${(() => { const r = routeMeta(c); return r.step ? `Paso ${r.step} · ${r.label}` : r.label; })()}</small></div>
+            <div class="selection-col-decision" title="${c.display_reason || c.reason || ''}">${c.decision || '—'}<br><small>${c.display_reason || c.reason || ''}</small><br><small>stage=${c.stage_kind || '—'} · reason=${c.stage_reason || '—'}</small></div>
             <div class="selection-col-time">${formatTime(c.last_review_at)}</div>
+            <div class="selection-col-actions">
+                <button class="selection-action-btn" onclick="openSelectionSymbolChart('${c.symbol || ''}', '${c.trade_type || 'spot'}', '${c.expected_side || c.side || 'LONG'}')">Ver gráfico</button>
+                <button class="selection-action-btn" onclick="openSymbolChart('${c.symbol || ''}', 'tradingview', '${c.trade_type || 'spot'}')">TV</button>
+                <button class="selection-action-btn" onclick="openSymbolChart('${c.symbol || ''}', 'binance', '${c.trade_type || 'spot'}')">BIN</button>
+            </div>
         </div>`).join('') : '<p class="loading">Sin candidatos en esta pestaña.</p>';
 
     el.innerHTML = `
+        <div class="sr-detail-title">Detalle de candidatas SR</div>
         ${countsSummary}
+        ${funnelSummary}
         ${cycleSummary}
+        ${cycleTiming}
+        ${cycleLatency}
+        ${stageLegend}
         ${tabs}
+        ${waitingBoard}
+        ${reviewedBoard}
         <div class="selection-candidates-header">
             <span>Símbolo</span>
+            <span>Operación</span>
+            <span>Régimen</span>
             <span>Perfil</span>
             <span>Score</span>
             <span>Checks</span>
             <span>Estado</span>
             <span>Decisión / Razón</span>
             <span>Últ. revisión</span>
+            <span>Acciones</span>
         </div>
         <div class="selection-candidates">${rows}</div>
     `;
@@ -2165,7 +2662,7 @@ function showPositionDetailModal(symbol, positionId, status) {
     const chartWrap = document.getElementById('spotChartWrap');
     if (status === 'closed' && position.entry_time && position.exit_time) {
         // Load historical data for closed positions
-        loadPriceHistory(symbol, position.entry_time, position.exit_time).then(priceData => {
+        loadPriceHistory(symbol, position.entry_time, position.exit_time, position.trade_type || 'spot').then(priceData => {
             if (priceData && priceData.data && chartWrap) {
                 const chart = buildTimeSeriesChart(
                     priceData.data,
@@ -2175,7 +2672,8 @@ function showPositionDetailModal(symbol, positionId, status) {
                     pred.take_profit_initial || position.take_profit,
                     position.stop_loss,
                     position.take_profit,
-                    position.quantity
+                    position.quantity,
+                    position.position_mode || position.side || 'SPOT_LONG'
                 );
                 chartWrap.innerHTML = chart.html;
                 attachTimeSeriesChartHover(chart);
@@ -2232,23 +2730,31 @@ async function previewManualClose(symbol, positionId, status) {
             alert(`No se puede cerrar ${symbol}: ${preview.reason || 'desconocido'}`);
             return;
         }
-        const lines = [
-            `Tipo: ${preview.trade_type || 'spot'}`,
-            `Entradas DB: ${preview.entries ?? '?'}`,
-            `Cantidad en Binance: ${(preview.binance_qty ?? 0).toFixed(6)}`,
-            `Precio actual: $${fmt(preview.price)}`,
-            `Notional: $${fmt(preview.notional_held)}`,
-        ];
-        if (preview.topup_needed) {
+        const isFutures = preview.trade_type === 'futures';
+        const lines = isFutures
+            ? [
+                `Tipo: futures ${preview.side || ''}`,
+                `Cantidad en Binance: ${(preview.qty ?? 0).toFixed(6)}`,
+                `Precio de entrada: $${fmt(preview.entry_price)}`,
+                `PnL no realizado: $${fmt(preview.unrealized_pnl)}`,
+            ]
+            : [
+                `Tipo: ${preview.trade_type || 'spot'}`,
+                `Entradas DB: ${preview.entries ?? '?'}`,
+                `Cantidad en Binance: ${(preview.binance_qty ?? 0).toFixed(6)}`,
+                `Precio actual: $${fmt(preview.price)}`,
+                `Notional: $${fmt(preview.notional_held)}`,
+            ];
+        if (!isFutures && preview.topup_needed) {
             lines.push(`⚠️ Se requiere top-up: ${preview.topup_qty.toFixed(6)} (~$${fmt(preview.topup_usdt)})`);
         }
-        if (!preview.sell_valid) {
+        if (!isFutures && !preview.sell_valid) {
             lines.push(`❌ Venta no válida: ${preview.sell_invalid_reason || ''}`);
             return;
         }
         lines.push('', '¿Confirmas cierre al mercado?');
         if (!confirm(lines.join('\n'))) return;
-        await executeManualClose(symbol);
+        await executeManualClose(symbol, preview.trade_type || 'auto', preview.side || 'SHORT');
     } catch (e) {
         console.error('previewManualClose error', e);
         alert(`Error al obtener preview: ${e.message}`);
@@ -2257,12 +2763,12 @@ async function previewManualClose(symbol, positionId, status) {
     }
 }
 
-async function executeManualClose(symbol) {
+async function executeManualClose(symbol, tradeType = 'auto', side = 'SHORT') {
     try {
-        const res = await fetch(`${API_BASE}/positions/${encodeURIComponent(symbol)}/close`, {
+        const params = new URLSearchParams({ trade_type: tradeType, side, ghost: 'false' });
+        const res = await fetch(`${API_BASE}/positions/${encodeURIComponent(symbol)}/close?${params}`, {
             method: 'POST',
             headers: _authHeaders(),
-            body: JSON.stringify({ trade_type: 'auto', ghost: false })
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const result = await res.json();
@@ -2285,7 +2791,7 @@ async function executeManualClose(symbol) {
 // ── Time Series Chart SVG (with hover tooltip) ───────────────────────────────
 let _chartUid = 0;
 
-function buildTimeSeriesChart(priceData, entryPrice, exitPrice, slInitial, tpInitial, slFinal, tpFinal, qty) {
+function buildTimeSeriesChart(priceData, entryPrice, exitPrice, slInitial, tpInitial, slFinal, tpFinal, qty, positionMode = 'SPOT_LONG') {
     const uid = ++_chartUid;
     const W = 620;
     const H = 180;
@@ -2421,7 +2927,7 @@ function buildTimeSeriesChart(priceData, entryPrice, exitPrice, slInitial, tpIni
         html: svg,
         uid, 
         entry: entryPrice, 
-        isShort: false, 
+        isShort: String(positionMode).toUpperCase().includes('SHORT'),
         rangeMin: minPrice, 
         rangeSpan: priceRange, 
         chartL: padding.left, 
@@ -2439,9 +2945,9 @@ function buildTimeSeriesChart(priceData, entryPrice, exitPrice, slInitial, tpIni
 // ── Price Range Chart SVG (legacy, kept for compatibility) ───────────────────────
 
 // Load price history data from API
-async function loadPriceHistory(symbol, startTime, endTime) {
+async function loadPriceHistory(symbol, startTime, endTime, tradeType = 'spot') {
     try {
-        const response = await fetch(`${API_BASE}/price-history/${symbol}?start_time=${startTime}&end_time=${endTime}`, {
+        const response = await fetch(`${API_BASE}/price-history/${symbol}?start_time=${encodeURIComponent(startTime)}&end_time=${encodeURIComponent(endTime)}&trade_type=${encodeURIComponent(tradeType)}`, {
             headers: _authHeaders()
         });
         if (!response.ok) return null;
@@ -2455,7 +2961,7 @@ async function loadPriceHistory(symbol, startTime, endTime) {
 
 // Enhanced attachChartHover for time series charts
 function attachTimeSeriesChartHover(chartData) {
-    const { uid, entry, priceData, exitPrice, slInitial, tpInitial, slFinal, tpFinal, qty } = chartData;
+    const { uid, entry, priceData, exitPrice, slInitial, tpInitial, slFinal, tpFinal, qty, isShort } = chartData;
     console.log('[attachTimeSeriesChartHover] uid=' + uid + ' entry=' + entry + ' dataPoints=' + (priceData?.length || 0));
     
     const svg = document.getElementById('prc-svg-' + uid);
@@ -2503,7 +3009,7 @@ function attachTimeSeriesChartHover(chartData) {
         }
         
         const hoverPrice = closestPoint.close;
-        const pnlEstUnit = exitPrice >= entry ? (hoverPrice - entry) : (entry - hoverPrice);
+        const pnlEstUnit = isShort ? (entry - hoverPrice) : (hoverPrice - entry);
         const pnlEst = pnlEstUnit * qty;
         const pnlPct = entry > 0 ? (pnlEstUnit / entry * 100) : 0;
         const col = pnlEst >= 0 ? '#4ecca3' : '#e74c3c';
@@ -3346,6 +3852,64 @@ async function updateReconciliation() {
 // Shows a non-blocking warning banner when run_trades detects critical conditions.
 // Operator must press STOP manually — the system never auto-pauses.
 let _activeAlertKeys = [];
+
+async function updateRangeScalpDual() {
+    try {
+        const [statsRes, recentRes] = await Promise.all([
+            fetch(`${API_BASE}/range_scalp/dual_stats`, { headers: _authHeaders() }),
+            fetch(`${API_BASE}/range_scalp/recent_reclassifications?limit=10`, { headers: _authHeaders() }),
+        ]);
+        const stats = statsRes.ok ? await statsRes.json() : { ok: false };
+        const recent = recentRes.ok ? await recentRes.json() : { ok: false };
+
+        const panel = document.getElementById('rangeScalpDualPanel');
+        const recentEl = document.getElementById('rangeScalpDualRecent');
+        if (!panel) return;
+
+        if (!stats.ok) {
+            panel.innerHTML = `<p class="loading">Error: ${stats.error || '—'}</p>`;
+            return;
+        }
+        const flags = stats.flags || {};
+        const flagState = (enabled, label) => `<span style="color:${enabled ? '#4caf50' : '#888'};font-size:11px">${enabled ? '✅' : '⏸'} ${label}</span>`;
+        panel.innerHTML = `
+            <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px">
+                <div class="data-item"><span class="data-label">Evaluados 24h</span><span class="data-value">${stats.evaluated ?? 0}</span></div>
+                <div class="data-item"><span class="data-label">SHORTs abiertos</span><span class="data-value">${stats.opened_shorts ?? 0}</span></div>
+            </div>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px">
+                ${flagState(flags.range_scalp_bidirectional_enabled, 'Bidireccional')}
+                ${flagState(flags.range_scalp_short_execution_enabled, 'Ejecución SHORT')}
+            </div>
+        `;
+
+        if (recentEl && recent.ok && recent.items) {
+            const rows = recent.items.map(item => {
+                const reclass = item.reclass || {};
+                const zone = reclass.sr_zone_position != null ? Number(reclass.sr_zone_position).toFixed(2) : '—';
+                const executed = reclass.execution_enabled ? '✅' : '⏸';
+                const ev = reclass.expected_pnl != null ? `${Number(reclass.expected_pnl).toFixed(2)}` : '—';
+                return `<div style="font-size:11px;color:#ccc;padding:3px 0;border-bottom:1px solid #333">
+                    ${executed} <b>${item.symbol}</b> zone=${zone} EV=${ev} (${item.discard_reason})
+                </div>`;
+            }).join('');
+            recentEl.innerHTML = `<div style="font-size:11px;color:#888;margin-bottom:4px">Re-clasificaciones recientes:</div>${rows || '<p class="loading">Sin datos</p>'}`;
+        }
+    } catch (e) {
+        console.error('RangeScalpDual fetch error:', e);
+    }
+}
+
+async function updateSRPoolPanel() {
+    try {
+        const res = await fetch(`${API_BASE}/sr_pool/status`, { headers: _authHeaders() });
+        const data = res.ok ? await res.json() : { ok: false };
+        _lastSrPoolStatus = data;
+        renderSROperationalFlow(_lastSrPoolStatus, _lastSelectionObservabilityData);
+    } catch (e) {
+        console.error('SRPool fetch error:', e);
+    }
+}
 
 async function updateOperatorAlerts() {
     try {
@@ -4483,7 +5047,7 @@ function showFuturesClosedDetailModal(symbol, side, idx) {
     // Load time series chart for closed futures
     const chartWrap = document.getElementById('futChartWrap');
     if (pos.opened_at && pos.closed_at) {
-        loadPriceHistory(symbol, pos.opened_at, pos.closed_at).then(priceData => {
+        loadPriceHistory(symbol, pos.opened_at, pos.closed_at, 'futures').then(priceData => {
             if (priceData && priceData.data && chartWrap) {
                 const chart = buildTimeSeriesChart(
                     priceData.data,
@@ -4493,7 +5057,8 @@ function showFuturesClosedDetailModal(symbol, side, idx) {
                     pos.tp_price_initial || pos.tp_price,
                     pos.sl_price,
                     pos.tp_price,
-                    pos.qty
+                    pos.qty,
+                    isShort ? 'FUTURES_SHORT' : 'FUTURES_LONG'
                 );
                 chartWrap.innerHTML = chart.html;
                 attachTimeSeriesChartHover(chart);
@@ -6403,7 +6968,8 @@ function renderPredVsRealChart(containerId, expectativaData) {
     });
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    await _apiKeyReady;
     _restoreSmartRunId();
 
     // ── Tab navigation ────────────────────────────────────────────────────────
@@ -6556,6 +7122,19 @@ document.addEventListener('DOMContentLoaded', () => {
     if (refreshHealthBtn) refreshHealthBtn.addEventListener('click', () => {
         updateHealthAndErrors();
         updateReconciliation();
+        updateRangeScalpDual();
+    });
+
+    // ── Refresh RANGE_SCALP Dual button ──────────────────────────
+    const refreshRangeScalpDualBtn = document.getElementById('refreshRangeScalpDualBtn');
+    if (refreshRangeScalpDualBtn) refreshRangeScalpDualBtn.addEventListener('click', () => {
+        updateRangeScalpDual();
+    });
+
+    // ── Refresh SR Pool button ───────────────────────────────────
+    const refreshSRPoolBtn = document.getElementById('refreshSRPoolBtn');
+    if (refreshSRPoolBtn) refreshSRPoolBtn.addEventListener('click', () => {
+        updateSRPoolPanel();
     });
 
     // ── Clear Errors button ──────────────────────────────────────
@@ -6597,12 +7176,15 @@ document.addEventListener('DOMContentLoaded', () => {
     updateDashboard();
     updateHealthAndErrors();
     updateReconciliation();
+    updateRangeScalpDual();
+    updateSRPoolPanel();
     updateOperatorAlerts();
     pollBacktestResults();
     updateBacktestProgressWidget();
     setInterval(updateDashboard, POLL_INTERVAL_MS);
     setInterval(updateReconciliation, 60000);
     setInterval(updateHealthAndErrors, 60000);  // Health & errors refresh every 60s
+    setInterval(updateSRPoolPanel, 30000);        // SR-pool panel every 30s
     setInterval(updateOperatorAlerts, 30000);   // Operator alerts every 30s
     setInterval(updateBacktestProgressWidget, BACKTEST_PROGRESS_POLL_MS);
     // Toggle MXN re-renders open positions

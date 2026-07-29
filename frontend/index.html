@@ -3,8 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Crypto Agent — Dashboard</title>
-    <link rel="stylesheet" href="/frontend/styles.css?v=30">
+    <link rel="stylesheet" href="/frontend/styles.css?v=32">
 </head>
 <body class="mode-FUTURES_SHORT" id="appBody">
 
@@ -212,11 +215,21 @@
                 <div id="closedPositionsData" class="ops-panel"            style="display:none"><p class="loading">Cargando...</p></div>
             </div>
 
-            <!-- Card: Selección de candidatos (mismo ancho que operaciones) -->
-            <div class="card selection-observability-card" id="selectionObservabilityCard">
+            <!-- Card unificada: Flujo Operativo SR (Pool + Selección) -->
+            <div class="card selection-observability-card" id="srOperationalFlowCard">
                 <div class="card-header">
-                    <h2>🔎 Selección de candidatos</h2>
+                    <h2>🧭 Flujo Operativo SR (1-10)</h2>
+                    <span class="card-sub">Visibilidad completa desde setup hasta apertura</span>
+                    <div class="card-actions">
+                        <button class="btn btn-primary btn-xs" id="refreshSRPoolBtn">↻ Actualizar</button>
+                    </div>
                 </div>
+                <div id="srFlowOverview"><p class="loading">Cargando estado SR...</p></div>
+                <div class="sr-flow-grid">
+                    <div class="sr-flow-block" id="srFlowEarly"><p class="loading">Cargando pasos 1-5...</p></div>
+                    <div class="sr-flow-block" id="srFlowLate"><p class="loading">Cargando pasos 6-10...</p></div>
+                </div>
+                <div id="srFlowBlockers"></div>
                 <div id="selectionObservabilityData"><p class="loading">Cargando...</p></div>
             </div>
 
@@ -651,6 +664,17 @@
             </div>
             <div id="reconciliationPanel"><p class="loading">Cargando reconciliación...</p></div>
         </div>
+        <div class="card" id="rangeScalpDualCard">
+            <div class="card-header">
+                <h2>🔀 RANGE_SCALP Dual</h2>
+                <span class="card-sub">LONG soporte / SHORT resistencia</span>
+                <div class="card-actions">
+                    <button class="btn btn-primary btn-xs" id="refreshRangeScalpDualBtn">↻ Actualizar</button>
+                </div>
+            </div>
+            <div id="rangeScalpDualPanel"><p class="loading">Cargando...</p></div>
+            <div id="rangeScalpDualRecent" style="margin-top:8px"></div>
+        </div>
         <div class="card" id="fullHealthCard" style="display:none">
             <div class="card-header">
                 <h2>🩺 System Health Report</h2>
@@ -840,7 +864,7 @@
     </div>
 </div>
 
-<script src="/frontend/dashboard.js?v=113"></script>
+<script src="/frontend/dashboard.js?v=118"></script>
 <script src="/frontend/super_mimic.js?v=1"></script>
 </body>
 </html>
