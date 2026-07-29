@@ -705,7 +705,19 @@ def _execute_validated_fast_path(
                     _update_fast_path_gate(db_client, ready_id, True, "FAST_PATH_FUTURES_LONG", usdt_liquid)
                     total_open += 1
                     continue
-                # FUTURES_LONG failed — fall through to SPOT LONG (same direction)
+                _routing_intent = str(signal_meta_row.get("routing_intent") or "").strip().upper()
+                if _routing_intent == "FUTURES_LONG_ANALYSIS":
+                    print(f"[FastPath] {symbol}: FUTURES_LONG failed, no SPOT fallback (futures-only intent)")
+                    _update_fast_path_gate(db_client, ready_id, False, "FUTURES_LONG_NO_MARGIN", usdt_liquid)
+                    update_signal_decision(
+                        symbol,
+                        "rejected",
+                        "FUTURES_LONG_NO_MARGIN",
+                        signal_id=signal_meta_row.get("signal_id"),
+                        trade_type="futures",
+                    )
+                    continue
+                # Backward-compatible behavior for non-futures-only intents.
                 print(f"[FastPath] {symbol}: FUTURES_LONG failed, falling through to SPOT LONG")
 
         # ── Gate 3: MAX_POSITIONS ────────────────────────────────────────────
@@ -10321,6 +10333,13 @@ def execute_once(monitor_only: bool = False, components=None):
     if getattr(settings, 'futures_enabled', True):
         try:
             _fc = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None), injected_client=getattr(comp, 'futures_client', None))
+
+            # M1: If a manual close was issued from another process (CLI/API), mark the position
+            # closed here before check_positions() tries to reconcile it as a Binance SL/TP hit.
+            try:
+                _fc.sync_manual_closes_from_audit()
+            except Exception as _manual_sync_err:
+                print(f"[Futures/Sync] manual close sync error: {_manual_sync_err}")
 
             # CapBridge: bidirectional autonomous spot↔futures capital rebalancing
             if getattr(settings, 'futures_capital_bridge_enabled', True):

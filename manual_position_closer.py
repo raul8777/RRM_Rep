@@ -260,7 +260,13 @@ def execute_spot(symbol: str, components, source: str = "api") -> Dict:
 def preview_futures(symbol: str, components) -> Dict:
     """Dry-run for FUTURES close."""
     from run_trades import _get_futures_client
-    fc = _get_futures_client()
+
+    db_client = getattr(components, "db_client", None)
+    settings = getattr(components, "settings", None)
+    if settings is None:
+        from config import get_settings
+        settings = get_settings()
+    fc = _get_futures_client(settings, db_client=db_client)
     if fc is None:
         return {"ok": False, "reason": "futures_client_not_available", "symbol": symbol}
 
@@ -308,12 +314,14 @@ def execute_futures(symbol: str, side: str, components, source: str = "api") -> 
       4. Verify positionAmt=0.
       5. Persist closed with manual metadata.
     """
-    import config_helpers
     from run_trades import _get_futures_client
 
     db = getattr(components, "db_client", None)
-
-    fc = _get_futures_client()
+    settings = getattr(components, "settings", None)
+    if settings is None:
+        from config import get_settings
+        settings = get_settings()
+    fc = _get_futures_client(settings, db_client=db)
     if fc is None:
         return {"ok": False, "reason": "futures_client_not_available", "symbol": symbol}
 
@@ -329,7 +337,11 @@ def execute_futures(symbol: str, side: str, components, source: str = "api") -> 
         return {"ok": False, "reason": "futures_close_returned_none", "symbol": symbol}
 
     _audit(db, symbol, "manual_position_futures_close_done", {
-        "side": side, "result": str(result)[:200], "source": source,
+        "side": side,
+        "result": str(result)[:200],
+        "source": source,
+        "order_id": result.get("orderId") if isinstance(result, dict) else None,
+        "client_order_id": result.get("clientOrderId") if isinstance(result, dict) else None,
     })
 
     return {

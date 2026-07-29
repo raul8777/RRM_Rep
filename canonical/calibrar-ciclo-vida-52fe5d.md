@@ -3,7 +3,7 @@ title: "Calibración del ciclo de vida de una operación"
 type: canonical-memory
 tags: ["lifecycle", "exit_pipeline", "SSO", "PRS", "UG", "peak_capture", "trailing", "breakeven", "spot", "futures", "profit_preservation", "loss_control"]
 created_at: 2026-07-23
-updated_at: 2026-07-23
+updated_at: 2026-07-24
 source_file: "C:\\Users\\raul8\\.windsurf\\plans\\calibrar-ciclo-vida-52fe5d.md"
 ---
 
@@ -16,6 +16,91 @@ Documento vivo que consolida el diseño actual del ciclo de vida de una posició
 **Fase:** calibración del ciclo de vida de posiciones abiertas.
 **Objetivo:** documentar el pipeline actual de salida, diagnosticar por qué las últimas 48h generaron pérdidas grandes / ganancias mínimas, y proponer ajustes canónicos a los módulos de exit (SSO, PRS, UG, PredExit, trailing, breakeven, hard SL/TP) sin romper la arquitectura existente.
 **Alcance:** SPOT y FUTURES, con paridad de criterios salvo que la mecánica de mercado justifique una diferencia documentada.
+
+## Actualización s93b — Fix RANGE_SCALP + trigger SR en salida (2026-07-24)
+
+### Fix de aperturas RANGE_SCALP
+
+- `staged_entry.build_range_reversion_prediction` esperaba Bollinger Bands en `bollinger_bands.{lower,middle,upper}`, pero `analyze_signal` las expone como `lower_band`, `middle_band`, `upper_band`. Eso hacía que la predicción de reversión fuera inválida (`missing_bollinger_bands`) y `entry_decision` cayera al predictor LONG genérico (comportamiento SPOT_BULL), que no genera `target_price`/`stop_price`, por lo que `staged_entry` descartaba con `DIRECTION_TARGET_MISSING`.
+- `pnl_predictor.predict_range_reversion` ponía el stop estructural exactamente en `lower`. Cuando el precio tocaba o rompía ligeramente la banda inferior (`band_position ≈ 0`), el stop quedaba en o por encima del precio, invalidando el payoff (`invalid_reversion_payoff`) y terminando en `DIRECTION_TARGET_MISSING`.
+- Se corrigieron ambos problemas: lectura plana/anidada de BB y selección del stop más alto entre el estructural (`lower * (1 - configured_sl/1000)`) y el configurado (`price * (1 - configured_sl)`) que esté estrictamente por debajo del precio actual, coherente con el criterio canónico de comprar cerca del soporte y no forzar trades en el techo del rango.
+- Nuevo cuello de botella detectado: `_normalize_autonomous_signal` en `run_trades.py` no reenviaba las features que el modelo universal espera (`range_position`, `rsi_1h`, `rsi_4h`, `trend_1h`, `trend_4h`). `_extract_universal_features` caía en proxies débiles, bajando el score de calidad y descartando todos los candidatos `RANGE_SCALP` con `PEAK_QUALITY_DISCARDED`. Se añadieron esas keys al dict normalizado y el siguiente ciclo ya staged a `KAITOUSDT`.
+- Se re-aplicaron overrides runtime:
+  - `category_max_positions_enabled = False`
+  - `entry_quality_vol_spike_min_range_scalp = 0.20`
+
+### Integración de Soporte/Resistencia en salida
+
+- `peak_capture_engine.py` ahora incluye el trigger `profit_predexit_sr_resistance` (prioridad 91) entre `regime_fear` (92) y `capture` (85).
+- Se dispara cuando la posición está cerca de la resistencia (`sr_zone_position > 0.85` o distancia ≤ ATR%%) y ya hay beneficio.
+- Esto añade una razón de cierre adicional al análisis lifecycle; los dashboards y queries deben agrupar también por `profit_predexit_sr_resistance`.
+
+### Monitorización requerida
+
+- Confirmar aperturas validadas `RANGE_SCALP` en las próximas 6-12h.
+- Revisar si `sr_entry_shadow_rejected` sombrea señales rentables; considerar pasar a `active` o ajustar umbrales tras 48h de datos.
+
+---
+
+## Actualización s94 — Pipeline SR completo y gates relajados (2026-07-24)
+
+### Inyección de features SR en aperturas y cierres
+
+- `pnl_predictor.py` ajusta probabilidad de éxito y rango de precios usando `sr_zone_position`, `sr_bounce`, `sr_breakout`, `sr_breakdown` y distancias SR.
+- `entry_profile_gate.py` consume distancias/posición de zona SR en el modelo universal y bonifica el score heurístico por eventos SR.
+- `autonomous_signals.py` extrae, reenvía y genera señales BUY/SELL a partir de rebote de soporte, breakout y breakdown; el ranking por régimen bonifica eventos SR confirmados.
+- `staged_entry.py` reduce fricción para señales SR confirmadas: `required_positive_checks=1`, `direction_required_confirmations=1`, `direction_min_progress_bps=1.0`, `max_cycles>=4`. También filtra `get_openable_candidates` por `top_symbols_qubo`.
+- `run_trades.py` reenvía SR features y evita el descarte inicial de perfil (`PEAK_QUALITY_DISCARDED`) para eventos SR confirmados.
+
+### Relajación de gates y configuración agresiva
+
+- `entry_decision.py`: `entry_decision_min_probability` default **0.50** para todos los regímenes.
+- `config.py` / `config_helpers.py`: `max_positions_spot_bull=12`, `max_positions_range_scalp=8`, `max_positions_preservation=4`, `max_positions_futures_short=8`, `max_total_exposure_pct=0.95`, `max_positions=8`, `max_open_per_cycle=2`, `category_max_positions_enabled=False`.
+- `market_regime.py`: `kelly_mult` SPOT_BULL=1.05, RANGE_SCALP=1.0, PRESERVATION=0.7; FUTURES_SHORT base 0.6 con boost hasta 1.0 según confianza.
+- `universe_selector.py`: default `screener_max_pairs=100` alineado a config.
+
+### Validación
+
+- Suite completa: **602 passed, 0 failed**.
+- `tmp_audit_config.py`: 0 critical mismatches.
+
+### Implicaciones para el lifecycle
+
+- Las aperturas ahora dependen más de eventos SR confirmados; los cierres siguen incluyendo el disparador `profit_predexit_sr_resistance`.
+- Los re-chequeos staged serán más permisivos para candidatos con metadatos `support_bounce_buy`, `sr_bounce`, `support_breakout_buy`, `sr_breakout`, `support_breakdown_sell` o `sr_breakdown`.
+- El riesgo agregado sube con mayor exposición y Kelly; se debe monitorear drawdown y correlación de cierres.
+
+---
+
+## Actualización s93 — Entrada universal desplegada (2026-07-23)
+
+El `entry_profile_gate` ahora aplica el **modelo universal** (`quality_score_model_universal_proposal.pkl`) con thresholds por régimen + categoría. Esto afecta el ciclo de vida porque:
+
+- El perfil de calidad de entrada (`peak_quality_profile`) y el score (`peak_quality_score`) se generan a partir del modelo universal; `score_source` en `entry_profile_gate_info` debe ser `"universal_model"`.
+- La propagación de `peak_quality_profile` al metadata de `trades_open` es crítica para que SSO/PRS/UG escaleen paciencia y riesgo por calidad real de entrada. El runtime ya no consulta un `current_regime_profile_label` global.
+- Los cierres reales bajo este gate deben agruparse por `score_source` y `profile_label` para comparar lifecycle (giveback, parciales, SL/TP) contra baseline y contra proyecciones walk-forward/MIMIC.
+- Rollback de entrada no altera SL/TP ni lifecycle; solo cambia el conjunto de señales que llegan al pipeline de salida.
+
+### Monitorización requerida
+
+- Fracción de posiciones abiertas con `score_source == "universal_model"`.
+- PnL neto, win rate, giveback y razón de parciales por `peak_quality_profile` (A/B/C) y categoría.
+- Comparar contra cohortes previas (`score_source != "universal_model"` o trades anteriores).
+
+---
+
+## Actualización s95 — Perfil por operación consolidado (2026-07-24)
+
+El refactor s95 elimina el perfil activo global del runtime. Implicaciones para el ciclo de vida:
+
+- Cada posición lleva su propio `peak_quality_profile` generado por `entry_profile_gate` en el momento de la entrada. Este perfil viaja en el metadata de `trades_open` y es la única fuente para decisiones de sizing, salida y monitorización.
+- Los supervisores de salida (PRS, UG, SSO, SmartTP, Peak Capture) deben leer el perfil de la posición, no de `settings.current_regime_profile_label`. Si el metadata carece de `peak_quality_profile`, el fallback canónico es `'B'`.
+- Los caps del `universe_selector` son por régimen únicamente; todos los perfiles comparten el mismo universo candidato, y la calidad de entrada decide cuáles entran.
+- El dashboard no presenta un "perfil activo global"; muestra "Per operation" y, en el detalle de cada posición, su `peak_quality_profile` real.
+- MIMIC/backtest asigna el perfil forzado por operación (`peak_quality_profile`), no un perfil global de simulación.
+- Verificación: suite completa `611 passed, 2 skipped, 0 failed` (`pytest -n 4`).
+
+---
 
 ## Estado actual del pipeline de salida
 
@@ -56,7 +141,7 @@ Hipótesis iniciales a validar con datos:
 2. **SSO / PRS / UG disparan cierres tardíos o nunca:** posiciones ganadoras no se cierran hasta que se convierten en perdedoras.
 3. **Peak Capture no captura picos:** hold mínimo muy largo o `prob_higher_peak` sobreestimado; se devuelve ganancia del pico.
 4. **SL/TP con R:R desfavorable:** `stop_loss_pct` / `take_profit_pct` actuales generan muchos stops y pocos TPs.
-5. **Confusión de perfiles:** `current_regime_profile_label=A` se usa para sizing y salidas, pero no refleja la calidad real de la entrada (`peak_quality_profile` puede estar vacío o mal propagado).
+5. **Perfil por operación:** sizing y salidas usan el `peak_quality_profile` de cada posición. Si el metadata de una posición no tiene `peak_quality_profile`, los supervisores fallback a 'B'.
 6. **Correlación / mass-SL:** múltiples posiciones cierran en SL simultáneo por alta correlación; la pausa global no es suficiente.
 7. **FUTURES_SHORT inactivo o mal calibrado:** ausencia de shorts en caídas deja el portfolio expuesto al lado largo.
 8. **Comisiones + slippage en parciales:** cierres parciales frecuentes erosionan PnL neto si no se contabilizan correctamente.
@@ -66,7 +151,7 @@ Hipótesis iniciales a validar con datos:
 Recolectar por ventanas de 24h y 48h antes de cualquier cambio:
 
 - Número de cierres por `close_reason`: `stop_loss`, `take_profit`, `sso_*`, `prs_*`, `unified_governance_*`, `profit_predexit_*`, `manual_close`, `ghost_*`, `dust_*`.
-- PnL **neto** agrupado por reason, régimen, perfil de régimen y tipo (SPOT/FUTURES).
+- PnL **neto** agrupado por reason, régimen, `peak_quality_profile` de la posición y tipo (SPOT/FUTURES).
 - Tiempo medio en trade hasta el cierre, por reason.
 - `peak_pnl_pct` vs `pnl_pct` al cierre: % devuelto del pico (`giveback`).
 - Tasa de activación de BE y trailing: % de posiciones que llegaron a BE, % que activaron trailing.
@@ -98,7 +183,7 @@ Recolectar por ventanas de 24h y 48h antes de cualquier cambio:
 - [ ] **C5. Cierre parcial canónico:** todo parcial debe insertar fila en `trades_closed` con `partial_close=True`, reducir `quantity` en `trades_open`, y resetear `peak_pnl_pct` baseline para la porción restante. Reforzar regla dura de `.windsurf/rules.md` §3.
 - [ ] **C6. Unificación SPOT/FUTURES de lógica de salida:** extraer helper común que construya `SSO/PRS/UG/PredExit` context para ambos modos; evitar divergencia de criterios.
 - [ ] **C7. F&G y correlación en salida:** si F&G <25 o >75 ajustar paciencia/peak-protection; si múltiples posiciones cierran SL en la misma hora, activar pausa global de re-entrada.
-- [ ] **C8. Propagación del perfil de calidad:** asegurar que `peak_quality_profile` y `peak_quality_score` del `entry_profile_gate` lleguen al metadata de la posición y se usen en los módulos de salida (no solo `current_regime_profile_label`).
+- [x] **C8. Propagación del perfil de calidad:** `entry_profile_gate.classify()` ya escribe `peak_quality_profile`, `peak_quality_score`, `entry_profile_gate_info` (incluyendo `score_source`, `model_version`, `category`) en `signal_meta`; `_filter_buy_candidates` y `staged_entry` propagan estos valores al metadata de la posición. Pendiente: que SSO/PRS/UG los consuman para escalar paciencia/riesgo.
 - [ ] **C9. Comisiones netas en decisión de parcial:** incluir comisión + slippage estimado en el cálculo de umbral de cierre parcial para evitar que parciales frecuentes erosionen PnL.
 - [ ] **C10. Dashboard de ciclo de vida:** añadir vista de "vida activa" con BE, trailing, peak, advisories, próximo trigger estimado y giveback actual.
 
@@ -377,3 +462,50 @@ El problema no es un módulo aislado, sino una **asimetría sistémica en las sa
 - Plan de calibración de entradas: `c:\Users\raul8\.windsurf\plans\calibracion_entradas-a20ab8-v3.md`.
 - Módulos clave: `run_trades.py`, `futures_client.py`, `smart_scale_out.py`, `profit_realization_supervisor.py`, `peak_capture_engine.py`, `unified_governance_supervisor.py`, `position_manager.py`, `state_persistence.py`.
 - Datos del análisis: queries a `crypto_agent.trades_closed` y `crypto_agent.trades_audit` del contenedor `crypto-agent-db`.
+
+## 15. Fix paridad DB/Binance para cierres manuales de futures — cc1b8f
+
+**Fecha:** 2026-07-28
+**Símbolo ejemplo:** DIAUSDT SHORT
+
+### 15.1 Problema
+
+El cierre manual de un future SHORT persistió en `trades_closed` con:
+- `exit_price = entry_price` → PnL bruto 0
+- `pnl = -comisiones` (−$8.55)
+- Poco después apareció un segundo registro con `close_reason = trailing_sl_binance` y `pnl = +$124.28`, duplicando el cierre sin existir una segunda operación real en Binance.
+
+El PnL real reportado por `userTrades` fue +$128.41, neto ~+$125.45.
+
+### 15.2 Root cause
+
+| # | Causa | Ubicación | Efecto |
+|---|---|---|---|
+| A | `pos.exit_price` y `pos.pnl` se asignaban **después** de `_save_futures_closed()` | `futures_client.py` `close_long`/`close_short` | El cierre se persistía con `exit_price = entry_price` y PnL ≈ −comisiones. |
+| B | `_get_realized_pnl_from_trades()` usaba heurística por signo del PnL para etiquetar la razón | `futures_client.py` | Un cierre manual positivo se etiquetaba como `trailing_sl_binance`. |
+| C | El ciclo principal no conocía cierres manuales hechos desde otro proceso | `run_trades.py` / `manual_position_closer.py` | `check_positions()` regeneraba el cierre como SL/TP de Binance. |
+
+### 15.3 Cambios
+
+1. **`futures_client.py`**
+   - `_average_fill_price(order, fallback)`: precio real del fill (fills → avgPrice → fallback).
+   - `close_long()` / `close_short()`: asignan `pos.exit_price` y `pos.pnl` **antes** de persistir.
+   - `_classify_close_reason(symbol, order_id, realized_pnl)`: prefiere `manual_close` por `trades_audit`, luego el tipo de orden de Binance, y solo al final recurre a signo.
+   - `sync_manual_closes_from_audit()`: lee `manual_position_futures_close_done` de los últimos 20 min y marca posiciones en memoria como cerradas.
+
+2. **`run_trades.py`**
+   - `_fc.sync_manual_closes_from_audit()` se ejecuta antes de `_fc.check_positions()` cada ciclo.
+
+3. **`manual_position_closer.py`**
+   - El audit `manual_position_futures_close_done` guarda `order_id` y `client_order_id`.
+
+### 15.4 Validación
+
+- `tests/test_futures_manual_close_parity.py`: 5/5 passed.
+- Regresión futures: 112/112 passed.
+- `auto_reconcile_futures(dry_run=True)`: `mismatch_count: 0`.
+- Contenedor `crypto-agent-app` reiniciado; health `overall: ok`; solo queda `WLDUSDT SHORT`.
+
+### 15.5 Rollback
+
+Revertir los commits que toquen `futures_client.py`, `run_trades.py`, `manual_position_closer.py` y el test; reiniciar el contenedor; ejecutar `auto_reconcile_futures(dry_run=False)` si aparecen discrepancias.
