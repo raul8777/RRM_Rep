@@ -18,9 +18,11 @@ Usage:
 """
 
 import json
+import re
 import time
 import hashlib
 import hmac
+import threading
 import urllib.request
 import urllib.parse
 import uuid
@@ -93,6 +95,16 @@ LEVERAGE_MAX  = 10         # hard upper bound; active leverage is settings.futur
 MAX_SHORTS    = 12         # hard upper bound; active max is settings.futures_max_shorts (backtest run_0812: 12)
 FUNDING_LIMIT = 0.0005     # Skip entry if funding rate > 0.05% (overleveraged longs → risky to short)
 _PRICE_CACHE_TTL = 15      # seconds
+# s107: safety margin between the "software" SL (pos.sl_price, used by is_sl_hit()
+# to close proactively) and the "Hard SL" — the real STOP_MARKET algo order sitting
+# on Binance. At entry (FIX-T2A) the Hard SL was placed 1.5x wider than software as
+# a last-resort net; but every subsequent update_sl_tp() call (trailing, breakeven,
+# SSO re-placement) was re-placing the Binance order at the SAME price as the
+# software SL, collapsing the margin to zero for the rest of the position's life —
+# from then on Binance's real-time engine, not our 3-45min polling loop, effectively
+# became the primary stop mechanism. This constant is now applied on every
+# update_sl_tp() SL adjustment, not just at entry, so the safety margin persists.
+_SL_SAFETY_MARGIN_MULTIPLIER = 1.5
 
 
 @dataclass
@@ -160,6 +172,16 @@ class FuturesClient:
         self._binance_client_ref = None  # set by _get_futures_client() for momentum eval
         self.db_client = db_client        # FIX-G: DB persistence for futures trades
         self._cached_settings = settings  # FIX-G3: keep settings for commission/config lookups
+        # S105h: single global lock serializing "detect close -> reconcile -> persist ->
+        # mark pos.closed" critical sections. Without it, the event-stream callback
+        # thread (binance_event_stream.py, S105g) and the polling reconciliation paths
+        # (Ghost-L1/L2 in check_positions(), the -2022 handler in close_long/close_short)
+        # can both pass the `pos.closed` guard before either finishes its network I/O,
+        # racing to _save_futures_closed() and inserting the same close twice into
+        # trades_closed. Closes are rare (a handful per cycle) so a single lock across
+        # symbols costs negligible latency and is far safer to reason about than
+        # per-symbol locking for a financial persistence path.
+        self._close_lock = threading.RLock()
         if not dry_run:
             self._sync_open_positions()
 
@@ -321,6 +343,27 @@ class FuturesClient:
                          f"Futures audit write failed ({symbol}:{event}): {e}")
             print(f"[Futures/Audit] failed {symbol}:{event}: {e}")
 
+    def _persist_truth_transition(self, stage: str, symbol: str, side: str, detail: Dict[str, Any], confirmed: bool) -> None:
+        """Persist the current Binance truth transition for futures lifecycle events."""
+        if not self.db_client:
+            return
+        try:
+            payload = {
+                "stage": stage,
+                "symbol": symbol,
+                "side": side,
+                "detail": detail,
+                "confirmed": bool(confirmed),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            persist_truth_status(self.db_client, payload, source=f"futures_{stage.lower()}")
+            self.db_client.execute_update(
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+                (symbol, 'futures', f'{stage.lower()}_binance', json.dumps(payload), bool(confirmed)),
+            )
+        except Exception as e:
+            print(f"[Futures/Truth] persist {stage} failed {symbol}: {e}")
+
     def _save_futures_closed(self, pos: 'FuturesPosition', reason: str,
                               close_group_id: Optional[str] = None,
                               esc_index: int = 1, total_esc: int = 1,
@@ -399,6 +442,29 @@ class FuturesClient:
                 _pred_pnl = float(pos.pnl_prediction.get('expected_pnl', 0) or 0)
                 if _pred_pnl != 0:
                     _pred_accuracy = round((pnl - _pred_pnl) / abs(_pred_pnl), 4)
+            # S105h: defense-in-depth duplicate guard. The in-memory `_close_lock`
+            # (see __init__) is the primary fix for the event-stream/polling race that
+            # produced duplicate trades_closed rows (RIFUSDT/DOGEUSDT, 2026-07-31), but
+            # this DB-level check catches anything the lock doesn't cover (e.g. a second
+            # process, a retried call after a transient error). Same symbol/side/entry_time
+            # (the anchor of a specific opened position) closed again within 5 minutes is
+            # treated as the same close event, not a new one.
+            if not partial_close:
+                try:
+                    _dupe = self.db_client.execute_query(
+                        "SELECT id FROM trades_closed WHERE symbol=%s AND side=%s AND entry_time=%s "
+                        "AND exit_time > NOW() - INTERVAL '5 minutes' LIMIT 1",
+                        (pos.symbol, 'SELL' if pos.side == 'SHORT' else 'BUY', pos.opened_at.isoformat()),
+                    )
+                    if _dupe:
+                        print(f"[Futures/DB] save_closed {pos.symbol} {pos.side}: duplicate close detected "
+                              f"(already persisted as id={_dupe[0]['id']}) — skipping re-insert")
+                        self._audit(pos.symbol, 'close_duplicate_skipped', {
+                            'side': pos.side, 'reason': reason, 'existing_id': _dupe[0]['id'],
+                        })
+                        return True
+                except Exception as _dupe_err:
+                    print(f"[Futures/DB] save_closed {pos.symbol}: duplicate check failed (proceeding): {_dupe_err}")
             insert_query = """
                 INSERT INTO trades_closed
                     (symbol, side, quantity, entry_price, exit_price, pnl, pnl_percentage,
@@ -486,16 +552,74 @@ class FuturesClient:
 
     # ── FIX-T4 helper: query Binance for realized PnL of closed position ────
 
-    def _classify_close_reason(self, symbol: str, order_id: str, realized_pnl: float) -> str:
+    def _infer_close_reason_from_price(
+        self, pos: Optional['FuturesPosition'], exit_price: Optional[float], tolerance: float = 0.015,
+    ) -> Optional[str]:
+        """s107: heuristic close-reason fallback for Binance algo-order fills.
+
+        Once a CONDITIONAL STOP_MARKET/TAKE_PROFIT_MARKET algo order triggers,
+        Binance executes it as a plain MARKET order — both the REST order lookup
+        and the user-data-stream execution report describe the resulting fill as
+        `type=MARKET`, not the original algo type. That means the order-type
+        mapping in `_classify_close_reason` (and the websocket handler) never
+        matches for our own SL/TP algo orders, and they fall through to the
+        generic `binance_unidentified_close` bucket even though we know exactly
+        where our SL/TP levels were.
+
+        This compares the fill price against our own known levels — software
+        SL (`pos.sl_price`), the wider Hard SL (`pos._smart_meta['hard_sl_price']`,
+        s107), and TP (`pos.tp_price`) — within a small relative tolerance, and
+        returns the matching reason, or None if nothing lines up (e.g. a genuine
+        manual/regime-change/UG close, which should keep using its own reason).
+        """
+        if not pos or not exit_price or exit_price <= 0:
+            return None
+        try:
+            candidates = [
+                (float(pos.sl_price) if pos.sl_price else None, "stop_loss_binance"),
+                (float(pos._smart_meta.get("hard_sl_price")) if pos._smart_meta.get("hard_sl_price") else None, "stop_loss_binance"),
+                (float(pos.tp_price) if pos.tp_price else None, "take_profit_binance"),
+            ]
+            for level, reason in candidates:
+                if level and level > 0 and abs(exit_price - level) / level <= tolerance:
+                    return reason
+        except Exception as _infer_err:
+            print(f"[Futures] close_reason price-inference failed: {_infer_err}")
+        return None
+
+    def _classify_close_reason(
+        self, symbol: str, order_id: str, realized_pnl: float,
+        fallback_reason: Optional[str] = None,
+        pos: Optional['FuturesPosition'] = None,
+        exit_price: Optional[float] = None,
+    ) -> str:
         """Return the most accurate close_reason for a Binance closing fill.
 
         Looks first at recent manual_close audit events, then at the order type.
         Falls back to a sign-based generic reason only when nothing else works.
+
+        S105f FIX: a Binance `MARKET` order does NOT prove a manual close — every
+        automated exit in this codebase (regime_change, unified_governance_*,
+        basket_reset_auto, gap protection, local stop_loss) also sends plain
+        `type=MARKET` orders (see close_long/close_short below). Only a matching
+        `manual_position_futures_close_done` audit event (step 1) is real evidence
+        of a manual close. When that's absent and the order type isn't a Binance
+        algo order (STOP_MARKET/TAKE_PROFIT_MARKET/TRAILING_STOP_MARKET), prefer
+        the caller's own intended `fallback_reason` (it knows why it tried to close)
+        over guessing "manual_close" without evidence.
+
+        S105g FIX: since every close order we place now carries a structured
+        `newClientOrderId` (see _gen_client_order_id), the *first* and most
+        authoritative check is simply reading that id back from Binance — it is
+        Binance's own record of our intent, not a guess reconstructed after the
+        fact from order type or a time-windowed audit match.
         """
         if not order_id:
-            return "trailing_sl_binance" if realized_pnl > 0 else "stop_loss_binance"
+            return fallback_reason or ("trailing_sl_binance" if realized_pnl > 0 else "stop_loss_binance")
 
-        # 1. Manual close audit?
+        # 1. Manual close audit? Cheap DB-only check, kept first for backward
+        #    compatibility with orders placed before client-order-id tagging (S105g)
+        #    or any close issued outside close_long()/close_short().
         try:
             if self.db_client:
                 audit_rows = self.db_client.execute_query(
@@ -519,13 +643,18 @@ class FuturesClient:
         except Exception as _audit_err:
             print(f"[Futures] close_reason audit lookup failed {symbol}: {_audit_err}")
 
-        # 2. Order type from Binance?
+        # 2. Look up the real closing order once: prefer our own structured
+        #    clientOrderId (S105g — Binance's own record of our intent, not a
+        #    guess), then fall back to mapping the Binance order type.
         try:
             order_info = self._get(
                 "/fapi/v1/order",
                 {"symbol": symbol, "orderId": order_id},
                 signed=True,
             )
+            _tagged_reason = self._decode_close_reason_from_client_order_id(order_info.get("clientOrderId"))
+            if _tagged_reason:
+                return _tagged_reason
             otype = str(order_info.get("type", "")).upper()
             if otype == "STOP_MARKET":
                 return "stop_loss_binance"
@@ -534,17 +663,46 @@ class FuturesClient:
             if otype == "TRAILING_STOP_MARKET":
                 return "trailing_sl_binance"
             if otype == "MARKET":
-                return "manual_close"
+                # MARKET is used by every automated close path too — not proof of manual.
+                # s107: before giving up to the generic bucket, check whether the fill
+                # price lines up with our own known SL/TP levels (this is exactly the
+                # case for algo-triggered SL/TP fills, which always report as MARKET).
+                _inferred = self._infer_close_reason_from_price(pos, exit_price)
+                if _inferred:
+                    return _inferred
+                # Prefer the caller's intended reason; only fall back to a neutral,
+                # explicitly-unresolved label (never "manual_close") when none was given.
+                return fallback_reason or "binance_unidentified_close"
         except Exception as _order_err:
             print(f"[Futures] close_reason order lookup failed {symbol} {order_id}: {_order_err}")
 
-        # 3. Fallback: generic sign-based guess with a warning label
+        # 3. Fallback: price-proximity heuristic, then the caller's intended reason,
+        #    else a sign-based generic guess.
+        _inferred = self._infer_close_reason_from_price(pos, exit_price)
+        if _inferred:
+            return _inferred
+        if fallback_reason:
+            return fallback_reason
         print(f"[Futures/WARN] {symbol}: could not classify close for order {order_id} — using sign heuristic")
         return "trailing_sl_binance" if realized_pnl > 0 else "stop_loss_binance"
 
-    def _get_realized_pnl_from_trades(self, symbol: str, side: str, opened_at: Optional[datetime] = None) -> dict:
+    def _get_realized_pnl_from_trades(
+        self, symbol: str, side: str, opened_at: Optional[datetime] = None,
+        fallback_reason: Optional[str] = None,
+        pos: Optional['FuturesPosition'] = None,
+    ) -> dict:
         """Query Binance userTrades for the most recent closing trade on this symbol/side.
-        Used when Binance executes SL/TP independently and our close call fails with -2022."""
+        Used when Binance executes SL/TP independently and our close call fails with -2022.
+
+        `fallback_reason` (S105f): the reason the caller originally intended for this close
+        (e.g. "regime_change", "unified_governance_near_sl_hold"). Passed through to
+        `_classify_close_reason` so an ambiguous MARKET-order reconciliation doesn't get
+        mislabeled "manual_close" just because no Binance algo order matched.
+
+        `pos` (s107): the (still-tracked) position, if available, so `_classify_close_reason`
+        can fall back to a price-proximity match against our own known SL/TP levels when
+        the resulting fill's order type is `MARKET` (true for every algo-triggered SL/TP).
+        """
         try:
             trades = self._get("/fapi/v1/userTrades", {
                 "symbol": symbol, "limit": "1000"
@@ -605,7 +763,10 @@ class FuturesClient:
                 funding = sum(float(row.get("income", 0) or 0) for row in income_rows or [])
             except Exception as funding_error:
                 print(f"[Futures] funding reconciliation unavailable for {symbol}: {funding_error}")
-            _close_reason = self._classify_close_reason(symbol, latest_order_id, realized_pnl)
+            _close_reason = self._classify_close_reason(
+                symbol, latest_order_id, realized_pnl, fallback_reason=fallback_reason,
+                pos=pos, exit_price=exit_price,
+            )
             return {
                 "exit_price": exit_price,
                 "pnl": realized_pnl - commission + funding,
@@ -669,6 +830,44 @@ class FuturesClient:
     def _pos_key(symbol: str, side: str) -> str:
         """Canonical key for _open_positions dict: 'BTCUSDT_SHORT' or 'BTCUSDT_LONG'."""
         return f"{symbol}_{side.upper()}"
+
+    # ── S105g: structured client order IDs ──────────────────────────────────────
+    # Binance's own order record is the highest-fidelity source of truth we have.
+    # By stamping our intent directly onto `newClientOrderId`, any later lookup of
+    # the order (REST or websocket event) reveals *why* we placed it without any
+    # guessing/heuristics — this is what lets _classify_close_reason stop inferring
+    # "manual_close" from an ambiguous MARKET order type (see s105f).
+    _CLIENT_ORDER_ID_MAX = 36
+
+    @staticmethod
+    def _slugify_reason(reason: Optional[str], max_len: int = 25) -> str:
+        """Sanitize a reason string to Binance's clientOrderId charset, truncated
+        to fit the remaining budget after the kind prefix + uuid suffix."""
+        slug = re.sub(r'[^A-Za-z0-9_-]', '', str(reason or ''))
+        return slug[:max_len] or 'unknown'
+
+    def _gen_client_order_id(self, kind: str, reason: Optional[str] = None) -> str:
+        """Build a structured clientOrderId: 'e-<uuid8>' (entry), 'sl-<uuid8>' /
+        'tp-<uuid8>' (algo orders), or 'x-<reason_slug>-<uuid8>' (bot-initiated
+        close/partial-close, MARKET order — the only ambiguous case today)."""
+        token = uuid.uuid4().hex[:8]
+        if reason:
+            cid = f"{kind}-{self._slugify_reason(reason)}-{token}"
+        else:
+            cid = f"{kind}-{token}"
+        return cid[:self._CLIENT_ORDER_ID_MAX]
+
+    @staticmethod
+    def _decode_close_reason_from_client_order_id(client_order_id: Optional[str]) -> Optional[str]:
+        """Reverse of _gen_client_order_id('x', reason, ...): extract the reason
+        slug from a bot-tagged close clientOrderId. Returns None if not our tag."""
+        if not client_order_id or not client_order_id.startswith("x-"):
+            return None
+        body = client_order_id[2:]
+        # body = "<reason_slug>-<uuid8>"; uuid8 is always exactly 8 hex chars.
+        if len(body) <= 9 or body[-9] != '-':
+            return None
+        return body[:-9] or None
 
     # ── Internal HTTP helpers ─────────────────────────────────────────────────
 
@@ -1390,22 +1589,98 @@ class FuturesClient:
                     except Exception:
                         pass
 
-            # FIX-S4: Ghost reconciliation — delete trades_open records with no matching Binance position
+            # FIX-S4: Ghost reconciliation — delete trades_open records with no matching Binance position.
+            # s105d: before deleting, try to reconcile the REAL close (price/PnL/reason) from Binance's
+            # own trade history via _get_realized_pnl_from_trades (already used by the normal SL/TP-miss
+            # recovery path). Previously this just deleted the row, silently discarding real realized
+            # PnL (wins and losses alike) whenever a position closed through a path that didn't go
+            # through the standard close_position()/_save_futures_closed() bookkeeping (e.g. a plain
+            # MARKET close classified as "manual_close").
             if self.db_client:
                 try:
                     _fut_db_rows = self.db_client.execute_query(
-                        """SELECT id, symbol, side FROM trades_open
+                        """SELECT id, symbol, side, quantity, price, entry_time, metadata,
+                                  entry_commission, pnl_prediction, indicators_at_entry
+                           FROM trades_open
                            WHERE metadata->>'trade_type' = 'futures'"""
                     )
                     for _fdr in _fut_db_rows:
                         _fdr_side = 'SHORT' if _fdr['side'] == 'SELL' else 'LONG'
                         _fdr_key = self._pos_key(_fdr['symbol'], _fdr_side)
-                        if _fdr_key not in self._open_positions:
-                            self.db_client.execute_update(
-                                "DELETE FROM trades_open WHERE id = %s", (_fdr['id'],)
+                        if _fdr_key in self._open_positions:
+                            continue
+                        _ghost_reconciled = False
+                        try:
+                            _opened_at = _fdr.get('entry_time')
+                            if not isinstance(_opened_at, datetime):
+                                _opened_at = None
+                            _recon = self._get_realized_pnl_from_trades(
+                                _fdr['symbol'], _fdr_side, opened_at=_opened_at,
                             )
-                            print(f"[Futures/Sync] Ghost cleanup: deleted stale trades_open "
-                                  f"id={_fdr['id']} {_fdr['symbol']} {_fdr['side']} (no Binance position)")
+                            _recon_exit = float(_recon.get('exit_price') or 0)
+                            _entry_price = float(_fdr.get('price') or 0)
+                            _qty = float(_fdr.get('quantity') or 0)
+                            if _recon_exit > 0 and _entry_price > 0 and _qty > 0:
+                                _pnl_pct = round(
+                                    (_entry_price - _recon_exit) / _entry_price * 100, 4
+                                ) if _fdr_side == 'SHORT' else round(
+                                    (_recon_exit - _entry_price) / _entry_price * 100, 4
+                                )
+                                _meta = _fdr.get('metadata') or {}
+                                if isinstance(_meta, str):
+                                    try:
+                                        _meta = json.loads(_meta)
+                                    except Exception:
+                                        _meta = {}
+                                _meta = dict(_meta)
+                                _meta['ghost_reconciled'] = True
+                                _meta['ghost_reconcile_source'] = _recon.get('pnl_accounting_mode', 'binance_user_trade_verified')
+                                _exit_time = datetime.now(timezone.utc)
+                                self.db_client.execute_update(
+                                    """
+                                    INSERT INTO trades_closed
+                                        (symbol, side, quantity, entry_price, exit_price, pnl, pnl_percentage,
+                                         close_reason, entry_time, exit_time, metadata, data_version,
+                                         pnl_prediction, indicators_at_entry, learning_eligible,
+                                         entry_commission, exit_commission)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s,
+                                            %s::jsonb, %s::jsonb, %s, %s, %s)
+                                    """,
+                                    (
+                                        _fdr['symbol'], _fdr['side'], _qty, _entry_price, _recon_exit,
+                                        round(float(_recon.get('pnl') or 0), 6), _pnl_pct,
+                                        _recon.get('reason') or 'ghost_reconciled_binance',
+                                        (_opened_at or _exit_time).isoformat(), _exit_time.isoformat(),
+                                        json.dumps(_meta), 'futures_v2_ghost_reconciled',
+                                        json.dumps(_fdr.get('pnl_prediction')) if _fdr.get('pnl_prediction') else None,
+                                        json.dumps(_fdr.get('indicators_at_entry')) if _fdr.get('indicators_at_entry') else None,
+                                        False,  # learning_eligible=False: reactive reconciliation, exclude from training per calibrar_datos.md
+                                        float(_fdr.get('entry_commission') or 0.0),
+                                        float(_recon.get('commission') or 0.0),
+                                    ),
+                                )
+                                self._audit(_fdr['symbol'], 'ghost_reconciled_close', {
+                                    'trades_open_id': _fdr['id'], 'side': _fdr_side,
+                                    'entry_price': _entry_price, 'exit_price': _recon_exit,
+                                    'pnl': _recon.get('pnl'), 'reason': _recon.get('reason'),
+                                }, binance_confirmed=True)
+                                _ghost_reconciled = True
+                                print(
+                                    f"[Futures/Sync] Ghost reconciled: {_fdr['symbol']} {_fdr_side} closed on "
+                                    f"Binance for PnL=${float(_recon.get('pnl') or 0):.2f} "
+                                    f"(reason={_recon.get('reason')}) — recorded in trades_closed before cleanup"
+                                )
+                        except Exception as _recon_err:
+                            print(f"[Futures/Sync] Ghost reconcile failed for {_fdr['symbol']}: {_recon_err}")
+                        self.db_client.execute_update(
+                            "DELETE FROM trades_open WHERE id = %s", (_fdr['id'],)
+                        )
+                        print(
+                            f"[Futures/Sync] Ghost cleanup: deleted stale trades_open "
+                            f"id={_fdr['id']} {_fdr['symbol']} {_fdr['side']} (no Binance position)"
+                            + (" — reconciled to trades_closed" if _ghost_reconciled
+                               else " — no Binance trade history found, could not reconcile PnL")
+                        )
                 except Exception as _gc_err:
                     print(f"[Futures/Sync] Ghost cleanup failed: {_gc_err}")
 
@@ -1562,6 +1837,89 @@ class FuturesClient:
                     print(f"[Futures/Sync] Marked {_sym} {_side} closed due to manual_close audit")
         except Exception as _audit_sync_err:
             print(f"[Futures/Sync] Manual-close audit sync failed: {_audit_sync_err}")
+
+    def handle_order_fill_event(self, order_data: dict) -> Optional[dict]:
+        """S105g: real-time handler for a Binance USDⓈ-M futures `ORDER_TRADE_UPDATE`
+        event (the `o` payload of the user data stream message).
+
+        This is the core of "anticipating Binance": instead of waiting up to
+        `_trade_cycle_interval_minutes` (default 5 min) for the next poll to notice
+        a position disappeared, the websocket tells us the instant Binance fills a
+        closing order — including algo SL/TP fills we never see any other way in
+        real time. It reuses the already-tested `_get_realized_pnl_from_trades` /
+        `_classify_close_reason` pipeline for PnL/commission accounting and reason
+        classification (with the clientOrderId now doing most of the work per
+        `_gen_client_order_id`) — the event only slashes *latency*, it does not
+        duplicate that logic.
+
+        Idempotent: a no-op if the position is already closed (e.g. the polling
+        path won the race) or if this isn't a closing fill. Never raises — a
+        malformed/unexpected event must never crash the websocket listener thread.
+        """
+        try:
+            if str(order_data.get('X', '')).upper() != 'FILLED':
+                return None
+            realized_profit = float(order_data.get('rp', 0) or 0)
+            if realized_profit == 0:
+                # FILLED with no realized PnL is an entry fill (or a reduce that
+                # netted to zero) — nothing to reconcile as a "close" here.
+                return None
+
+            symbol = str(order_data.get('s', ''))
+            position_side = str(order_data.get('ps', '')).upper()
+            if not symbol or position_side not in ('LONG', 'SHORT'):
+                return None
+
+            key = self._pos_key(symbol, position_side)
+            # S105h: serialize against the polling reconciliation paths (Ghost-L1/L2,
+            # the -2022 handler in close_long/close_short) so both sides can't pass the
+            # `pos.closed` guard concurrently and double-insert the same close.
+            with self._close_lock:
+                pos = self._open_positions.get(key)
+                if not pos or pos.closed:
+                    return None  # already closed by the polling path, or untracked
+
+                order_id = str(order_data.get('i', ''))
+                client_order_id = order_data.get('c')
+                avg_price = float(order_data.get('ap', 0) or 0) or float(order_data.get('L', 0) or 0)
+
+                reason = self._decode_close_reason_from_client_order_id(client_order_id)
+                if not reason:
+                    otype = str(order_data.get('ot') or order_data.get('o') or '').upper()
+                    reason = {
+                        'STOP_MARKET': 'stop_loss_binance',
+                        'TAKE_PROFIT_MARKET': 'take_profit_binance',
+                        'TRAILING_STOP_MARKET': 'trailing_sl_binance',
+                    }.get(otype, 'binance_unidentified_close')
+
+                # Reuse the already-tested reconciliation for authoritative PnL/commission.
+                real = self._get_realized_pnl_from_trades(symbol, position_side, pos.opened_at, fallback_reason=reason, pos=pos)
+                exit_price = real.get('exit_price') or avg_price or pos.sl_price
+                pnl = real.get('pnl')
+                if pnl is None:
+                    pnl = realized_profit
+                close_reason = real.get('reason') or reason
+
+                pos.exit_price = exit_price
+                pos.pnl = pnl
+                saved = self._save_futures_closed(pos, close_reason)
+                if saved:
+                    pos.closed = True
+                    pos.closed_at = datetime.now(timezone.utc)
+            if saved:
+                self._audit(symbol, 'event_stream_close_detected', {
+                    'side': position_side, 'reason': close_reason, 'order_id': order_id,
+                    'client_order_id': client_order_id, 'exit_price': exit_price,
+                    'pnl': pos.pnl, 'realized_profit_raw': realized_profit,
+                }, binance_confirmed=True)
+                print(f"[Futures/EventStream] {symbol} {position_side} closed "
+                      f"(reason={close_reason}, pnl=${pos.pnl:.2f}) — detected via websocket")
+                return {"symbol": symbol, "side": position_side, "reason": close_reason, "pnl": pos.pnl}
+            print(f"[Futures/EventStream] {symbol} {position_side}: persist failed — leaving tracked for polling fallback")
+            return None
+        except Exception as e:
+            print(f"[Futures/EventStream] handle_order_fill_event error: {e}")
+            return None
 
     def count_open_shorts(self) -> int:
         try:
@@ -2085,17 +2443,25 @@ class FuturesClient:
             entry_order = self._post("/fapi/v1/order", {
                 "symbol": symbol, "side": "SELL", "type": "MARKET",
                 "quantity": str(qty), "positionSide": "SHORT",
+                "newClientOrderId": self._gen_client_order_id("e"),
             })
             if entry_order.get("status") not in ("FILLED", "NEW", None):
                 print(f"[Futures/WARN] SHORT {symbol}: entry order status={entry_order.get('status')} — may not have filled")
             order_id    = str(entry_order.get("orderId", "?"))
             filled_price = float(entry_order.get("avgPrice", price)) or price
+            self._persist_truth_transition(
+                "OPEN_PENDING_BINANCE_VERIFY",
+                symbol,
+                "SHORT",
+                {"order_id": order_id, "qty": qty, "filled_price": filled_price},
+                confirmed=False,
+            )
 
             # Recalculate SL/TP based on actual fill price
             # FIX-T2A: software SL = tight (3%), Binance safety SL = wide (4.5%)
             sl_price = round(filled_price * (1 + sl_pct / 100), 6)  # software SL (used by is_sl_hit)
             tp_price = round(filled_price * (1 - tp_pct / 100), 6)
-            _binance_sl_pct = sl_pct * 1.5  # safety net: 50% wider than software SL
+            _binance_sl_pct = sl_pct * _SL_SAFETY_MARGIN_MULTIPLIER  # safety net: wider than software SL
 
             # 2. Stop-loss order via Algo Orders API (required since Binance API change 2025-12-09)
             # POST /fapi/v1/algoOrder with algoType=CONDITIONAL + orderType=STOP_MARKET
@@ -2111,6 +2477,7 @@ class FuturesClient:
                         "algoType": "CONDITIONAL", "type": "STOP_MARKET",
                         "quantity": str(qty), "triggerPrice": str(_sl_trigger),
                         "positionSide": "SHORT", "timeInForce": "GTC",
+                        "newClientOrderId": self._gen_client_order_id("sl"),
                     })
                     sl_order_id = str(sl_order.get("algoId", sl_order.get("orderId", "")))
                     # FIX-T2A: pos.sl_price stays at software level, NOT Binance safety trigger
@@ -2127,6 +2494,7 @@ class FuturesClient:
                         self._post("/fapi/v1/order", {
                             "symbol": symbol, "side": "BUY", "type": "MARKET",
                             "quantity": str(qty), "positionSide": "SHORT",
+                            "newClientOrderId": self._gen_client_order_id("x", "entry_abort_sl_failed"),
                         })
                         return None
 
@@ -2140,6 +2508,7 @@ class FuturesClient:
                     "algoType": "CONDITIONAL", "type": "TAKE_PROFIT_MARKET",
                     "quantity": str(qty), "triggerPrice": str(self._align_price(tp_price, tick)),
                     "positionSide": "SHORT", "timeInForce": "GTC",
+                    "newClientOrderId": self._gen_client_order_id("tp"),
                 })
                 tp_order_id = str(tp_order.get("algoId", tp_order.get("orderId", "")))
                 print(f"[Futures] TP algo order placed: triggerPrice={tp_price:.4f} (algoId={tp_order_id})")
@@ -2174,10 +2543,18 @@ class FuturesClient:
                     self._post("/fapi/v1/order", {
                         "symbol": symbol, "side": "BUY", "type": "MARKET",
                         "quantity": str(qty), "positionSide": "SHORT",
+                        "newClientOrderId": self._gen_client_order_id("x", "entry_abort_not_confirmed"),
                     })
                 except Exception as _ce:
                     print(f"[Futures/WARN] SHORT {symbol}: cleanup close also failed: {_ce}")
                 return None
+            self._persist_truth_transition(
+                "OPEN_BINANCE_CONFIRMED",
+                symbol,
+                "SHORT",
+                {"order_id": order_id, "qty": qty, "filled_price": filled_price},
+                confirmed=True,
+            )
             pos._smart_meta['regime_at_entry'] = str(getattr(_fut_settings, 'current_regime_mode', '') or '').strip().upper() or None
             pos._smart_meta['profile_at_entry'] = str(peak_quality_profile or 'B').strip().upper() or None
             pos._smart_meta['peak_quality_profile'] = str(peak_quality_profile or '').strip().upper() or None
@@ -2192,7 +2569,22 @@ class FuturesClient:
             pos._smart_meta['max_loss_usd_per_trade'] = _max_loss_usd
             pos._smart_meta['effective_sl_usd'] = min(_max_loss_usd, actual_notional * 0.95) if _max_loss_usd > 0 else None
             pos._smart_meta['effective_sl_price'] = sl_price
+            pos._smart_meta['hard_sl_price'] = _sl_trigger  # s107: real Binance algo trigger, for close-reason classification
             pos._smart_meta['sl_source'] = 'usd_cap' if (_max_loss_usd > 0 and actual_notional > 0 and sl_pct < (_max_loss_usd / actual_notional * 100.0) * (1 + 1e-12)) else 'category_pct'
+            # PIS: capture S/R context at entry for behavioral tracking
+            try:
+                from position_intelligence import refresh_sr_levels
+                _sr_entry = refresh_sr_levels(symbol, lambda s, i, l: self._client.get_klines(symbol=s, interval=i, limit=l) or [], filled_price)
+                if _sr_entry:
+                    pos._smart_meta['sr_entry_context'] = {
+                        'support_at_entry': _sr_entry.get('support_level'),
+                        'resistance_at_entry': _sr_entry.get('resistance_level'),
+                        'zone_at_entry': _sr_entry.get('sr_zone_position'),
+                        'support_strength_at_entry': _sr_entry.get('support_strength', 0),
+                        'atr_pct_at_entry': _sr_entry.get('atr_pct', 0),
+                    }
+            except Exception:
+                pass
             self._open_positions[self._pos_key(symbol, "SHORT")] = pos
             self._save_futures_open(pos)  # FIX-G+P2: persist to DB with prediction
             print(f"[Futures] SHORT {symbol} OPEN: entry={filled_price:.4f}, "
@@ -2284,16 +2676,24 @@ class FuturesClient:
             entry_order = self._post("/fapi/v1/order", {
                 "symbol": symbol, "side": "BUY", "type": "MARKET",
                 "quantity": str(qty), "positionSide": "LONG",
+                "newClientOrderId": self._gen_client_order_id("e"),
             })
             if entry_order.get("status") not in ("FILLED", "NEW", None):
                 print(f"[Futures/WARN] LONG {symbol}: entry order status={entry_order.get('status')} — may not have filled")
             order_id    = str(entry_order.get("orderId", "?"))
             filled_price = float(entry_order.get("avgPrice", price)) or price
+            self._persist_truth_transition(
+                "OPEN_PENDING_BINANCE_VERIFY",
+                symbol,
+                "LONG",
+                {"order_id": order_id, "qty": qty, "filled_price": filled_price},
+                confirmed=False,
+            )
 
             # FIX-T2A: software SL = tight, Binance safety SL = wide (50% wider)
             sl_price = self._align_price(filled_price * (1 - sl_pct / 100), tick)  # software SL
             tp_price = self._align_price(filled_price * (1 + tp_pct / 100), tick)
-            _binance_sl_pct = sl_pct * 1.5  # safety net: 50% wider
+            _binance_sl_pct = sl_pct * _SL_SAFETY_MARGIN_MULTIPLIER  # safety net: wider
             _binance_sl_trigger = self._align_price(filled_price * (1 - _binance_sl_pct / 100), tick)
 
             # 2. Stop-loss: SELL STOP_MARKET with positionSide=LONG
@@ -2306,6 +2706,7 @@ class FuturesClient:
                         "algoType": "CONDITIONAL", "type": "STOP_MARKET",
                         "quantity": str(qty), "triggerPrice": str(_binance_sl_trigger),
                         "positionSide": "LONG", "timeInForce": "GTC",
+                        "newClientOrderId": self._gen_client_order_id("sl"),
                     })
                     sl_order_id = str(sl_order.get("algoId", sl_order.get("orderId", "")))
                     print(f"[Futures] LONG SL placed: triggerPrice={_binance_sl_trigger:.4f} (safety), software SL={sl_price:.4f} (algoId={sl_order_id})")
@@ -2321,6 +2722,7 @@ class FuturesClient:
                         self._post("/fapi/v1/order", {
                             "symbol": symbol, "side": "SELL", "type": "MARKET",
                             "quantity": str(qty), "positionSide": "LONG",
+                            "newClientOrderId": self._gen_client_order_id("x", "entry_abort_sl_failed"),
                         })
                         return None
 
@@ -2332,6 +2734,7 @@ class FuturesClient:
                     "algoType": "CONDITIONAL", "type": "TAKE_PROFIT_MARKET",
                     "quantity": str(qty), "triggerPrice": str(tp_price),
                     "positionSide": "LONG", "timeInForce": "GTC",
+                    "newClientOrderId": self._gen_client_order_id("tp"),
                 })
                 tp_order_id = str(tp_order.get("algoId", tp_order.get("orderId", "")))
                 print(f"[Futures] LONG TP placed: triggerPrice={tp_price:.4f} (algoId={tp_order_id})")
@@ -2364,10 +2767,18 @@ class FuturesClient:
                     self._post("/fapi/v1/order", {
                         "symbol": symbol, "side": "SELL", "type": "MARKET",
                         "quantity": str(qty), "positionSide": "LONG",
+                        "newClientOrderId": self._gen_client_order_id("x", "entry_abort_not_confirmed"),
                     })
                 except Exception as _ce:
                     print(f"[Futures/WARN] LONG {symbol}: cleanup close also failed: {_ce}")
                 return None
+            self._persist_truth_transition(
+                "OPEN_BINANCE_CONFIRMED",
+                symbol,
+                "LONG",
+                {"order_id": order_id, "qty": qty, "filled_price": filled_price},
+                confirmed=True,
+            )
             pos._smart_meta['regime_at_entry'] = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
             pos._smart_meta['profile_at_entry'] = str(peak_quality_profile or 'B').strip().upper() or None
             pos._smart_meta['peak_quality_profile'] = str(peak_quality_profile or '').strip().upper() or None
@@ -2382,7 +2793,22 @@ class FuturesClient:
             pos._smart_meta['max_loss_usd_per_trade'] = _max_loss_usd
             pos._smart_meta['effective_sl_usd'] = min(_max_loss_usd, actual_notional * 0.95) if _max_loss_usd > 0 else None
             pos._smart_meta['effective_sl_price'] = sl_price
+            pos._smart_meta['hard_sl_price'] = _binance_sl_trigger  # s107: real Binance algo trigger, for close-reason classification
             pos._smart_meta['sl_source'] = 'usd_cap' if (_max_loss_usd > 0 and actual_notional > 0 and sl_pct < (_max_loss_usd / actual_notional * 100.0) * (1 + 1e-12)) else 'category_pct'
+            # PIS: capture S/R context at entry for behavioral tracking
+            try:
+                from position_intelligence import refresh_sr_levels
+                _sr_entry = refresh_sr_levels(symbol, lambda s, i, l: self._client.get_klines(symbol=s, interval=i, limit=l) or [], filled_price)
+                if _sr_entry:
+                    pos._smart_meta['sr_entry_context'] = {
+                        'support_at_entry': _sr_entry.get('support_level'),
+                        'resistance_at_entry': _sr_entry.get('resistance_level'),
+                        'zone_at_entry': _sr_entry.get('sr_zone_position'),
+                        'support_strength_at_entry': _sr_entry.get('support_strength', 0),
+                        'atr_pct_at_entry': _sr_entry.get('atr_pct', 0),
+                    }
+            except Exception:
+                pass
             self._open_positions[self._pos_key(symbol, "LONG")] = pos
             self._save_futures_open(pos)  # FIX-G: persist to DB
             print(f"[Futures] LONG {symbol} OPEN: entry={filled_price:.4f}, "
@@ -2438,9 +2864,17 @@ class FuturesClient:
         try:
             step = self._get_step_size(symbol)
             aligned_qty = self._align_qty(close_qty, step)
+            self._persist_truth_transition(
+                "CLOSE_PENDING_BINANCE_VERIFY",
+                symbol,
+                "LONG",
+                {"qty": aligned_qty, "reason": reason},
+                confirmed=False,
+            )
             result = self._post("/fapi/v1/order", {
                 "symbol": symbol, "side": "SELL", "type": "MARKET",
                 "quantity": str(aligned_qty), "positionSide": "LONG",
+                "newClientOrderId": self._gen_client_order_id("x", reason),
             })
             # Verify real position size before persisting close; if still open, keep tracking residual.
             _real_qty = self._get_position_qty_real(symbol, "LONG")
@@ -2454,7 +2888,7 @@ class FuturesClient:
                 # Use real fill price from order response for PnL persistence (not current market price)
                 _fill_price = self._average_fill_price(result, current_price)
                 pos.exit_price = _fill_price
-                _real = self._get_realized_pnl_from_trades(symbol, "LONG", pos.opened_at)
+                _real = self._get_realized_pnl_from_trades(symbol, "LONG", pos.opened_at, pos=pos)
                 if _real.get('pnl_accounting_mode'):
                     pos.pnl = _real['pnl']
                     pos._smart_meta['pnl_accounting_mode'] = _real['pnl_accounting_mode']
@@ -2467,6 +2901,13 @@ class FuturesClient:
                     pos.closed_at = datetime.now(timezone.utc)
                     if pos.pnl is None:
                         pos.pnl = pnl
+                    self._persist_truth_transition(
+                        "CLOSE_BINANCE_CONFIRMED",
+                        symbol,
+                        "LONG",
+                        {"qty": aligned_qty, "reason": reason, "exit_price": pos.exit_price, "pnl": pos.pnl},
+                        confirmed=True,
+                    )
                     print(f"[Futures] LONG {symbol} CLOSED: PnL~${pos.pnl:.2f}")
                     return result
                 else:
@@ -2478,17 +2919,31 @@ class FuturesClient:
             _emsg = str(e)
             # FIX-T1: Binance already closed position via SL/TP algo order
             if pos and ("-2022" in _emsg or "ReduceOnly" in _emsg):
-                print(f"[Futures] close_long {symbol}: position already closed by Binance — recording")
-                _real = self._get_realized_pnl_from_trades(symbol, "LONG", pos.opened_at)
-                _exit_price = _real.get('exit_price') or current_price
-                _pnl = _real.get('pnl') or pnl
-                _reason = _real.get('reason', 'binance_unidentified_close')
-                pos.exit_price = _exit_price
-                pos.pnl = _pnl
-                _saved = self._save_futures_closed(pos, _reason)
+                # S105h: serialize against the event-stream callback (handle_order_fill_event)
+                # and the Ghost-L1/L2 polling reconciliation — see _close_lock in __init__.
+                with self._close_lock:
+                    if pos.closed:
+                        print(f"[Futures] close_long {symbol}: already closed (race won by another path)")
+                        return {"binance_closed": True, "symbol": symbol, "pnl": pos.pnl}
+                    print(f"[Futures] close_long {symbol}: position already closed by Binance — recording")
+                    _real = self._get_realized_pnl_from_trades(symbol, "LONG", pos.opened_at, fallback_reason=reason, pos=pos)
+                    _exit_price = _real.get('exit_price') or current_price
+                    _pnl = _real.get('pnl') or pnl
+                    _reason = _real.get('reason', 'binance_unidentified_close')
+                    pos.exit_price = _exit_price
+                    pos.pnl = _pnl
+                    _saved = self._save_futures_closed(pos, _reason)
+                    if _saved:
+                        pos.closed = True
+                        pos.closed_at = datetime.now(timezone.utc)
                 if _saved:
-                    pos.closed = True
-                    pos.closed_at = datetime.now(timezone.utc)
+                    self._persist_truth_transition(
+                        "CLOSE_BINANCE_CONFIRMED",
+                        symbol,
+                        "LONG",
+                        {"reason": _reason, "exit_price": _exit_price, "pnl": pos.pnl, "binance_closed": True},
+                        confirmed=True,
+                    )
                     print(f"[Futures] LONG {symbol} CLOSED (by Binance): PnL=${pos.pnl:.2f}")
                     return {"binance_closed": True, "symbol": symbol, "pnl": pos.pnl}
                 else:
@@ -2539,9 +2994,17 @@ class FuturesClient:
             step = self._get_step_size(symbol)
             from decimal import Decimal
             aligned_qty = self._align_qty(close_qty, step)
+            self._persist_truth_transition(
+                "CLOSE_PENDING_BINANCE_VERIFY",
+                symbol,
+                "SHORT",
+                {"qty": aligned_qty, "reason": reason},
+                confirmed=False,
+            )
             result = self._post("/fapi/v1/order", {
                 "symbol": symbol, "side": "BUY", "type": "MARKET",
                 "quantity": str(aligned_qty), "positionSide": "SHORT",
+                "newClientOrderId": self._gen_client_order_id("x", reason),
             })
             # Verify real position size before persisting close; if still open, keep tracking residual.
             _real_qty = self._get_position_qty_real(symbol, "SHORT")
@@ -2555,7 +3018,7 @@ class FuturesClient:
                 # Use real fill price from order response for PnL persistence (not current market price)
                 _fill_price = self._average_fill_price(result, current_price)
                 pos.exit_price = _fill_price
-                _real = self._get_realized_pnl_from_trades(symbol, "SHORT", pos.opened_at)
+                _real = self._get_realized_pnl_from_trades(symbol, "SHORT", pos.opened_at, pos=pos)
                 if _real.get('pnl_accounting_mode'):
                     pos.pnl = _real['pnl']
                     pos._smart_meta['pnl_accounting_mode'] = _real['pnl_accounting_mode']
@@ -2568,6 +3031,13 @@ class FuturesClient:
                     pos.closed_at  = datetime.now(timezone.utc)
                     if pos.pnl is None:
                         pos.pnl = pnl
+                    self._persist_truth_transition(
+                        "CLOSE_BINANCE_CONFIRMED",
+                        symbol,
+                        "SHORT",
+                        {"qty": aligned_qty, "reason": reason, "exit_price": pos.exit_price, "pnl": pos.pnl},
+                        confirmed=True,
+                    )
                     print(f"[Futures] SHORT {symbol} CLOSED: PnL~${pos.pnl:.2f}")
                     return result
                 else:
@@ -2579,17 +3049,31 @@ class FuturesClient:
             _emsg = str(e)
             # FIX-T1: Binance already closed position via SL/TP algo order
             if pos and ("-2022" in _emsg or "ReduceOnly" in _emsg):
-                print(f"[Futures] close_short {symbol}: position already closed by Binance — recording")
-                _real = self._get_realized_pnl_from_trades(symbol, "SHORT", pos.opened_at)
-                _exit_price = _real.get('exit_price') or current_price
-                _pnl = _real.get('pnl') or pnl
-                _reason = _real.get('reason', 'binance_unidentified_close')
-                pos.exit_price = _exit_price
-                pos.pnl        = _pnl
-                _saved = self._save_futures_closed(pos, _reason)
+                # S105h: serialize against the event-stream callback (handle_order_fill_event)
+                # and the Ghost-L1/L2 polling reconciliation — see _close_lock in __init__.
+                with self._close_lock:
+                    if pos.closed:
+                        print(f"[Futures] close_short {symbol}: already closed (race won by another path)")
+                        return {"binance_closed": True, "symbol": symbol, "pnl": pos.pnl}
+                    print(f"[Futures] close_short {symbol}: position already closed by Binance — recording")
+                    _real = self._get_realized_pnl_from_trades(symbol, "SHORT", pos.opened_at, fallback_reason=reason, pos=pos)
+                    _exit_price = _real.get('exit_price') or current_price
+                    _pnl = _real.get('pnl') or pnl
+                    _reason = _real.get('reason', 'binance_unidentified_close')
+                    pos.exit_price = _exit_price
+                    pos.pnl        = _pnl
+                    _saved = self._save_futures_closed(pos, _reason)
+                    if _saved:
+                        pos.closed     = True
+                        pos.closed_at  = datetime.now(timezone.utc)
                 if _saved:
-                    pos.closed     = True
-                    pos.closed_at  = datetime.now(timezone.utc)
+                    self._persist_truth_transition(
+                        "CLOSE_BINANCE_CONFIRMED",
+                        symbol,
+                        "SHORT",
+                        {"reason": _reason, "exit_price": _exit_price, "pnl": pos.pnl, "binance_closed": True},
+                        confirmed=True,
+                    )
                     print(f"[Futures] SHORT {symbol} CLOSED (by Binance): PnL=${pos.pnl:.2f}")
                     return {"binance_closed": True, "symbol": symbol, "pnl": pos.pnl}
                 else:
@@ -2604,6 +3088,7 @@ class FuturesClient:
         side: str,
         new_sl: Optional[float] = None,
         new_tp: Optional[float] = None,
+        current_price: Optional[float] = None,
     ) -> bool:
         """
         Move stop-loss and/or take-profit on a live futures position.
@@ -2620,6 +3105,15 @@ class FuturesClient:
         if the SL/TP triggered between our cycles.  This is handled gracefully —
         we proceed to place the new order (it will fail with no-position error and
         check_positions() will detect the closure on the next cycle).
+
+        s107: `new_sl` is always the SOFTWARE level (what `pos.sl_price`/`is_sl_hit()`
+        use). The actual Binance algo order ("Hard SL") is placed `_SL_SAFETY_MARGIN_MULTIPLIER`
+        times wider than the software distance to the reference price — the same
+        margin used at entry (FIX-T2A) — so trailing/breakeven/SSO re-placements
+        never collapse the safety net to the exact software price. `current_price`
+        lets the caller pass an already-fetched price to avoid a redundant API call;
+        if omitted, it is fetched fresh. TP is never widened (no safety-net concept
+        needed for a favorable exit) — Hard TP always equals software TP.
         """
         key = self._pos_key(symbol, side.upper())
         pos = self._open_positions.get(key)
@@ -2627,6 +3121,7 @@ class FuturesClient:
             return False
 
         # FIX-T3: REGLA DE ORO — SL nunca empeora (guardia universal)
+        # Comparado siempre contra el SL de software (pos.sl_price), nunca contra el Hard SL.
         if new_sl is not None:
             if pos.side == "SHORT" and new_sl > pos.sl_price:
                 print(f"[Futures/Guard] {symbol}: SL WORSEN blocked {pos.sl_price:.4f} → {new_sl:.4f}")
@@ -2648,22 +3143,47 @@ class FuturesClient:
         tick = self._get_tick_size(symbol)
         success = True
 
+        # s107: re-derive the Hard SL (real Binance algo trigger) with the same
+        # safety margin used at entry, instead of placing the Binance order at the
+        # exact software price. Without this, every trailing/breakeven/SSO
+        # re-placement collapsed the margin to zero, making Binance's real-time
+        # engine — not our 3-45min polling loop — the de-facto stop mechanism.
+        _hard_sl_target = new_sl
+        if new_sl is not None:
+            try:
+                _ref_price = current_price if current_price and current_price > 0 else self.get_price(symbol)
+            except Exception:
+                _ref_price = None
+            if _ref_price and _ref_price > 0:
+                if side.upper() == "SHORT":
+                    _distance = new_sl - _ref_price
+                    if _distance > 0:
+                        _hard_sl_target = _ref_price + _distance * _SL_SAFETY_MARGIN_MULTIPLIER
+                else:  # LONG
+                    _distance = _ref_price - new_sl
+                    if _distance > 0:
+                        _hard_sl_target = _ref_price - _distance * _SL_SAFETY_MARGIN_MULTIPLIER
+            # else: no reference price available — fall back to placing the Hard SL
+            # at the software level (no margin) rather than failing the whole update.
+
         # FIX-T5: Anti-cancel gap — place new order FIRST, then cancel old.
         # This ensures the position is NEVER without SL/TP protection.
 
         # ── Update SL: place new → cancel old ────────────────────────────────
         if new_sl is not None:
-            _sl_aligned = self._align_price(new_sl, tick)
+            _sl_aligned = self._align_price(_hard_sl_target, tick)  # Hard SL sent to Binance
+            _sl_software_aligned = self._align_price(new_sl, tick)  # Software SL kept internally
             _sl_side   = "BUY" if side.upper() == "SHORT" else "SELL"
             _pos_side  = side.upper()
             _old_sl_id = pos.sl_order_id
             try:
-                # 1. FIRST: place new SL order
+                # 1. FIRST: place new SL order (at the Hard/widened price)
                 _sl_order = self._post("/fapi/v1/algoOrder", {
                     "symbol": symbol, "side": _sl_side,
                     "algoType": "CONDITIONAL", "type": "STOP_MARKET",
                     "quantity": str(pos.qty), "triggerPrice": str(_sl_aligned),
                     "positionSide": _pos_side, "timeInForce": "GTC",
+                    "newClientOrderId": self._gen_client_order_id("sl"),
                 })
                 _new_sl_id = str(_sl_order.get("algoId", _sl_order.get("orderId", "")))
                 if not _new_sl_id or _new_sl_id == "None":
@@ -2671,14 +3191,16 @@ class FuturesClient:
                     success = False
                 else:
                     pos.sl_order_id = _new_sl_id
-                    pos.sl_price    = _sl_aligned
+                    pos.sl_price    = _sl_software_aligned
+                    pos._smart_meta['hard_sl_price'] = _sl_aligned
                 # 2. THEN: cancel old SL (position is already protected by new one)
                 if _old_sl_id:
                     try:
                         self._delete("/fapi/v1/algoOrder", {"symbol": symbol, "algoId": _old_sl_id})
                     except Exception:
                         pass  # old order may already be gone — safe to ignore
-                print(f"[Futures/Trail] {symbol} {side}: SL moved → {_sl_aligned:.4f} (algoId={pos.sl_order_id})")
+                print(f"[Futures/Trail] {symbol} {side}: SL moved → software={_sl_software_aligned:.4f} "
+                      f"hard={_sl_aligned:.4f} (algoId={pos.sl_order_id})")
             except Exception as _e:
                 _emsg = str(_e)
                 # If new SL placement fails, old one is still active (no gap!)
@@ -2695,10 +3217,12 @@ class FuturesClient:
                             "algoType": "CONDITIONAL", "type": "STOP_MARKET",
                             "quantity": str(pos.qty), "triggerPrice": str(_sl_aligned),
                             "positionSide": _pos_side, "timeInForce": "GTC",
+                            "newClientOrderId": self._gen_client_order_id("sl"),
                         })
                         pos.sl_order_id = str(_sl_order.get("algoId", _sl_order.get("orderId", "")))
-                        pos.sl_price = _sl_aligned
-                        print(f"[Futures/Trail] {symbol} {side}: SL moved (fallback) → {_sl_aligned:.4f}")
+                        pos.sl_price = _sl_software_aligned
+                        pos._smart_meta['hard_sl_price'] = _sl_aligned
+                        print(f"[Futures/Trail] {symbol} {side}: SL moved (fallback) → software={_sl_software_aligned:.4f} hard={_sl_aligned:.4f}")
                     except Exception as _e2:
                         print(f"[Futures/Trail] {symbol}: SL update failed (both paths): {_e2}")
                         success = False
@@ -2719,6 +3243,7 @@ class FuturesClient:
                     "algoType": "CONDITIONAL", "type": "TAKE_PROFIT_MARKET",
                     "quantity": str(pos.qty), "triggerPrice": str(_tp_aligned),
                     "positionSide": _pos_side, "timeInForce": "GTC",
+                    "newClientOrderId": self._gen_client_order_id("tp"),
                 })
                 pos.tp_order_id = str(_tp_order.get("algoId", _tp_order.get("orderId", "")))
                 pos.tp_price    = _tp_aligned
@@ -2739,6 +3264,7 @@ class FuturesClient:
                             "algoType": "CONDITIONAL", "type": "TAKE_PROFIT_MARKET",
                             "quantity": str(pos.qty), "triggerPrice": str(_tp_aligned),
                             "positionSide": _pos_side, "timeInForce": "GTC",
+                            "newClientOrderId": self._gen_client_order_id("tp"),
                         })
                         pos.tp_order_id = str(_tp_order.get("algoId", _tp_order.get("orderId", "")))
                         pos.tp_price = _tp_aligned
@@ -2928,12 +3454,17 @@ class FuturesClient:
                     _binance_syms.add(_sym)
 
                 # FIX-T4-L1 (original): memory _open_positions vs Binance
+                # S105h: each iteration is serialized against the event-stream callback
+                # and the -2022 handler via _close_lock, so a fill that races this loop
+                # can't be persisted twice (see handle_order_fill_event / close_long/close_short).
                 for _gk, _gp in list(self._open_positions.items()):
-                    if _gp.closed:
+                    if _gp.closed or _gk in _binance_keys:
                         continue
-                    if _gk not in _binance_keys:
+                    with self._close_lock:
+                        if _gp.closed:
+                            continue  # closed by another path while we were waiting for the lock
                         print(f"[Futures/Ghost-L1] {_gp.symbol} {_gp.side}: position gone from Binance — closed externally")
-                        _real = self._get_realized_pnl_from_trades(_gp.symbol, _gp.side, _gp.opened_at)
+                        _real = self._get_realized_pnl_from_trades(_gp.symbol, _gp.side, _gp.opened_at, pos=_gp)
                         _exit_price = _real.get('exit_price') or _gp.sl_price
                         _pnl = _real.get('pnl', 0)
                         _close_reason = _real.get('reason', 'binance_safety_close')
@@ -2943,10 +3474,11 @@ class FuturesClient:
                         if _saved:
                             _gp.closed = True
                             _gp.closed_at = datetime.now(timezone.utc)
-                            closed.append({"symbol": _gp.symbol, "side": _gp.side,
-                                           "reason": _close_reason, "pnl": _gp.pnl})
-                        else:
-                            print(f"[Futures/WARN] Ghost-L1 {_gp.symbol} {_gp.side}: persist failed — leaving tracked for retry")
+                    if _saved:
+                        closed.append({"symbol": _gp.symbol, "side": _gp.side,
+                                       "reason": _close_reason, "pnl": _gp.pnl})
+                    else:
+                        print(f"[Futures/WARN] Ghost-L1 {_gp.symbol} {_gp.side}: persist failed — leaving tracked for retry")
 
                 # FIX-T4-L2 (NEW): DB trades_open vs Binance — catches ghosts never in memory
                 # This handles records left after container restart when Binance closed externally
@@ -2969,75 +3501,82 @@ class FuturesClient:
                             if self._pos_key(_sym, _side) in self._open_positions:
                                 continue  # already handled by L1 above
                             # Ghost: symbol not in Binance but has DB record(s)
-                            print(f"[Futures/Ghost-L2] {_sym} {_side}: {len(_db_rows)} DB record(s) not in Binance — cleaning up")
-                            _opened_at = min(
-                                (_parse_utc_datetime(row.get('entry_time')) for row in _db_rows),
-                                key=lambda value: value or datetime.max.replace(tzinfo=timezone.utc),
-                            )
-                            _real = self._get_realized_pnl_from_trades(_sym, _side, _opened_at)
-                            _exit_p = _real.get('exit_price', 0)
-                            _total_pnl = float(_real.get('pnl', 0))
-                            _close_reason = _real.get('reason', 'binance_closed_untracked')
-                            _close_now = datetime.now(timezone.utc)
-                            _cgid = str(uuid.uuid4())
-                            # Calculate total notional for proportional PnL distribution
-                            _total_notional = sum(float(r['quantity']) * float(r['price']) for r in _db_rows)
-                            _all_saved = True
-                            _saved_positions = []
-                            for _i, _row in enumerate(_db_rows):
-                                _qty = float(_row['quantity'])
-                                _ep = float(_row['price'])
-                                _notional = _qty * _ep
-                                _weight = _notional / _total_notional if _total_notional > 0 else 1.0 / len(_db_rows)
-                                _row_pnl = _total_pnl * _weight if _total_pnl else None
-                                # Build a minimal FuturesPosition to reuse _save_futures_closed
-                                _meta = _row.get('metadata') or {}
-                                if isinstance(_meta, str):
-                                    try: _meta = json.loads(_meta)
-                                    except: _meta = {}
-                                _ghost_pos = FuturesPosition(
-                                    symbol=_sym, side=_side, qty=_qty,
-                                    entry_price=_ep,
-                                    sl_price=float(_row.get('stop_loss') or _ep),
-                                    tp_price=float(_row.get('take_profit') or _ep),
-                                    order_id=_meta.get('order_id'),
-                                    sl_order_id=_meta.get('sl_order_id'),
-                                    tp_order_id=_meta.get('tp_order_id'),
+                            # S105h: serialize against every other close-persistence path
+                            # (event stream, Ghost-L1, -2022 handler) via _close_lock — even
+                            # though this branch doesn't touch _open_positions, it shares the
+                            # same trades_closed destination and the same underlying race risk.
+                            with self._close_lock:
+                                if self._pos_key(_sym, _side) in self._open_positions:
+                                    continue  # became tracked/handled by L1 while we waited for the lock
+                                print(f"[Futures/Ghost-L2] {_sym} {_side}: {len(_db_rows)} DB record(s) not in Binance — cleaning up")
+                                _opened_at = min(
+                                    (_parse_utc_datetime(row.get('entry_time')) for row in _db_rows),
+                                    key=lambda value: value or datetime.max.replace(tzinfo=timezone.utc),
                                 )
-                                _ghost_pos.exit_price = _exit_p if _exit_p else _ep
-                                _ghost_pos.pnl = _row_pnl
-                                _ghost_pos._smart_meta = _meta.get('smart_meta', {})
-                                try:
-                                    _et = _row.get('entry_time')
-                                    if _et:
-                                        _ghost_pos.opened_at = _et if hasattr(_et, 'tzinfo') else datetime.fromisoformat(str(_et))
-                                        if _ghost_pos.opened_at.tzinfo is None:
-                                            _ghost_pos.opened_at = _ghost_pos.opened_at.replace(tzinfo=timezone.utc)
-                                except Exception:
-                                    pass
-                                # Load prediction/indicators from DB row
-                                try:
-                                    if _row.get('pnl_prediction'):
-                                        _ghost_pos.pnl_prediction = json.loads(_row['pnl_prediction']) if isinstance(_row['pnl_prediction'], str) else _row['pnl_prediction']
-                                    if _row.get('indicators_at_entry'):
-                                        _ghost_pos.indicators_at_entry = json.loads(_row['indicators_at_entry']) if isinstance(_row['indicators_at_entry'], str) else _row['indicators_at_entry']
-                                except Exception:
-                                    pass
-                                _saved = self._save_futures_closed(
-                                    _ghost_pos, _close_reason,
-                                    close_group_id=_cgid,
-                                    esc_index=_i + 1,
-                                    total_esc=len(_db_rows),
-                                    pnl_override=_row_pnl,
-                                )
-                                if _saved:
-                                    _ghost_pos.closed = True
-                                    _ghost_pos.closed_at = _close_now
-                                    _saved_positions.append(_ghost_pos)
-                                    print(f"[Futures/Ghost-L2] {_sym}: inserted trades_closed esc={_i+1}/{len(_db_rows)} pnl={round(_row_pnl or 0, 2)}")
-                                else:
-                                    _all_saved = False
-                                    print(f"[Futures/WARN] Ghost-L2 {_sym} esc={_i+1}/{len(_db_rows)}: persist failed")
+                                _real = self._get_realized_pnl_from_trades(_sym, _side, _opened_at)
+                                _exit_p = _real.get('exit_price', 0)
+                                _total_pnl = float(_real.get('pnl', 0))
+                                _close_reason = _real.get('reason', 'binance_closed_untracked')
+                                _close_now = datetime.now(timezone.utc)
+                                _cgid = str(uuid.uuid4())
+                                # Calculate total notional for proportional PnL distribution
+                                _total_notional = sum(float(r['quantity']) * float(r['price']) for r in _db_rows)
+                                _all_saved = True
+                                _saved_positions = []
+                                for _i, _row in enumerate(_db_rows):
+                                    _qty = float(_row['quantity'])
+                                    _ep = float(_row['price'])
+                                    _notional = _qty * _ep
+                                    _weight = _notional / _total_notional if _total_notional > 0 else 1.0 / len(_db_rows)
+                                    _row_pnl = _total_pnl * _weight if _total_pnl else None
+                                    # Build a minimal FuturesPosition to reuse _save_futures_closed
+                                    _meta = _row.get('metadata') or {}
+                                    if isinstance(_meta, str):
+                                        try: _meta = json.loads(_meta)
+                                        except: _meta = {}
+                                    _ghost_pos = FuturesPosition(
+                                        symbol=_sym, side=_side, qty=_qty,
+                                        entry_price=_ep,
+                                        sl_price=float(_row.get('stop_loss') or _ep),
+                                        tp_price=float(_row.get('take_profit') or _ep),
+                                        order_id=_meta.get('order_id'),
+                                        sl_order_id=_meta.get('sl_order_id'),
+                                        tp_order_id=_meta.get('tp_order_id'),
+                                    )
+                                    _ghost_pos.exit_price = _exit_p if _exit_p else _ep
+                                    _ghost_pos.pnl = _row_pnl
+                                    _ghost_pos._smart_meta = _meta.get('smart_meta', {})
+                                    try:
+                                        _et = _row.get('entry_time')
+                                        if _et:
+                                            _ghost_pos.opened_at = _et if hasattr(_et, 'tzinfo') else datetime.fromisoformat(str(_et))
+                                            if _ghost_pos.opened_at.tzinfo is None:
+                                                _ghost_pos.opened_at = _ghost_pos.opened_at.replace(tzinfo=timezone.utc)
+                                    except Exception:
+                                        pass
+                                    # Load prediction/indicators from DB row
+                                    try:
+                                        if _row.get('pnl_prediction'):
+                                            _ghost_pos.pnl_prediction = json.loads(_row['pnl_prediction']) if isinstance(_row['pnl_prediction'], str) else _row['pnl_prediction']
+                                        if _row.get('indicators_at_entry'):
+                                            _ghost_pos.indicators_at_entry = json.loads(_row['indicators_at_entry']) if isinstance(_row['indicators_at_entry'], str) else _row['indicators_at_entry']
+                                    except Exception:
+                                        pass
+                                    _saved = self._save_futures_closed(
+                                        _ghost_pos, _close_reason,
+                                        close_group_id=_cgid,
+                                        esc_index=_i + 1,
+                                        total_esc=len(_db_rows),
+                                        pnl_override=_row_pnl,
+                                    )
+                                    if _saved:
+                                        _ghost_pos.closed = True
+                                        _ghost_pos.closed_at = _close_now
+                                        _saved_positions.append(_ghost_pos)
+                                        print(f"[Futures/Ghost-L2] {_sym}: inserted trades_closed esc={_i+1}/{len(_db_rows)} pnl={round(_row_pnl or 0, 2)}")
+                                    else:
+                                        _all_saved = False
+                                        print(f"[Futures/WARN] Ghost-L2 {_sym} esc={_i+1}/{len(_db_rows)}: persist failed")
                             if _all_saved:
                                 if _total_pnl:
                                     closed.append({"symbol": _sym, "side": _side,
@@ -3464,6 +4003,7 @@ class FuturesClient:
                                             "symbol": symbol, "side": _side, "type": "MARKET",
                                             "quantity": str(_sso_qty_aligned),
                                             "positionSide": pos.side,
+                                            "newClientOrderId": self._gen_client_order_id("x", _sso_action.reason),
                                         })
                                         _sso_ok = True
                                     except Exception as _sso_err:
@@ -3708,7 +4248,11 @@ class FuturesClient:
                         prs_advisory_reason=_ug_prs_reason,
                         prs_advisory_detail=_ug_prs_detail,
                         lifecycle_structure_mode=str(_lifecycle_structure.get('mode', 'shadow')),
-                        lifecycle_structure_decision=dict(_lifecycle_structure.get('decision') or {}),
+                        lifecycle_structure_decision={
+                            **dict(_lifecycle_structure.get('decision') or {}),
+                            'sr_behavior': _ug_meta.get('sr_behavior') or {},
+                            'pim_flag_exit': _ug_meta.get('pim_flag_exit'),
+                        },
                         fear_greed_value=_ug_fng_value,
                     )
                     _ug_decision = _evaluate_unified_governance(_ug_ctx, settings)
@@ -3721,6 +4265,10 @@ class FuturesClient:
                     })
                     if _ug_decision.state_patch:
                         pos._smart_meta.update(_ug_decision.state_patch)
+                        self._persist_smart_meta(pos)
+                    # PIS: clear consumed pim_flag_exit so it doesn't trigger again
+                    if pos._smart_meta.get('pim_flag_exit'):
+                        pos._smart_meta.pop('pim_flag_exit', None)
                         self._persist_smart_meta(pos)
 
                     self._audit(symbol, 'unified_governance_decision', {
@@ -3760,6 +4308,7 @@ class FuturesClient:
                                             "type": "MARKET",
                                             "quantity": str(_ug_qty),
                                             "positionSide": pos.side,
+                                            "newClientOrderId": self._gen_client_order_id("x", _ug_decision.reason),
                                         })
                                         _ug_ok = True
                                     except Exception as _uge:
@@ -3798,10 +4347,10 @@ class FuturesClient:
                         _be_ok = False
                         if pos.side == "SHORT" and entry < pos.sl_price:
                             # SHORT: SL is above entry. Move SL to entry (price must rise to entry to stop out)
-                            _be_ok = self.update_sl_tp(symbol, pos.side, new_sl=entry)
+                            _be_ok = self.update_sl_tp(symbol, pos.side, new_sl=entry, current_price=price)
                         elif pos.side == "LONG" and entry > pos.sl_price:
                             # LONG: SL is below entry. Move SL to entry
-                            _be_ok = self.update_sl_tp(symbol, pos.side, new_sl=entry)
+                            _be_ok = self.update_sl_tp(symbol, pos.side, new_sl=entry, current_price=price)
                         if _be_ok:
                             pos._smart_meta['breakeven_done'] = True
                             self._persist_smart_meta(pos)  # FIX-S1: persist to DB
@@ -3812,6 +4361,16 @@ class FuturesClient:
                 if _trailing_enabled and pnl_pct >= _trail_act_pct / 100.0:
                     # ATR-scaled trail: respects per-symbol volatility to avoid wick stop-outs
                     _trail_dist = self.compute_trail_distance(symbol, pnl_pct, settings)
+                    # PIS: S/R-aware trailing — tighten near opposing level
+                    try:
+                        from position_intelligence import compute_sr_aware_trail_distance, get_cached_sr_levels
+                        _cached_sr = get_cached_sr_levels(symbol)
+                        if _cached_sr:
+                            _trail_dist = compute_sr_aware_trail_distance(
+                                pos.side, _trail_dist, _cached_sr, price,
+                            )
+                    except Exception:
+                        pass
                     tick = self._get_tick_size(symbol)
 
                     if pos.side == "SHORT":
@@ -3838,7 +4397,7 @@ class FuturesClient:
                                 # FIX-S5: Immediately set trailing SL on activation (don't wait for new low)
                                 _init_sl = self._align_price(_best_price * (1.0 + _trail_dist), tick)
                                 if _init_sl < pos.sl_price:
-                                    self.update_sl_tp(symbol, pos.side, new_sl=_init_sl)
+                                    self.update_sl_tp(symbol, pos.side, new_sl=_init_sl, current_price=price)
                                     print(f"[Futures/Trail] {symbol} SHORT: Trailing activated → SL={_init_sl:.4f} "
                                           f"(best={_best_price:.4f}, PnL={pnl_pct*100:.2f}%)")
                                 else:
@@ -3852,7 +4411,7 @@ class FuturesClient:
                             _new_sl = self._align_price(_best_price * (1.0 + _trail_dist), tick)
                             # Only lower SL (SHORT: lower sl_price = tighter stop = more profit protected)
                             if _new_sl < pos.sl_price:
-                                self.update_sl_tp(symbol, pos.side, new_sl=_new_sl)
+                                self.update_sl_tp(symbol, pos.side, new_sl=_new_sl, current_price=price)
                                 print(f"[Futures/Trail] {symbol} SHORT: SL trailed down → {_new_sl:.4f} "
                                       f"(best={_best_price:.4f}, dist={_trail_dist_pct}%)")
                             # Also trail TP downward (lock in more profit on deep moves)
@@ -3880,7 +4439,7 @@ class FuturesClient:
                                 # FIX-S5: Immediately set trailing SL on activation
                                 _init_sl = self._align_price(_best_price * (1.0 - _trail_dist), tick)
                                 if _init_sl > pos.sl_price:
-                                    self.update_sl_tp(symbol, pos.side, new_sl=_init_sl)
+                                    self.update_sl_tp(symbol, pos.side, new_sl=_init_sl, current_price=price)
                                     print(f"[Futures/Trail] {symbol} LONG: Trailing activated → SL={_init_sl:.4f} "
                                           f"(best={_best_price:.4f}, PnL={pnl_pct*100:.2f}%)")
                                 else:
@@ -3891,7 +4450,7 @@ class FuturesClient:
                             pos._smart_meta['trail_best_price'] = _best_price
                             _new_sl = self._align_price(_best_price * (1.0 - _trail_dist), tick)
                             if _new_sl > pos.sl_price:  # only raise SL (LONG: protect more)
-                                self.update_sl_tp(symbol, pos.side, new_sl=_new_sl)
+                                self.update_sl_tp(symbol, pos.side, new_sl=_new_sl, current_price=price)
                                 print(f"[Futures/Trail] {symbol} LONG: SL trailed up → {_new_sl:.4f}")
                             self._persist_smart_meta(pos)  # FIX-S1: persist trail update
 

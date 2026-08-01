@@ -57,6 +57,8 @@ class UnifiedGovernanceContext:
     peak_capture_detail: str = ""
     peak_capture_prob_higher_peak: float = 0.0
     peak_capture_expected_future_pnl: float = 0.0
+    lifecycle_structure_mode: str = "shadow"
+    lifecycle_structure_decision: Dict[str, Any] = field(default_factory=dict)
     # Fear & Greed index value (0-100) for exit modifier
     fear_greed_value: Optional[float] = None
 
@@ -333,12 +335,65 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
             _detail = f"{_prs_detail} | F&G={_fng:.0f} modifier={_fng_exit_modifier:.2f}"
             _priority = _prs_priority
 
+        _structure_mode = str(context.lifecycle_structure_mode or "shadow").lower()
+        _structure = context.lifecycle_structure_decision or {}
+        _structure_action = str(_structure.get("action") or "allow_exit")
+        if _structure_mode == "active":
+            if context.pnl_pct < 0 and _structure_action == "hold_loss" and _should_close:
+                # Behavioral guard: if support already failed before, don't hold
+                _sr_beh = _structure.get("sr_behavior") or {}
+                _support_proven_failed = (
+                    int(_sr_beh.get("support_tests", 0) or 0) >= 2
+                    and _sr_beh.get("support_held") is False
+                )
+                if not _support_proven_failed:
+                    _should_close = False
+                    _close_pct = 0.0
+                    _reason = "lifecycle_structure_hold_loss"
+                    _detail = f"{_detail} | structure={_structure.get('reason', '')}"
+                    _priority = min(_priority, 40)
+            elif context.pnl_pct > 0 and _structure_action == "partial_profit" and not _should_close:
+                _should_close = True
+                _close_pct = min(0.5, max(0.05, float(get_param(settings, "lifecycle_structure_partial_close_pct", 0.35))))
+                _reason = "lifecycle_structure_partial_profit"
+                _detail = f"structure={_structure.get('reason', '')}"
+                _priority = 76
+
+        # PIS: PIM flag_exit — fast monitor detected trade thesis exhaustion
+        _pim_flag = _structure.get("pim_flag_exit") or {}
+        if (
+            _pim_flag
+            and _pim_flag.get("action") == "flag_exit"
+            and float(_pim_flag.get("confidence", 0) or 0) >= 0.5
+            and context.pnl_pct > 0
+            and not _should_close
+        ):
+            _pim_conf = float(_pim_flag.get("confidence", 0.5))
+            _should_close = True
+            _close_pct = min(0.6, max(0.3, _pim_conf))
+            _reason = f"pim_{_pim_flag.get('reason', 'flag_exit')}"
+            _detail = f"PIM conf={_pim_conf:.2f} | {_pim_flag.get('detail', '')}"
+            _priority = 78
+
+        _held_min = _held_minutes(now, context.opened_at)
+        _default_profit_hold = 15.0 if str(context.trade_type or "").lower() == "futures" else 20.0
+        _profit_hold_minutes = float(get_param(settings, "unified_governance_min_profit_hold_minutes", _default_profit_hold))
+        if _should_close and _held_min < _profit_hold_minutes and _close_pct >= 1.0:
+            _close_pct = 0.5
+            _detail = (
+                f"{_detail} | full exit deferred by minimum profit hold "
+                f"({_held_min}m/{_profit_hold_minutes:.0f}m)"
+            )
+            _reason = f"{_reason or 'unified_governance'}_minimum_profit_hold_partial"
+            _priority = min(_priority, 79)
+
         _ug_diagnostics = (
             f"sso_advisory={context.sso_advisory_trigger or 'none'}(close={context.sso_advisory_should_close},"
             f"pct={context.sso_advisory_close_pct:.2f}); "
             f"prs_advisory(close={context.prs_advisory_should_close}); "
             f"prs_eval(close={pr_decision.should_close},pct={pr_decision.close_pct:.2f}); "
             f"fng={_fng:.0f}(mod={_fng_exit_modifier:.2f}); "
+            f"profit_hold={_held_min}m/{_profit_hold_minutes:.0f}m; "
             f"{pr_decision.diagnostics}"
         )
 
@@ -558,6 +613,26 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
             should_close = False
             close_pct = 0.0
             priority = 55
+
+    _loss_structure = context.lifecycle_structure_decision or {}
+    if (
+        str(context.lifecycle_structure_mode or "shadow").lower() == "active"
+        and str(_loss_structure.get("action") or "allow_exit") == "hold_loss"
+        and should_close
+        and not near_sl
+    ):
+        # PIS behavioral guard: don't hold if support already proven to fail
+        _sr_beh_loss = _loss_structure.get("sr_behavior") or {}
+        _support_proven_failed_loss = (
+            int(_sr_beh_loss.get("support_tests", 0) or 0) >= 2
+            and _sr_beh_loss.get("support_held") is False
+        )
+        if not _support_proven_failed_loss:
+            action = "hold"
+            reason = "lifecycle_structure_hold_loss"
+            should_close = False
+            close_pct = 0.0
+            priority = min(priority, 40)
 
     if action == "watchdog":
         watchdog_level += 1

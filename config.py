@@ -261,6 +261,12 @@ class Settings(BaseSettings):
     profit_realization_futures_drawback_pct: float = Field(default=0.0035)
     profit_realization_futures_partial_close_pct: float = Field(default=0.60)
     profit_realization_futures_max_extensions: int = Field(default=1)
+    # SR resistance-aware exit acceleration (for long positions near resistance zones)
+    profit_realization_sr_accel_enabled: bool = Field(default=True)
+    profit_realization_sr_accel_partial_multiplier: float = Field(default=0.80)
+    profit_realization_sr_accel_full_multiplier: float = Field(default=0.85)
+    profit_realization_sr_accel_drawback_multiplier: float = Field(default=0.85)
+    profit_realization_sr_resistance_zone_min: float = Field(default=0.68)
     # Unified governance supervisor (profit + loss)
     unified_governance_enabled: bool = Field(default=True)
     unified_governance_profit_enabled: bool = Field(default=True)
@@ -625,8 +631,13 @@ class Settings(BaseSettings):
     peak_reconstruction_enabled: bool = Field(default=True)
     peak_reconstruction_lookback_candles: int = Field(default=30)
     unified_governance_min_profit_hold_minutes: float = Field(default=15.0)
-    lifecycle_structure_mode: str = Field(default="shadow")
+    lifecycle_structure_mode: str = Field(default="active")
     lifecycle_structure_partial_close_pct: float = Field(default=0.35)
+    # ── Position Intelligence System (PIS) ───────────────────────────────────
+    position_intelligence_enabled: bool = Field(default=True)
+    position_intelligence_sr_refresh_seconds: float = Field(default=30.0)
+    position_intelligence_min_confidence: float = Field(default=0.3)
+    position_intelligence_emergency_confidence: float = Field(default=0.7)
 
     # ── Staged multi-cycle entry validation (ready state) ──────────────────────
     staged_entry_enabled: bool = Field(default=True)
@@ -636,14 +647,30 @@ class Settings(BaseSettings):
     hard_risk_monitor_enabled: bool = Field(default=True)
     hard_risk_monitor_interval_seconds: float = Field(default=2.0)
     hard_risk_breakeven_enabled: bool = Field(default=True)
+    # S105g: real-time Binance User Data Stream (futures + spot) so position
+    # closures are detected in seconds instead of waiting for the next 5-min
+    # polling cycle. Falls back silently to polling/reconciliation if disabled,
+    # unavailable (dry_run/no credentials), or the connection drops.
+    binance_event_stream_enabled: bool = Field(default=True)
+    binance_event_stream_futures_enabled: bool = Field(default=True)
+    # S105g: was OFF because python-binance==1.0.16 used a deprecated spot
+    # listenKey endpoint (/api/v1/userDataStream -> 410 Gone) against the
+    # installed websockets>=16. Fixed by upgrading python-binance to 1.0.37
+    # (requirements.txt) — verified in production: both futures and spot
+    # streams connect and stop() no longer hangs (root-caused to the same
+    # library/websockets incompatibility). Re-enabled by default.
+    binance_event_stream_spot_enabled: bool = Field(default=True)
     directional_policy_mode: str = Field(default="shadow")
     range_reversion_predictor_mode: str = Field(default="shadow")
     preservation_upgrade_to_futures: bool = Field(default=False)
     range_scalp_bidirectional_enabled: bool = Field(default=True)
-    range_scalp_short_first_enabled: bool = Field(default=True)
+    range_scalp_short_first_enabled: bool = Field(default=False)
     range_scalp_short_priority_bonus: float = Field(default=0.05)
-    range_scalp_short_preferred: bool = Field(default=True)  # True = select FUTURES_SHORT whenever eligible
+    range_scalp_short_preferred: bool = Field(default=False)  # Neutral = do not bias selection by side
     range_scalp_long_entries_enabled: bool = Field(default=True)
+    range_scalp_long_min_probability: float = Field(default=0.60)
+    range_scalp_long_min_expected_pnl: float = Field(default=0.0)
+    range_scalp_long_support_zone_max: float = Field(default=0.55)
     range_scalp_long_superiority_delta: float = Field(default=0.10)
     range_scalp_direction_min_probability: float = Field(default=0.55)
     range_scalp_short_resistance_threshold: float = Field(default=0.65)
@@ -659,8 +686,8 @@ class Settings(BaseSettings):
             "enabled": True,
             "checks_per_cycle": 3,
             "required_positive_checks": 1,
-            "max_cycles": 3,
-            "max_age_min": 60,
+            "max_cycles": 100,  # s105: decoupled from the 8h max_age_min ceiling (was 3)
+            "max_age_min": 480,  # s105: a breakout candidate may legitimately wait up to 8h (was 60)
             "intra_mode": "predictor",  # 'predictor' | 'price_ratio' | 'disabled'
             "price_source": "avg",
             "use_fear_greed": True,
@@ -675,14 +702,23 @@ class Settings(BaseSettings):
             "direction_max_adverse_bps": 50.0,
             "direction_required_confirmations": 2,
             "direction_max_adverse_observations": 3,
+            "direction_sr_invalidation_pct": 1.5,  # s105: hard SR-proximity-loss terminal threshold
         },
         "RANGE_SCALP": {
             "enabled": True,
             "checks_per_cycle": 2,
             "required_positive_checks": 1,
-            "max_cycles": 4,
-            "max_age_min": 20,
-            "intra_mode": "predictor",
+            "max_cycles": 100,  # s105: decoupled from the 8h max_age_min ceiling (was 4)
+            "max_age_min": 480,  # s105: a breakout candidate may legitimately wait up to 8h (was 20)
+            # s106: was 'predictor' (sequential re-check every ~150s, re-running the
+            # full ML predictor per candidate) despite this regime having a dedicated
+            # lightweight 'watcher' path (parallel price+direction poll, no predictor
+            # recompute) built specifically for it. Measured impact of the 15x slower
+            # cadence: median 13.6 min (up to 4.8h) spent oscillating between
+            # confirmed/pending AFTER the market already gave its first favorable tick
+            # (median 2.8 min) — see calibracion_entradas-a20ab8-v3.md s106.
+            "intra_mode": "watcher",
+            "watcher_interval_seconds": 10,
             "price_source": "avg",
             "use_fear_greed": True,
             "cooldown_min": 0,
@@ -695,13 +731,14 @@ class Settings(BaseSettings):
             "direction_max_adverse_bps": 150.0,
             "direction_required_confirmations": 1,
             "direction_max_adverse_observations": 4,
+            "direction_sr_invalidation_pct": 1.5,  # s105: hard SR-proximity-loss terminal threshold
         },
         "FUTURES_SHORT": {
             "enabled": True,
             "checks_per_cycle": 1,
             "required_positive_checks": 2,
-            "max_cycles": 3,
-            "max_age_min": 20,
+            "max_cycles": 100,  # s105: decoupled from the 8h max_age_min ceiling (was 3)
+            "max_age_min": 480,  # s105: a breakout candidate may legitimately wait up to 8h (was 20)
             "intra_mode": "predictor",
             "price_source": "ticker",
             "use_fear_greed": False,
@@ -716,13 +753,14 @@ class Settings(BaseSettings):
             "direction_max_adverse_bps": 50.0,
             "direction_required_confirmations": 2,
             "direction_max_adverse_observations": 2,
+            "direction_sr_invalidation_pct": 1.5,  # s105: hard SR-proximity-loss terminal threshold
         },
         "PRESERVATION": {
             "enabled": True,
             "checks_per_cycle": 1,
             "required_positive_checks": 2,
-            "max_cycles": 3,
-            "max_age_min": 100,
+            "max_cycles": 100,  # s105: decoupled from the 8h max_age_min ceiling (was 3)
+            "max_age_min": 480,  # s105: a breakout candidate may legitimately wait up to 8h (was 100)
             "intra_mode": "predictor",
             "price_source": "avg",
             "use_fear_greed": True,
@@ -737,6 +775,7 @@ class Settings(BaseSettings):
             "direction_max_adverse_bps": 50.0,
             "direction_required_confirmations": 2,
             "direction_max_adverse_observations": 3,
+            "direction_sr_invalidation_pct": 1.5,  # s105: hard SR-proximity-loss terminal threshold
         },
     })
 
@@ -893,9 +932,10 @@ class Settings(BaseSettings):
     # PRESERVATION mode parameters
     preservation_sl_pct: float = Field(default=1.5)
     preservation_tp_pct: float = Field(default=3.0)
-    preservation_kelly_mult: float = Field(default=0.5)
+    preservation_kelly_mult: float = Field(default=0.6)
     preservation_narrative_only: bool = Field(default=True)
-    preservation_max_rsi: float = Field(default=65.0)
+    preservation_max_rsi: float = Field(default=70.0)
+    preservation_min_vol_spike: float = Field(default=0.8)
 
     # Binance commission configuration â€” rates are controlled by Binance, not backtest.
     # Defaults are the documented standard rates; live rates are refreshed from API.

@@ -244,10 +244,16 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'hard_risk_monitor_enabled': True,
     'hard_risk_monitor_interval_seconds': 2.0,
     'hard_risk_breakeven_enabled': True,
-    'range_scalp_short_first_enabled': True,
+    'binance_event_stream_enabled': True,
+    'binance_event_stream_futures_enabled': True,
+    'binance_event_stream_spot_enabled': False,
+    'range_scalp_short_first_enabled': False,
     'range_scalp_short_priority_bonus': 0.05,
-    'range_scalp_short_preferred': True,  # True = select FUTURES_SHORT whenever eligible
+    'range_scalp_short_preferred': False,  # Neutral = do not bias selection by side
     'range_scalp_long_entries_enabled': True,
+    'range_scalp_long_min_probability': 0.60,
+    'range_scalp_long_min_expected_pnl': 0.0,
+    'range_scalp_long_support_zone_max': 0.55,
     'range_scalp_long_superiority_delta': 0.10,
     'range_scalp_direction_min_probability': 0.55,
     'range_scalp_short_min_probability': 0.40,
@@ -302,7 +308,9 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'btc_dominance_altcoin_threshold': 56.0,
     'market_regime_enabled': True,
     'preservation_narrative_only': True,
-    'preservation_max_rsi': 65.0,
+    'preservation_max_rsi': 70.0,
+    'preservation_min_vol_spike': 0.8,
+    'preservation_kelly_mult': 0.6,
     'range_scalp_sl_pct': 0.8,          # s70: 1.2→0.8 (R:R 2.25)
     'range_scalp_tp_pct': 1.8,          # s70: 1.5→1.8
     'range_scalp_min_rsi': 25.0,        # s70: new
@@ -372,13 +380,20 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'range_scalp_short_usdt_per_trade': 1000.0,
     'range_scalp_short_sl_pct': 2.0,
     'range_scalp_short_tp_pct': 4.0,
+    # s106 NOTE: config.py::Settings.staged_entry_regime_config is the REAL,
+    # LIVE-EFFECTIVE source for these values in production — this dict is only
+    # the fallback used if _sync_canonical_defaults_from_settings() (below)
+    # fails at import time; that function overwrites _PARAM_DEFAULTS (and thus
+    # _DEFAULT_STAGED_ENTRY_REGIME_CONFIG) with config.py's values on every
+    # startup. Editing ONLY this dict has NO effect on a running system.
+    # Keep both copies identical; drift here silently does nothing.
     'staged_entry_regime_config': {
         'SPOT_BULL': {
             'enabled': True,
             'checks_per_cycle': 3,
-            'required_positive_checks': 2,
-            'max_cycles': 3,
-            'max_age_min': 60,
+            'required_positive_checks': 1,
+            'max_cycles': 100,  # s105: decoupled from the 8h max_age_min ceiling
+            'max_age_min': 480,  # s105: a breakout candidate may legitimately wait up to 8h
             'intra_mode': 'predictor',
             'price_source': 'avg',
             'use_fear_greed': True,
@@ -387,19 +402,22 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'require_predictor_valid': True,
             'min_expected_pnl': 0.0,
             'policy_version': 'v1',
-            'max_open_per_cycle': 1,
-            'direction_confirmation_mode': 'enforced',
+            'max_open_per_cycle': 2,
+            'direction_confirmation_mode': 'disabled',
             'direction_min_progress_bps': 5.0,
             'direction_max_adverse_bps': 50.0,
             'direction_required_confirmations': 2,
+            'direction_max_adverse_observations': 3,
+            'direction_sr_invalidation_pct': 1.5,
         },
         'RANGE_SCALP': {
             'enabled': True,
             'checks_per_cycle': 2,
             'required_positive_checks': 1,
-            'max_cycles': 4,
-            'max_age_min': 20,
-            'intra_mode': 'predictor',
+            'max_cycles': 100,  # s105: decoupled from the 8h max_age_min ceiling
+            'max_age_min': 480,  # s105: a breakout candidate may legitimately wait up to 8h
+            'intra_mode': 'watcher',
+            'watcher_interval_seconds': 10,
             'price_source': 'avg',
             'use_fear_greed': True,
             'cooldown_min': 0,
@@ -411,13 +429,15 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'direction_min_progress_bps': 1.0,
             'direction_max_adverse_bps': 150.0,
             'direction_required_confirmations': 1,
+            'direction_max_adverse_observations': 4,
+            'direction_sr_invalidation_pct': 1.5,
         },
         'FUTURES_SHORT': {
             'enabled': True,
             'checks_per_cycle': 1,
             'required_positive_checks': 2,
-            'max_cycles': 3,
-            'max_age_min': 20,
+            'max_cycles': 100,  # s105: decoupled from the 8h max_age_min ceiling
+            'max_age_min': 480,  # s105: a breakout candidate may legitimately wait up to 8h
             'intra_mode': 'predictor',
             'price_source': 'ticker',
             'use_fear_greed': False,
@@ -426,18 +446,20 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'require_predictor_valid': True,
             'min_expected_pnl': 0.0,
             'policy_version': 'v1',
-            'max_open_per_cycle': 1,
+            'max_open_per_cycle': 2,
             'direction_confirmation_mode': 'enforced',
             'direction_min_progress_bps': 3.0,
             'direction_max_adverse_bps': 50.0,
             'direction_required_confirmations': 2,
+            'direction_max_adverse_observations': 2,
+            'direction_sr_invalidation_pct': 1.5,
         },
         'PRESERVATION': {
             'enabled': True,
             'checks_per_cycle': 1,
             'required_positive_checks': 2,
-            'max_cycles': 3,
-            'max_age_min': 100,
+            'max_cycles': 100,  # s105: decoupled from the 8h max_age_min ceiling
+            'max_age_min': 480,  # s105: a breakout candidate may legitimately wait up to 8h
             'intra_mode': 'predictor',
             'price_source': 'avg',
             'use_fear_greed': True,
@@ -446,11 +468,13 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'require_predictor_valid': True,
             'min_expected_pnl': 0.0,
             'policy_version': 'v1',
-            'max_open_per_cycle': 1,
+            'max_open_per_cycle': 2,
             'direction_confirmation_mode': 'enforced',
             'direction_min_progress_bps': 3.0,
             'direction_max_adverse_bps': 50.0,
             'direction_required_confirmations': 2,
+            'direction_max_adverse_observations': 3,
+            'direction_sr_invalidation_pct': 1.5,
         },
     },
 
@@ -604,11 +628,20 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'profit_realization_futures_drawback_pct': 0.0035,
     'profit_realization_futures_partial_close_pct': 0.60,
     'profit_realization_futures_max_extensions': 1,
+    'profit_realization_sr_accel_enabled': True,
+    'profit_realization_sr_accel_partial_multiplier': 0.80,
+    'profit_realization_sr_accel_full_multiplier': 0.85,
+    'profit_realization_sr_accel_drawback_multiplier': 0.85,
+    'profit_realization_sr_resistance_zone_min': 0.68,
     'unified_governance_enabled': True,
     'unified_governance_profit_enabled': True,
     'unified_governance_min_profit_hold_minutes': 15.0,
-    'lifecycle_structure_mode': 'shadow',
+    'lifecycle_structure_mode': 'active',
     'lifecycle_structure_partial_close_pct': 0.35,
+    'position_intelligence_enabled': True,
+    'position_intelligence_sr_refresh_seconds': 30.0,
+    'position_intelligence_min_confidence': 0.3,
+    'position_intelligence_emergency_confidence': 0.7,
     'unified_governance_loss_enabled': True,
     'unified_governance_loss_min_age_profile_a': 90.0,    # jul07: 30→90 (wolf-hunter: SL lógico primero)
     'unified_governance_loss_min_age_profile_b': 120.0,   # jul07: 60→120
@@ -720,8 +753,12 @@ def _sync_canonical_defaults_from_settings() -> None:
             default = getattr(field, "default", None)
             if default is not None:
                 _PARAM_DEFAULTS[name] = deepcopy(default)
-    except Exception:
-        # Validation step will surface any remaining mismatch explicitly.
+    except Exception as exc:
+        # Don't fail silently: if this sync fails, _PARAM_DEFAULTS keeps the
+        # hardcoded fallback values above, which can silently drift from the
+        # real config.Settings defaults (e.g. staged_entry_regime_config) and
+        # make the system run stricter/looser thresholds than intended.
+        logger.warning(f"_sync_canonical_defaults_from_settings failed, using hardcoded fallback defaults: {exc}")
         return
 
 
@@ -786,7 +823,7 @@ def get_staged_entry_regime_config(settings, regime: str) -> Dict[str, Any]:
     # Allow RANGE_SCALP to use a single confirmation for fast SR bounces.
     if regime != "RANGE_SCALP":
         merged['direction_required_confirmations'] = max(2, int(merged.get('direction_required_confirmations', 2) or 2))
-    elif bool(getattr(settings, 'range_scalp_short_first_enabled', True)):
+    elif bool(getattr(settings, 'range_scalp_short_first_enabled', False)):
         merged['direction_confirmation_mode'] = 'enforced'
         merged['direction_required_confirmations'] = min(max(1, int(merged.get('direction_required_confirmations', 1) or 1)), 1)
         merged['direction_min_progress_bps'] = min(float(merged.get('direction_min_progress_bps', 1.0) or 1.0), 1.0)

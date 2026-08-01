@@ -3,7 +3,7 @@ from fastapi import status as http_status
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from collections import Counter
 import asyncio
 import json
@@ -41,7 +41,7 @@ from binance_truth_guard import (
     auto_reconcile_futures,
 )
 from trade_utils import get_min_notional_delta, get_symbol_filters
-from entry_evidence import build_entry_evidence
+from entry_evidence import build_entry_evidence, build_sr_hunt_48h_report
 
 settings = get_settings()
 app = FastAPI(title="Binance Trading Agent")
@@ -94,6 +94,231 @@ db_client = _comp.db_client
 position_manager = _comp.position_manager
 portfolio_manager = _comp.portfolio_manager
 orchestrator = _comp.orchestrator
+
+
+def _get_runtime_state_value(key: str) -> Dict[str, Any]:
+    if not db_client:
+        return {}
+    try:
+        rows = db_client.execute_query("SELECT value FROM trading_runtime_state WHERE key=%s", (key,))
+        if not rows:
+            return {}
+        value = rows[0].get("value")
+        if isinstance(value, str):
+            value = json.loads(value)
+        return value if isinstance(value, dict) else {"value": value}
+    except Exception:
+        return {}
+
+
+def _get_capital_routing_guard_status() -> Dict[str, Any]:
+    guard = _get_runtime_state_value("capital_routing_guard")
+    if not guard:
+        return {"active": False}
+    payload = guard.get("capital_routing_guard") if isinstance(guard, dict) else None
+    if isinstance(payload, dict):
+        active = bool(payload.get("pause_new_entries"))
+        return {
+            "active": active,
+            "pause_new_entries": active,
+            "scope": payload.get("scope"),
+            "reason": payload.get("reason"),
+            "selected_mode": payload.get("selected_mode"),
+            "cooldown_until": payload.get("cooldown_until"),
+            "updated_at": payload.get("updated_at"),
+        }
+    return {"active": False}
+
+
+def _time(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+    return None
+
+
+def _get_effective_runtime_selection() -> Dict[str, Any]:
+    snapshot = _get_runtime_state_value("effective_runtime_selection_snapshot")
+    if snapshot:
+        return snapshot
+    active_mode = getattr(settings, "current_regime_mode", None) or getattr(settings, "regime_mode", None) or "SPOT_BULL"
+    active_profile = _get_runtime_state_value(f"regime_profile_active_{str(active_mode).upper()}")
+    payload = active_profile.get("profile") if isinstance(active_profile, dict) else None
+    if isinstance(payload, str) and payload:
+        profile = payload
+    elif isinstance(active_profile, dict):
+        profile = active_profile.get("profile") or active_profile.get("value")
+    else:
+        profile = None
+    return {
+        "mode": str(active_mode).upper(),
+        "profile": profile,
+        "source": "settings_default",
+    }
+
+
+def _get_mode_profile_harmony_snapshot() -> Dict[str, Any]:
+    runtime = _get_effective_runtime_selection()
+    mode = str(runtime.get("mode") or getattr(settings, "current_regime_mode", "SPOT_BULL") or "SPOT_BULL").upper()
+    profile = str(runtime.get("profile") or "").upper() or None
+    guard = _get_capital_routing_guard_status()
+    pause = _get_pause_new_entries_status()
+    aligned = bool(mode) and bool(profile)
+    return {
+        "ok": True,
+        "mode": mode,
+        "profile": profile,
+        "source": runtime.get("source", "runtime_state"),
+        "aligned": aligned,
+        "capital_guard_active": bool(guard.get("active")),
+        "pause_new_entries": bool(pause.get("active")),
+        "updated_at": runtime.get("updated_at"),
+    }
+
+
+def _get_parity_validation_snapshot() -> Dict[str, Any]:
+    comp = get_components()
+    try:
+        futures_truth = get_truth_status(comp.db_client)
+    except Exception as exc:
+        futures_truth = {"ok": False, "severity": "error", "error": str(exc)}
+    try:
+        spot_truth = get_truth_status_spot(comp.db_client)
+    except Exception as exc:
+        spot_truth = {"ok": False, "severity": "error", "error": str(exc)}
+    severities = {
+        str(futures_truth.get("severity") or "unknown").lower(),
+        str(spot_truth.get("severity") or "unknown").lower(),
+    }
+    mismatch_count = int(futures_truth.get("mismatch_count") or 0) + int(spot_truth.get("mismatch_count") or 0)
+    status = "ok"
+    if not futures_truth.get("ok") or not spot_truth.get("ok"):
+        status = "critical" if "error" in severities else "warning"
+    elif "critical" in severities:
+        status = "critical"
+    elif "warning" in severities:
+        status = "warning"
+    return {
+        "ok": status == "ok",
+        "status": status,
+        "futures": futures_truth,
+        "spot": spot_truth,
+        "mismatch_count": mismatch_count,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _get_performance_changepoint_metrics() -> Dict[str, Any]:
+    try:
+        cached = _HEALTH_RESULTS_CACHE.get("snapshot") or {}
+        if isinstance(cached, dict) and cached.get("performance_changepoint"):
+            payload = cached.get("performance_changepoint")
+            if isinstance(payload, dict):
+                return payload
+        rows = _get_runtime_state_value("performance_changepoint")
+        if rows:
+            return rows
+        overall = None
+        if isinstance(cached, dict):
+            overall = cached.get("overall") or cached.get("summary")
+        return {
+            "ok": overall in (None, "ok", "healthy", "pass"),
+            "available": bool(cached),
+            "status": overall or "unknown",
+            "source": "health_snapshot" if cached else "empty",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "available": False,
+            "status": "error",
+            "error": str(exc),
+            "source": "fallback",
+        }
+
+
+def _get_promotion_criteria_snapshot() -> Dict[str, Any]:
+    parity = _get_parity_validation_snapshot()
+    rollout = _get_rollout_readiness_snapshot(include_promotion=False)
+    rollout_control = _get_rollout_control_status()
+    health = _HEALTH_RESULTS_CACHE.get("snapshot") or {}
+    health_status = str((health or {}).get("overall") or (health or {}).get("summary") or "unknown").lower()
+    passes = []
+    checks = {
+        "truth_ok": bool(parity.get("ok")),
+        "rollout_ready": bool(rollout.get("ok")),
+        "health_ok": health_status in {"ok", "healthy", "pass", "good", "warning"},
+        "no_pause": not _get_pause_new_entries_status().get("active"),
+        "no_capital_guard": not _get_capital_routing_guard_status().get("active"),
+        "stable_rollout": str(rollout_control.get("mode") or "stable") == "stable",
+    }
+    for name, passed in checks.items():
+        if passed:
+            passes.append(name)
+    ok = all(checks.values())
+    return {
+        "ok": ok,
+        "status": "ready" if ok else "blocked",
+        "checks": checks,
+        "passed_checks": passes,
+        "blocked_checks": [name for name, passed in checks.items() if not passed],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _get_rollout_readiness_snapshot(include_promotion: bool = True) -> Dict[str, Any]:
+    health = _HEALTH_RESULTS_CACHE.get("snapshot") or {}
+    parity = _get_parity_validation_snapshot()
+    harmony = _get_mode_profile_harmony_snapshot()
+    changepoint = _get_performance_changepoint_metrics()
+    pause = _get_pause_new_entries_status()
+    guard = _get_capital_routing_guard_status()
+    rollout_control = _get_rollout_control_status()
+    health_status = str((health or {}).get("overall") or (health or {}).get("summary") or "unknown").lower()
+    blocks: List[str] = []
+    if health_status in {"critical", "error"}:
+        blocks.append(f"health:{health_status}")
+    if not parity.get("ok"):
+        blocks.append(f"parity:{parity.get('status', 'unknown')}")
+    if pause.get("active"):
+        blocks.append("pause_new_entries")
+    if guard.get("active"):
+        blocks.append("capital_guard")
+    if str(rollout_control.get("mode") or "stable") == "rollback":
+        blocks.append("rollout_rollback")
+    if include_promotion:
+        promotion = _get_promotion_criteria_snapshot()
+        if not promotion.get("ok"):
+            blocks.extend([f"promotion:{name}" for name in promotion.get("blocked_checks", [])])
+    ok = not blocks
+    return {
+        "ok": ok,
+        "status": "ready" if ok else "blocked",
+        "blocks": blocks,
+        "harmony": harmony,
+        "parity": parity,
+        "health": {
+            "status": health_status,
+            "available": bool(health),
+        },
+        "changepoint": changepoint,
+        "pause_new_entries": pause,
+        "capital_guard": guard,
+        "rollout_control": rollout_control,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 _HEALTH_RESULTS_CACHE: Dict[str, Any] = {
     "snapshot": None,
@@ -778,7 +1003,7 @@ async def range_scalp_dual_stats(_auth: None = Depends(_require_api_key)) -> Dic
                       WHERE to2.symbol = rc.symbol
                         AND to2.side = 'SELL'
                         AND COALESCE(to2.metadata->>'trade_type', 'spot') = 'futures'
-                        AND to2.opened_at >= rc.discarded_at
+                        AND to2.entry_time >= rc.discarded_at
                   )
             ) AS opened_shorts
         FROM ready_candidates rc
@@ -944,6 +1169,13 @@ class PauseEntriesRequest(BaseModel):
     ttl_minutes: Optional[float] = 180.0
 
 
+class RolloutRequest(BaseModel):
+    mode: str
+    reason: Optional[str] = None
+    canary_percent: Optional[float] = None
+    scope: Optional[str] = None
+
+
 @app.post("/control/pause")
 async def pause_system(payload: ControlRequest, _auth: None = Depends(_require_api_key)) -> Dict:
     """Pause the system (stop new orders, monitor open positions)."""
@@ -989,6 +1221,10 @@ async def resume_all(payload: ControlRequest, _auth: None = Depends(_require_api
     db_client.execute_update(
         "DELETE FROM trading_runtime_state WHERE key=%s",
         ('pause_new_entries',),
+    )
+    db_client.execute_update(
+        "DELETE FROM trading_runtime_state WHERE key=%s",
+        ('capital_routing_guard',),
     )
 
     _cleared_alert_types = [str(a.get("alert_type") or "") for a in _before_alerts if a.get("alert_type")]
@@ -1125,16 +1361,126 @@ async def resume_new_entries(_auth: None = Depends(_require_api_key)) -> Dict:
     }
 
 
+def _get_rollout_control_status() -> Dict[str, Any]:
+    payload = _get_runtime_state_value("rollout_control_state")
+    if not payload:
+        return {
+            "mode": "stable",
+            "active": False,
+            "reason": None,
+            "canary_percent": None,
+            "scope": None,
+        }
+    state = payload.get("rollout_control_state") if isinstance(payload, dict) else None
+    if not isinstance(state, dict):
+        return {
+            "mode": str(payload.get("mode") or "stable"),
+            "active": bool(payload.get("active", False)),
+            "reason": payload.get("reason"),
+            "canary_percent": payload.get("canary_percent"),
+            "scope": payload.get("scope"),
+            "updated_at": payload.get("updated_at"),
+        }
+    return {
+        "mode": str(state.get("mode") or "stable"),
+        "active": bool(state.get("active", False)),
+        "reason": state.get("reason"),
+        "canary_percent": state.get("canary_percent"),
+        "scope": state.get("scope"),
+        "updated_at": state.get("updated_at"),
+        "changed_by": state.get("changed_by"),
+    }
+
+
+@app.post("/control/rollout")
+async def set_rollout_control(payload: RolloutRequest, _auth: None = Depends(_require_api_key)) -> Dict:
+    """Persist rollout state for canary, stable and rollback operations."""
+    if not db_client:
+        raise HTTPException(status_code=503, detail="DB not available")
+    mode = str(payload.mode or "").strip().lower()
+    if mode not in {"canary", "stable", "rollback"}:
+        raise HTTPException(status_code=400, detail="mode must be canary, stable or rollback")
+
+    now = datetime.now(timezone.utc).isoformat()
+    state = {
+        "mode": mode,
+        "active": mode != "stable",
+        "reason": (payload.reason or f"rollout_{mode}").strip() or f"rollout_{mode}",
+        "canary_percent": None,
+        "scope": (payload.scope or "RANGE_SCALP").strip() or "RANGE_SCALP",
+        "updated_at": now,
+        "changed_by": "api",
+    }
+    if payload.canary_percent is not None:
+        try:
+            state["canary_percent"] = max(0.0, min(100.0, float(payload.canary_percent)))
+        except Exception:
+            raise HTTPException(status_code=400, detail="canary_percent must be numeric")
+
+    if mode == "rollback":
+        pause_payload = json.dumps({
+            "paused": True,
+            "reason": state["reason"],
+            "started_at": now,
+            "ttl_minutes": None,
+            "expires_at": None,
+            "changed_by": "api",
+        })
+        db_client.execute_transaction([
+            (
+                "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES ('rollout_control_state', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                (json.dumps({"rollout_control_state": state}), json.dumps({"rollout_control_state": state})),
+            ),
+            (
+                "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES ('pause_new_entries', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                (pause_payload, pause_payload),
+            ),
+            (
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES ('__config__', 'system', 'rollout_control_rollback', %s, false)",
+                (json.dumps(state),),
+            ),
+        ])
+    else:
+        if mode == "stable":
+            db_client.execute_update(
+                "DELETE FROM trading_runtime_state WHERE key=%s",
+                ('pause_new_entries',),
+            )
+        db_client.execute_transaction([
+            (
+                "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES ('rollout_control_state', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()",
+                (json.dumps({"rollout_control_state": state}), json.dumps({"rollout_control_state": state})),
+            ),
+            (
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES ('__config__', 'system', 'rollout_control_update', %s, false)",
+                (json.dumps(state),),
+            ),
+        ])
+
+    return {
+        "ok": True,
+        "rollout_control": _get_rollout_control_status(),
+        "pause_new_entries": _get_pause_new_entries_status(),
+    }
+
+
 @app.get("/control/status")
 async def get_control_status() -> Dict:
     """Get current system control status."""
     _state = orchestrator.get_state()
     _pause = _get_pause_new_entries_status()
+    _capital_guard = _get_capital_routing_guard_status()
+    _rollout_control = _get_rollout_control_status()
     _alerts = _list_active_operator_alerts()
     _unified = _build_unified_system_status(_state, _pause, _alerts)
     return {
         **_state,
         "pause_new_entries": _pause,
+        "capital_routing_guard": _capital_guard,
+        "rollout_control": _rollout_control,
         "operator_alerts_active": {
             "count": len(_alerts),
             "alerts": _alerts,
@@ -2789,6 +3135,17 @@ async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
     except Exception as e:
         result["health"] = {"error": str(e)}
 
+    # Binance truth status — visible in the main dashboard summary
+    try:
+        from binance_truth_guard import get_truth_status, get_truth_status_spot
+        comp = get_components()
+        result["binance_truth"] = {
+            "futures": get_truth_status(comp.db_client),
+            "spot": get_truth_status_spot(comp.db_client),
+        }
+    except Exception as e:
+        result["binance_truth"] = {"error": str(e)}
+
     # Pause status for new entries (operator visibility + TTL)
     try:
         result["pause_new_entries"] = _get_pause_new_entries_status()
@@ -2857,6 +3214,24 @@ async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
         result["performance_changepoint"] = _get_performance_changepoint_metrics()
     except Exception as e:
         result["performance_changepoint"] = {"available": False, "error": str(e)}
+
+    # Selection observability — funnel, latest cycle and stage counters for the dashboard
+    try:
+        _open_symbols = set()
+        if comp.position_manager:
+            try:
+                _open_positions = comp.position_manager.get_all_positions() or {}
+                _open_symbols = {str(sym).upper() for sym in _open_positions.keys()}
+            except Exception:
+                _open_symbols = set()
+        result["selection_observability"] = _build_selection_observability(
+            comp.db_client,
+            limit=100,
+            active_regime=str(_runtime_ctx.get("mode") or "").upper() or None,
+            open_symbols=_open_symbols,
+        )
+    except Exception as e:
+        result["selection_observability"] = {"available": False, "error": str(e), "candidates": []}
 
     # Mode/profile harmony — expose the effective Kelly/KPI/SSO overlay currently active
     try:
@@ -5758,6 +6133,51 @@ async def get_entry_evidence(
         return {"ok": False, "error": str(exc), "filters": {"regime": normalized_regime, "days": days}}
 
 
+@app.get("/metrics/sr-hunt-48h")
+async def get_sr_hunt_48h(
+    hours: int = Query(48, ge=1, le=168),
+    regime: str = Query("RANGE_SCALP", min_length=1, max_length=32),
+    _auth=Depends(_require_api_key),
+) -> Dict:
+    """Operational 48h SR-hunt funnel by routing intent/side with execution outcomes."""
+    normalized_regime = regime.strip().upper()
+    try:
+        payload = build_sr_hunt_48h_report(
+            db_client,
+            regime=normalized_regime,
+            hours=hours,
+        )
+        # Reuse existing governance verdicts so rollout Go/Hold/Rollback remains canonical.
+        try:
+            readiness = _get_rollout_readiness_snapshot()
+            parity = _get_parity_validation_snapshot()
+            promotion = _get_promotion_criteria_snapshot()
+            rollout_action = "hold"
+            if str(readiness.get("status") or "").lower() in {"blocked", "error"}:
+                rollout_action = "rollback"
+            elif str(parity.get("status") or "").lower() in {"critical", "error"}:
+                rollout_action = "rollback"
+            elif str(promotion.get("status") or "").lower() == "promote":
+                rollout_action = "go"
+            elif str(promotion.get("status") or "").lower() == "observe":
+                rollout_action = "hold"
+            payload["rollout"] = {
+                "readiness": readiness,
+                "parity_validation": parity,
+                "promotion_criteria": promotion,
+                "governance_action": rollout_action,
+            }
+        except Exception as rollout_exc:
+            payload["rollout"] = {"ok": False, "error": str(rollout_exc)}
+        return payload
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "filters": {"regime": normalized_regime, "hours": hours},
+        }
+
+
 @app.get("/metrics/transition-health")
 async def get_transition_health(_auth=Depends(_require_api_key)) -> Dict:
     """Return lightweight transition-health KPIs from runtime state and orchestrator memory."""
@@ -6359,11 +6779,11 @@ async def get_price_history(symbol: str, start_time: str, end_time: str, trade_t
 
 @app.get("/futures/closed")
 async def get_futures_closed_positions(limit: int = 20, days: int = 7) -> Dict:
-    """Return closed futures positions queried live from Binance userTrades (last N days).
-    Survives container restarts — does not depend on in-memory tracking.
+    """Return closed futures positions grouped by real position from trades_closed (last N days).
+    Uses Binance userTrades only as a fallback enrichment for fields not persisted in DB.
+    Survives container restarts and does not depend on in-memory tracking.
     """
     try:
-        from run_trades import _get_futures_client
         from config import get_settings as _get_s
         _s = _get_s()
         _runtime_ctx = _get_dashboard_context_reference()
@@ -6377,117 +6797,141 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 7) -> Dict:
                 "source": "dry_run",
             }
 
-        _fc = _get_futures_client(_s)
-
-        # Build symbol list from config to query even after restart (empty tracking)
-        _extra = list(_cfg_param(_s, 'futures_symbols'))
-        try:
-            from pair_screener import get_screened_pairs
-            _regime_mode = str(getattr(_s, 'current_regime_mode', 'SPOT_BULL')).strip().upper()
-            _profile = _get_active_profile_summary(_regime_mode).get("label")
-            _extra = list(dict.fromkeys(
-                _extra + get_screened_pairs(
-                    settings=_s,
-                    regime_mode=_regime_mode,
-                    profile_label=_profile,
-                    db_client=db_client,
-                ).get("futures", [])
-            ))
-        except Exception:
-            pass
-
-        raw = _fc.get_recent_trades(days=days, limit=limit, extra_symbols=_extra)
-
-        # FIX-L2: build DB enrichment map from trades_closed for futures
-        _db_closed_map: dict = {}
+        # Primary source of truth: trades_closed for futures
+        _db_groups: dict = {}
         try:
             from datetime import datetime as _dt3, timedelta as _td3
             _since_str = (_dt3.utcnow() - _td3(days=days)).isoformat()
             _db_rows = db_client.execute_query(
-                """SELECT symbol, exit_price, entry_time, exit_time,
-                          close_reason, pnl_prediction, prediction_accuracy, pnl, metadata
+                """SELECT symbol, side, quantity, entry_price, exit_price,
+                          entry_time, exit_time, close_reason,
+                          pnl, pnl_percentage, pnl_prediction, prediction_accuracy, metadata
                    FROM trades_closed
-                   WHERE metadata->>'trade_type' = 'futures'
+                   WHERE (metadata->>'trade_type' = 'futures' OR metadata IS NULL)
                      AND exit_time >= %s
                    ORDER BY exit_time DESC""",
                 (_since_str,)
             ) if db_client else []
+
             for _r in _db_rows:
-                _key = _r['symbol']
-                if _key not in _db_closed_map:
-                    _db_closed_map[_key] = _r
+                _meta = _r.get('metadata') or {}
+                if isinstance(_meta, str):
+                    try:
+                        import json as _j2
+                        _meta = _j2.loads(_meta)
+                    except Exception:
+                        _meta = {}
+                _cgid = _meta.get('close_group_id')
+                _group_key = (_r['symbol'], _cgid) if _cgid else (_r['symbol'], None, _r.get('entry_time'))
+                _db_groups.setdefault(_group_key, []).append({**dict(_r), '_parsed_meta': _meta})
         except Exception as _db2e:
-            print(f"[FuturesClosed/DB] enrichment query failed: {_db2e}")
+            print(f"[FuturesClosed/DB] primary query failed: {_db2e}")
+
+        # Optional fallback enrichment from Binance userTrades for price fields
+        _binance_extra: dict = {}
+        try:
+            from run_trades import _get_futures_client
+            _fc = _get_futures_client(_s)
+            _extra = list(_cfg_param(_s, 'futures_symbols'))
+            raw = _fc.get_recent_trades(days=days, limit=limit * 3, extra_symbols=_extra)
+            for t in raw:
+                _sym = t.get('symbol')
+                if _sym:
+                    _binance_extra.setdefault(_sym, []).append(t)
+        except Exception as _bne:
+            print(f"[FuturesClosed/Binance] enrichment query failed: {_bne}")
 
         closed = []
-        for t in raw:
-            closed_at_raw = t.get("closed_at")
-            opened_at_raw = t.get("time") or t.get("timestamp")
-            if not opened_at_raw and closed_at_raw:
-                from datetime import datetime as _dt4, timedelta as _td4
-                if isinstance(closed_at_raw, str):
-                    try:
-                        closed_dt = _dt4.fromisoformat(closed_at_raw.replace('Z', '+00:00'))
-                        opened_dt = closed_dt - _td4(hours=6)
-                        opened_at_raw = opened_dt.isoformat()
-                    except Exception:
-                        opened_at_raw = None
-                else:
-                    opened_at_raw = None
+        for _key, _rows in _db_groups.items():
+            _symbol = _rows[0]['symbol']
+            _side = _rows[0]['side']
+            _meta = _rows[0].get('_parsed_meta') or {}
+            _cgid = _meta.get('close_group_id')
 
-            # FIX-L2: enrich with DB data
-            _sym = t["symbol"]
-            _db_e = _db_closed_map.get(_sym, {})
-            _pnl_pred = _db_e.get('pnl_prediction') if _db_e else None
-            if isinstance(_pnl_pred, str):
-                try:
-                    import json as _j2
-                    _pnl_pred = _j2.loads(_pnl_pred)
-                except Exception:
-                    _pnl_pred = None
-            _pred_acc = float(_db_e['prediction_accuracy']) if _db_e and _db_e.get('prediction_accuracy') else None
-            _close_reason = _db_e.get('close_reason') or t.get('close_reason') or ''
-            _entry_time_raw = _db_e.get('entry_time') or opened_at_raw
-            _exit_time_raw  = _db_e.get('exit_time') or closed_at_raw
+            _total_qty = sum(float(r['quantity'] or 0) for r in _rows)
+            _entry_notional = sum(float(r['quantity'] or 0) * float(r['entry_price'] or 0) for r in _rows)
+            _exit_notional = sum(float(r['quantity'] or 0) * float(r['exit_price'] or 0) for r in _rows)
+            _avg_entry = _entry_notional / _total_qty if _total_qty > 0 else None
+            _avg_exit = _exit_notional / _total_qty if _total_qty > 0 else None
+            _pnl = sum(float(r['pnl'] or 0) for r in _rows)
+            _pnl_pct = sum(float(r['pnl_percentage'] or 0) for r in _rows) / len(_rows) if _rows else None
 
-            _db_meta = _db_e.get('metadata') or {} if _db_e else {}
-            if isinstance(_db_meta, str):
-                try:
-                    import json as _jm2
-                    _db_meta = _jm2.loads(_db_meta)
-                except Exception:
-                    _db_meta = {}
+            _entry_times = [r['entry_time'] for r in _rows if r.get('entry_time')]
+            _exit_times = [r['exit_time'] for r in _rows if r.get('exit_time')]
+            _opened_at = min(_entry_times) if _entry_times else None
+            _closed_at = max(_exit_times) if _exit_times else None
+            _reasons = sorted(set(r['close_reason'] for r in _rows if r.get('close_reason')))
+
+            _pnl_pred = None
+            for r in _rows:
+                if r.get('pnl_prediction'):
+                    _pnl_pred = r['pnl_prediction']
+                    if isinstance(_pnl_pred, str):
+                        try:
+                            import json as _j3
+                            _pnl_pred = _j3.loads(_pnl_pred)
+                        except Exception:
+                            _pnl_pred = None
+                    break
+            _pred_acc = next((float(r['prediction_accuracy']) for r in _rows if r.get('prediction_accuracy')), None)
+
+            _entries_meta = [r.get('_parsed_meta') or {} for r in _rows]
+            _esc_indices = sorted(set(
+                int(m.get('escalonamiento_index', 1)) for m in _entries_meta
+            ))
+
+            # Preserve badge rendering: aggregate escalamiento info into a copy of metadata
+            _meta_out = dict(_meta)
+            if len(_esc_indices) > 1:
+                _meta_out['escalonamiento_index'] = _esc_indices[0]
+                _meta_out['total_escalonamientos'] = len(_esc_indices)
+                _meta_out['escalonamiento_indices'] = _esc_indices
+
+            # Enrich sl/tp/exit price from Binance if DB record lacks them
+            _bn = _binance_extra.get(_symbol, [])
+            _sl = _bn[0].get('sl_price') if _bn else None
+            _tp = _bn[0].get('tp_price') if _bn else None
+            _exit_price = _avg_exit if _avg_exit is not None else (_bn[0].get('exit_price') if _bn else None)
+
             closed.append({
-                "symbol":              _sym,
-                "side":                t["side"],
-                "qty":                 t["qty"],
-                "entry_price":         t.get("entry_price"),
-                "exit_price":          t.get("exit_price") or (_db_e.get('exit_price') if _db_e else None),
-                "sl_price":            t.get("sl_price"),
-                "tp_price":            t.get("tp_price"),
-                "pnl":                 t.get("pnl") or (_db_e.get('pnl') if _db_e else None),
-                "opened_at":           to_mexico_time_str(_entry_time_raw) if _entry_time_raw else None,
-                "closed_at":           to_mexico_time_str(_exit_time_raw) if _exit_time_raw else None,
-                "close_reason":        _close_reason,
-                "pnl_prediction":      _pnl_pred,
+                "symbol": _symbol,
+                "side": _side,
+                "qty": round(_total_qty, 8),
+                "entry_price": _avg_entry,
+                "exit_price": _exit_price,
+                "sl_price": _sl,
+                "tp_price": _tp,
+                "pnl": round(_pnl, 4),
+                "pnl_percentage": round(_pnl_pct, 4) if _pnl_pct is not None else None,
+                "opened_at": to_mexico_time_str(_opened_at) if _opened_at else None,
+                "closed_at": to_mexico_time_str(_closed_at) if _closed_at else None,
+                "close_reason": ", ".join(_reasons) if _reasons else (_meta.get('close_reason') or ''),
+                "pnl_prediction": _pnl_pred,
                 "prediction_accuracy": _pred_acc,
-                "trade_type":          "futures",
-                "metadata":            _db_meta,
-                "bounce_entry":        bool((_db_meta.get('smart_meta') or {}).get('bounce_entry', False)),
-                **_normalize_transaction_context(_db_meta, _runtime_ctx),
+                "trade_type": "futures",
+                "metadata": _meta_out,
+                "entries_count": len(_rows),
+                "escalonamiento_indices": _esc_indices,
+                "close_group_id": _cgid,
+                "bounce_entry": bool((_meta.get('smart_meta') or {}).get('bounce_entry', False)),
+                **_normalize_transaction_context(_meta, _runtime_ctx),
             })
 
+        # Sort by closed_at desc and apply limit
+        closed.sort(key=lambda x: x.get('closed_at') or '', reverse=True)
+        _limited = closed[:limit]
+
         _ctx_counts = {
-            "legacy": sum(1 for p in closed if p.get('config_context_state') == 'legacy'),
-            "partial": sum(1 for p in closed if p.get('config_context_state') == 'partial'),
-            "current": sum(1 for p in closed if p.get('config_context_state') == 'current'),
-            "unknown": sum(1 for p in closed if p.get('config_context_state') == 'unknown'),
+            "legacy": sum(1 for p in _limited if p.get('config_context_state') == 'legacy'),
+            "partial": sum(1 for p in _limited if p.get('config_context_state') == 'partial'),
+            "current": sum(1 for p in _limited if p.get('config_context_state') == 'current'),
+            "unknown": sum(1 for p in _limited if p.get('config_context_state') == 'unknown'),
         }
 
         return {
             "enabled": True,
-            "positions": closed[:limit],
-            "count": len(closed[:limit]),
+            "positions": _limited,
+            "count": len(_limited),
             "legacy_count": _ctx_counts["legacy"],
             "partial_context_count": _ctx_counts["partial"],
             "current_context_count": _ctx_counts["current"],
@@ -8251,6 +8695,8 @@ _KELLY_EDITABLE_FIELDS = {
     "rebalance_max_abs_pnl_pct",
     "min_hold_minutes_spot_bull", "min_hold_for_prediction_exit",
     "lifecycle_structure_mode", "lifecycle_structure_partial_close_pct",
+    "position_intelligence_enabled", "position_intelligence_sr_refresh_seconds",
+    "position_intelligence_min_confidence", "position_intelligence_emergency_confidence",
     "profit_predexit_early_protection_mode", "profit_predexit_early_active_regimes", "profit_predexit_early_min_peak_pct", "profit_predexit_early_min_giveback_pct",
     "loss_focus_enabled", "loss_focus_threshold_usdt", "loss_focus_reset_usdt",
     "min_cycles_before_close_shorts",
@@ -8308,15 +8754,26 @@ _KELLY_EDITABLE_FIELDS = {
     "staged_entry_regime_config",
     "hard_risk_monitor_enabled",
     "hard_risk_monitor_interval_seconds",
+    "binance_event_stream_enabled",
+    "binance_event_stream_futures_enabled",
+    "binance_event_stream_spot_enabled",
     "hard_risk_breakeven_enabled",
     "range_scalp_short_first_enabled",
     "range_scalp_short_priority_bonus",
     "range_scalp_short_preferred",
     "range_scalp_long_entries_enabled",
+    "range_scalp_long_min_probability",
+    "range_scalp_long_min_expected_pnl",
+    "range_scalp_long_support_zone_max",
     "range_scalp_long_superiority_delta",
     "range_scalp_direction_min_probability",
     "range_scalp_short_min_probability",
     "range_scalp_short_resistance_threshold",
+    "profit_realization_sr_accel_enabled",
+    "profit_realization_sr_accel_partial_multiplier",
+    "profit_realization_sr_accel_full_multiplier",
+    "profit_realization_sr_accel_drawback_multiplier",
+    "profit_realization_sr_resistance_zone_min",
     "directional_policy_mode",
     "ug_loss_policy_mode",
     # USD loss guard — dynamic SL cap per trade without reducing Kelly sizing
@@ -8610,7 +9067,7 @@ async def get_regime_profile_selector_decisions(limit: int = 50, _auth=Depends(_
     try:
         _limit = max(1, min(int(limit), 500))
         _rows = db_client.execute_query(
-            "SELECT id, event, detail, created_at FROM trades_audit "
+            "SELECT id, event, detail, ts AS created_at FROM trades_audit "
             "WHERE event IN ('regime_profile_selector_decision', 'smart_total_mode_selector_decision') "
             "ORDER BY id DESC LIMIT %s",
             (_limit,)
@@ -9162,36 +9619,40 @@ def _selection_display_state(
     status = str(candidate.get("status") or "unknown").lower()
     symbol = str(candidate.get("symbol") or "")
     reason = candidate.get("reason") or candidate.get("discard_reason") or ""
+    stage_kind = str(candidate.get("stage_kind") or "")
+    stage_reason = str(candidate.get("stage_reason") or "")
+    stage_summary = stage_reason or reason
     if status == "opened":
-        return {"display_status": "opened", "display_label": "Aceptada · abierta", "actionable": False, "display_reason": reason}
+        return {"display_status": "opened", "display_label": "Aceptada · abierta", "actionable": False, "display_reason": stage_summary, "stage_kind": stage_kind or "opened", "stage_reason": stage_reason or "EXECUTION_CONFIRMED"}
     if status == "expired" or "EXPIRED" in str(reason).upper():
-        return {"display_status": "expired", "display_label": "Expirada", "actionable": False, "display_reason": reason}
+        return {"display_status": "expired", "display_label": "Expirada", "actionable": False, "display_reason": stage_summary, "stage_kind": stage_kind or "expired", "stage_reason": stage_reason or "TRIGGER_TIMEOUT"}
     if status == "discarded":
-        return {"display_status": "discarded", "display_label": "Rechazada · descartada", "actionable": False, "display_reason": reason}
+        return {"display_status": "discarded", "display_label": "Rechazada · descartada", "actionable": False, "display_reason": stage_summary, "stage_kind": stage_kind or "discarded", "stage_reason": stage_reason or reason}
     if active_regime and candidate.get("regime_mode") and str(candidate["regime_mode"]).upper() != active_regime.upper():
-        return {"display_status": "blocked_regime", "display_label": "Bloqueada por régimen", "actionable": False, "display_reason": f"Régimen activo: {active_regime}"}
+        return {"display_status": "blocked_regime", "display_label": "Bloqueada por régimen", "actionable": False, "display_reason": f"Régimen activo: {active_regime}", "stage_kind": stage_kind, "stage_reason": stage_reason}
     if symbol and symbol.upper() in open_symbols:
-        return {"display_status": "duplicate_position", "display_label": "Duplicada · posición abierta", "actionable": False, "display_reason": "El símbolo ya tiene una posición abierta"}
+        return {"display_status": "duplicate_position", "display_label": "Duplicada · posición abierta", "actionable": False, "display_reason": "El símbolo ya tiene una posición abierta", "stage_kind": stage_kind, "stage_reason": stage_reason}
     if status == "ready":
-        return {"display_status": "validating", "display_label": "En validación", "actionable": False, "display_reason": reason}
-    execution_gate = (candidate.get("data") or {}).get("last_execution_gate") or {}
-    direction = (candidate.get("data") or {}).get("direction") or {}
+        return {"display_status": "validating", "display_label": "En validación", "actionable": False, "display_reason": stage_summary, "stage_kind": stage_kind or "trigger_monitoring", "stage_reason": stage_reason or "TRIGGER_RECHECK"}
+    execution_gate = candidate.get("execution_gate") or (candidate.get("data") or {}).get("last_execution_gate") or {}
+    direction = candidate.get("direction") or (candidate.get("data") or {}).get("direction") or {}
     if status == "validated" and execution_gate.get("passed") is False:
         gate_reason = str(execution_gate.get("reason") or "PREFLIGHT_BLOCKED")
-        return {"display_status": "preflight_pending", "display_label": "Pendiente de preflight", "actionable": False, "display_reason": gate_reason}
+        return {"display_status": "preflight_pending", "display_label": "Pendiente de preflight", "actionable": False, "display_reason": gate_reason, "stage_kind": "execution_attempted", "stage_reason": "EXECUTION_BLOCKED"}
     if status == "validated" and str(direction.get("state") or "") in {"awaiting_confirmation", "recovery_pending", "recovery_confirming"}:
-        return {"display_status": "direction_pending", "display_label": "Dirección sin confirmar", "actionable": False, "display_reason": "DIRECTION_NOT_CONFIRMED"}
+        return {"display_status": "direction_pending", "display_label": "Dirección sin confirmar", "actionable": False, "display_reason": "DIRECTION_NOT_CONFIRMED", "stage_kind": "trigger_monitoring", "stage_reason": "TRIGGER_REQUEUE_DIRECTION"}
     if status == "validated" and candidate.get("id") in actionable_ids:
-        return {"display_status": "ready_to_open", "display_label": "Lista para abrir", "actionable": True, "display_reason": reason}
+        return {"display_status": "ready_to_open", "display_label": "Lista para abrir", "actionable": True, "display_reason": stage_summary, "stage_kind": "risk_authorized", "stage_reason": stage_reason or "RISK_QUEUE_SELECTED"}
     if status == "validated":
-        return {"display_status": "validated_queue", "display_label": "Validada · en cola", "actionable": False, "display_reason": reason}
-    return {"display_status": "unknown", "display_label": "Sin estado operativo", "actionable": False, "display_reason": reason}
+        return {"display_status": "validated_queue", "display_label": "Validada · en cola", "actionable": False, "display_reason": stage_summary, "stage_kind": "risk_authorized", "stage_reason": stage_reason or "RISK_QUEUE_SELECTED"}
+    return {"display_status": "unknown", "display_label": "Sin estado operativo", "actionable": False, "display_reason": stage_summary, "stage_kind": stage_kind, "stage_reason": stage_reason}
 
 
 def _build_selection_observability(db, limit: int = 100, active_regime: Optional[str] = None, open_symbols: Optional[set[str]] = None) -> Dict[str, Any]:
     if not db:
         return {"available": False, "reason": "database_unavailable", "candidates": []}
     safe_limit = max(1, min(int(limit), 500))
+    now = datetime.now(timezone.utc)
     try:
         rows = db.execute_query(
             """
@@ -9211,6 +9672,8 @@ def _build_selection_observability(db, limit: int = 100, active_regime: Optional
                 rc.opened_at,
                 rc.discarded_at,
                 rc.discard_reason,
+                rc.signal_price,
+                rc.signal_meta,
                 rc.data,
                 rc.config_snapshot,
                 c.checked_at AS last_check_at,
@@ -9255,8 +9718,30 @@ def _build_selection_observability(db, limit: int = 100, active_regime: Optional
     except Exception:
         latest_cycle = None
 
+    latency_metrics = {
+        "cycle_duration_seconds": None,
+        "cycle_age_seconds": None,
+        "selected_per_minute": None,
+        "executed_per_minute": None,
+        "candidates_per_minute": None,
+    }
+    if latest_cycle:
+        started_at = _time(latest_cycle.get("started_at"))
+        completed_at = _time(latest_cycle.get("completed_at"))
+        cycle_end = completed_at or now
+        if started_at and cycle_end and cycle_end >= started_at:
+            duration_seconds = (cycle_end - started_at).total_seconds()
+            latency_metrics["cycle_duration_seconds"] = round(duration_seconds, 2)
+            duration_minutes = max(duration_seconds / 60.0, 1 / 60.0)
+            latency_metrics["selected_per_minute"] = round((latest_cycle.get("selected_count") or 0) / duration_minutes, 2)
+            latency_metrics["executed_per_minute"] = round((latest_cycle.get("executed_count") or 0) / duration_minutes, 2)
+            latency_metrics["candidates_per_minute"] = round((latest_cycle.get("candidate_count") or 0) / duration_minutes, 2)
+        if started_at:
+            latency_metrics["cycle_age_seconds"] = round((now - started_at).total_seconds(), 2)
+
     candidates: List[Dict[str, Any]] = []
     status_counts: Dict[str, int] = {}
+    stage_counts: Dict[str, int] = {}
     effective_regime = str(active_regime or _get_effective_runtime_selection().get("mode") or "").upper() or None
     effective_open_symbols = {str(symbol).upper() for symbol in (open_symbols or set())}
     for row in rows or []:
@@ -9270,6 +9755,10 @@ def _build_selection_observability(db, limit: int = 100, active_regime: Optional
 
         status = row.get("status") or "unknown"
         status_counts[status] = status_counts.get(status, 0) + 1
+        _row_data = row.get("data") or {}
+        stage_kind = str(_row_data.get("stage_kind") or "unknown")
+        stage_reason = str(_row_data.get("stage_reason") or "")
+        stage_counts[stage_kind] = stage_counts.get(stage_kind, 0) + 1
 
         last_review_at = (
             row.get("last_checked_at")
@@ -9312,13 +9801,37 @@ def _build_selection_observability(db, limit: int = 100, active_regime: Optional
             "policy": (row.get("data") or {}).get("policy") or {},
             "config_snapshot": row.get("config_snapshot") or {},
             "entry_decision": (row.get("data") or {}).get("policy") or {},
+            "stage_kind": stage_kind,
+            "stage_reason": stage_reason,
+            "stage_ttl_min": _row_data.get("stage_ttl_min"),
+            "time_in_stage_sec": _row_data.get("time_in_stage_sec"),
+            "stage_updated_at": _row_data.get("stage_updated_at"),
             "expected_pnl": ((row.get("data") or {}).get("policy") or {}).get("expected_pnl"),
             "range_reversion_shadow": ((row.get("data") or {}).get("policy") or {}).get("range_reversion_shadow"),
             "execution_gate": ((row.get("data") or {}).get("last_execution_gate") or {}),
             "direction": ((row.get("data") or {}).get("direction") or {}),
             "arbiter_mode": ((row.get("signal_meta") or {}).get("directional_arbitration") or {}).get("selected_mode"),
             "expected_side": (row.get("signal_meta") or {}).get("expected_side"),
+            "signal_price": float(row.get("signal_price")) if row.get("signal_price") is not None else None,
+            "live_price": (
+                ((row.get("data") or {}).get("direction") or {}).get("last_observed_price")
+                or (row.get("input_features") or {}).get("current_price")
+            ),
+            "reject_price": (
+                ((row.get("data") or {}).get("direction") or {}).get("last_observed_price")
+                or (row.get("input_features") or {}).get("current_price")
+                or float(row.get("signal_price")) if row.get("signal_price") is not None else None
+            ),
         })
+
+    def _openable_sort_key(candidate: Dict[str, Any]) -> Tuple[float, float, float, float]:
+        policy = candidate.get("policy") or {}
+        expected_pnl = float(policy.get("expected_pnl") or -float("inf"))
+        quality_score = float(policy.get("quality_score") or -float("inf"))
+        probability = float(policy.get("success_probability") or -float("inf"))
+        ready_at = _time(candidate.get("ready_at"))
+        ready_ts = -ready_at.timestamp() if ready_at else float("inf")
+        return (expected_pnl, quality_score, probability, ready_ts)
 
     actionable_ids: set[int] = set()
     validated_candidates = [
@@ -9326,8 +9839,11 @@ def _build_selection_observability(db, limit: int = 100, active_regime: Optional
         if candidate["status"] == "validated"
         and (not effective_regime or str(candidate.get("regime_mode") or "").upper() == effective_regime)
         and str(candidate.get("symbol") or "").upper() not in effective_open_symbols
+        and str((candidate.get("direction") or {}).get("state") or "") == "confirmed"
+        and int((candidate.get("direction") or {}).get("directional_confirmations") or 0)
+            >= max(1, int((candidate.get("config_snapshot") or {}).get("direction_required_confirmations", 1) or 1))
     ]
-    validated_candidates.sort(key=lambda candidate: tuple(candidate.get("priority") or []), reverse=True)
+    validated_candidates.sort(key=_openable_sort_key, reverse=True)
     if validated_candidates:
         max_open = max(
             1,
@@ -9358,7 +9874,7 @@ def _build_selection_observability(db, limit: int = 100, active_regime: Optional
         "candidates": candidates,
         "status_counts": status_counts,
         "display_counts": display_counts,
-        "stage_counts": status_counts,
+        "stage_counts": stage_counts,
         "under_review_count": under_review_count,
         "reviewed_count": reviewed_count,
         "opened_count": status_counts.get("opened", 0),
@@ -9367,6 +9883,7 @@ def _build_selection_observability(db, limit: int = 100, active_regime: Optional
         "latest_review_at": latest_review_at,
         "last_entry_at": last_entry_at,
         "latest_selection_cycle": latest_cycle,
+        "latency_metrics": latency_metrics,
         "total": len(candidates),
     }
 
@@ -12064,7 +12581,8 @@ async def mimic_apply_recommendation(request: Request):
     if not dry_run and db_client:
         try:
             db_client.execute_update(
-                "INSERT INTO trades_audit (event, detail, created_at) VALUES (%s, %s, NOW())",
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                "VALUES ('__config__', 'system', %s, %s, false)",
                 ("mimic_config_applied", json.dumps({
                     "profile": profile,
                     "scalars": applied["scalars"],
@@ -12209,7 +12727,8 @@ async def mimic_rollback_check(request: Request):
                 ("kelly_config_override", json.dumps(current_override), json.dumps(current_override)),
             )
             db_client.execute_update(
-                "INSERT INTO trades_audit (event, detail, created_at) VALUES (%s, %s, NOW())",
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                "VALUES ('__config__', 'system', %s, %s, false)",
                 ("mimic_config_rollback", json.dumps({
                     "triggers": triggers,
                     "max_dd_pct": max_dd_pct,

@@ -83,6 +83,7 @@ def test_entry_evidence_endpoint_validates_filters(monkeypatch):
 
     db = EvidenceDb([], [], [])
     monkeypatch.setattr(app_module, "db_client", db)
+    app_module.app.dependency_overrides[app_module._require_api_key] = lambda: None
     client = TestClient(app_module.app)
 
     invalid = client.get("/metrics/entry-evidence?profile=Z")
@@ -90,6 +91,40 @@ def test_entry_evidence_endpoint_validates_filters(monkeypatch):
     valid = client.get("/metrics/entry-evidence?days=7&profile=A")
     assert valid.status_code == 200
     assert valid.json()["filters"]["profile"] == "A"
+
+
+def test_shadow_readiness_endpoint_reports_component_states(monkeypatch):
+    import types
+    import app as app_module
+    from fastapi.testclient import TestClient
+    from config import Settings
+
+    class ShadowDb(EvidenceDb):
+        def execute_query(self, sql, params=None):
+            if "FROM trades_audit" in sql and "lifecycle_structure_decision" in sql:
+                return [{"total": 30, "available": 30, "actionable": 8}]
+            if "FROM trades_audit" in sql:
+                return [{"pool_events": 0, "entry_rejections": 0}]
+            if "COUNT(*) AS total" in sql and "ready_candidates" in sql:
+                return [{"total": 30, "timing": 30, "reversion_valid": 30, "schema_v1": 30}]
+            return super().execute_query(sql, params)
+
+    settings = Settings(_env_file=None)
+    db = ShadowDb([], [], [])
+    monkeypatch.setattr(app_module, "db_client", db)
+    monkeypatch.setattr(app_module, "get_components", lambda: types.SimpleNamespace(settings=settings))
+    app_module.app.dependency_overrides[app_module._require_api_key] = lambda: None
+
+    response = TestClient(app_module.app).get("/metrics/shadow-readiness")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    states = {item["id"]: item["state"] for item in payload["components"]}
+    assert states["directional_v2"] == "COLLECTING"
+    assert states["ug_loss_v2"] == "COLLECTING"
+    assert states["lifecycle_structure"] == "ACTIVE"
+    assert states["range_reversion"] == "COLLECTING"
 
 
 def test_evidence_does_not_promote_legacy_or_missing_snapshot():
