@@ -10,6 +10,8 @@ open short positions so SSO has fresh indicators even in bear market.
 """
 import logging
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import List, Dict
 
@@ -22,6 +24,26 @@ from binance_truth_guard import is_truth_critical
 from universe_selector import select_analysis_universe
 
 logger = logging.getLogger(__name__)
+
+
+class _RateLimiter:
+    """Simple sliding-window limiter for task admission (target req/s)."""
+
+    def __init__(self, rate_per_second: float):
+        self.rate = max(1.0, float(rate_per_second))
+        self._lock = threading.Lock()
+        self._events: List[float] = []
+
+    def acquire(self) -> None:
+        while True:
+            now = time.monotonic()
+            with self._lock:
+                self._events = [t for t in self._events if now - t < 1.0]
+                if len(self._events) < int(self.rate):
+                    self._events.append(now)
+                    return
+                wait_s = max(0.01, 1.0 - (now - self._events[0]))
+            time.sleep(wait_s)
 
 
 def _get_client():
@@ -94,46 +116,99 @@ def analyze_symbols(symbols: List[str], client=None, settings=None) -> Dict[str,
 
     interval = getattr(settings, 'interval', '1h') if settings else '1h'
 
-    for symbol in symbols:
-        try:
+    max_workers = max(1, int(getattr(settings, 'analysis_cycle_max_workers', 10) if settings else 10))
+    req_rate = float(getattr(settings, 'analysis_cycle_request_rate_limit', 20.0) if settings else 20.0)
+    req_slots = max(1, int(getattr(settings, 'analysis_cycle_request_semaphore', 4) if settings else 4))
+    latency_warn_s = float(getattr(settings, 'analysis_cycle_latency_warn_seconds', 20.0) if settings else 20.0)
+    limiter = _RateLimiter(req_rate)
+    request_semaphore = threading.BoundedSemaphore(req_slots)
+    latencies: List[float] = []
+
+    def _analyze_one(symbol: str):
+        started = time.monotonic()
+        limiter.acquire()
+        with request_semaphore:
             sig = asg.analyze_symbol(symbol, interval=interval, use_multi_timeframe=True)
-            if not sig:
-                results[symbol] = {'status': 'no_data'}
-                continue
+        return symbol, sig, time.monotonic() - started
 
-            indicators = sig.get('indicators', {})
-            # Enrich indicators with top-level signal fields (vol_spike, trend_4h, etc.)
-            indicators['vol_spike']    = sig.get('vol_spike', indicators.get('vol_spike', 0.0))
-            indicators['trend_4h']     = sig.get('higher_tf_trend', 'FLAT')
-            indicators['signal']       = sig.get('signal', 'HOLD')
-            indicators['strength']     = sig.get('strength', 0.0)
-            indicators['change_24h_pct'] = sig.get('change_24h_pct', 0.0)
-            indicators['bb_bandwidth'] = sig.get('bb_bandwidth', indicators.get('bb_bandwidth', 0.0))
-            indicators['bb_lower_touch'] = sig.get('bb_lower_touch', False)
-            indicators['current_price'] = sig.get('current_price', 0.0)
+    def _store_result(symbol: str, sig: Dict):
+        if not sig:
+            results[symbol] = {'status': 'no_data'}
+            return
+        indicators = sig.get('indicators', {})
+        if not isinstance(indicators, dict):
+            indicators = {}
+        # Enrich indicators with top-level signal fields (vol_spike, trend_4h, etc.)
+        indicators['vol_spike'] = sig.get('vol_spike', indicators.get('vol_spike', 0.0))
+        indicators['trend_4h'] = sig.get('higher_tf_trend', 'FLAT')
+        indicators['signal'] = sig.get('signal', 'HOLD')
+        indicators['strength'] = sig.get('strength', 0.0)
+        indicators['change_24h_pct'] = sig.get('change_24h_pct', 0.0)
+        indicators['bb_bandwidth'] = sig.get('bb_bandwidth', indicators.get('bb_bandwidth', 0.0))
+        indicators['bb_lower_touch'] = sig.get('bb_lower_touch', False)
+        indicators['current_price'] = sig.get('current_price', 0.0)
+        tech_score = float(sig.get('strength', 0.0)) * 100.0
+        analysis_cache.set(symbol, indicators, tech_score)
+        results[symbol] = {
+            'indicators': indicators,
+            'technical_score': tech_score,
+            'signal': sig.get('signal', 'HOLD'),
+            'strength': sig.get('strength', 0.0),
+            'status': 'success',
+        }
+        logger.info(
+            f"[AnalysisCycle] {symbol}: signal={sig.get('signal')} "
+            f"strength={sig.get('strength', 0):.2f} "
+            f"vol_spike={indicators.get('vol_spike', 0):.2f} "
+            f"trend_4h={indicators.get('trend_4h')} "
+            f"rsi={indicators.get('rsi', 0):.1f}"
+        )
 
-            # tech_score: use strength × 100 as proxy (0-100 scale)
-            tech_score = float(sig.get('strength', 0.0)) * 100.0
+    cycle_started = time.monotonic()
+    if len(symbols) <= 1 or max_workers == 1:
+        for symbol in symbols:
+            try:
+                _sym, _sig, _lat = _analyze_one(symbol)
+                latencies.append(_lat)
+                _store_result(_sym, _sig)
+            except Exception as e:
+                import traceback as _tb
+                _tb_str = _tb.format_exc()
+                logger.error(f"[AnalysisCycle] Failed to analyze {symbol}: {e}\n{_tb_str}")
+                ec.add_error(ec.SOURCE_ANALYSIS, ec.LEVEL_ERROR, f"Failed to analyze {symbol}: {e}\n{_tb_str}")
+                results[symbol] = {'status': 'error', 'error': str(e), 'traceback': _tb_str}
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='analysis') as pool:
+            future_map = {pool.submit(_analyze_one, symbol): symbol for symbol in symbols}
+            for future in as_completed(future_map):
+                symbol = future_map[future]
+                try:
+                    _sym, _sig, _lat = future.result()
+                    latencies.append(_lat)
+                    _store_result(_sym, _sig)
+                except Exception as e:
+                    import traceback as _tb
+                    _tb_str = _tb.format_exc()
+                    logger.error(f"[AnalysisCycle] Failed to analyze {symbol}: {e}\n{_tb_str}")
+                    ec.add_error(ec.SOURCE_ANALYSIS, ec.LEVEL_ERROR, f"Failed to analyze {symbol}: {e}\n{_tb_str}")
+                    results[symbol] = {'status': 'error', 'error': str(e), 'traceback': _tb_str}
 
-            analysis_cache.set(symbol, indicators, tech_score)
-            results[symbol] = {
-                'indicators':    indicators,
-                'technical_score': tech_score,
-                'signal':        sig.get('signal', 'HOLD'),
-                'strength':      sig.get('strength', 0.0),
-                'status':        'success',
-            }
-            logger.info(
-                f"[AnalysisCycle] {symbol}: signal={sig.get('signal')} "
-                f"strength={sig.get('strength', 0):.2f} "
-                f"vol_spike={indicators.get('vol_spike', 0):.2f} "
-                f"trend_4h={indicators.get('trend_4h')} "
-                f"rsi={indicators.get('rsi', 0):.1f}"
-            )
-        except Exception as e:
-            logger.error(f"[AnalysisCycle] Failed to analyze {symbol}: {e}")
-            ec.add_error(ec.SOURCE_ANALYSIS, ec.LEVEL_ERROR, f"Failed to analyze {symbol}: {e}")
-            results[symbol] = {'status': 'error', 'error': str(e)}
+    cycle_latency = time.monotonic() - cycle_started
+    if latencies:
+        avg_latency = sum(latencies) / len(latencies)
+        max_latency = max(latencies)
+    else:
+        avg_latency = 0.0
+        max_latency = 0.0
+    logger.info(
+        f"[AnalysisCycle] Latency: total={cycle_latency:.2f}s avg_symbol={avg_latency:.2f}s "
+        f"max_symbol={max_latency:.2f}s workers={max_workers} req_rate={req_rate:.1f}/s slots={req_slots}"
+    )
+    if cycle_latency > latency_warn_s:
+        logger.warning(
+            f"[AnalysisCycle] Latency alert: {cycle_latency:.2f}s > {latency_warn_s:.2f}s "
+            f"(symbols={len(symbols)}, workers={max_workers})"
+        )
 
     return results
 
@@ -165,12 +240,11 @@ def execute_once() -> None:
 
             settings = _get_settings()
             active_regime = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
-            active_profile = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper() or None
             short_symbols = _get_futures_short_symbols()
             universe = select_analysis_universe(
                 settings=settings,
                 regime_mode=active_regime,
-                profile_label=active_profile,
+                profile_label=None,  # s95: per-operation profiles, no global active profile
                 db_client=getattr(_comp, 'db_client', None),
             )
             symbols = list(dict.fromkeys((short_symbols or []) + (universe.get('symbols') or [])))
@@ -191,10 +265,15 @@ def execute_once() -> None:
         logger.info(f"[AnalysisCycle] Analyzing {len(symbols)} symbols: {', '.join(symbols)}")
         client = _get_client()
         settings = _get_settings()
+        cycle_started = time.monotonic()
         results = analyze_symbols(symbols, client=client, settings=settings)
+        cycle_elapsed = time.monotonic() - cycle_started
 
         ok = sum(1 for r in results.values() if r.get('status') == 'success')
-        logger.info(f"[AnalysisCycle] Cycle complete: {ok}/{len(results)} symbols analyzed successfully")
+        logger.info(
+            f"[AnalysisCycle] Cycle complete: {ok}/{len(results)} symbols analyzed successfully "
+            f"in {cycle_elapsed:.2f}s"
+        )
 
         # P2.3: Persist analysis_cache_freshness to trading_runtime_state
         try:
@@ -217,8 +296,10 @@ def execute_once() -> None:
             logger.debug(f"[AnalysisCycle] runtime_state persist failed (non-fatal): {_rs_err}")
 
     except Exception as e:
-        logger.error(f"[AnalysisCycle] Technical analysis cycle failed: {e}")
-        ec.add_error(ec.SOURCE_ANALYSIS, ec.LEVEL_ERROR, f"Technical analysis cycle failed: {e}")
+        import traceback as _tb
+        _tb_str = _tb.format_exc()
+        logger.error(f"[AnalysisCycle] Technical analysis cycle failed: {e}\n{_tb_str}")
+        ec.add_error(ec.SOURCE_ANALYSIS, ec.LEVEL_ERROR, f"Technical analysis cycle failed: {e}\n{_tb_str}")
 
 
 def run_loop() -> None:

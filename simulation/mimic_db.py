@@ -42,6 +42,12 @@ class _StagedTables:
             )
             return [{"seq": m + 1}]
 
+        if "candidate_revision" in s and s.startswith("SELECT COALESCE"):
+            ready_id = params[0]
+            row = next((r for r in self.ready if r["id"] == ready_id), None)
+            rev = int((row.get("data") or {}).get("candidate_revision", 0) or 0) if row else 0
+            return [{"rev": rev}]
+
         if "SELECT check_type, positive FROM ready_candidate_checks" in s:
             ready_id, check_type = params[:2]
             rows = [c for c in self.checks if c["ready_candidate_id"] == ready_id and c["check_type"] == check_type]
@@ -199,14 +205,28 @@ class _StagedTables:
         set_start = upper.find("SET ") + 4
         where_pos = upper.rfind(" WHERE ")
         set_part = sql[set_start:where_pos]
+        where_part = upper[where_pos:]
         assignments = [a.strip() for a in set_part.split(",")]
-        row_id = params[-1]
+
+        has_status_guard = "AND STATUS = %S" in where_part
+        has_revision_guard = "CANDIDATE_REVISION" in where_part
+        n_where_params = 1 + int(has_status_guard) + int(has_revision_guard)
+        where_params = params[-n_where_params:]
+        row_id = where_params[0]
+        guard_status = where_params[1] if has_status_guard else None
+        expected_revision = where_params[-1] if has_revision_guard else None
 
         row = next((r for r in self.ready if r["id"] == row_id), None)
         if row is None:
             return 0
+        if has_status_guard and row.get("status") != guard_status:
+            return 0
+        if has_revision_guard:
+            current_rev = int((row.get("data") or {}).get("candidate_revision", 0) or 0)
+            if current_rev != int(expected_revision):
+                return 0
 
-        param_iter = iter(params[:-1])
+        param_iter = iter(params[: len(params) - n_where_params])
         for assign in assignments:
             if "=" not in assign:
                 continue

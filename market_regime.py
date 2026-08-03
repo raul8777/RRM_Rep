@@ -232,14 +232,14 @@ def _compute_confidence(raw: dict) -> float:
     return round(max(0.1, raw_conf), 2)
 
 
-def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
+def _build_regime(raw: dict, confirmed: bool, settings=None) -> MarketRegime:
     """Convert raw detection dict to MarketRegime with mode-specific parameters."""
     mode = raw["mode"]
 
     # Default parameters (SPOT_BULL) — aligned with config.py production defaults
     sl_pct           = 1.8
     tp_pct           = 3.5
-    kelly_mult       = 1.0
+    kelly_mult       = 1.05  # SR strategy: slightly larger size on breakout confirmations
     min_rsi          = 0.0
     max_rsi          = 100.0
     require_bb_lower = False
@@ -250,7 +250,7 @@ def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
         # s73 A1: max_rsi 48→60 (aligns with config.py + DB profiles updated in s72; 48 was panic-dip only)
         sl_pct           = 0.8   # tighter SL — micro-bounce captured fast
         tp_pct           = 1.8   # TP at BB mid-upper; R:R = 2.25
-        kelly_mult       = 0.95  # s78: 0.7→0.95 — liquid cap + conc_mult protect risk; ×0.7 over-penalized with few open slots
+        kelly_mult       = 1.0  # SR strategy: full Kelly multiplier on confirmed support bounces
         min_rsi          = 0.0
         max_rsi          = 60.0  # s73: lateral RSI normal 45-65; 48 was panic-dip only (20% of the time)
         require_bb_lower = True  # signal must come from BB lower band touch
@@ -259,15 +259,15 @@ def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
         # Minimal risk: small positions, NARRATIVE only, strict vol requirement
         sl_pct         = 1.8
         tp_pct         = 3.0    # wider TP to compensate fewer entries
-        kelly_mult     = 0.5    # half size
-        max_rsi        = 65.0
+        kelly_mult     = float(getattr(settings, 'preservation_kelly_mult', 0.6))
+        max_rsi        = float(getattr(settings, 'preservation_max_rsi', 70.0))
         narrative_only = True   # only NARRATIVE tokens allowed
 
     elif mode == "FUTURES_SHORT":
         # Active bear market shorting via futures (2x leverage)
         sl_pct         = 3.0    # 3% above entry → 6% loss on margin at 2x
         tp_pct         = 7.0    # 7% below entry → 14% gain on margin at 2x (v4 OPT jun20)
-        kelly_mult     = 0.5    # K2: base para no-confirmado (era 0.3 fijo)
+        kelly_mult     = 0.6    # SR strategy: slightly larger base for confirmed breakdowns
         max_rsi        = 70.0   # enter shorts when RSI not yet extremely oversold
 
     confidence = _compute_confidence(raw)
@@ -281,9 +281,9 @@ def _build_regime(raw: dict, confirmed: bool) -> MarketRegime:
         if confidence >= 0.80:
             kelly_mult = 1.0    # Bear estructural fuerte + todos indicadores alineados
         elif confidence >= 0.60:
-            kelly_mult = 0.8    # Bear confirmado con buena convicción
+            kelly_mult = 0.85   # Bear confirmado con buena convicción
         else:
-            kelly_mult = 0.6    # Bear confirmado pero con señales mixtas
+            kelly_mult = 0.7    # Bear confirmado pero con señales mixtas
 
     return MarketRegime(
         mode             = mode,
@@ -343,7 +343,7 @@ def get_regime(binance_client, force_refresh: bool = False, settings=None) -> Ma
         # Same as current — reset pending, confirm current
         _cache["pending_mode"]  = None
         _cache["pending_count"] = 0
-        confirmed_regime = _build_regime(raw, confirmed=True)
+        confirmed_regime = _build_regime(raw, confirmed=True, settings=settings)
         print(f"[MarketRegime] {proposed_mode} confirmed (stable)")
 
     elif proposed_mode == _cache["pending_mode"]:
@@ -351,20 +351,20 @@ def get_regime(binance_client, force_refresh: bool = False, settings=None) -> Ma
         _cache["pending_count"] += 1
         if _cache["pending_count"] >= _confirm_needed:
             # Confirmed switch
-            confirmed_regime = _build_regime(raw, confirmed=True)
+            confirmed_regime = _build_regime(raw, confirmed=True, settings=settings)
             _cache["pending_mode"]  = None
             _cache["pending_count"] = 0
             print(f"[MarketRegime] SWITCH confirmed: {current_mode} → {proposed_mode} | {raw['reason']}")
         else:
             # Not yet confirmed — return current regime (anti-whipsaw holding)
-            confirmed_regime = current_regime if current_regime else _build_regime(raw, confirmed=False)
+            confirmed_regime = current_regime if current_regime else _build_regime(raw, confirmed=False, settings=settings)
             print(f"[MarketRegime] Pending {proposed_mode} ({_cache['pending_count']}/{_CONFIRM_CYCLES}) | holding {current_mode}")
 
     else:
         # New different mode — start pending counter
         _cache["pending_mode"]  = proposed_mode
         _cache["pending_count"] = 1
-        confirmed_regime = current_regime if current_regime else _build_regime(raw, confirmed=False)
+        confirmed_regime = current_regime if current_regime else _build_regime(raw, confirmed=False, settings=settings)
         print(f"[MarketRegime] Proposed {proposed_mode} (1/{_CONFIRM_CYCLES}) | holding {current_mode} | {raw['reason']}")
 
     # ── Upgrade PRESERVATION → FUTURES_SHORT when futures enabled ────────────
@@ -383,7 +383,7 @@ def get_regime(binance_client, force_refresh: bool = False, settings=None) -> Ma
             ema9_vs_ema21 = confirmed_regime.ema9_vs_ema21,
             reason        = confirmed_regime.reason + " [FUTURES SHORT activo]",
         )
-        confirmed_regime = _build_regime(raw_upgraded, confirmed=True)
+        confirmed_regime = _build_regime(raw_upgraded, confirmed=True, settings=settings)
         print(f"[MarketRegime] FUTURES_SHORT mode active (futures_enabled=True)")
 
     _cache["regime"] = confirmed_regime

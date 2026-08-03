@@ -864,8 +864,11 @@ class SmartScaleOut:
         if _regime == 'RANGE_SCALP':
             target = min(target, self.target_daily_usd * 0.5)
             # s73 C2: per-regime contribution floor — RANGE_SCALP TP=1.8% can't hit 15% of $40 daily target
-            # Read configurable field (default 0.05 = 5%): $20 target × 0.05 = $1.00 min → achievable
-            _rs_contrib = self._cfg('sso_target_contribution_pct_range_scalp', 0.05)
+            # s110: raised 0.05->0.10 — at 0.05, min_contribution was only ~$1-8 (e.g. $20
+            # target x 0.05 = $1.00), letting SSO-4 fully close winners at a fraction of the
+            # $18-27 USD loss guardrail (avg win $6.84 vs avg loss $17.82 over 48h, RR~0.38).
+            # 0.10 still stays under the global default (0.15) but roughly doubles the floor.
+            _rs_contrib = self._cfg('sso_target_contribution_pct_range_scalp', 0.10)
             _target_contribution_pct = _rs_contrib
             _target_min_hours *= 0.8
         elif _regime == 'PRESERVATION':

@@ -206,7 +206,20 @@ def test_profile_a_is_more_permissive_than_c():
     assert ok_c is False
 
 
-def test_filter_buy_candidates_keeps_valid_and_drops_invalid():
+def _load_preuniversal_thresholds() -> dict:
+    """Return pre-universal thresholds inline to avoid dependency on external JSON."""
+    return {
+        "SPOT_BULL": {"A": 1.0, "B": 0.35, "C": 0.15, "discard": float("-inf")},
+        "RANGE_SCALP": {"A": 1.0, "B": 0.35, "C": 0.05, "discard": float("-inf")},
+        "PRESERVATION": {"A": 1.0, "B": 0.35, "C": 0.05, "discard": float("-inf")},
+        "FUTURES_SHORT": {"A": 1.0, "B": 0.35, "C": 0.05, "discard": float("-inf")},
+    }
+
+
+def test_filter_buy_candidates_keeps_valid_and_drops_invalid(monkeypatch):
+    import entry_profile_gate
+
+    monkeypatch.setattr(entry_profile_gate, "load_thresholds", lambda path=None: _load_preuniversal_thresholds())
     meta = {
         "GOOD": {
             "strength": 0.60,
@@ -228,11 +241,14 @@ def test_filter_buy_candidates_keeps_valid_and_drops_invalid():
         },
     }
     candidates = ["GOOD", "BAD"]
-    passed = _filter_buy_candidates(candidates, meta, SETTINGS, "SPOT_BULL", "B")
+    passed = _filter_buy_candidates(candidates, meta, SETTINGS, "SPOT_BULL")
     assert passed == ["GOOD"]
 
 
-def test_filter_buy_candidates_handles_dict_candidates():
+def test_filter_buy_candidates_handles_dict_candidates(monkeypatch):
+    import entry_profile_gate
+
+    monkeypatch.setattr(entry_profile_gate, "load_thresholds", lambda path=None: _load_preuniversal_thresholds())
     meta = {
         "GOOD": {
             "strength": 0.60,
@@ -245,7 +261,7 @@ def test_filter_buy_candidates_handles_dict_candidates():
         },
     }
     candidates = [{"symbol": "GOOD", "strength": 0.60}]
-    passed = _filter_buy_candidates(candidates, meta, SETTINGS, "SPOT_BULL", "B")
+    passed = _filter_buy_candidates(candidates, meta, SETTINGS, "SPOT_BULL")
     assert len(passed) == 1
     assert passed[0]["symbol"] == "GOOD"
     assert passed[0]["entry_decision"]["eligible"] is True
@@ -343,13 +359,16 @@ def test_quality_model_artifact_loads():
     assert hasattr(model, "predict")
 
 
-def test_entry_profile_gate_dynamic_fg_adjustment():
+def test_entry_profile_gate_dynamic_fg_adjustment(monkeypatch):
     """Extreme fear lowers C threshold; extreme greed raises it, keeping A/B fixed."""
     import entry_profile_gate
 
+    monkeypatch.setattr(entry_profile_gate, "load_thresholds", lambda path=None: _load_preuniversal_thresholds())
+
     # A score that is exactly the C threshold should benefit from fear and be hurt by greed.
-    base_c = entry_profile_gate.load_thresholds()["thresholds"]["SPOT_BULL"]["C"]
-    base_a = entry_profile_gate.load_thresholds()["thresholds"]["SPOT_BULL"]["A"]
+    thresholds_data = entry_profile_gate.load_thresholds()
+    base_c = thresholds_data["SPOT_BULL"]["C"]
+    base_a = thresholds_data["SPOT_BULL"]["A"]
     meta = {"expected_pnl_percentage": base_c, "position_size_usdt": 100.0}
 
     profile_fear, info_fear = entry_profile_gate.classify(

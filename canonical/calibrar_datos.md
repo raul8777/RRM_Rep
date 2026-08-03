@@ -11,6 +11,12 @@ status: active
 
 Este documento es la referencia única de datos para análisis, calibración, entrenamiento, MIMIC, backtests y auditoría. Define qué fuente es apta para cada afirmación, dónde vive, qué representa y qué no debe concluirse de ella.
 
+## 0. Acoplamiento canónico con calibración de entrada
+
+- La arquitectura y responsabilidades del pipeline de calibración de entrada viven en la apertura de `canonical/calibracion_entradas-a20ab8-v3.md`.
+- Este documento (`calibrar_datos.md`) no redefine flujo de módulos; solo define autoridad de datos, contratos de features, linaje y criterios de promoción.
+- Si hay conflicto entre flujo operativo y evidencia de datos, se conserva la separación: `calibracion_entradas` decide operación, `calibrar_datos` decide validez analítica.
+
 ## 1. Principios no negociables
 
 - **Producción es la verdad de PnL:** una afirmación de edge desplegable usa `trades_closed` con PnL neto y lifecycle real. Peaks, MIMIC y backtests son evidencia auxiliar.
@@ -30,6 +36,8 @@ Este documento es la referencia única de datos para análisis, calibración, en
 | Features del walk-forward | 296/306 sin casi todo el schema histórico | El modelo anterior no representa el contrato live; no entrenar/promover hasta reparar cobertura. |
 | Peaks | 1,638,639 registros, 43 símbolos | Fuente de oportunidades forward, no PnL ejecutado. |
 | MIMIC / sweeps | algunos resultados positivos | Hipótesis; sólo sirve tras igualar ejecución, coste, selección y lifecycle con producción. |
+| **Universal cross-symbol dataset** (s93) | 397,081 filas, 40 símbolos, features OHLCV + labels `forward_net_4h` | Entrenamiento y validación walk-forward purgada del modelo universal. |
+| **Universal thresholds/model** (s93) | Walk-forward WR 69.7%, PF 4.55, cov 11.6%; MIMIC WR 66.2%, PF 2.90, cov 12.3% | **Desplegado en producción el 2026-07-23.** La verdad final sigue siendo `trades_closed` real. |
 
 ## 3. Mapa de almacenamiento y autoridad
 
@@ -77,6 +85,9 @@ Campos básicos: `symbol`, `direction`, `peak_type`, `peak_start_ts`, `peak_end_
 | Dataset de perfil | `Dev/benchmarks/entry_profile_calibration/training_data_v2*.jsonl` | resultados de simulaciones para calibración | no es fill real |
 | Dataset RANGE actual | `Dev/benchmarks/entry_profile_calibration/range_scalp_calibration_dataset.jsonl` | mezcla histórica actual de real + MIMIC | versión v1 tiene feature coverage insuficiente |
 | Reporte walk-forward | `Dev/benchmarks/entry_profile_calibration/range_scalp_walkforward_report.json` | validación temporal del modelo RANGE | no promovible al 2026-07-23 |
+| **Dataset universal** | `Dev/benchmarks/research_data/cross_symbol_dataset.jsonl` | features OHLCV genéricas + label `forward_net_4h`, 40 símbolos | entrenamiento del modelo universal (s93) |
+| **Umbrales universal** | `Dev/benchmarks/research_data/universal_thresholds_proposal.json` | thresholds A/B/C por régimen + categoría | insumo para `entry_profile_thresholds.json` (s93) |
+| **Modelo universal** | `Dev/benchmarks/research_data/quality_score_model_universal_proposal.pkl` | `HistGradientBoostingClassifier` por régimen/categoría | gate en producción desde s93; verdad final en `trades_closed` |
 | Sweep por ventanas | `Dev/benchmarks/entry_profile_calibration/sweep_*` | sensibilidad de parámetros/ventanas | descartar `trades=0`, PF nulo y perfiles sin propagación |
 | Super MIMIC | `Dev/benchmarks/super_mimic/` | simulación multi-régimen y predictive sweep | resultado auxiliar hasta alinear lifecycle |
 | Lifecycle sweeps | `Dev/benchmarks/lifecycle_sweep*`, `mimic_sweep_peak_quality_lifecycle` | hipótesis de salida | comparar con los mismos labels netos de producción |

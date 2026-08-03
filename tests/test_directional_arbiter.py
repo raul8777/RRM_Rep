@@ -7,10 +7,14 @@ from run_trades import _prepare_range_scalp_staging_candidates
 
 def _settings(**overrides):
     values = {
+        "range_scalp_direction_mode": "short_priority",
         "range_scalp_direction_min_probability": 0.55,
         "range_scalp_short_min_probability": 0.40,
         "range_scalp_short_priority_bonus": 0.05,
         "range_scalp_long_superiority_delta": 0.10,
+        "range_scalp_long_min_probability": 0.55,
+        "range_scalp_long_min_expected_pnl": 0.0,
+        "range_scalp_long_support_zone_max": 0.55,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -65,7 +69,7 @@ def test_long_requires_confirmed_support_or_breakout():
         _settings(),
     )
     assert result.selected_mode == "SPOT_LONG"
-    assert result.reason == "LONG_SUPPORT_OR_BREAKOUT"
+    assert result.reason == "LONG_SUPPORT_OR_BREAKOUT_SUPERIOR"
 
 
 def test_long_structure_abstains_when_long_entries_are_disabled():
@@ -97,7 +101,35 @@ def test_futures_long_analysis_intent_never_routes_to_spot_long():
         _settings(range_scalp_long_entries_enabled=True),
     )
     assert result.selected_mode == "FUTURES_LONG"
-    assert result.reason == "LONG_SUPPORT_OR_BREAKOUT"
+    assert result.reason == "LONG_SUPPORT_OR_BREAKOUT_SUPERIOR"
+
+
+def test_long_structure_abstains_when_not_superior_to_short():
+    result = evaluate_range_scalp(
+        "BTCUSDT",
+        {"sr_zone_position": 0.20, "support_bounce_buy": True},
+        _prediction(5.0, 0.60),
+        _prediction(4.5, 0.60),
+        _prediction(8.0, 0.70),
+        True,
+        _settings(range_scalp_long_superiority_delta=0.10),
+    )
+    assert result.selected_mode == "ABSTAIN"
+    assert result.reason == "LONG_NOT_SUPERIOR_TO_SHORT"
+
+
+def test_long_structure_abstains_when_above_support_zone_limit():
+    result = evaluate_range_scalp(
+        "BTCUSDT",
+        {"sr_zone_position": 0.72, "support_bounce_buy": True, "trend_4h": "UP"},
+        _prediction(20.0, 0.85),
+        _prediction(18.0, 0.82),
+        _prediction(2.0, 0.45),
+        True,
+        _settings(range_scalp_short_first_enabled=False),
+    )
+    assert result.selected_mode == "ABSTAIN"
+    assert result.reason == "LONG_STRUCTURE_SHORT_BLOCKED"
 
 
 def test_short_wins_in_middle_range_even_when_long_has_higher_ev():
@@ -158,6 +190,26 @@ def test_short_breakdown_receives_priority():
     assert result.long_structure is False
 
 
+def test_resistance_rejection_receives_priority_even_below_zone_threshold():
+    """resistance_bounce_sell/sr_rejection (confirmed reversal candle near
+    resistance) must qualify as a real resistance setup on its own, the same
+    way support_breakdown_sell already does — not just the static zone
+    threshold. Zone here (0.5) is below short_resistance_threshold (0.65),
+    so without the rejection event this would fall through to
+    SHORT_GEOMETRY_PRIORITY instead."""
+    result = evaluate_range_scalp(
+        "BTCUSDT",
+        {"sr_zone_position": 0.5, "resistance_bounce_sell": True, "trend_4h": "DOWN"},
+        _prediction(8.0, 0.68),
+        _prediction(8.0, 0.68),
+        _prediction(5.0, 0.65),
+        True,
+        _settings(),
+    )
+    assert result.selected_mode == "FUTURES_SHORT"
+    assert result.reason == "SHORT_RESISTANCE_PRIORITY"
+
+
 def test_both_ineligible_abstains():
     result = evaluate_range_scalp(
         "SOLUSDT",
@@ -216,3 +268,95 @@ def test_staging_drops_arbitrated_abstain():
     assert predictions == {}
     assert metadata == {}
     update.assert_called_once()
+
+
+# ── s116: symmetric LONG/SHORT mode tests ──────────────────────────────────
+
+def _symmetric_settings(**overrides):
+    return _settings(
+        range_scalp_direction_mode="ev_symmetric",
+        range_scalp_short_priority_bonus=0.0,
+        range_scalp_long_superiority_delta=0.0,
+        range_scalp_long_min_probability=0.50,
+        range_scalp_short_min_probability=0.50,
+        **overrides,
+    )
+
+
+def test_symmetric_long_wins_near_support():
+    result = evaluate_range_scalp(
+        "BTCUSDT",
+        {"sr_zone_position": 0.15, "support_bounce_buy": True, "trend_4h": "UP"},
+        _prediction(15.0, 0.70),  # spot long
+        _prediction(16.0, 0.72),  # futures long (preferred when score >= spot)
+        _prediction(5.0, 0.60),  # short
+        True,
+        _symmetric_settings(),
+    )
+    assert result.selected_mode == "FUTURES_LONG"
+    assert result.reason == "SYMMETRIC_LONG_SETUP"
+
+
+def test_symmetric_short_wins_near_resistance():
+    result = evaluate_range_scalp(
+        "BTCUSDT",
+        {"sr_zone_position": 0.85, "resistance_bounce_sell": True, "trend_4h": "DOWN"},
+        _prediction(5.0, 0.60),
+        _prediction(5.0, 0.60),
+        _prediction(15.0, 0.70),
+        True,
+        _symmetric_settings(),
+    )
+    assert result.selected_mode == "FUTURES_SHORT"
+    assert result.reason == "SYMMETRIC_SHORT_SETUP"
+
+
+def test_symmetric_abstains_in_middle_zone():
+    result = evaluate_range_scalp(
+        "BTCUSDT",
+        {"sr_zone_position": 0.6},  # outside support (0.55) and resistance (0.65) zones
+        _prediction(15.0, 0.70),
+        _prediction(14.0, 0.68),
+        _prediction(15.0, 0.70),
+        True,
+        _symmetric_settings(),
+    )
+    assert result.selected_mode == "ABSTAIN"
+
+
+def test_symmetric_tie_prefers_higher_ev():
+    result = evaluate_range_scalp(
+        "BTCUSDT",
+        {
+            "sr_zone_position": 0.5,
+            "support_bounce_buy": True,
+            "resistance_bounce_sell": True,
+        },
+        _prediction(15.0, 0.80),
+        _prediction(14.0, 0.78),
+        _prediction(5.0, 0.70),
+        True,
+        _symmetric_settings(),
+    )
+    assert result.selected_mode in ("FUTURES_LONG", "SPOT_LONG")
+    assert result.reason == "SYMMETRIC_LONG_WINS_TIE"
+
+
+def test_symmetric_long_uses_spot_when_futures_not_executable():
+    result = evaluate_range_scalp(
+        "QIUSDT",
+        {"sr_zone_position": 0.10, "support_bounce_buy": True},
+        _prediction(15.0, 0.70),
+        _prediction(14.0, 0.68),
+        _prediction(5.0, 0.70),
+        False,
+        _symmetric_settings(),
+    )
+    assert result.selected_mode == "ABSTAIN"
+    assert result.reason == "TRIPLE_UNIVERSE_REQUIRED"
+
+
+def test_symmetric_defaults_to_ev_symmetric_in_code():
+    # Guardrail: the factory default in config.py/config_helpers.py is ev_symmetric.
+    from config_helpers import _PARAM_DEFAULTS
+    assert _PARAM_DEFAULTS.get("range_scalp_direction_mode") == "ev_symmetric"

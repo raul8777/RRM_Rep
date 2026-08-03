@@ -62,8 +62,62 @@ def test_range_reversion_prediction_returns_net_ev():
 
     assert prediction["valid"] is True
     assert prediction["model"] == "range_reversion_v1"
+    assert prediction["trade_side"] == "LONG"
     assert prediction["target_price"] > 96.0
     assert prediction["stop_price"] < 96.0
+
+
+def test_range_reversion_prediction_is_direction_aware_for_short():
+    """Regression test: predict_range_reversion previously ignored trade_side
+    entirely and always evaluated the LONG case (target above price, stop
+    below price), even when called for a SHORT candidate near resistance.
+    The SHORT branch must be a true mirror: target below price (toward the
+    middle band), stop above price (toward resistance)."""
+    predictor = PnLPredictor()
+    indicators = _bearish_indicators()
+    indicators["rsi"] = {"value": 50.0}
+    indicators["trend_4h"] = {"value": -1}
+    indicators["signal_strength"] = 0.7
+
+    # Price near the upper band (resistance side) — a favorable SHORT setup,
+    # the mirror image of the LONG setup near the lower band used above.
+    current_price = 102.5
+    prediction = predictor.predict_range_reversion(
+        current_price, indicators, 100.0, trade_side="SHORT"
+    )
+
+    assert prediction["valid"] is True
+    assert prediction["trade_side"] == "SHORT"
+    assert prediction["target_price"] < current_price
+    assert prediction["stop_price"] > current_price
+    assert prediction["expected_pnl"] > 0.0
+
+
+def test_range_reversion_short_favors_resistance_over_support_side():
+    """A SHORT candidate near resistance must be evaluated as a genuine
+    reversion opportunity. A SHORT candidate near support must be rejected
+    as payoff-invalid (its reversion target toward the middle band sits
+    *above* current price, which contradicts the SHORT direction) — this is
+    the exact mirror of a LONG being rejected near resistance. Before the
+    fix, both cases were scored using the LONG-favorable (low band_position)
+    curve and neither distinction existed."""
+    predictor = PnLPredictor()
+    indicators = _bearish_indicators()
+    indicators["rsi"] = {"value": 50.0}
+    indicators["trend_4h"] = {"value": 0}
+    indicators["signal_strength"] = 0.5
+
+    near_resistance = predictor.predict_range_reversion(
+        102.5, indicators, 100.0, trade_side="SHORT"
+    )
+    near_support = predictor.predict_range_reversion(
+        96.0, indicators, 100.0, trade_side="SHORT"
+    )
+
+    assert near_resistance["valid"] is True
+    assert near_resistance["success_probability"] > 0.5
+    assert near_support["valid"] is False
+    assert near_support["reason"] == "invalid_reversion_payoff"
 
 
 def test_prediction_payload_includes_trade_side():

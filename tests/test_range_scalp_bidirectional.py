@@ -24,7 +24,11 @@ def test_range_scalp_relaxed_direction_config():
     assert cfg["direction_required_confirmations"] == 1
     assert cfg["direction_min_progress_bps"] == 1.0
     assert cfg["required_positive_checks"] == 1
-    assert cfg["max_cycles"] == 4
+    # s105: max_cycles decoupled from a short cycle-count ceiling; max_age_min
+    # (8h) is now the single source of truth for how long a breakout candidate
+    # may legitimately wait.
+    assert cfg["max_cycles"] == 100
+    assert cfg["max_age_min"] == 480
 
 
 def test_non_range_scalp_keeps_two_confirmations():

@@ -44,7 +44,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     # FUTURES trading
     'futures_enabled': True,  # EntryDecision blocks unpromoted futures entries
     'futures_leverage': 10,
-    'futures_max_shorts': 5,
+    'futures_max_shorts': 4,
     'futures_max_largecap_shorts': 3,
     'futures_max_new_per_cycle': 2,
     'futures_usdt_per_trade': 150.0,
@@ -97,7 +97,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'entry_quality_rsi_min_spot_bull': 33.0,
     'entry_quality_rsi_max_spot_bull': 68.0,
     'entry_quality_vol_spike_min_range_scalp': 0.35,  # s72: lateral = low vol structural; lower floor
-    'sso_target_contribution_pct_range_scalp': 0.05,  # s73 C2: 5% of half-target — achievable at TP=1.8%
+    'sso_target_contribution_pct_range_scalp': 0.10,  # s110: raised 0.05->0.10, min_contribution was too small vs $18-27 SL guardrail (RR~0.38)
 
     # Bayesian evidence gate (superseded by entry_profile_gate; kept disabled)
     'evidence_gate_enabled': False,
@@ -244,19 +244,26 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'hard_risk_monitor_enabled': True,
     'hard_risk_monitor_interval_seconds': 2.0,
     'hard_risk_breakeven_enabled': True,
+    # High-frequency telemetry watcher for open positions
+    'position_telemetry_watcher_enabled': True,
+    'position_telemetry_watcher_interval_seconds': 1.0,
+    'position_telemetry_db_throttle_seconds': 5.0,
+    'position_reaction_policy_mode': 'telemetry_only',
     'binance_event_stream_enabled': True,
     'binance_event_stream_futures_enabled': True,
     'binance_event_stream_spot_enabled': False,
     'range_scalp_short_first_enabled': False,
-    'range_scalp_short_priority_bonus': 0.05,
+    'range_scalp_short_priority_bonus': 0.0,
     'range_scalp_short_preferred': False,  # Neutral = do not bias selection by side
     'range_scalp_long_entries_enabled': True,
-    'range_scalp_long_min_probability': 0.60,
+    'range_scalp_long_min_probability': 0.50,
     'range_scalp_long_min_expected_pnl': 0.0,
     'range_scalp_long_support_zone_max': 0.55,
-    'range_scalp_long_superiority_delta': 0.10,
+    'range_scalp_long_superiority_delta': 0.0,
+    'range_scalp_direction_mode': 'ev_symmetric',  # short_priority | ev_symmetric
     'range_scalp_direction_min_probability': 0.55,
-    'range_scalp_short_min_probability': 0.40,
+    'range_scalp_short_resistance_threshold': 0.65,
+    'range_scalp_short_min_probability': 0.50,
     # TEMP (jul 24 2026, RANGE_SCALP universe expansion to ~100 assets):
     # lower liquidity floor to broaden the universe while keeping slippage in check.
     # Execution liquidity filter stays at $3M. Monitor commission vs PnL; rollback if worsens.
@@ -380,6 +387,14 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'range_scalp_short_usdt_per_trade': 1000.0,
     'range_scalp_short_sl_pct': 2.0,
     'range_scalp_short_tp_pct': 4.0,
+    'range_scalp_short_atr_sl_anchor_enabled': True,
+    'range_scalp_short_atr_sl_multiplier': 1.5,
+    'spot_atr_sl_anchor_enabled': True,
+    'spot_atr_sl_multiplier': 1.5,
+    'staged_immediate_entry_enabled': False,
+    'staged_immediate_entry_fraction': 0.3,
+    'range_scalp_sr_thesis_gate_enabled': True,
+    'range_scalp_sr_thesis_max_dist_pct': 5.0,
     # s106 NOTE: config.py::Settings.staged_entry_regime_config is the REAL,
     # LIVE-EFFECTIVE source for these values in production — this dict is only
     # the fallback used if _sync_canonical_defaults_from_settings() (below)
@@ -431,6 +446,11 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'direction_required_confirmations': 1,
             'direction_max_adverse_observations': 4,
             'direction_sr_invalidation_pct': 1.5,
+            'direction_geometry_anchor_enabled': True,
+            'direction_min_progress_stop_fraction': 0.05,
+            'direction_max_adverse_stop_fraction': 0.6,
+            'direction_volume_gate_enabled': False,
+            'direction_volume_anomaly_multiplier': 3.0,
         },
         'FUTURES_SHORT': {
             'enabled': True,
@@ -438,7 +458,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'required_positive_checks': 2,
             'max_cycles': 100,  # s105: decoupled from the 8h max_age_min ceiling
             'max_age_min': 480,  # s105: a breakout candidate may legitimately wait up to 8h
-            'intra_mode': 'predictor',
+            'intra_mode': 'watcher',
+            'watcher_interval_seconds': 10,
             'price_source': 'ticker',
             'use_fear_greed': False,
             'cooldown_min': 0,
@@ -460,7 +481,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'required_positive_checks': 2,
             'max_cycles': 100,  # s105: decoupled from the 8h max_age_min ceiling
             'max_age_min': 480,  # s105: a breakout candidate may legitimately wait up to 8h
-            'intra_mode': 'predictor',
+            'intra_mode': 'watcher',
+            'watcher_interval_seconds': 10,
             'price_source': 'avg',
             'use_fear_greed': True,
             'cooldown_min': 0,
@@ -549,6 +571,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     # WR screener
     'wr_screener_enabled': True,
     'wr_screener_consecutive_sl_block': 5,
+    'wr_screener_short_window_minutes': 120.0,
+    'wr_screener_short_window_min_losses': 2,
 
     # Market Regime
     'current_regime_mode': 'SPOT_BULL',
@@ -556,7 +580,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
 
     # Futures mode
     'futures_hedge_mode_enabled': True,
-    'futures_max_longs': 2,
+    'futures_max_longs': 3,
     'futures_long_enabled': True,
     'futures_long_in_range_scalp': True,
     'futures_long_in_spot_bull': True,
@@ -570,6 +594,13 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'futures_sl_cooldown_hours': 4.0,
     'futures_mass_sl_threshold': 3,
     'futures_mass_sl_cooldown_hours': 4.0,
+    'futures_mass_sl_window_minutes': 75.0,
+    'futures_staged_btc_momentum_gate_enabled': True,
+    'portfolio_drawdown_circuit_breaker_enabled': True,
+    'portfolio_drawdown_window_minutes': 120.0,
+    'portfolio_drawdown_max_loss_usd': 150.0,
+    'portfolio_drawdown_recheck_momentum_minutes': 30.0,
+    'portfolio_drawdown_recheck_momentum_pct': 0.5,
     'futures_max_escalamientos': 2,
     'futures_protect_profit_usdt': -5.0,
     'min_cycles_before_close_shorts': 5,

@@ -429,6 +429,7 @@ def estimate_bnb_buffer_needed(settings, trade_type: str = 'spot', days: int = 7
             FROM trades_closed
             WHERE exit_time >= NOW() - INTERVAL '7 days'
               AND metadata->>'trade_type' = %s
+              AND COALESCE(is_corrupted, FALSE) = FALSE
         """
         rows = db.execute_query(query, (trade_type,))
         row = rows[0] if rows else {}

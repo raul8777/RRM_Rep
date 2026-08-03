@@ -132,7 +132,7 @@ def build_entry_evidence(
     ) or []
     ready = {int(row["id"]): row for row in ready_rows if row.get("id") is not None}
     closed_rows = db.execute_query(
-        "SELECT id, symbol, side, entry_time, exit_time, pnl, pnl_percentage, close_reason, metadata, is_synthetic, corrupt, is_corrupted FROM trades_closed WHERE exit_time >= NOW() - (%s * INTERVAL '1 day') ORDER BY entry_time ASC, id ASC",
+        "SELECT id, symbol, side, entry_time, exit_time, pnl, pnl_percentage, close_reason, metadata, is_synthetic, corrupt, is_corrupted FROM trades_closed WHERE exit_time >= NOW() - (%s * INTERVAL '1 day') AND COALESCE(is_corrupted, FALSE) = FALSE ORDER BY entry_time ASC, id ASC",
         (days,),
     ) or []
     candidate_rows = db.execute_query(
@@ -267,4 +267,184 @@ def build_entry_evidence(
         "shadow": {"model_mode": "shadow", "scored": scored, "missing_model_features": dict(sorted(model_missing.items())), "calibration_available": len(exact) >= 30},
         "promotion": {"overall_status": status, "gates": gates, "next_requirements": [gate["reason"] for gate in gates if gate["status"] != "passed"], "tier_a_deficit": max(0, 30 - len(exact_a))},
         "alerts": alerts,
+    }
+
+
+def build_sr_hunt_48h_report(
+    db: Any,
+    regime: str = "RANGE_SCALP",
+    hours: int = 48,
+) -> Dict[str, Any]:
+    """Build a compact SR-hunt operational report for the last N hours.
+
+    Focused on routing intent, side selection, execution outcomes and rejection
+    causes to support short-priority governance and futures-long safety checks.
+    """
+    now = datetime.now(timezone.utc)
+    regime_upper = str(regime or "RANGE_SCALP").strip().upper()
+    window_hours = max(1, int(hours or 48))
+
+    rc_rows = db.execute_query(
+        """
+        SELECT id, symbol, status, discard_reason, opened_at, discarded_at, signal_meta, data
+        FROM ready_candidates
+        WHERE upper(regime_mode) = %s
+          AND (
+                opened_at >= NOW() - (%s * INTERVAL '1 hour')
+             OR discarded_at >= NOW() - (%s * INTERVAL '1 hour')
+             OR status IN ('ready', 'validated')
+          )
+        ORDER BY id DESC
+        """,
+        (regime_upper, window_hours, window_hours),
+    ) or []
+
+    cand_rows = db.execute_query(
+        """
+        SELECT c.symbol, c.stage, c.decision, c.reason, c.data
+        FROM entry_selection_candidates c
+        JOIN entry_selection_cycles cycle ON cycle.cycle_id = c.cycle_id
+        WHERE upper(cycle.regime_mode) = %s
+          AND c.updated_at >= NOW() - (%s * INTERVAL '1 hour')
+        """,
+        (regime_upper, window_hours),
+    ) or []
+
+    opened_rows = db.execute_query(
+        """
+        SELECT symbol, side, entry_time, metadata FROM trades_open
+        WHERE entry_time >= NOW() - (%s * INTERVAL '1 hour')
+        """,
+        (window_hours,),
+    ) or []
+    closed_rows = db.execute_query(
+        """
+        SELECT symbol, side, entry_time, metadata, pnl_usdt FROM trades_closed
+        WHERE entry_time >= NOW() - (%s * INTERVAL '1 hour')
+          AND COALESCE(is_corrupted, FALSE) = FALSE
+        """,
+        (window_hours,),
+    ) or []
+
+    by_routing_intent = Counter()
+    by_selected_mode = Counter()
+    by_trade_type_side = Counter()
+    by_profile = Counter()
+    by_category = Counter()
+    ready_status = Counter()
+    rc_rejection_reasons = Counter()
+    execution_failures = Counter()
+
+    for row in rc_rows:
+        meta = _dict(row.get("signal_meta"))
+        data = _dict(row.get("data"))
+        arb = _dict(data.get("directional_arbitration"))
+        routing_intent = str(meta.get("routing_intent") or "UNKNOWN").upper()
+        selected_mode = str(
+            arb.get("selected_mode")
+            or meta.get("selected_mode")
+            or meta.get("regime_mode")
+            or "UNKNOWN"
+        ).upper()
+        trade_type = str(meta.get("trade_type") or ("futures" if "FUTURES" in selected_mode else "spot")).lower()
+        expected_side = str(meta.get("expected_side") or ("SHORT" if "SHORT" in selected_mode else "LONG")).upper()
+        profile = _profile(meta, row)
+        category = str(meta.get("category") or "UNKNOWN").upper()
+        status = str(row.get("status") or "unknown")
+
+        by_routing_intent[routing_intent] += 1
+        by_selected_mode[selected_mode] += 1
+        by_trade_type_side[f"{trade_type}:{expected_side}"] += 1
+        by_profile[profile] += 1
+        by_category[category] += 1
+        ready_status[status] += 1
+
+        discard_reason = str(row.get("discard_reason") or "").strip()
+        if discard_reason:
+            rc_rejection_reasons[discard_reason] += 1
+        gate = _dict(data.get("last_execution_gate"))
+        if gate.get("passed") is False:
+            execution_failures[str(gate.get("reason") or "PREFLIGHT_BLOCKED")] += 1
+
+    funnel_stage = Counter()
+    funnel_rejections = Counter()
+    for row in cand_rows:
+        stage = str(row.get("stage") or "unknown")
+        decision = str(row.get("decision") or "pending")
+        reason = str(row.get("reason") or "").strip()
+        funnel_stage[stage] += 1
+        if decision == "rejected" and reason:
+            funnel_rejections[reason] += 1
+
+    fill_by_trade_type = Counter()
+    fill_confirmed_by_trade_type = Counter()
+    side_calibration: Dict[str, Dict[str, Any]] = {}
+    seen_entries = set()
+    for row, is_closed in ([(r, False) for r in opened_rows] + [(r, True) for r in closed_rows]):
+        meta = _dict(row.get("metadata"))
+        symbol = str(row.get("symbol") or "")
+        entry_time = _iso(row.get("entry_time")) or ""
+        entry_order_id = str(meta.get("entry_order_id") or meta.get("order_id") or "")
+        dedupe_key = (symbol, entry_time, entry_order_id)
+        if dedupe_key in seen_entries:
+            continue
+        seen_entries.add(dedupe_key)
+        trade_type = str(meta.get("trade_type") or "spot").lower()
+        side = str(meta.get("expected_side") or row.get("side") or "LONG").upper()
+        routing_intent = str(meta.get("routing_intent") or "UNKNOWN").upper()
+        fill_by_trade_type[trade_type] += 1
+        if bool(meta.get("binance_entry_confirmed", False)):
+            fill_confirmed_by_trade_type[trade_type] += 1
+
+        if is_closed:
+            pnl_usdt = _number(row.get("pnl_usdt"))
+            cohort_key = f"{trade_type}:{side}:{routing_intent}"
+            slot = side_calibration.setdefault(
+                cohort_key,
+                {"trades": 0, "wins": 0, "losses": 0, "net_pnl_usdt": 0.0, "avg_pnl_usdt": 0.0},
+            )
+            slot["trades"] += 1
+            slot["wins"] += int(pnl_usdt > 0.0)
+            slot["losses"] += int(pnl_usdt < 0.0)
+            slot["net_pnl_usdt"] += pnl_usdt
+
+    fill_rates = {}
+    for trade_type, total in fill_by_trade_type.items():
+        confirmed = int(fill_confirmed_by_trade_type.get(trade_type, 0))
+        fill_rates[trade_type] = {
+            "entries": int(total),
+            "fill_confirmed": confirmed,
+            "fill_confirmed_rate_pct": round((confirmed / total) * 100.0, 2) if total else 0.0,
+        }
+
+    for key, slot in side_calibration.items():
+        trades = max(1, int(slot.get("trades") or 0))
+        wins = int(slot.get("wins") or 0)
+        net_pnl = float(slot.get("net_pnl_usdt") or 0.0)
+        slot["win_rate_pct"] = round((wins / trades) * 100.0, 2)
+        slot["net_pnl_usdt"] = round(net_pnl, 6)
+        slot["avg_pnl_usdt"] = round(net_pnl / trades, 6)
+
+    return {
+        "generated_at": now.isoformat(),
+        "filters": {"regime": regime_upper, "hours": window_hours},
+        "cohorts": {
+            "routing_intent": dict(by_routing_intent),
+            "selected_mode": dict(by_selected_mode),
+            "trade_type_side": dict(by_trade_type_side),
+            "profile": dict(by_profile),
+            "category": dict(by_category),
+        },
+        "funnel": {
+            "ready_status": dict(ready_status),
+            "selection_stage": dict(funnel_stage),
+            "selection_rejections": dict(funnel_rejections),
+            "ready_candidate_rejections": dict(rc_rejection_reasons),
+            "execution_failures": dict(execution_failures),
+        },
+        "execution": {
+            "fill_confirmed": fill_rates,
+            "entries_analyzed": int(sum(fill_by_trade_type.values())),
+            "calibration_side_decisions": side_calibration,
+        },
     }

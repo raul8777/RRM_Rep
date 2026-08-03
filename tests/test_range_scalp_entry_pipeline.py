@@ -29,6 +29,7 @@ def _range_meta():
         "higher_tf_trend": "UP",
         "bb_lower": 95.0,
         "bb_upper": 103.0,
+        "bollinger_bands": {"lower": 95.0, "middle": 99.0, "upper": 103.0},
         "peak_quality_profile": "A",
         "peak_quality_score": 2.0,
     }
@@ -51,6 +52,7 @@ def test_shared_range_reversion_builder_records_missing_bollinger_reason():
     meta = _range_meta()
     meta.pop("bb_lower")
     meta.pop("bb_upper")
+    meta.pop("bollinger_bands")
 
     prediction = staged_entry.build_range_reversion_prediction(meta, 96.0, _settings())
 
@@ -66,7 +68,7 @@ def test_direct_filter_attaches_valid_range_reversion_before_entry_decision(monk
     run_trades._selection_begin_cycle(None, "RANGE_SCALP", "A")
 
     passed = run_trades._filter_buy_candidates(
-        [candidate], signal_meta, settings, "RANGE_SCALP", "A", predictions={}
+        [candidate], signal_meta, settings, "RANGE_SCALP", predictions={}
     )
 
     assert passed == [candidate]
@@ -81,13 +83,14 @@ def test_direct_filter_rejects_invalid_range_reversion_with_reason(monkeypatch):
     candidate = _range_meta()
     candidate.pop("bb_lower")
     candidate.pop("bb_upper")
+    candidate.pop("bollinger_bands")
     signal_meta = {"TESTUSDT": dict(candidate)}
     monkeypatch.setattr(run_trades, "_db_client_ref", None)
     monkeypatch.setattr(run_trades, "update_signal_decision", lambda *args, **kwargs: None)
     run_trades._selection_begin_cycle(None, "RANGE_SCALP", "A")
 
     passed = run_trades._filter_buy_candidates(
-        [candidate], signal_meta, settings, "RANGE_SCALP", "A", predictions={}
+        [candidate], signal_meta, settings, "RANGE_SCALP", predictions={}
     )
 
     assert passed == []

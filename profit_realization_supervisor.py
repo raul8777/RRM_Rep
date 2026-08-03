@@ -94,7 +94,7 @@ def _regime_scale(regime_mode: Optional[str], trade_type: Optional[str]) -> floa
     return 1.0
 
 
-def _peak_protection_pct(regime_mode: Optional[str], trade_type: Optional[str], settings=None) -> float:
+def _peak_protection_pct(regime_mode: Optional[str], trade_type: Optional[str], settings=None, profile_label: Optional[str] = None) -> float:
     """Minimum fraction of peak_pnl_pct that must be preserved.
     If pnl_pct < peak * this value, trigger full close regardless of held time.
     F11: defends significant gains, prevents giving back peak to near-zero."""
@@ -106,8 +106,8 @@ def _peak_protection_pct(regime_mode: Optional[str], trade_type: Optional[str], 
     if regime == "RANGE_SCALP":
         return 0.70  # range scalp: defend 70% (mini-rebound killer)
     if regime == "SPOT_BULL":
-        # Fase 2.5: configurable via settings; default is more patient than the old 0.60
-        _profile = str(getattr(settings, 'current_regime_profile_label', '') or '').strip().upper()
+        # s95: per-operation profile instead of global active profile.
+        _profile = str(profile_label or '').strip().upper()
         if _profile == 'A':
             return float(getattr(settings, 'peak_protection_spot_bull_profile_a_pct', 0.70))
         return float(getattr(settings, 'peak_protection_spot_bull_pct', 0.65))
@@ -184,6 +184,42 @@ def _held_minutes(now: datetime, started_at: Optional[datetime], fallback_at: Op
         return 0
 
 
+def _sr_resistance_acceleration(
+    context: ProfitRealizationContext,
+    settings: Any,
+) -> Dict[str, Any]:
+    metadata = context.metadata if isinstance(context.metadata, dict) else {}
+    enabled = bool(get_param(settings, "profit_realization_sr_accel_enabled", True))
+    regime = str(context.regime_mode or "").strip().upper()
+    side = str(context.side or "").strip().upper()
+    if not enabled or regime != "RANGE_SCALP" or side not in {"BUY", "LONG"}:
+        return {"active": False, "score": 0, "zone": 0.0}
+
+    zone_min = float(get_param(settings, "profit_realization_sr_resistance_zone_min", 0.68))
+    zone = float(metadata.get("sr_zone_position", 0.0) or 0.0)
+    near_resistance = zone >= zone_min
+    rejection = bool(
+        metadata.get("resistance_rejection")
+        or metadata.get("resistance_rejection_sell")
+        or metadata.get("sr_resistance_rejection")
+    )
+    predexit_sr = bool(
+        metadata.get("profit_predexit_sr_resistance")
+        or metadata.get("sr_exit_triggered")
+        or metadata.get("peak_capture_sr_signal")
+    )
+    score = int(near_resistance) + int(rejection) + int(predexit_sr)
+    return {
+        "active": score > 0,
+        "score": score,
+        "zone": zone,
+        "zone_min": zone_min,
+        "near_resistance": near_resistance,
+        "rejection": rejection,
+        "predexit_sr": predexit_sr,
+    }
+
+
 def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime] = None) -> ProfitRealizationDecision:
     now = now or datetime.now(timezone.utc)
     trade_type = str(context.trade_type or "").strip().lower() or "spot"
@@ -237,6 +273,17 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
     partial_minutes = max(15.0, partial_minutes * scale_with_fng)
     full_minutes = max(partial_minutes + 15.0, full_minutes * scale_with_fng)
     drawback_pct = max(0.001, drawback_pct * (1.0 / max(0.75, scale_with_fng)))
+    sr_accel = _sr_resistance_acceleration(context, settings)
+    if bool(sr_accel.get("active")):
+        partial_mult = float(get_param(settings, "profit_realization_sr_accel_partial_multiplier", 0.80))
+        full_mult = float(get_param(settings, "profit_realization_sr_accel_full_multiplier", 0.85))
+        drawback_mult = float(get_param(settings, "profit_realization_sr_accel_drawback_multiplier", 0.85))
+        partial_mult = max(0.50, min(1.00, partial_mult))
+        full_mult = max(0.50, min(1.00, full_mult))
+        drawback_mult = max(0.50, min(1.00, drawback_mult))
+        partial_minutes = max(10.0, partial_minutes * partial_mult)
+        full_minutes = max(partial_minutes + 10.0, full_minutes * full_mult)
+        drawback_pct = max(0.0008, drawback_pct * drawback_mult)
     min_velocity = float(defaults["min_velocity"])
     hold_signal_strength = float(defaults["hold_signal_strength"])
 
@@ -287,7 +334,7 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
 
     # F11: Peak protection — close immediately if significant gains are being given back
     # W7: Minimum threshold is ATR-aware to avoid triggering on normal volatility noise
-    _peak_protect = _peak_protection_pct(context.regime_mode, trade_type, settings)
+    _peak_protect = _peak_protection_pct(context.regime_mode, trade_type, settings, profile_label=context.profile_label)
     _atr_4h_pct = float(context.metadata.get("atr_4h_pct", 0.0) or 0.0)
     _atr_floor = _atr_4h_pct * 1.5 if _atr_4h_pct > 0 else 0.0
     _peak_protect_min = max(min_profit_pct * 3.0, _atr_floor)
@@ -391,17 +438,28 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
     override_target = "smarttp_extend"
     priority = 50
 
-    if held_min >= full_minutes and ((giveback_pct >= drawback_pct) or (not positive_velocity) or extension_cap_hit or signal_faded or momentum_low):
+    sr_partial_trigger = bool(
+        sr_accel.get("active")
+        and held_min >= max(10.0, partial_minutes * 0.80)
+        and giveback_pct >= (drawback_pct * 0.30)
+    )
+    sr_full_trigger = bool(
+        sr_accel.get("active")
+        and held_min >= max(partial_minutes + 10.0, full_minutes * 0.85)
+        and giveback_pct >= (drawback_pct * 0.65)
+    )
+
+    if (held_min >= full_minutes and ((giveback_pct >= drawback_pct) or (not positive_velocity) or extension_cap_hit or signal_faded or momentum_low)) or sr_full_trigger:
         should_full = True
-        reason = "profit_realization_supervisor_full"
+        reason = "profit_realization_supervisor_full_sr_accel" if sr_full_trigger else "profit_realization_supervisor_full"
         detail = (
             f"{trade_type.upper()} held {held_min}m in profit; pnl={context.pnl_pct*100:.2f}% peak={peak*100:.2f}% "
             f"giveback={giveback_pct*100:.2f}% >= {drawback_pct*100:.2f}% | score={momentum_score:.0f}"
         )
         priority = 90
-    elif held_min >= partial_minutes and ((giveback_pct >= (drawback_pct * 0.5)) or (not positive_velocity) or extension_cap_hit or signal_faded or momentum_low):
+    elif (held_min >= partial_minutes and ((giveback_pct >= (drawback_pct * 0.5)) or (not positive_velocity) or extension_cap_hit or signal_faded or momentum_low)) or sr_partial_trigger:
         should_partial = True
-        reason = "profit_realization_supervisor_partial"
+        reason = "profit_realization_supervisor_partial_sr_accel" if sr_partial_trigger else "profit_realization_supervisor_partial"
         detail = (
             f"{trade_type.upper()} held {held_min}m in profit; pnl={context.pnl_pct*100:.2f}% peak={peak*100:.2f}% "
             f"giveback={giveback_pct*100:.2f}% velocity={None if velocity is None else round(float(velocity)*100, 4)} | score={momentum_score:.0f}"
@@ -417,7 +475,9 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
         f"drawback={drawback_pct*100:.2f}%; giveback={giveback_pct*100:.2f}%; "
         f"velocity={None if velocity is None else round(float(velocity), 6)}; "
         f"momentum_score={momentum_score:.1f}; momentum_high={momentum_high}; momentum_low={momentum_low}; "
-        f"strong_signal={strong_signal}; extensions={tp_extensions}; scale={scale:.2f}; fng_mod={_fng_meta_modifier:.2f}"
+        f"strong_signal={strong_signal}; extensions={tp_extensions}; scale={scale:.2f}; fng_mod={_fng_meta_modifier:.2f}; "
+        f"sr_accel_active={bool(sr_accel.get('active'))}; sr_score={int(sr_accel.get('score', 0))}; "
+        f"sr_zone={float(sr_accel.get('zone', 0.0)):.3f}; sr_zone_min={float(sr_accel.get('zone_min', 0.0)):.3f}"
     )
     state_patch = {
         LAST_DECISION_KEY: {

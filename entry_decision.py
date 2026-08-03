@@ -96,6 +96,22 @@ def evaluate(
     model = prediction.get("model")
     target_price = _number(prediction.get("target_price"))
     stop_price = _number(prediction.get("stop_price"))
+    # If the generic predictor produced a price_range but no explicit target/stop,
+    # use the range extremes so downstream staged-entry direction confirmation
+    # has a reference even when the range-reversion model is invalid.
+    if target_price is None or stop_price is None:
+        price_range = prediction.get("price_range") or {}
+        if isinstance(price_range, dict):
+            _min = _number(price_range.get("min"))
+            _max = _number(price_range.get("max"))
+            if _min is not None and _max is not None:
+                _side = str(meta.get("expected_side") or "LONG").strip().upper()
+                if _side == "SHORT":
+                    target_price = target_price or _min
+                    stop_price = stop_price or _max
+                else:
+                    target_price = target_price or _max
+                    stop_price = stop_price or _min
     if not enabled:
         return _decision(True, "ENTRY_DECISION_DISABLED", settings, regime, profile, quality_score, model, expected_pnl, expected_pnl_pct, probability, target_price, stop_price)
     if _mode(settings, regime) != "enforced":
@@ -137,7 +153,7 @@ def evaluate(
             getattr(
                 settings,
                 "entry_decision_min_probability",
-                {"SPOT_BULL": 0.6, "RANGE_SCALP": 0.6, "FUTURES_SHORT": 0.6, "PRESERVATION": 0.6},
+                {"SPOT_BULL": 0.50, "RANGE_SCALP": 0.50, "FUTURES_SHORT": 0.50, "PRESERVATION": 0.50},
             )
             or {}
         ).get(regime, 0.0)

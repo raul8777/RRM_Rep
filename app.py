@@ -1589,7 +1589,8 @@ async def get_commission_summary(hours: int = 24) -> Dict:
         rows = comp.db_client.execute_query(
             """SELECT symbol, quantity, entry_price, exit_price, pnl,
                       entry_commission, exit_commission, metadata
-               FROM trades_closed WHERE exit_time > %s""",
+               FROM trades_closed WHERE exit_time > %s
+                 AND COALESCE(is_corrupted, FALSE) = FALSE""",
             (cutoff,)
         )
         spot_gross = spot_comm = spot_trades = 0.0
@@ -4572,6 +4573,7 @@ def _summarize_closed_trades_range(start_ts: datetime, end_ts: Optional[datetime
             COALESCE(AVG(pnl_percentage), 0)::numeric AS pnl_pct_avg
         FROM trades_closed
         WHERE exit_time >= %s AND exit_time < %s
+          AND COALESCE(is_corrupted, FALSE) = FALSE
         GROUP BY trade_scope
         ORDER BY trade_scope
         """,
@@ -4605,6 +4607,7 @@ def _trade_diagnostics_range(start_ts: datetime, end_ts: Optional[datetime] = No
             EXTRACT(EPOCH FROM (exit_time - entry_time))::numeric AS hold_seconds
         FROM trades_closed
         WHERE exit_time >= %s AND exit_time < %s
+          AND COALESCE(is_corrupted, FALSE) = FALSE
         ORDER BY exit_time ASC
         """,
         (start_ts, _end_ts),
@@ -4788,6 +4791,7 @@ def _trade_throughput_exposure_range(
             close_reason
         FROM trades_closed
         WHERE exit_time >= %s AND exit_time < %s
+          AND COALESCE(is_corrupted, FALSE) = FALSE
         ORDER BY exit_time ASC
         """,
         (start_ts, _end_ts),
@@ -5984,6 +5988,42 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
             _shadow_readiness_gate("decision_sample", ug_observed, 50, ug_observed >= 50, "Recolectar 50 decisiones UG shadow antes de activar una política nueva."),
         ]
 
+        # s115: shadow-evidence entries for the s113 volume/immediate-entry mechanisms
+        # and the active s115 SR-thesis gate — every mechanism left "en observación"
+        # must be visible here (see .windsurf/rules.md "regla dura — visibilidad shadow").
+        volume_gate_rows = _query("direction_volume_gate_shadow", """
+            SELECT
+                COUNT(*) FILTER (WHERE (input_features->'direction'->>'volume_anomaly') IS NOT NULL) AS total,
+                COUNT(*) FILTER (WHERE input_features->'direction'->>'volume_anomaly' = 'true') AS anomalies
+            FROM ready_candidate_checks
+            WHERE created_at >= NOW() - INTERVAL '7 days' AND check_type = 'intra'
+        """)
+        volume_gate_data = volume_gate_rows[0] if volume_gate_rows else {}
+        volume_gate_total = int(volume_gate_data.get("total") or 0)
+        volume_gate_anomalies = int(volume_gate_data.get("anomalies") or 0)
+        volume_gate_gates = [
+            _shadow_readiness_gate("observation_sample", volume_gate_total, 200, volume_gate_total >= 200, "Recolectar checks de dirección con vol_spike antes de calibrar el multiplicador de anomalía."),
+        ]
+
+        immediate_entry_rows = _query("staged_immediate_entry_shadow", """
+            SELECT COUNT(*) AS n FROM (
+                SELECT metadata FROM trades_open WHERE metadata->'smart_meta'->>'is_immediate_leg' = 'true'
+                UNION ALL
+                SELECT metadata FROM trades_closed WHERE metadata->'smart_meta'->>'is_immediate_leg' = 'true' AND exit_time >= NOW() - INTERVAL '7 days'
+            ) legs
+        """)
+        immediate_entry_count = int((immediate_entry_rows[0] or {}).get("n") or 0) if immediate_entry_rows else 0
+        immediate_entry_gates = [
+            _shadow_readiness_gate("leg1_sample", immediate_entry_count, 20, immediate_entry_count >= 20, "Habilitar staged_immediate_entry_enabled con fracción pequeña y recolectar al menos 20 piernas inmediatas antes de ampliar."),
+        ]
+
+        sr_thesis_rows = _query("sr_thesis_gate_snapshot", """
+            SELECT COUNT(*) AS n FROM ready_candidates
+            WHERE data->'last_execution_gate'->>'reason' = 'SR_THESIS_MISMATCH_AT_EXECUTION'
+              AND created_at >= NOW() - INTERVAL '7 days'
+        """)
+        sr_thesis_blocked_count = int((sr_thesis_rows[0] or {}).get("n") or 0) if sr_thesis_rows else 0
+
         entries = [
             {
                 "id": "directional_v2",
@@ -6069,6 +6109,36 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
                     _shadow_readiness_gate("universe_snapshot", opportunity_count, 1, opportunity_count > 0, "Esperar snapshot del screener."),
                     _shadow_readiness_gate("executable_model", "absent", "validated", False, "Entrenar/validar retorno neto 2h/4h antes de routing."),
                 ],
+            },
+            {
+                "id": "direction_volume_gate",
+                "name": "Corroboración de volumen (VSA/Wyckoff)",
+                "mode": "active" if _cfg_param(live_settings, "direction_volume_gate_enabled", False) else "shadow",
+                "state": _shadow_readiness_state(
+                    "active" if _cfg_param(live_settings, "direction_volume_gate_enabled", False) else "shadow",
+                    volume_gate_gates,
+                ),
+                "summary": f"Checks con dirección evaluados: {volume_gate_total}; anomalías de volumen detectadas: {volume_gate_anomalies}.",
+                "gates": volume_gate_gates,
+            },
+            {
+                "id": "staged_immediate_entry",
+                "name": "Entrada inmediata escalonada (pierna 1 en S/R)",
+                "mode": "active" if _cfg_param(live_settings, "staged_immediate_entry_enabled", False) else "shadow",
+                "state": _shadow_readiness_state(
+                    "active" if _cfg_param(live_settings, "staged_immediate_entry_enabled", False) else "shadow",
+                    immediate_entry_gates,
+                ),
+                "summary": f"Piernas inmediatas abiertas (7d): {immediate_entry_count}.",
+                "gates": immediate_entry_gates,
+            },
+            {
+                "id": "sr_thesis_gate",
+                "name": "Revalidación de tesis S/R al ejecutar (s115)",
+                "mode": "active" if _cfg_param(live_settings, "range_scalp_sr_thesis_gate_enabled", True) else "disabled",
+                "state": "ACTIVE" if _cfg_param(live_settings, "range_scalp_sr_thesis_gate_enabled", True) else "DISABLED",
+                "summary": f"Candidatos bloqueados por tesis S/R inconsistente (snapshot actual): {sr_thesis_blocked_count}. Umbral: {_cfg_param(live_settings, 'range_scalp_sr_thesis_max_dist_pct', 5.0)}%.",
+                "gates": [],
             },
             {
                 "id": "retired_gates",
@@ -6243,6 +6313,7 @@ async def get_transition_kpis(hours: int = 168, _auth=Depends(_require_api_key))
             SELECT pnl, close_reason, entry_time, exit_time, metadata
             FROM trades_closed
             WHERE exit_time > NOW() - (%s || ' hours')::interval
+              AND COALESCE(is_corrupted, FALSE) = FALSE
             ORDER BY exit_time DESC
             """,
             (int(hours),),
@@ -6809,6 +6880,7 @@ async def get_futures_closed_positions(limit: int = 20, days: int = 7) -> Dict:
                    FROM trades_closed
                    WHERE (metadata->>'trade_type' = 'futures' OR metadata IS NULL)
                      AND exit_time >= %s
+                     AND COALESCE(is_corrupted, FALSE) = FALSE
                    ORDER BY exit_time DESC""",
                 (_since_str,)
             ) if db_client else []
@@ -8674,7 +8746,8 @@ _KELLY_EDITABLE_FIELDS = {
     "scale_out_enabled", "scale_out_first_close_pct",
     "futures_sl_pct", "futures_tp_pct",
     "futures_smart_tp_enabled", "futures_smart_tp_extend_score_threshold",
-    "futures_max_new_per_cycle", "futures_confirm_red_candle",
+    "futures_max_new_per_cycle", "futures_max_longs", "futures_max_shorts",
+    "futures_confirm_red_candle",
     "futures_no_short_btc_4h_threshold", "futures_no_short_btc_3h_threshold", "futures_no_short_btc_1h_threshold",
     "futures_mass_sl_threshold", "futures_mass_sl_cooldown_hours",
     "min_signal_strength",
@@ -8720,6 +8793,7 @@ _KELLY_EDITABLE_FIELDS = {
     "btc_dominance_filter_enabled", "btc_dominance_altcoin_threshold",
     "liquidity_filter_enabled", "min_liquidity_vol_usdt", "min_liquidity_vol_usdt_range_scalp",
     "wr_screener_enabled", "wr_screener_consecutive_sl_block",
+    "wr_screener_short_window_minutes", "wr_screener_short_window_min_losses",
     "sso_target_daily_usd",
     "sl_confirmation_candles",
     "circuit_breaker_enabled", "circuit_breaker_consecutive_failures", "circuit_breaker_pause_minutes",
@@ -8766,9 +8840,15 @@ _KELLY_EDITABLE_FIELDS = {
     "range_scalp_long_min_expected_pnl",
     "range_scalp_long_support_zone_max",
     "range_scalp_long_superiority_delta",
+    "range_scalp_direction_mode",
     "range_scalp_direction_min_probability",
     "range_scalp_short_min_probability",
     "range_scalp_short_resistance_threshold",
+    # s116: position telemetry watcher
+    "position_telemetry_watcher_enabled",
+    "position_telemetry_watcher_interval_seconds",
+    "position_telemetry_db_throttle_seconds",
+    "position_reaction_policy_mode",
     "profit_realization_sr_accel_enabled",
     "profit_realization_sr_accel_partial_multiplier",
     "profit_realization_sr_accel_full_multiplier",
@@ -9534,6 +9614,7 @@ async def get_dashboard_commission(_auth=Depends(_require_api_key)) -> Dict:
                     COALESCE(SUM(CASE WHEN exit_time >= NOW() - INTERVAL '7 days' THEN COALESCE(entry_commission,0) + COALESCE(exit_commission,0) ELSE 0 END), 0) as d7
                 FROM trades_closed
                 WHERE exit_time >= NOW() - INTERVAL '7 days'
+                  AND COALESCE(is_corrupted, FALSE) = FALSE
                 GROUP BY symbol
             """)
             for r in rows:
@@ -10384,7 +10465,8 @@ _BACKTEST_BASELINE: Dict[str, Any] = {
     'kelly_max_pct_cap': 0.30,
     'max_per_trade_usdt': 1500.0,
     'futures_leverage': 2,              # plan v3: reduced leverage for FUTURES_SHORT
-    'futures_max_shorts': 5,            # 3-5 shorts simultáneos
+    'futures_max_longs': 3,             # s116: symmetric LONG capacity in RANGE_SCALP
+    'futures_max_shorts': 4,            # s116: balanced with LONG slots
     'futures_max_new_per_cycle': 3,     # aggressive calibration: more new shorts per cycle
     'futures_usdt_per_trade': 150.0,
     'futures_sl_pct': 2.0,
@@ -11202,6 +11284,7 @@ def _build_backtest_compare_vs_live(
                close_reason, metadata, entry_commission, exit_commission
         FROM trades_closed
         WHERE entry_time >= %s AND entry_time < %s
+          AND COALESCE(is_corrupted, FALSE) = FALSE
         ORDER BY entry_time ASC
         """,
         (window_start, window_end)
@@ -12091,11 +12174,13 @@ async def get_hybrid_recommend(
         # Fetch recent PnL for allocation (trades_closed uses exit_time)
         _spot_pnl = db_client.execute_query(
             "SELECT COALESCE(SUM(pnl), 0) AS pnl FROM trades_closed "
-            "WHERE side IN ('BUY','SELL') AND exit_time > NOW() - INTERVAL '7 days'"
+            "WHERE side IN ('BUY','SELL') AND exit_time > NOW() - INTERVAL '7 days' "
+            "AND COALESCE(is_corrupted, FALSE) = FALSE"
         )
         _fut_pnl = db_client.execute_query(
             "SELECT COALESCE(SUM(pnl), 0) AS pnl FROM trades_closed "
-            "WHERE side IN ('SHORT','LONG') AND exit_time > NOW() - INTERVAL '7 days'"
+            "WHERE side IN ('SHORT','LONG') AND exit_time > NOW() - INTERVAL '7 days' "
+            "AND COALESCE(is_corrupted, FALSE) = FALSE"
         )
         _spot_pnl_7d = float(_spot_pnl[0]["pnl"] if _spot_pnl else 0)
         _fut_pnl_7d = float(_fut_pnl[0]["pnl"] if _fut_pnl else 0)

@@ -25,6 +25,11 @@ _DEFAULT_WEIGHTS = {
     "atr_pct":      0.08,   # volatility regime — higher ATR = wider expected move
     "trend_4h":     0.15,   # macro trend EMA9>EMA21 on 4h
     "weekly_range": 0.08,   # price position vs 7d range (low = support)
+    "sr_zone_position": 0.10, # position between support and resistance
+    "sr_bounce":    0.06,   # confirmed bounce at support
+    "sr_breakout":  0.06,   # confirmed breakout above resistance
+    "sr_breakdown": 0.06,   # confirmed breakdown below support (shorts)
+    "support_strength": 0.04, # historical volume/touches at support
     "bias_correction": 1.0,
 }
 
@@ -72,6 +77,8 @@ class PnLPredictor:
         trade_type: str = 'spot',
         trade_side: str = 'LONG',
         settings = None,
+        candles: Optional[Dict] = None,
+        interval_minutes: int = 5,
     ) -> Dict:
         """
         Predict expected PnL for a position.
@@ -85,6 +92,11 @@ class PnLPredictor:
             trade_type: 'spot' or 'futures' — used to subtract Binance fees
             trade_side: 'LONG' or 'SHORT' — direction-aware scoring/EV
             settings: Settings object for commission rates
+            candles: Optional OHLCV dict {'open':..., 'high':..., 'low':..., 'close':..., 'volume':...}
+                from the target micro timeframe (e.g. 5m). When provided, the predictor
+                uses the realized range/drift over the prediction horizon instead of
+                extrapolating volatility from the 1h Bollinger Bands.
+            interval_minutes: Candle interval in minutes (e.g. 5 for 5m candles).
 
         Returns:
             Dictionary with prediction results
@@ -104,8 +116,25 @@ class PnLPredictor:
             # Calculate success probability based on indicators + learned weights
             success_probability = self._calculate_success_probability(indicators, weights, trade_side=_side, current_price=current_price)
 
+            # Micro-momentum adjustment using real 1m/5m candles
+            if candles and self._has_candles(candles):
+                micro_adj = self._micro_momentum_adjustment(
+                    candles, interval_minutes, cycle_duration_minutes, _side
+                )
+                success_probability = max(0.0, min(1.0, success_probability + micro_adj))
+
             # Estimate price range for the cycle
-            price_range = self._estimate_price_range(current_price, indicators, cycle_duration_minutes)
+            if candles and self._has_candles(candles):
+                price_range = self._estimate_price_range_from_candles(
+                    current_price,
+                    candles,
+                    cycle_duration_minutes,
+                    interval_minutes=interval_minutes,
+                    trade_side=_side,
+                    indicators=indicators,
+                )
+            else:
+                price_range = self._estimate_price_range(current_price, indicators, cycle_duration_minutes, trade_side=_side)
 
             # Calculate expected PnL
             expected_pnl = self._calculate_expected_pnl(
@@ -114,6 +143,8 @@ class PnLPredictor:
                 success_probability,
                 position_size_usdt,
                 trade_side=_side,
+                settings=settings,
+                trade_type=trade_type,
             )
 
             # Subtract Binance round-trip commission so expected_pnl is net
@@ -128,7 +159,10 @@ class PnLPredictor:
             risk_metrics = self._calculate_risk_metrics(
                 current_price,
                 price_range,
-                position_size_usdt
+                position_size_usdt,
+                trade_side=_side,
+                settings=settings,
+                trade_type=trade_type,
             )
             
             prediction = {
@@ -201,6 +235,15 @@ class PnLPredictor:
                 return float(v)
             except Exception:
                 return default
+
+        def _sr_val(indicators: Dict, keys: List[str], default=None):
+            for k in keys:
+                if k in indicators:
+                    return indicators[k]
+                sr = indicators.get('support_resistance') or {}
+                if isinstance(sr, dict) and k in sr:
+                    return sr[k]
+            return default
 
         probability = 0.5  # Base probability
         _is_short = str(trade_side or 'LONG').strip().upper() == 'SHORT'
@@ -332,13 +375,193 @@ class PnLPredictor:
                 elif wr >= 0.85:
                     probability -= w_weekly_rng * 0.90  # near weekly resistance
 
+        # ── Support / Resistance levels and events ─────────────────────────
+        w_sr_zone = weights.get("sr_zone_position", 0.10)
+        w_sr_bounce = weights.get("sr_bounce", 0.06)
+        w_sr_breakout = weights.get("sr_breakout", 0.06)
+        w_sr_breakdown = weights.get("sr_breakdown", 0.06)
+        w_sr_strength = weights.get("support_strength", 0.04)
+
+        sr_zone = _num(_sr_val(indicators, ['sr_zone_position']), 0.5)
+        sr_bounce = bool(_sr_val(indicators, ['support_bounce_buy', 'sr_bounce'], False))
+        sr_breakout = bool(_sr_val(indicators, ['support_breakout_buy', 'sr_breakout'], False))
+        sr_breakdown = bool(_sr_val(indicators, ['support_breakdown_sell', 'sr_breakdown'], False))
+        support_strength = _num(_sr_val(indicators, ['support_strength']), 0.0)
+        support_distance_atr = _num(_sr_val(indicators, ['support_distance_atr']), 999.0)
+
+        strength_bonus = w_sr_strength * min(1.0, support_strength)
+        if _is_short:
+            if sr_breakdown:
+                probability += w_sr_breakdown * 0.80 + strength_bonus
+            if sr_zone >= 0.75:
+                probability += w_sr_zone
+            elif sr_zone <= 0.25:
+                probability -= w_sr_zone * 0.80
+            if support_distance_atr < 0.3:
+                probability -= w_sr_zone * 0.40  # too close to support for short
+        else:
+            if sr_bounce:
+                probability += w_sr_bounce * 0.80 + strength_bonus
+            if sr_breakout:
+                probability += w_sr_breakout * 0.60
+            if sr_zone <= 0.25:
+                probability += w_sr_zone
+            elif sr_zone >= 0.75:
+                probability -= w_sr_zone * 0.80
+            if support_distance_atr < 0.3:
+                probability += w_sr_zone * 0.40  # very close to support
+
         return max(0.0, min(1.0, probability))
     
+    @staticmethod
+    def _micro_momentum_adjustment(
+        candles: Dict,
+        interval_minutes: int,
+        horizon_minutes: int,
+        trade_side: str,
+    ) -> float:
+        """
+        Compute a small probability adjustment (-0.04 .. +0.04) from the
+        realized drift and volume profile over the prediction window.
+        """
+        closes = np.asarray(candles.get('close', []), dtype=float)
+        volumes = np.asarray(candles.get('volume', []), dtype=float)
+        if len(closes) < 3:
+            return 0.0
+
+        n = max(1, min(int(np.ceil(horizon_minutes / max(interval_minutes, 1))), len(closes)))
+        recent = closes[-n:]
+        drift = (recent[-1] - recent[0]) / recent[0] if recent[0] > 0 else 0.0
+
+        adj = 0.0
+        _is_short = str(trade_side or 'LONG').strip().upper() == 'SHORT'
+        if _is_short:
+            adj += -0.04 if drift > 0.001 else 0.02 if drift < -0.001 else 0.0
+        else:
+            adj += 0.04 if drift > 0.001 else -0.02 if drift < -0.001 else 0.0
+
+        if len(volumes) >= n + 1:
+            recent_vol = volumes[-n:].mean()
+            older_vol = volumes[-(2 * n):-n].mean() if len(volumes) >= 2 * n else volumes[:n].mean()
+            if older_vol > 0:
+                vol_ratio = recent_vol / older_vol
+                adj += 0.02 * min(max(vol_ratio - 1.0, -1.0), 1.0)
+
+        return max(-0.06, min(0.06, adj))
+
+    @staticmethod
+    def _has_candles(candles: Dict) -> bool:
+        """Check that an OHLCV dict contains enough non-empty arrays."""
+        if not isinstance(candles, dict):
+            return False
+        for key in ('high', 'low', 'close'):
+            arr = candles.get(key)
+            if arr is None or len(arr) < 3:
+                return False
+        return True
+
+    def _estimate_price_range_from_candles(
+        self,
+        current_price: float,
+        candles: Dict,
+        cycle_duration_minutes: int,
+        interval_minutes: int = 5,
+        trade_side: str = 'LONG',
+        indicators: Optional[Dict] = None,
+    ) -> Dict:
+        """
+        Estimate price range using realized OHLCV candles instead of ATR extrapolation.
+        Uses the last N candles that fit inside the prediction horizon.
+        """
+        highs = np.asarray(candles.get('high', []), dtype=float)
+        lows = np.asarray(candles.get('low', []), dtype=float)
+        closes = np.asarray(candles.get('close', []), dtype=float)
+        volumes = np.asarray(candles.get('volume', []), dtype=float)
+
+        if len(closes) < 3:
+            return self._estimate_price_range(current_price, indicators or {}, cycle_duration_minutes, trade_side=trade_side)
+
+        n_candles = max(1, int(np.ceil(cycle_duration_minutes / max(interval_minutes, 1))))
+        n_candles = min(n_candles, len(closes))
+
+        recent_highs = highs[-n_candles:]
+        recent_lows = lows[-n_candles:]
+        recent_closes = closes[-n_candles:]
+        recent_volumes = volumes[-n_candles:] if len(volumes) >= n_candles else None
+
+        realized_range = max(recent_highs.max(), recent_closes.max()) - min(recent_lows.min(), recent_closes.min())
+        realized_range = max(realized_range, current_price * 0.001)  # at least 10 bps
+
+        # Net drift over the window (price direction)
+        drift = recent_closes[-1] - recent_closes[0]
+
+        # Realized volatility using log returns over the window
+        log_prices = np.log(recent_closes)
+        returns_log = np.diff(log_prices)
+        realized_vol = float(np.std(returns_log)) if len(returns_log) > 1 else 0.0
+        vol_amplitude = current_price * max(realized_vol * np.sqrt(n_candles), 0.001)
+
+        # Volume confirmation: recent avg volume vs older window avg
+        volume_boost = 0.0
+        if recent_volumes is not None and len(recent_volumes) >= 3:
+            recent_avg_vol = recent_volumes.mean()
+            older = volumes[:-n_candles] if len(volumes) > n_candles * 2 else volumes[:n_candles]
+            older_avg_vol = older.mean() if len(older) > 0 else recent_avg_vol
+            if older_avg_vol > 0:
+                volume_ratio = recent_avg_vol / older_avg_vol
+                volume_boost = 0.2 * min(max(volume_ratio - 1.0, -1.0), 1.0)
+
+        _is_short = str(trade_side or 'LONG').strip().upper() == 'SHORT'
+        # Project max/min from current price using drift + half realized range, then expand with vol amplitude
+        if _is_short:
+            # SHORT wins when price falls
+            max_price = current_price + max(0.0, drift) * 0.5 + realized_range * 0.3 + vol_amplitude
+            min_price = current_price + min(0.0, drift) - realized_range * 0.7 - vol_amplitude
+        else:
+            max_price = current_price + max(0.0, drift) + realized_range * 0.7 + vol_amplitude
+            min_price = current_price + min(0.0, drift) * 0.5 - realized_range * 0.3 - vol_amplitude
+
+        # Soft cap to a realistic intraday move
+        max_move_pct = min(0.05, max(0.005, (realized_range / current_price) * 2.0 + volume_boost))
+        max_price = min(max_price, current_price * (1.0 + max_move_pct))
+        min_price = max(min_price, current_price * (1.0 - max_move_pct))
+
+        # Anchor to support/resistance when available
+        indicators = indicators or {}
+        sr_support = indicators.get('support_level')
+        sr_resistance = indicators.get('resistance_level')
+        if sr_support is None:
+            sr = indicators.get('support_resistance') or {}
+            sr_support = sr.get('support_level')
+            sr_resistance = sr.get('resistance_level')
+        if sr_support is not None and sr_support > 0:
+            if _is_short:
+                min_price = max(min_price, sr_support * 1.005)
+            else:
+                min_price = max(min_price, sr_support * 0.998)
+        if sr_resistance is not None and sr_resistance > 0:
+            if _is_short:
+                max_price = min(max_price, sr_resistance * 1.002)
+            else:
+                max_price = min(max_price, sr_resistance * 0.995)
+
+        return {
+            'min': float(min_price),
+            'max': float(max_price),
+            'volatility': float(realized_range / current_price),
+            'adjusted_volatility': float((max_price - min_price) / (2.0 * current_price)),
+            'realized_range': float(realized_range),
+            'drift': float(drift),
+            'volume_boost': float(volume_boost),
+            'candle_based': True,
+        }
+
     def _estimate_price_range(
         self,
         current_price: float,
         indicators: Dict,
-        cycle_duration_minutes: int
+        cycle_duration_minutes: int,
+        trade_side: str = 'LONG'
     ) -> Dict:
         """
         Estimate price range for the trading cycle.
@@ -374,7 +597,30 @@ class PnLPredictor:
         # Estimate price range
         min_price = current_price * (1 - adjusted_volatility)
         max_price = current_price * (1 + adjusted_volatility)
-        
+
+        # Anchor to nearest support/resistance when available.
+        _is_short = str(trade_side or 'LONG').strip().upper() == 'SHORT'
+        sr_support = indicators.get('support_level')
+        sr_resistance = indicators.get('resistance_level')
+        if sr_support is None:
+            sr = indicators.get('support_resistance') or {}
+            sr_support = sr.get('support_level')
+            sr_resistance = sr.get('resistance_level')
+        if sr_support is not None and sr_support > 0:
+            if _is_short:
+                # Stop above support for short; do not let min fall through strong support.
+                min_price = max(min_price, sr_support * 1.005)
+            else:
+                # Floor at support for long.
+                min_price = max(min_price, sr_support * 0.998)
+        if sr_resistance is not None and sr_resistance > 0:
+            if _is_short:
+                # Ceiling at resistance for short.
+                max_price = min(max_price, sr_resistance * 1.002)
+            else:
+                # Cap target near resistance for long.
+                max_price = min(max_price, sr_resistance * 0.995)
+
         return {
             'min': min_price,
             'max': max_price,
@@ -382,6 +628,27 @@ class PnLPredictor:
             'adjusted_volatility': adjusted_volatility
         }
     
+    def _get_sl_tp_pct(self, settings, trade_type: str, is_short: bool):
+        """Return configured SL/TP percentages for the active trade type/side."""
+        if settings is None:
+            return None, None
+        sl_pct = None
+        tp_pct = None
+        if str(trade_type).lower() == 'futures' and is_short:
+            sl_pct = float(getattr(settings, 'futures_sl_pct', None) or 0.0)
+            if not sl_pct:
+                sl_pct = float(getattr(settings, 'range_scalp_short_sl_pct', 2.0) or 0.0)
+            tp_pct = float(getattr(settings, 'futures_tp_pct', None) or 0.0)
+            if not tp_pct:
+                tp_pct = float(getattr(settings, 'range_scalp_short_tp_pct', 4.0) or 0.0)
+        elif str(trade_type).lower() == 'futures':
+            sl_pct = float(getattr(settings, 'futures_long_sl_pct', 2.5) or 0.0)
+            tp_pct = float(getattr(settings, 'futures_long_tp_pct', 5.0) or 0.0)
+        else:
+            sl_pct = float(getattr(settings, 'stop_loss_pct', 3.36) or 0.0)
+            tp_pct = float(getattr(settings, 'take_profit_pct', 4.14) or 0.0)
+        return (sl_pct if sl_pct > 0 else None), (tp_pct if tp_pct > 0 else None)
+
     def _calculate_expected_pnl(
         self,
         current_price: float,
@@ -389,33 +656,69 @@ class PnLPredictor:
         success_probability: float,
         position_size_usdt: float,
         trade_side: str = 'LONG',
+        settings=None,
+        trade_type: str = 'spot',
     ) -> float:
         """
         Calculate expected PnL.
-        
+
         Args:
             current_price: Current market price
             price_range: Estimated price range
             success_probability: Probability of successful trade
             position_size_usdt: Size of position in USDT
-            
+            settings: Settings object to read configured SL/TP percentages
+            trade_type: 'spot' or 'futures'
+            trade_side: 'LONG' or 'SHORT'
+
         Returns:
             Expected PnL in USDT
         """
         # Calculate quantity
         quantity = position_size_usdt / current_price
         _is_short = str(trade_side or 'LONG').strip().upper() == 'SHORT'
-        
+
+        _min = float(price_range.get('min', 0.0) or 0.0)
+        _max = float(price_range.get('max', 0.0) or 0.0)
+        if _min <= 0 or _max <= 0:
+            return 0.0
+
+        # Cap the expected move by configured SL/TP so the predictor reflects the
+        # actual position risk/reward instead of the full Bollinger/candle range.
+        # For prob > sl/(sl+tp) the expected PnL is positive (e.g. SHORT SL2%/TP4%
+        # needs prob > 33%).
+        effective_min = _min
+        effective_max = _max
+        sl_pct, tp_pct = self._get_sl_tp_pct(settings, trade_type, _is_short)
+        if sl_pct and tp_pct:
+            sl_mult = sl_pct / 100.0
+            tp_mult = tp_pct / 100.0
+            if _is_short:
+                # SHORT: TP is price fall, SL is price rise.
+                gain_price = current_price * (1.0 - tp_mult)
+                loss_price = current_price * (1.0 + sl_mult)
+                effective_min = gain_price
+                effective_max = loss_price
+            else:
+                # LONG: TP is price rise, SL is price fall.
+                gain_price = current_price * (1.0 + tp_mult)
+                loss_price = current_price * (1.0 - sl_mult)
+                effective_min = loss_price
+                effective_max = gain_price
+            # Fallback to price_range if configured SL/TP produce an inverted range.
+            if effective_max <= effective_min:
+                effective_min, effective_max = _min, _max
+
         if _is_short:
             # SHORT wins when price falls.
-            expected_gain = (current_price - price_range['min']) * quantity * success_probability
-            expected_loss = (price_range['max'] - current_price) * quantity * (1 - success_probability)
+            expected_gain = max(0.0, (current_price - effective_min)) * quantity * success_probability
+            expected_loss = max(0.0, (effective_max - current_price)) * quantity * (1 - success_probability)
         else:
             # LONG wins when price rises.
-            expected_gain = (price_range['max'] - current_price) * quantity * success_probability
-            expected_loss = (current_price - price_range['min']) * quantity * (1 - success_probability)
+            expected_gain = max(0.0, (effective_max - current_price)) * quantity * success_probability
+            expected_loss = max(0.0, (current_price - effective_min)) * quantity * (1 - success_probability)
         expected_pnl = expected_gain - expected_loss
-        
+
         return expected_pnl
     
     def predict_range_reversion(
@@ -427,7 +730,20 @@ class PnLPredictor:
         take_profit_pct: Optional[float] = None,
         stop_loss_pct: Optional[float] = None,
         trade_type: str = "spot",
+        trade_side: str = "LONG",
     ) -> Dict:
+        """Evaluate a range-reversion (mean-reversion) setup for either side.
+
+        LONG: reversion off support, target toward the middle band, stop below
+        support. SHORT: reversion off resistance, target toward the middle
+        band from above, stop above resistance. The two branches are exact
+        mirrors of each other around the middle band so neither side is
+        favored by construction; `trade_side` must reflect the actual
+        candidate side being evaluated (previously this function always
+        evaluated the LONG case regardless of the caller's side, which made
+        `valid`/`band_position` meaningless for SHORT candidates).
+        """
+        is_short = str(trade_side or "LONG").strip().upper() == "SHORT"
         bollinger = indicators.get("bollinger_bands") or {}
         lower = float(bollinger.get("lower", 0.0) or 0.0)
         middle = float(bollinger.get("middle", 0.0) or 0.0)
@@ -436,14 +752,48 @@ class PnLPredictor:
             return {"valid": False, "reason": "invalid_bollinger_or_position"}
 
         band_position = max(0.0, min(1.0, (current_price - lower) / (upper - lower)))
+        # Favorability of the current position for the side being evaluated:
+        # 0.0 = ideal entry (support for LONG, resistance for SHORT), mirrored
+        # around the middle band so both sides reuse the same scoring curve.
+        directional_position = (1.0 - band_position) if is_short else band_position
+
         configured_tp = float(take_profit_pct if take_profit_pct is not None else getattr(settings, "take_profit_pct", 4.14)) / 100.0
         configured_sl = float(stop_loss_pct if stop_loss_pct is not None else getattr(settings, "range_scalp_sl_pct", 0.8)) / 100.0
-        target_price = min(middle, current_price * (1.0 + max(configured_tp, 0.0)))
-        structural_stop = lower
-        configured_stop = current_price * (1.0 - max(configured_sl, 0.0))
-        stop_price = max(structural_stop, configured_stop)
-        if target_price <= current_price or stop_price >= current_price:
-            return {"valid": False, "reason": "invalid_reversion_payoff", "band_position": band_position}
+
+        # Anchor target / stop to nearest support/resistance when available.
+        sr_support = indicators.get("support_level")
+        sr_resistance = indicators.get("resistance_level")
+        if sr_support is None:
+            sr = indicators.get("support_resistance") or {}
+            sr_support = sr.get("support_level")
+            sr_resistance = sr.get("resistance_level")
+
+        if is_short:
+            # SHORT wins when price falls: target toward/through the middle
+            # band from above, stop toward the upper band / above resistance.
+            target_price = max(middle, current_price * (1.0 - max(configured_tp, 0.0)))
+            structural_stop = upper
+            if sr_resistance is not None and sr_resistance > 0:
+                structural_stop = min(structural_stop, sr_resistance * 1.002)
+            if sr_support is not None and sr_support > 0:
+                target_price = max(target_price, sr_support * 1.005)
+            configured_stop = current_price * (1.0 + max(configured_sl, 0.0))
+            stop_price = min(structural_stop, configured_stop)
+            if target_price >= current_price or stop_price <= current_price:
+                return {"valid": False, "reason": "invalid_reversion_payoff", "band_position": band_position}
+        else:
+            # LONG wins when price rises: target toward/through the middle
+            # band from below, stop toward the lower band / below support.
+            target_price = min(middle, current_price * (1.0 + max(configured_tp, 0.0)))
+            structural_stop = lower
+            if sr_support is not None and sr_support > 0:
+                structural_stop = max(structural_stop, sr_support * 0.998)
+            if sr_resistance is not None and sr_resistance > 0:
+                target_price = min(target_price, sr_resistance * 0.995)
+            configured_stop = current_price * (1.0 - max(configured_sl, 0.0))
+            stop_price = max(structural_stop, configured_stop)
+            if target_price <= current_price or stop_price >= current_price:
+                return {"valid": False, "reason": "invalid_reversion_payoff", "band_position": band_position}
 
         rsi = float((indicators.get("rsi") or {}).get("value", 50.0) or 50.0)
         volume = float((indicators.get("vol_spike") or {}).get("value", 1.0) or 1.0)
@@ -452,24 +802,32 @@ class PnLPredictor:
             trend = 1.0 if trend_raw.strip().upper() in ("UP", "BULL", "BULLISH") else -1.0 if trend_raw.strip().upper() in ("DOWN", "BEAR", "BEARISH") else 0.0
         else:
             trend = float(trend_raw or 0.0)
+        # Trend bonus mirrors the side: a downtrend favors SHORT reversion
+        # from resistance the same way an uptrend favors LONG from support.
+        directional_trend = -trend if is_short else trend
         strength = float(indicators.get("signal_strength", indicators.get("strength", 0.5)) or 0.5)
         probability = 0.50
-        probability += max(-0.20, min(0.20, (0.55 - band_position) * 0.50))
+        probability += max(-0.20, min(0.20, (0.55 - directional_position) * 0.50))
         probability += 0.12 if 45.0 <= rsi <= 56.0 else 0.04 if 35.0 <= rsi <= 65.0 else -0.10
         probability += 0.10 if 1.5 <= volume <= 2.5 else 0.03 if volume >= 1.0 else -0.10
-        probability += 0.05 if trend > 0 else -0.10 if trend < 0 else 0.0
+        probability += 0.05 if directional_trend > 0 else -0.10 if directional_trend < 0 else 0.0
         probability += max(-0.08, min(0.08, (strength - 0.5) * 0.32))
         probability = max(0.05, min(0.95, probability))
 
         quantity = position_size_usdt / current_price
-        gross_gain = (target_price - current_price) * quantity
-        gross_loss = (current_price - stop_price) * quantity
+        if is_short:
+            gross_gain = (current_price - target_price) * quantity
+            gross_loss = (stop_price - current_price) * quantity
+        else:
+            gross_gain = (target_price - current_price) * quantity
+            gross_loss = (current_price - stop_price) * quantity
         expected_pnl = probability * gross_gain - (1.0 - probability) * gross_loss
         from binance_commission import expected_pnl_after_fees
         expected_pnl = expected_pnl_after_fees(expected_pnl, position_size_usdt, trade_type, settings)
         return {
             "valid": True,
             "model": "range_reversion_v1",
+            "trade_side": "SHORT" if is_short else "LONG",
             "expected_pnl": expected_pnl,
             "expected_pnl_percentage": expected_pnl / position_size_usdt * 100.0,
             "success_probability": probability,
@@ -484,36 +842,74 @@ class PnLPredictor:
         self,
         current_price: float,
         price_range: Dict,
-        position_size_usdt: float
+        position_size_usdt: float,
+        trade_side: str = 'LONG',
+        settings=None,
+        trade_type: str = 'spot',
     ) -> Dict:
         """
         Calculate risk metrics for the position.
-        
+
         Args:
             current_price: Current market price
             price_range: Estimated price range
             position_size_usdt: Size of position in USDT
-            
+            trade_side: 'LONG' or 'SHORT'
+            settings: Settings object to read configured SL/TP percentages
+            trade_type: 'spot' or 'futures'
+
         Returns:
             Dictionary with risk metrics
         """
         quantity = position_size_usdt / current_price
-        
-        # Maximum potential loss
-        max_loss = (current_price - price_range['min']) * quantity
-        
-        # Maximum potential gain
-        max_gain = (price_range['max'] - current_price) * quantity
-        
+        _is_short = str(trade_side or 'LONG').strip().upper() == 'SHORT'
+
+        _min = float(price_range.get('min', 0.0) or 0.0)
+        _max = float(price_range.get('max', 0.0) or 0.0)
+
+        # Use configured SL/TP as the actual position risk/reward when available,
+        # otherwise fall back to the estimated price range.
+        sl_pct, tp_pct = self._get_sl_tp_pct(settings, trade_type, _is_short)
+        if sl_pct and tp_pct:
+            sl_mult = sl_pct / 100.0
+            tp_mult = tp_pct / 100.0
+            if _is_short:
+                target_price = current_price * (1.0 - tp_mult)
+                stop_price = current_price * (1.0 + sl_mult)
+            else:
+                target_price = current_price * (1.0 + tp_mult)
+                stop_price = current_price * (1.0 - sl_mult)
+            if stop_price > 0 and target_price > 0 and (
+                (_is_short and target_price < stop_price) or
+                (not _is_short and target_price > stop_price)
+            ):
+                if _is_short:
+                    max_loss = max(0.0, (stop_price - current_price)) * quantity
+                    max_gain = max(0.0, (current_price - target_price)) * quantity
+                else:
+                    max_loss = max(0.0, (current_price - stop_price)) * quantity
+                    max_gain = max(0.0, (target_price - current_price)) * quantity
+            else:
+                # Fallback to estimated price range if SL/TP are invalid.
+                sl_pct, tp_pct = None, None
+
+        if not (sl_pct and tp_pct):
+            if _is_short:
+                max_loss = max(0.0, (_max - current_price)) * quantity
+                max_gain = max(0.0, (current_price - _min)) * quantity
+            else:
+                max_loss = max(0.0, (current_price - _min)) * quantity
+                max_gain = max(0.0, (_max - current_price)) * quantity
+
         # Risk-reward ratio
         risk_reward_ratio = max_gain / max_loss if max_loss > 0 else 0
-        
+
         # Percentage risk
         percentage_risk = (max_loss / position_size_usdt) * 100 if position_size_usdt > 0 else 0
-        
+
         # Percentage reward
         percentage_reward = (max_gain / position_size_usdt) * 100 if position_size_usdt > 0 else 0
-        
+
         return {
             'max_loss_usdt': max_loss,
             'max_gain_usdt': max_gain,

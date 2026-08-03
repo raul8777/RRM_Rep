@@ -93,7 +93,14 @@ _CAPITAL_RESERVATIONS: Dict[str, Dict[str, Any]] = {}
 # Previously 3 retries x 5 min (~15-20 min) could terminally discard a
 # directionally-confirmed candidate purely because capital routing/margin
 # transfer was still in progress, well before the setup itself was invalid.
-_CAPITAL_ROUTING_MAX_RETRIES_DEFAULT: int = 96
+# s108/Opcion B: the fixed 5-minute cooldown was disproportionate to the 10s
+# watcher cadence that already drives re-checks — a confirmed RANGE_SCALP
+# candidate could lose most of its edge (see calibracion_entradas s108, the
+# AVAXUSDT case) waiting out a cooldown far longer than the watcher tick that
+# could have retried it. Cooldown shortened to 30s; max_retries scaled up
+# (30 x 960 = 28800s = 8h) to preserve the same total wait budget/ceiling.
+_CAPITAL_ROUTING_COOLDOWN_SECONDS_DEFAULT: int = 30
+_CAPITAL_ROUTING_MAX_RETRIES_DEFAULT: int = 960
 
 # BUG-E2: Cycle-scoped ASG instance — reset each execute_once() call so all
 # consumers (BTC trend check, futures inject, pnl_service) share one instance
@@ -436,6 +443,12 @@ def _capital_routing_state(balance: Dict[str, Any], selected_mode: str) -> Dict[
     }
 
 
+# s108/Opcion D: minimum trade size below which scaling a position down stops
+# being worth the commissions/slippage — mirrors the "$10 minimum" checks
+# already used throughout the fast-path open helpers.
+_CAPITAL_RESERVATION_MIN_VIABLE_USDT: float = 15.0
+
+
 def _reserve_capital_for_candidate(
     symbol: str,
     selected_mode: str,
@@ -444,7 +457,22 @@ def _reserve_capital_for_candidate(
     *,
     ready_id: Optional[int] = None,
     reason_context: Optional[str] = None,
+    min_viable_usdt: float = _CAPITAL_RESERVATION_MIN_VIABLE_USDT,
+    allow_scale_down: bool = True,
 ) -> Tuple[bool, Dict[str, Any]]:
+    """Reserve capital for a candidate about to execute.
+
+    s108/Opcion D: previously this was strictly all-or-nothing — a confirmed,
+    directionally-validated candidate requesting e.g. $1000 was blocked
+    entirely (`CAPITAL_ROUTING_BLOCKED`) even when e.g. $400 was genuinely
+    available, discarding a real (smaller) opportunity instead of taking it.
+    Now, when the full request cannot be met but at least `min_viable_usdt`
+    is available, the reservation is scaled down to what actually exists —
+    maximizing portfolio utilization without ever exceeding real available
+    capital (the risk per trade only ever shrinks, never grows). Callers must
+    use `snapshot["reserved_usdt"]` (not the original request) as the actual
+    position size to open.
+    """
     _cleanup_capital_reservations()
     bucket = _capital_bucket_for_mode(selected_mode)
     routing_state = _capital_routing_state(balance, selected_mode)
@@ -462,22 +490,32 @@ def _reserve_capital_for_candidate(
     if amount <= 0.0:
         snapshot["reason"] = "ALLOCATION_TOO_SMALL"
         return False, snapshot
+
+    reserved_amount = amount
     if amount > available:
-        snapshot["reason"] = "CAPITAL_ROUTING_BLOCKED"
-        snapshot["blocked_reason"] = "BUDGET_EXHAUSTED"
-        return False, snapshot
+        if allow_scale_down and available >= min_viable_usdt:
+            reserved_amount = available
+            snapshot["reason"] = "OK_SCALED_DOWN"
+            snapshot["scaled_down_from_usdt"] = amount
+        else:
+            snapshot["reason"] = "CAPITAL_ROUTING_BLOCKED"
+            snapshot["blocked_reason"] = "BUDGET_EXHAUSTED"
+            return False, snapshot
+    else:
+        snapshot["reason"] = "OK"
 
     reservation_key = f"{bucket}:{symbol}"
     _CAPITAL_RESERVATIONS[reservation_key] = {
         "symbol": symbol,
         "bucket": bucket,
-        "amount": amount,
+        "amount": reserved_amount,
         "ready_id": ready_id,
         "reserved_at": time.monotonic(),
         "expires_at": time.monotonic() + _CAPITAL_RESERVATION_TTL_SECONDS,
         "reason_context": reason_context,
     }
     snapshot["reservation_key"] = reservation_key
+    snapshot["reserved_usdt"] = reserved_amount
     snapshot["capital_reservation_revision"] = int((ready_id or 0) * 10 + len(_CAPITAL_RESERVATIONS))
     return True, snapshot
 
@@ -493,6 +531,19 @@ def _capital_routing_max_retries(settings: Any) -> int:
         return max(1, int(raw))
     except Exception:
         return _CAPITAL_ROUTING_MAX_RETRIES_DEFAULT
+
+
+def _capital_routing_cooldown_seconds(settings: Any) -> int:
+    try:
+        raw = _get_param(settings, "capital_routing_cooldown_seconds")
+    except Exception:
+        raw = None
+    if raw is None:
+        raw = getattr(settings, "capital_routing_cooldown_seconds", _CAPITAL_ROUTING_COOLDOWN_SECONDS_DEFAULT)
+    try:
+        return max(1, int(raw))
+    except Exception:
+        return _CAPITAL_ROUTING_COOLDOWN_SECONDS_DEFAULT
 
 
 def _extract_capital_routing_state(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -539,10 +590,12 @@ def _persist_capital_routing_block(
     *,
     previous_state: Optional[Dict[str, Any]] = None,
     max_retries: int = _CAPITAL_ROUTING_MAX_RETRIES_DEFAULT,
+    settings: Any = None,
 ) -> None:
     if not db_client or ready_id is None:
         return
-    cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=5)
+    cooldown_seconds = _capital_routing_cooldown_seconds(settings) if settings is not None else _CAPITAL_ROUTING_COOLDOWN_SECONDS_DEFAULT
+    cooldown_until = datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
     prev_retry_count = int((previous_state or {}).get("retry_count") or 0)
     retry_count = prev_retry_count + 1 if stage_reason.startswith("CAPITAL_ROUTING_BLOCKED") else prev_retry_count
     exhausted = retry_count >= int(max_retries)
@@ -566,7 +619,7 @@ def _persist_capital_routing_block(
             "scope": "RANGE_SCALP" if str(selected_mode or "").upper().startswith("FUTURES_") or str(selected_mode or "").upper() == "RANGE_SCALP" else "GLOBAL",
             "reason": stage_reason,
             "selected_mode": selected_mode,
-            "cooldown_minutes": 5,
+            "cooldown_seconds": cooldown_seconds,
             "cooldown_until": cooldown_until.isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
@@ -667,7 +720,11 @@ def _prepare_range_scalp_staging_candidates(
     settings: Any,
     screened_pairs_cache: Optional[Dict[str, Any]],
 ) -> Tuple[List[Any], Dict[str, Any], Dict[str, Any]]:
-    if regime_mode != "RANGE_SCALP" or not bool(getattr(settings, "range_scalp_short_first_enabled", True)):
+    # s116: run direction arbitration for every RANGE_SCALP signal so LONGs and
+    # SHORTs are symmetrically resolved and persisted into signal_meta. Previously
+    # this only ran when short_first_enabled was True, which disabled the arbiter
+    # entirely after we neutralized the SHORT priority.
+    if regime_mode != "RANGE_SCALP":
         return list(top_signals), dict(predictions), dict(signal_meta)
     staged_signals: List[Any] = []
     staged_predictions: Dict[str, Any] = {}
@@ -805,6 +862,8 @@ def _execute_validated_fast_path(
         return []
     if not rows:
         return []
+    # s117: computed once per batch — see _btc_momentum_blocks_new_shorts docstring.
+    _btc_blocked, _btc_block_reason = _btc_momentum_blocks_new_shorts(client, settings)
 
     orders: List[Dict] = []
     _fast_screened_pairs = None
@@ -820,6 +879,12 @@ def _execute_validated_fast_path(
             print(f"[FastPath/DirectionArbiter] universe unavailable: {exc}")
             _fast_screened_pairs = {"spot": [], "futures": []}
     _fast_decision: Dict[str, Any] = {}
+
+    # ── Gate 0: Portfolio drawdown circuit breaker (s118) — market losses, any cause ──
+    _pf_dd_blocked, _pf_dd_reason = _portfolio_drawdown_circuit_breaker(db_client, settings, client=client)
+    if _pf_dd_blocked:
+        print(f"[FastPath] BLOCKED: {_pf_dd_reason}")
+        return []
 
     # ── Gate 1: Circuit breaker ──────────────────────────────────────────────
     _cb_enabled = getattr(settings, "circuit_breaker_enabled", True)
@@ -892,6 +957,27 @@ def _execute_validated_fast_path(
 
         print(f"[FastPath] Evaluating {symbol} (ready_id={ready_id})")
 
+        # s109: per-symbol SL cooldown (FIX-F1) was only ever checked in the
+        # legacy/generic FUTURES_SHORT branch of _buy_top_symbols — RANGE_SCALP
+        # (both this fast-path and _maybe_open_range_scalp_shorts/_maybe_open_sr_pool_shorts)
+        # only checked the GLOBAL mass-SL cooldown, never the per-symbol one.
+        # This let a staged candidate re-open the SAME symbol within seconds
+        # of its own stop-loss (BABYUSDT: 86s after an SL hit at essentially
+        # the same price, also hit SL again — see calibracion_entradas s109).
+        _sl_cd_hit = _FUTURES_SL_COOLDOWN.get(symbol)
+        if _sl_cd_hit is None:
+            if _check_cooldown_db(symbol, 'futures_sl'):
+                print(f"[FastPath] {symbol}: SL cooldown active (from DB) — skip re-entry")
+                _update_fast_path_gate(db_client, ready_id, False, "SL_COOLDOWN", usdt_liquid)
+                continue
+        else:
+            _sl_cd_hours = _get_param(settings, 'futures_sl_cooldown_hours') or getattr(settings, 'futures_sl_cooldown_hours', 4.0)
+            _sl_cd_elapsed_h = (datetime.now(timezone.utc) - _sl_cd_hit).total_seconds() / 3600
+            if _sl_cd_elapsed_h < float(_sl_cd_hours):
+                print(f"[FastPath] {symbol}: SL cooldown active ({float(_sl_cd_hours) - _sl_cd_elapsed_h:.2f}h remaining) — skip re-entry")
+                _update_fast_path_gate(db_client, ready_id, False, "SL_COOLDOWN", usdt_liquid)
+                continue
+
         if regime_mode == "RANGE_SCALP":
             _allow_retry, _retry_reason, _retry_state, _max_retries = _precheck_capital_routing_retry(row, settings)
             if not _allow_retry:
@@ -917,6 +1003,22 @@ def _execute_validated_fast_path(
                 _update_fast_path_gate(db_client, ready_id, False, _fast_decision["reason"], usdt_liquid)
                 continue
             if _fast_decision["selected_mode"] == "FUTURES_SHORT":
+                # s116: the staged fast-path never checked the PB2 mass-SL global cooldown —
+                # only the legacy `_buy_top_symbols`/`_maybe_open_range_scalp_shorts` paths did.
+                # Since `STAGED_SHORT_DIRECTION` was the dominant open path during the
+                # 2026-08-03 cascade, the cooldown (even once correctly triggered, see
+                # `_mass_sl_rolling_window_count`) would still not have stopped new shorts
+                # opening here. See calibrar-ciclo-vida-52fe5d.md s116.
+                if _FUTURES_MASS_SL_COOLDOWN_UNTIL and datetime.now(timezone.utc) < _FUTURES_MASS_SL_COOLDOWN_UNTIL:
+                    _cd_rem = (_FUTURES_MASS_SL_COOLDOWN_UNTIL - datetime.now(timezone.utc)).total_seconds() / 3600
+                    print(f"[FastPath] {symbol}: MASS_SL_COOLDOWN active ({_cd_rem:.1f}h remaining) — no new shorts")
+                    _update_fast_path_gate(db_client, ready_id, False, "MASS_SL_COOLDOWN", usdt_liquid)
+                    continue
+                # s117: BTC-momentum gate, see _btc_momentum_blocks_new_shorts docstring.
+                if _btc_blocked:
+                    print(f"[FastPath] {symbol}: {_btc_block_reason} — no shorting into BTC momentum")
+                    _update_fast_path_gate(db_client, ready_id, False, _btc_block_reason, usdt_liquid)
+                    continue
                 _short_alloc = float(_fast_decision.get("locked_position_size_usdt") or policy.get("position_size_usdt") or _get_param(settings, "futures_usdt_per_trade") or 0)
                 _short_ok, _short_snapshot = _reserve_capital_for_candidate(
                     symbol,
@@ -936,17 +1038,24 @@ def _execute_validated_fast_path(
                         _short_snapshot.get("reason", "CAPITAL_ROUTING_BLOCKED"),
                         previous_state=_retry_state,
                         max_retries=_max_retries,
+                        settings=settings,
                     )
                     _update_fast_path_gate(db_client, ready_id, False, _short_snapshot.get("reason", "CAPITAL_ROUTING_BLOCKED"), usdt_liquid)
                     if int(_retry_state.get("retry_count") or 0) + 1 >= _max_retries:
                         _finalize_capital_routing_exhausted(db_client, ready_id)
                     continue
-                if _symbol_has_open_futures_position(settings, futures_client, position_manager, symbol):
+                if _symbol_has_open_futures_position(settings, futures_client, position_manager, symbol, allow_scale_in_ready_id=ready_id):
                     print(f"[FastPath] {symbol}: BLOCKED duplicate position (futures short already open)")
                     _release_capital_reservation(symbol, _fast_decision["selected_mode"])
                     _update_fast_path_gate(db_client, ready_id, False, "DUPLICATE_POSITION_SKIP", usdt_liquid)
                     staged_entry._discard_ready(db_client, ready_id, "DUPLICATE_POSITION_SKIP")
                     continue
+                # s108/Opcion D: use the (possibly scaled-down) reserved
+                # amount, not the original request — a confirmed candidate
+                # that couldn't get its full $ allocation still opens with
+                # whatever capital is genuinely available, instead of being
+                # discarded outright.
+                _short_final_alloc = float(_short_snapshot.get("reserved_usdt") or _short_alloc)
                 _fast_order = _open_arbitrated_range_scalp_short(
                     symbol,
                     _fast_decision,
@@ -955,7 +1064,9 @@ def _execute_validated_fast_path(
                     position_manager,
                     signal_meta_row.get("signal_id"),
                     signal_meta_row,
-                    usdt_override=_short_alloc if _short_alloc > 0 else None,
+                    usdt_override=_short_final_alloc if _short_final_alloc > 0 else None,
+                    candidate_data=row.get("data"),
+                    allow_scale_in_ready_id=ready_id,
                 )
                 if _fast_order:
                     orders.append(_fast_order)
@@ -990,17 +1101,20 @@ def _execute_validated_fast_path(
                         _long_snapshot.get("reason", "CAPITAL_ROUTING_BLOCKED"),
                         previous_state=_retry_state,
                         max_retries=_max_retries,
+                        settings=settings,
                     )
                     _update_fast_path_gate(db_client, ready_id, False, _long_snapshot.get("reason", "CAPITAL_ROUTING_BLOCKED"), usdt_liquid)
                     if int(_retry_state.get("retry_count") or 0) + 1 >= _max_retries:
                         _finalize_capital_routing_exhausted(db_client, ready_id)
                     continue
-                if _symbol_has_open_futures_position(settings, futures_client, position_manager, symbol):
+                if _symbol_has_open_futures_position(settings, futures_client, position_manager, symbol, allow_scale_in_ready_id=ready_id):
                     print(f"[FastPath] {symbol}: BLOCKED duplicate position (futures long already open)")
                     _release_capital_reservation(symbol, _fast_decision["selected_mode"])
                     _update_fast_path_gate(db_client, ready_id, False, "DUPLICATE_POSITION_SKIP", usdt_liquid)
                     staged_entry._discard_ready(db_client, ready_id, "DUPLICATE_POSITION_SKIP")
                     continue
+                # s108/Opcion D: use the (possibly scaled-down) reserved amount.
+                _fp_final_size = float(_long_snapshot.get("reserved_usdt") or _fp_policy_size)
                 _fast_order = _open_arbitrated_range_scalp_long(
                     symbol,
                     _fast_decision,
@@ -1009,7 +1123,8 @@ def _execute_validated_fast_path(
                     position_manager,
                     signal_meta_row.get("signal_id"),
                     signal_meta_row,
-                    usdt_override=_fp_policy_size if _fp_policy_size > 0 else None,
+                    usdt_override=_fp_final_size if _fp_final_size > 0 else None,
+                    candidate_data=row.get("data"),
                 )
                 if _fast_order:
                     orders.append(_fast_order)
@@ -1065,6 +1180,11 @@ def _execute_validated_fast_path(
             if regime_obj and regime_obj.confirmed and regime_mode == "RANGE_SCALP":
                 sl_pct = float(getattr(settings, "range_scalp_sl_pct", 0.8)) / 100.0
                 tp_pct = float(getattr(settings, "range_scalp_tp_pct", 1.8)) / 100.0
+            # s113: widen (never tighten) by ATR before the USD-loss guardrail applies.
+            sl_pct = _atr_anchor_sl_pct(
+                sl_pct * 100.0, signal_meta_row, settings,
+                "spot_atr_sl_multiplier", "spot_atr_sl_anchor_enabled",
+            ) / 100.0
             _open_slots = total_open
             _conc_mult, _ = _compute_portfolio_concentration_multiplier(
                 settings, regime=regime_mode, trade_type="spot",
@@ -1113,11 +1233,14 @@ def _execute_validated_fast_path(
                 routing_snapshot.get("reason", "CAPITAL_ROUTING_BLOCKED"),
                 previous_state=_state_pre,
                 max_retries=_max_retries_generic,
+                settings=settings,
             )
             _update_fast_path_gate(db_client, ready_id, False, routing_snapshot.get("reason", "CAPITAL_ROUTING_BLOCKED"), usdt_liquid)
             if int(_state_pre.get("retry_count") or 0) + 1 >= _max_retries_generic:
                 _finalize_capital_routing_exhausted(db_client, ready_id)
             continue
+        # s108/Opcion D: use the (possibly scaled-down) reserved amount.
+        trade_allocation = float(routing_snapshot.get("reserved_usdt") or trade_allocation)
 
         # ── Get price and filters ────────────────────────────────────────────
         try:
@@ -1175,6 +1298,11 @@ def _execute_validated_fast_path(
             if regime_obj and regime_obj.confirmed and regime_mode == "RANGE_SCALP":
                 sl_pct_final = float(getattr(settings, "range_scalp_sl_pct", 0.8)) / 100.0
                 tp_pct_final = float(getattr(settings, "range_scalp_tp_pct", 1.8)) / 100.0
+            # s113: widen (never tighten) by ATR before the USD-loss guardrail applies.
+            sl_pct_final = _atr_anchor_sl_pct(
+                sl_pct_final * 100.0, signal_meta_row, settings,
+                "spot_atr_sl_multiplier", "spot_atr_sl_anchor_enabled",
+            ) / 100.0
             _fill_price = float(_fill.get("avg_price", price) or price)
             sl_price = _fill_price * (1 - sl_pct_final)
             tp_price = _fill_price * (1 + tp_pct_final)
@@ -2008,6 +2136,17 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'sso_target_contribution_pct_range_scalp':    'sso_target_contribution_pct_range_scalp',
             # s75: category limit hot-config governance
             'category_max_positions_enabled': 'category_max_positions_enabled',
+            # s116: symmetric LONG/SHORT direction selection
+            'range_scalp_direction_mode': 'range_scalp_direction_mode',
+            'range_scalp_long_min_probability': 'range_scalp_long_min_probability',
+            'range_scalp_short_min_probability': 'range_scalp_short_min_probability',
+            'range_scalp_short_priority_bonus': 'range_scalp_short_priority_bonus',
+            'range_scalp_long_superiority_delta': 'range_scalp_long_superiority_delta',
+            # s116: position telemetry watcher for open positions
+            'position_telemetry_watcher_enabled': 'position_telemetry_watcher_enabled',
+            'position_telemetry_watcher_interval_seconds': 'position_telemetry_watcher_interval_seconds',
+            'position_telemetry_db_throttle_seconds': 'position_telemetry_db_throttle_seconds',
+            'position_reaction_policy_mode': 'position_reaction_policy_mode',
         }
 
         _applied = {}
@@ -3392,10 +3531,101 @@ def _check_liquidity_and_slippage(symbol: str, vol_24h_usdt: float,
     return True, ""
 
 
+def _is_losing_close(p) -> bool:
+    """s110: a close counts as a "loss" for streak-detection if it's tagged `stop_loss`
+    OR if it realized a negative PnL under any other reason.
+
+    Before this fix, only `close_reason` containing 'stop_loss' counted — so a real loss
+    reported under `binance_safety_close` (Binance reconciliation fallback), or any other
+    non-SL reason, was invisible to `_consecutive_sl_count` / `_recent_losses_in_window`,
+    letting the bot re-enter the same losing setup without ever tripping the WR screener.
+    """
+    _reason = getattr(p, 'close_reason', '') or ''
+    if 'stop_loss' in _reason:
+        return True
+    _pnl = getattr(p, 'pnl', None)
+    if _pnl is not None:
+        try:
+            if float(_pnl) < 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    _pnl_pct = getattr(p, 'pnl_percentage', None)
+    if _pnl_pct is not None:
+        try:
+            if float(_pnl_pct) < 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+def _is_losing_close_dict(cc: Dict[str, Any]) -> bool:
+    """Dict-shaped counterpart of `_is_losing_close`, for the close records returned
+    by `FuturesClient.check_positions()` (plain dicts, not `Position` objects)."""
+    _reason = str(cc.get('reason') or '')
+    if 'stop_loss' in _reason:
+        return True
+    for _key in ('pnl', 'pnl_usdt'):
+        _pnl = cc.get(_key)
+        if _pnl is not None:
+            try:
+                if float(_pnl) < 0:
+                    return True
+            except (TypeError, ValueError):
+                pass
+    _pnl_pct = cc.get('pnl_percentage') or cc.get('pnl_pct')
+    if _pnl_pct is not None:
+        try:
+            if float(_pnl_pct) < 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+def _mass_sl_rolling_window_count(db_client: Any, window_minutes: float) -> int:
+    """s116: rolling-window (not per-cycle) count of losing FUTURES closes, counting
+    ANY losing `close_reason` (mirrors `_is_losing_close`'s broadened definition from
+    s110), not just the exact string 'stop_loss'.
+
+    The previous PB2 circuit breaker (`_sl_count_this_cycle`) reset to 0 every cycle
+    and only matched `reason == 'stop_loss'` exactly — a cascade of 8 losses over 2
+    hours (2026-08-03, BTC +2% in 2h dragging nearly every RANGE_SCALP SHORT into its
+    stop) never tripped it: only 2 of the 8 had the exact 'stop_loss' string, and none
+    landed in the same ~3-5min cycle. See calibrar-ciclo-vida-52fe5d.md s116.
+    """
+    if not db_client:
+        return 0
+    try:
+        rows = db_client.execute_query(
+            """SELECT pnl, pnl_percentage, close_reason FROM trades_closed
+               WHERE (metadata->>'trade_type' = 'futures' OR metadata IS NULL)
+                 AND exit_time > NOW() - (%s || ' minutes')::interval
+                 AND COALESCE(is_corrupted, FALSE) = FALSE""",
+            (window_minutes,),
+        )
+    except Exception as exc:
+        print(f"[Futures/MASS-SL] rolling-window query failed: {exc}")
+        return 0
+    count = 0
+    for row in rows or []:
+        if _is_losing_close_dict({
+            'reason': row.get('close_reason'),
+            'pnl': row.get('pnl'),
+            'pnl_percentage': row.get('pnl_percentage'),
+        }):
+            count += 1
+    return count
+
+
 def _consecutive_sl_count(symbol: str, position_manager, n: int = 3) -> bool:
-    """WR Screener: returns True if the last N closed trades for symbol were ALL stop_loss.
+    """WR Screener: returns True if the last N closed trades for symbol were ALL losses.
     Uses only clean closes (not rebalancing/manual) to detect genuine losing streaks.
     MEJO-G: Only considers trades from the last 30 days to avoid blocking pairs indefinitely.
+    s110: a "loss" is `stop_loss` in the reason OR a negative realized PnL (see
+    `_is_losing_close`), so reconciliation fallbacks like `binance_safety_close` that
+    masked real losses as $0 no longer hide losing streaks from this screener.
     """
     try:
         from datetime import timedelta
@@ -3425,7 +3655,48 @@ def _consecutive_sl_count(symbol: str, position_manager, n: int = 3) -> bool:
         if len(sym_trades) < n:
             return False
         recent_n = sym_trades[:n]
-        return all('stop_loss' in (getattr(t, 'close_reason', '') or '') for t in recent_n)
+        return all(_is_losing_close(t) for t in recent_n)
+    except Exception:
+        return False
+
+
+def _recent_losses_in_window(symbol: str, position_manager, window_minutes: float, min_losses: int) -> bool:
+    """s110: short-window loss circuit-breaker — returns True if `symbol` has at least
+    `min_losses` losing closes (see `_is_losing_close`) within the last `window_minutes`.
+
+    This is independent from `_consecutive_sl_count` (which needs N *consecutive* losses
+    with no cap on how long ago they happened). The gap it closes: a symbol can fail
+    twice within the same hour (e.g. ALLOUSDT/HYPERUSDT 2026-08-02) without ever reaching
+    `wr_screener_consecutive_sl_block` (default 5), because that threshold is meant for
+    multi-day losing streaks, not fast repeated re-entries into the same failed setup.
+    """
+    try:
+        from datetime import timedelta
+        _cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+        closed = position_manager.get_closed_positions(limit=50)
+        count = 0
+        for p in closed:
+            if getattr(p, 'symbol', '') != symbol:
+                continue
+            if 'rebalancing' in (getattr(p, 'close_reason', '') or ''):
+                continue
+            if 'manual' in (getattr(p, 'close_reason', '') or ''):
+                continue
+            _exit = getattr(p, 'exit_time', None)
+            if _exit is None:
+                continue
+            try:
+                if isinstance(_exit, str):
+                    _exit = datetime.fromisoformat(_exit.replace('Z', '+00:00'))
+                if hasattr(_exit, 'tzinfo') and _exit.tzinfo is None:
+                    _exit = _exit.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if _exit < _cutoff:
+                continue
+            if _is_losing_close(p):
+                count += 1
+        return count >= min_losses
     except Exception:
         return False
 
@@ -4476,6 +4747,44 @@ def _spot_net_pnl_aggregate(pos_list, current_price: float, settings) -> tuple[f
     net_pnl_usdt = gross_pnl_usdt - entry_comm - exit_comm
     net_pnl_pct = net_pnl_usdt / total_cost
     return gross_pnl_usdt, net_pnl_usdt, net_pnl_pct
+
+
+def _atr_anchor_sl_pct(
+    base_sl_pct: float,
+    metadata: Optional[Dict[str, Any]],
+    settings,
+    multiplier_attr: str,
+    enabled_attr: str,
+    default_multiplier: float = 1.5,
+) -> float:
+    """s113: widen (never tighten) a fixed-% stop-loss to at least
+    `atr_pct * multiplier` when a fresher, volatility-aware estimate is
+    available, before the USD-loss guardrail (`_apply_usd_loss_cap_to_sl`) is
+    applied downstream — that guardrail remains the hard $ ceiling and can
+    still tighten this back down for large-notional trades; this only fixes
+    the case where the flat % default was tighter than the symbol's actual
+    recent volatility for small/medium notionals (see
+    calibrar-ciclo-vida-52fe5d.md s113 — ZAMAUSDT/AEVOUSDT-style premature
+    stops from ordinary wicks, not from a genuine reversal).
+
+    Returns `base_sl_pct` unchanged if disabled, ATR is unavailable, or ATR
+    implies a *tighter* stop than the configured default.
+    """
+    try:
+        if not bool(getattr(settings, enabled_attr, True)):
+            return base_sl_pct
+        _meta = metadata or {}
+        _indicators = _meta.get("indicators") if isinstance(_meta.get("indicators"), dict) else {}
+        _atr_pct_raw = _meta.get("atr_pct")
+        if _atr_pct_raw in (None, ""):
+            _atr_pct_raw = _indicators.get("atr_pct")
+        _atr_pct = float(_atr_pct_raw) if _atr_pct_raw not in (None, "") else 0.0
+        if _atr_pct <= 0:
+            return base_sl_pct
+        _mult = float(getattr(settings, multiplier_attr, default_multiplier) or default_multiplier)
+        return max(base_sl_pct, _atr_pct * _mult)
+    except Exception:
+        return base_sl_pct
 
 
 def _apply_usd_loss_cap_to_sl(
@@ -7035,8 +7344,20 @@ def _range_scalp_direction_decision(
     screened_pairs_cache: Optional[Dict[str, Any]],
     precomputed_predictions: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    futures_symbols = set((screened_pairs_cache or {}).get("futures") or [])
-    futures_executable = symbol in futures_symbols and symbol not in _INVALID_FUTURES_SYMBOLS
+    # s110: trust the futures-tradability fact already established when this
+    # candidate's direction was first confirmed, if available, instead of
+    # re-deriving membership from the screener's rotating top-N ranking.
+    _arb_ctx = metadata.get("directional_arbitration")
+    _cached_futures_executable = (
+        bool(_arb_ctx.get("futures_executable"))
+        if isinstance(_arb_ctx, dict) and "futures_executable" in _arb_ctx
+        else None
+    )
+    if _cached_futures_executable is not None:
+        futures_executable = _cached_futures_executable and symbol not in _INVALID_FUTURES_SYMBOLS
+    else:
+        futures_symbols = set((screened_pairs_cache or {}).get("futures") or [])
+        futures_executable = symbol in futures_symbols and symbol not in _INVALID_FUTURES_SYMBOLS
     _precomputed_is_spot_long = bool(
         str(metadata.get("trade_type") or "").strip().lower() == "spot"
         and str(metadata.get("expected_side") or "").strip().upper() == "LONG"
@@ -7094,6 +7415,181 @@ def _range_scalp_direction_decision(
     return decision
 
 
+def _portfolio_drawdown_circuit_breaker(db_client: Any, settings: Any, client: Any = None) -> Tuple[bool, str]:
+    """s118: "smart" portfolio-wide circuit breaker — pauses ALL new entries only
+    while the underlying adverse condition is still active, not just because
+    realized losses from earlier haven't yet aged out of a fixed rolling window.
+
+    s117's first version paused purely on `sum(pnl) <= -threshold` over a fixed
+    window, decaying only by time — it could keep the whole system paused for up
+    to `portfolio_drawdown_window_minutes` after the market that caused the losses
+    had already calmed down (explicit user pushback: "no debes pausar solo por
+    pausar... debe ser un pausado inteligente, leer la causa y revisar si conviene
+    pausar o no"). This version reads the *cause*:
+
+    1. Symptom: realized PnL in the rolling window still below -threshold (same
+       detector as s117 — this is what tells us something bad happened).
+    2. Cause check: which side (SHORT/LONG closes) dominates the realized loss —
+       that identifies which BTC direction would have to keep moving against the
+       book for the danger to still be real. Only if BTC's *recent* short-term
+       momentum (last `portfolio_drawdown_recheck_momentum_minutes`, default 30)
+       still moves that same adverse direction beyond
+       `portfolio_drawdown_recheck_momentum_pct` (default 0.5%) does the breaker
+       actually pause. If the market has already reverted/stabilized, it does not
+       pause even though the rolling PnL sum is still negative — the cause has
+       passed, and blind time-decay would otherwise hold the pause well past the
+       point it stopped being useful. See calibrar-ciclo-vida-52fe5d.md s118.
+    """
+    if not db_client or not bool(getattr(settings, "portfolio_drawdown_circuit_breaker_enabled", True)):
+        return False, ""
+    window_minutes = float(getattr(settings, "portfolio_drawdown_window_minutes", 120.0))
+    max_loss_usd = abs(float(getattr(settings, "portfolio_drawdown_max_loss_usd", 150.0)))
+    try:
+        rows = db_client.execute_query(
+            """SELECT COALESCE(SUM(pnl), 0) AS realized,
+                      COALESCE(SUM(CASE WHEN side = 'SELL' THEN pnl ELSE 0 END), 0) AS realized_short,
+                      COALESCE(SUM(CASE WHEN side = 'BUY' THEN pnl ELSE 0 END), 0) AS realized_long
+               FROM trades_closed
+               WHERE exit_time > NOW() - (%s || ' minutes')::interval
+                 AND COALESCE(is_corrupted, FALSE) = FALSE""",
+            (window_minutes,),
+        )
+        row = rows[0] if rows else {}
+        realized = float(row.get("realized") or 0.0)
+        realized_short = float(row.get("realized_short") or 0.0)
+        realized_long = float(row.get("realized_long") or 0.0)
+    except Exception as exc:
+        print(f"[Portfolio/Drawdown] query failed: {exc}")
+        return False, ""
+    if realized > -max_loss_usd:
+        return False, ""  # symptom absent — nothing to evaluate
+
+    # Symptom present. Identify which side is driving it, and check if BTC's
+    # recent short-term momentum still opposes that side right now.
+    _dominant_side = "SHORT" if realized_short <= realized_long else "LONG"
+    if not client:
+        # No client to re-check momentum — fail conservative (pause), same as s117.
+        print(f"[Portfolio/Drawdown] realized PnL ${realized:.2f} <= -${max_loss_usd:.2f} "
+              f"(dominant side={_dominant_side}) — no client to re-check momentum, pausing")
+        return True, "PORTFOLIO_DRAWDOWN_PAUSE"
+    _recheck_minutes = float(getattr(settings, "portfolio_drawdown_recheck_momentum_minutes", 30.0))
+    _recheck_threshold = float(getattr(settings, "portfolio_drawdown_recheck_momentum_pct", 0.5))
+    try:
+        _limit = max(2, int(_recheck_minutes / 5.0) + 1)
+        _kl = client.client.get_klines(symbol="BTCUSDT", interval="5m", limit=_limit)
+        _recent_chg_pct = (float(_kl[-1][4]) - float(_kl[0][1])) / float(_kl[0][1]) * 100 if _kl else 0.0
+    except Exception as exc:
+        print(f"[Portfolio/Drawdown] momentum re-check failed ({exc}) — failing conservative, pausing")
+        return True, "PORTFOLIO_DRAWDOWN_PAUSE"
+    _still_adverse = (
+        (_dominant_side == "SHORT" and _recent_chg_pct >= _recheck_threshold)
+        or (_dominant_side == "LONG" and _recent_chg_pct <= -_recheck_threshold)
+    )
+    if _still_adverse:
+        print(f"[Portfolio/Drawdown] realized PnL ${realized:.2f} in last {window_minutes:.0f}min, "
+              f"dominant side={_dominant_side}, BTC {_recent_chg_pct:+.2f}% in last {_recheck_minutes:.0f}min "
+              f"still adverse — pausing all new entries")
+        return True, "PORTFOLIO_DRAWDOWN_PAUSE"
+    print(f"[Portfolio/Drawdown] realized PnL ${realized:.2f} still below threshold, but BTC "
+          f"{_recent_chg_pct:+.2f}% in last {_recheck_minutes:.0f}min no longer adverse for "
+          f"dominant side={_dominant_side} — NOT pausing (cause has passed)")
+    return False, ""
+
+
+def _btc_momentum_blocks_new_shorts(client: Any, settings: Any) -> Tuple[bool, str]:
+    """s117: replicate the legacy BTC-momentum guards (`BTC_MOMENTUM`/`BTC_1H_BOUNCE`/
+    `BTC_3H_RALLY`, previously only in `_buy_top_symbols`/`_maybe_open_range_scalp_shorts`)
+    for the staged fast-path, which never had them. Confirmed real gap: 2026-08-03,
+    BTC rallied +2% in ~2h while the staged path (`STAGED_SHORT_DIRECTION`, the
+    dominant open route) kept opening new SHORTs into it (`GIGGLEUSDT`, `NEARUSDT`,
+    `RIFUSDT`, `ICPUSDT`, `MIRAUSDT`, `ADAUSDT`), several of which lost. See
+    calibrar-ciclo-vida-52fe5d.md s116/s117.
+
+    Computed once per fast-path batch (not per-candidate) — same BTC data applies to
+    every SHORT candidate evaluated together. Returns (blocked, reason).
+    """
+    if not bool(getattr(settings, "futures_staged_btc_momentum_gate_enabled", True)):
+        return False, ""
+    try:
+        _no_short_4h = float(getattr(settings, "futures_no_short_btc_4h_threshold", 2.0))
+        _btc_kl_4h = client.client.get_klines(symbol="BTCUSDT", interval="4h", limit=2)
+        if _btc_kl_4h and len(_btc_kl_4h) >= 2:
+            _prev = _btc_kl_4h[-2]
+            _chg_4h = (float(_prev[4]) - float(_prev[1])) / float(_prev[1]) * 100
+            if _chg_4h >= _no_short_4h:
+                return True, "BTC_MOMENTUM"
+    except Exception as exc:
+        print(f"[FastPath/BTC] 4h check failed: {exc}")
+    try:
+        _no_short_1h = float(getattr(settings, "futures_no_short_btc_1h_threshold", 0.8))
+        _btc_kl_1h = client.client.get_klines(symbol="BTCUSDT", interval="1h", limit=2)
+        if _btc_kl_1h:
+            _chg_1h = (float(_btc_kl_1h[-1][4]) - float(_btc_kl_1h[-1][1])) / float(_btc_kl_1h[-1][1]) * 100
+            if _chg_1h >= _no_short_1h:
+                return True, "BTC_1H_BOUNCE"
+    except Exception as exc:
+        print(f"[FastPath/BTC] 1h check failed: {exc}")
+    try:
+        _no_short_3h = float(getattr(settings, "futures_no_short_btc_3h_threshold", 1.0))
+        _btc_kl_3h = client.client.get_klines(symbol="BTCUSDT", interval="1h", limit=4)
+        if _btc_kl_3h and len(_btc_kl_3h) >= 4:
+            _open_3h = float(_btc_kl_3h[-4][1])
+            _close_now = float(_btc_kl_3h[-1][4])
+            _chg_3h = (_close_now - _open_3h) / _open_3h * 100
+            if _chg_3h >= _no_short_3h:
+                return True, "BTC_3H_RALLY"
+    except Exception as exc:
+        print(f"[FastPath/BTC] 3h check failed: {exc}")
+    return False, ""
+
+
+def _staged_sr_thesis_check(metadata: Dict[str, Any], side: str, settings: Any) -> Tuple[bool, str]:
+    """s115: defensive re-validation, right before committing capital, that a
+    staged SHORT/LONG actually sits near the S/R level its own thesis depends
+    on — instead of trusting whatever `sr_zone_position`/`resistance_level`
+    happens to be cached on the candidate (which can be stale or, in at least
+    one confirmed real case, self-contradictory: `sr_zone_position=0.75`
+    "near resistance" while `sr_resistance_dist_pct=14.89%` and
+    `support_level=null`). `STAGED_SHORT_DIRECTION`/`STAGED_FUTURES_LONG_DIRECTION`/
+    `STAGED_SPOT_LONG_DIRECTION` bypass the arbiter entirely once the direction
+    FSM confirms a side — this was the one gap in that bypass.
+
+    Applies symmetrically: a SHORT needs to be near resistance (or a genuine
+    support-breakdown continuation); a LONG needs to be near support (or a
+    genuine resistance-breakout continuation). Mirrors the SHORT/LONG symmetry
+    fix already established in s108 for `pnl_predictor.py`/`directional_arbiter.py`.
+
+    Backtested against 48h of real closes (`calibracion_entradas-a20ab8-v3.md`
+    s115): at a 5% threshold, only taking trades that pass this check would
+    have turned a -$180.92 net result into +$31.28 (11 real winners worth
+    +$122.18 sacrificed, but 16 real losers worth -$334.38 avoided).
+    """
+    if not bool(getattr(settings, "range_scalp_sr_thesis_gate_enabled", True)):
+        return True, ""
+    max_dist_pct = float(getattr(settings, "range_scalp_sr_thesis_max_dist_pct", 5.0) or 5.0)
+    if side == "SHORT":
+        dist = metadata.get("nearest_resistance_dist_pct")
+        if dist is None:
+            dist = metadata.get("sr_resistance_dist_pct")
+        continuation = bool(metadata.get("support_breakdown_sell") or metadata.get("sr_breakdown"))
+    elif side == "LONG":
+        dist = metadata.get("nearest_support_dist_pct")
+        if dist is None:
+            dist = metadata.get("sr_support_dist_pct")
+        continuation = bool(metadata.get("support_breakout_buy") or metadata.get("sr_breakout"))
+    else:
+        return True, ""
+    if continuation:
+        return True, ""
+    try:
+        dist_f = float(dist) if dist not in (None, "") else None
+    except (TypeError, ValueError):
+        dist_f = None
+    if dist_f is None or dist_f > max_dist_pct:
+        return False, "SR_THESIS_MISMATCH_AT_EXECUTION"
+    return True, ""
+
+
 def _staged_range_scalp_decision(
     symbol: str,
     metadata: Dict[str, Any],
@@ -7111,8 +7607,28 @@ def _staged_range_scalp_decision(
     side = str(direction.get("side") or metadata.get("expected_side") or "LONG").upper()
     routing_intent = str(metadata.get("routing_intent") or "").strip().upper()
     trade_type = str(metadata.get("trade_type") or "spot").strip().lower()
-    futures_symbols = set((screened_pairs_cache or {}).get("futures") or [])
-    futures_executable = symbol in futures_symbols and symbol not in _INVALID_FUTURES_SYMBOLS
+    # s110: trust the futures-tradability fact already established when this
+    # candidate's direction was first confirmed (`directional_arbitration.
+    # futures_executable`, persisted in `signal_meta` at candidate creation)
+    # instead of re-deriving membership in the screener's rotating top-N ranking
+    # every cycle. That ranking exists to *discover* new candidates by relative
+    # volatility/volume — it has nothing to do with whether an already-validated
+    # candidate can still be executed, and its unrelated churn was stranding
+    # validated candidates indefinitely (HEIUSDT, 2026-08-02: 1,114 rechecks over
+    # 3h47min, purely because it fell out of the top-67 that cycle, despite being
+    # a valid TRADING/PERPETUAL Binance Futures pair the whole time). A hard
+    # exclusion (stablecoin/delisted) still applies dynamically either way.
+    _arb_ctx = metadata.get("directional_arbitration")
+    _cached_futures_executable = (
+        bool(_arb_ctx.get("futures_executable"))
+        if isinstance(_arb_ctx, dict) and "futures_executable" in _arb_ctx
+        else None
+    )
+    if _cached_futures_executable is not None:
+        futures_executable = _cached_futures_executable and symbol not in _INVALID_FUTURES_SYMBOLS
+    else:
+        futures_symbols = set((screened_pairs_cache or {}).get("futures") or [])
+        futures_executable = symbol in futures_symbols and symbol not in _INVALID_FUTURES_SYMBOLS
 
     position_size_usdt = float(policy.get("position_size_usdt") or 0)
     if position_size_usdt <= 0:
@@ -7159,6 +7675,10 @@ def _staged_range_scalp_decision(
         if not futures_executable:
             decision["reason"] = "STAGED_SHORT_NOT_FUTURES_EXECUTABLE"
             return decision
+        _sr_ok, _sr_reason = _staged_sr_thesis_check(metadata, "SHORT", settings)
+        if not _sr_ok:
+            decision["reason"] = _sr_reason
+            return decision
         decision["selected_mode"] = "FUTURES_SHORT"
         decision["reason"] = "STAGED_SHORT_DIRECTION"
         decision["capital_intent"] = "FUTURES"
@@ -7167,6 +7687,10 @@ def _staged_range_scalp_decision(
         decision["short_eligible"] = True
         decision["short_structure"] = True
     elif side == "LONG":
+        _sr_ok, _sr_reason = _staged_sr_thesis_check(metadata, "LONG", settings)
+        if not _sr_ok:
+            decision["reason"] = _sr_reason
+            return decision
         if routing_intent == "FUTURES_LONG_ANALYSIS" or trade_type == "futures":
             if not futures_executable:
                 decision["reason"] = "STAGED_FUTURES_LONG_NOT_EXECUTABLE"
@@ -7194,6 +7718,7 @@ def _symbol_has_open_futures_position(
     futures_client: Any,
     position_manager: Any,
     symbol: str,
+    allow_scale_in_ready_id: Optional[int] = None,
 ) -> bool:
     """Pre-check for the fast-path: is there already a live futures position for `symbol`?
 
@@ -7202,18 +7727,268 @@ def _symbol_has_open_futures_position(
     candidate as explicitly discarded (DUPLICATE_POSITION_SKIP) instead of the
     open helper silently returning None and leaving the candidate stuck
     retrying forever without ever opening or being discarded.
+
+    s113: `allow_scale_in_ready_id` lets a caller identify itself as the *same*
+    `ready_candidate` that already opened an immediate "leg 1" (see
+    `staged_immediate_entry_enabled`, off by default) and is now trying to add
+    "leg 2" on confirmation — that is a deliberate scale-in of its own position,
+    not a duplicate. When the only open position(s) for `symbol` are tagged
+    with `_smart_meta['scale_in_ready_id'] == allow_scale_in_ready_id`, this
+    returns False (not blocked) instead of discarding the candidate. Any other
+    open position for the symbol (untagged, or tagged with a different
+    ready_id) still blocks exactly as before — this is strictly additive and
+    inert while `staged_immediate_entry_enabled` is off, since nothing sets
+    that tag today.
     """
+    try:
+        fc = _get_futures_client(settings, injected_client=futures_client)
+        _live_futures = [pos for pos in fc._open_positions.values() if not pos.closed and pos.symbol == symbol]
+        if _live_futures:
+            if allow_scale_in_ready_id is not None and all(
+                (getattr(pos, "_smart_meta", None) or {}).get("scale_in_ready_id") == allow_scale_in_ready_id
+                for pos in _live_futures
+            ):
+                return False
+            return True
+    except Exception:
+        # Fail-open on futures client check — still check position_manager below.
+        pass
     try:
         if position_manager and position_manager.get_positions_count(symbol) > 0:
             return True
-        fc = _get_futures_client(settings, injected_client=futures_client)
-        if any(not pos.closed and pos.symbol == symbol for pos in fc._open_positions.values()):
-            return True
     except Exception:
-        # Fail-open: an error checking for a duplicate must not itself block
-        # a legitimate open attempt; the open helper still re-checks internally.
-        return False
+        pass
     return False
+
+
+def _candidate_delayed_by_capital_or_slots(candidate_data: Optional[Dict[str, Any]]) -> bool:
+    """s110: True only when this candidate was genuinely stuck waiting either for
+    (a) a capital/budget routing block — `_persist_capital_routing_block` recorded
+    at least one retry in `capital_routing.retry_count`/`status` — or (b) a
+    concurrent-position "slot" block (`MAX_POSITIONS`, `PER_SYMBOL_LIMIT`,
+    `EXPOSURE_CAP`, etc., canonicalized by `_update_fast_path_gate` into
+    `data.stage_reason="RISK_BLOCKED"`, or a routing block into
+    `stage_reason="ROUTING_BLOCKED"`).
+
+    This is the ONE scenario where re-validating the setup with a fresh price
+    before opening is justified — anything could have happened to it while it
+    sat blocked for capital or a free slot. A candidate that was never blocked
+    for either reason should open on its first confirmed attempt instead of
+    being re-litigated from scratch every cycle; doing so was costing real
+    breakouts (ZAMAUSDT/RIFUSDT/HEIUSDT, 2026-08-02: confirmed direction, price
+    moved favorably 1.2-3.6%, never opened because this gate re-derived
+    reward:risk against a fixed target using an ever-later price — none of the
+    three had ever been capital- or slot-blocked).
+    """
+    if not isinstance(candidate_data, dict):
+        return False
+    _cr = candidate_data.get("capital_routing")
+    if isinstance(_cr, dict):
+        if int(_cr.get("retry_count") or 0) > 0:
+            return True
+        if str(_cr.get("status") or "").lower() in ("blocked", "exhausted"):
+            return True
+    _prior_stage_reason = str(candidate_data.get("stage_reason") or "").strip().upper()
+    return _prior_stage_reason in ("RISK_BLOCKED", "ROUTING_BLOCKED")
+
+
+def _revalidate_entry_before_submit(
+    symbol: str,
+    side: str,
+    fc: Any,
+    sl_pct: float,
+    metadata: Dict[str, Any],
+    min_reward_risk_ratio: float = 2.0,
+    min_remaining_pct: float = 0.15,
+) -> Tuple[bool, str, Optional[float]]:
+    """Final sanity check right before sending the order to Binance (s108,
+    Propuesta 1): refetch a live price and confirm the setup still has enough
+    structural room to justify opening, given how long this candidate may
+    have waited in the execution queue (e.g. behind a capital-routing block).
+
+    s110: callers must gate this behind `_candidate_delayed_by_capital_or_slots`
+    — see that function's docstring. This check was always designed for the
+    "waited behind a capital/slot block" scenario (per the docstring below), but
+    was being invoked unconditionally on every execution attempt, including ones
+    with zero delay.
+
+    Deliberately reuses the SR levels already computed by `support_resistance.py`
+    (`metadata["support_level"]`/`["resistance_level"]`) instead of re-running
+    any prediction model — the opposite-side SR level is the structural target
+    for a range-reversion setup (support for a SHORT, resistance for a LONG),
+    and the stop is the same `sl_pct` percentage that will govern the real
+    order, applied to the same fresh price used here.
+
+    Fails OPEN (returns True) whenever it cannot form an opinion (missing
+    price/SR data) — this is a guard against acting on an exhausted setup, not
+    a new mandatory gate that could reject symbols with incomplete data.
+    """
+    try:
+        fresh_price = float(fc.get_price(symbol))
+    except Exception:
+        return True, "PRICE_REFRESH_FAILED_FAIL_OPEN", None
+    if fresh_price is None or fresh_price <= 0:
+        return True, "PRICE_REFRESH_FAILED_FAIL_OPEN", None
+
+    is_short = str(side or "").upper() == "SHORT"
+    sr_target = metadata.get("support_level") if is_short else metadata.get("resistance_level")
+    try:
+        sr_target = float(sr_target) if sr_target is not None else None
+    except (TypeError, ValueError):
+        sr_target = None
+    if sr_target is None or sr_target <= 0:
+        return True, "NO_SR_TARGET_FAIL_OPEN", fresh_price
+
+    sl_fraction = max(0.0, float(sl_pct or 0.0)) / 100.0
+    stop_price = fresh_price * (1.0 + sl_fraction) if is_short else fresh_price * (1.0 - sl_fraction)
+    risk = abs(stop_price - fresh_price)
+    remaining = (fresh_price - sr_target) if is_short else (sr_target - fresh_price)
+    remaining_pct = (remaining / fresh_price * 100.0) if fresh_price > 0 else 0.0
+
+    if remaining_pct < min_remaining_pct:
+        return False, "STALE_ENTRY_SR_TARGET_EXHAUSTED", fresh_price
+    if risk <= 0:
+        return True, "ZERO_RISK_DISTANCE_FAIL_OPEN", fresh_price
+    reward_risk_ratio = remaining / risk
+    if reward_risk_ratio < min_reward_risk_ratio:
+        return False, "STALE_ENTRY_REWARD_RISK_BELOW_MIN", fresh_price
+    return True, "OK", fresh_price
+
+
+def _build_entry_context(
+    decision: Dict[str, Any],
+    metadata: Dict[str, Any],
+    candidate_data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Snapshot the directional-arbitration/SR context that justified this
+    entry, for persistence into `trades_open`/`trades_closed.metadata`. Kept
+    as a small, explicit dict (not the raw `decision`/`metadata`) so the
+    fields that get persisted are stable and intentional.
+
+    When `candidate_data` (the staged-entry `ready_candidates.data`) is
+    available, also persists the "wait cost" (s108, Opcion E): the price at
+    first directional confirmation vs. the price at actual execution, so the
+    cost of queueing time (capital-routing blocks, cooldowns, etc.) can be
+    measured in aggregate without reconstructing the check-by-check timeline
+    for every position, as had to be done manually for the AVAXUSDT case that
+    motivated this fix.
+    """
+    _reversion = metadata.get("range_reversion_prediction")
+    _reversion_valid = _reversion.get("valid") if isinstance(_reversion, dict) else None
+    context: Dict[str, Any] = {
+        "directional_arbitration_reason": decision.get("reason"),
+        "sr_zone_position_at_entry": metadata.get("sr_zone_position"),
+        "range_reversion_valid_at_entry": _reversion_valid,
+    }
+    if isinstance(candidate_data, dict):
+        direction = candidate_data.get("direction") or {}
+        context["signal_price_at_detection"] = metadata.get("current_price") or metadata.get("price")
+        context["first_direction_confirmed_price"] = direction.get("first_confirmed_price")
+        context["first_direction_confirmed_at"] = direction.get("first_confirmed_at")
+    return context
+
+
+def maybe_open_immediate_leg_range_scalp_short(
+    settings: Any,
+    futures_client: Any,
+    position_manager: Any,
+    db_client: Any,
+) -> List[Dict[str, Any]]:
+    """s113: optional "leg 1" — open a small, reduced-size SHORT immediately when a
+    RANGE_SCALP candidate is first staged (still touching its S/R level), instead of
+    waiting for direction confirmation for the whole size. "Leg 2" (the remainder)
+    still opens later through the normal confirmed fast-path, tagged via
+    `allow_scale_in_ready_id` so it is not blocked as a duplicate position (see
+    `_symbol_has_open_futures_position`/`_open_arbitrated_range_scalp_short`).
+
+    Off by default (`staged_immediate_entry_enabled=False`). Rationale and the 48h
+    retrospective data behind this (majority of confirmed entries captured LESS of
+    the total move than an immediate entry would have, without the confirmation
+    step reliably preventing the worst reversals) are documented in
+    calibrar-ciclo-vida-52fe5d.md / calibracion_entradas-a20ab8-v3.md, s113.
+
+    This is intentionally the highest-risk mechanism of the s113 plan — it commits
+    real capital before any directional confirmation. Recommended to validate with
+    a small `staged_immediate_entry_fraction` and close monitoring before widening.
+    """
+    if not db_client or not bool(getattr(settings, "staged_immediate_entry_enabled", False)):
+        return []
+    fraction = max(0.0, min(1.0, float(getattr(settings, "staged_immediate_entry_fraction", 0.3) or 0.0)))
+    if fraction <= 0:
+        return []
+    try:
+        rows = db_client.execute_query(
+            """SELECT * FROM ready_candidates
+               WHERE status='ready' AND regime_mode='RANGE_SCALP' AND trade_type='futures'
+               ORDER BY ready_at ASC""",
+        )
+    except Exception as exc:
+        print(f"[ImmediateLeg] query failed: {exc}")
+        return []
+
+    opened: List[Dict[str, Any]] = []
+    for row in rows or []:
+        data = row.get("data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = {}
+        data = data if isinstance(data, dict) else {}
+        if data.get("immediate_leg_attempted"):
+            continue
+        symbol = row.get("symbol")
+        ready_id = row.get("id")
+        signal_meta = row.get("signal_meta")
+        if isinstance(signal_meta, str):
+            try:
+                signal_meta = json.loads(signal_meta)
+            except Exception:
+                signal_meta = {}
+        signal_meta = signal_meta if isinstance(signal_meta, dict) else {}
+        # Mark attempted up front (idempotent, best-effort) so a slow/failed attempt
+        # is never retried every cycle and does not compound sizing across cycles.
+        try:
+            db_client.execute_update(
+                "UPDATE ready_candidates SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb WHERE id = %s AND status='ready'",
+                (json.dumps({"immediate_leg_attempted": True}), ready_id),
+            )
+        except Exception as exc:
+            print(f"[ImmediateLeg] {symbol}: failed to mark attempted, skipping to avoid duplicate leg1: {exc}")
+            continue
+
+        base_usdt = float(getattr(settings, "range_scalp_short_usdt_per_trade", 1000.0))
+        leg1_usdt = base_usdt * fraction
+        try:
+            order = _open_arbitrated_range_scalp_short(
+                symbol,
+                {"selected_mode": "FUTURES_SHORT"},
+                settings,
+                futures_client,
+                position_manager,
+                signal_meta.get("signal_id"),
+                signal_meta,
+                usdt_override=leg1_usdt,
+                candidate_data=data,
+                allow_scale_in_ready_id=ready_id,
+            )
+        except Exception as exc:
+            print(f"[ImmediateLeg] {symbol}: open failed: {exc}")
+            continue
+        if not order:
+            continue
+        try:
+            fc = _get_futures_client(settings, injected_client=futures_client)
+            pos = fc._open_positions.get(fc._pos_key(symbol, "SHORT"))
+            if pos is not None:
+                pos._smart_meta["scale_in_ready_id"] = ready_id
+                pos._smart_meta["is_immediate_leg"] = True
+                fc._persist_smart_meta(pos)
+        except Exception as exc:
+            print(f"[ImmediateLeg] {symbol}: failed to tag leg1 position: {exc}")
+        print(f"[ImmediateLeg] {symbol}: leg1 opened immediately (${leg1_usdt:.2f}, ready_id={ready_id})")
+        opened.append(order)
+    return opened
 
 
 def _open_arbitrated_range_scalp_short(
@@ -7225,12 +8000,18 @@ def _open_arbitrated_range_scalp_short(
     signal_id: Optional[str],
     metadata: Dict[str, Any],
     usdt_override: Optional[float] = None,
+    candidate_data: Optional[Dict[str, Any]] = None,
+    allow_scale_in_ready_id: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
-    if position_manager and position_manager.get_positions_count(symbol) > 0:
+    # s113: mirrors `_symbol_has_open_futures_position`'s scale-in allowance — this
+    # function has its own inline duplicate-position guard (independent of the
+    # fast-path caller's check), so the same allowance has to be threaded through
+    # here too or a tagged "leg 1" immediate entry would block its own "leg 2".
+    if _symbol_has_open_futures_position(
+        settings, futures_client, position_manager, symbol, allow_scale_in_ready_id=allow_scale_in_ready_id,
+    ):
         return None
     fc = _get_futures_client(settings, injected_client=futures_client)
-    if any(not pos.closed and pos.symbol == symbol for pos in fc._open_positions.values()):
-        return None
     available = float(fc.get_available_usdt()) if not fc.dry_run else float(getattr(settings, "range_scalp_short_usdt_per_trade", 1000.0))
 
     if usdt_override and usdt_override > 0:
@@ -7239,7 +8020,10 @@ def _open_arbitrated_range_scalp_short(
         print(f"[Futures/SHORT] {symbol}: target Kelly=${amount:.2f} (futures avail=${available:.2f})")
     else:
         # Normal path: full Kelly sizing (analogous to FUTURES_LONG)
-        _fs_sl = float(getattr(settings, "range_scalp_short_sl_pct", 2.0))
+        _fs_sl = _atr_anchor_sl_pct(
+            float(getattr(settings, "range_scalp_short_sl_pct", 2.0)), metadata, settings,
+            "range_scalp_short_atr_sl_multiplier", "range_scalp_short_atr_sl_anchor_enabled",
+        )
         _fs_tp = float(getattr(settings, "range_scalp_short_tp_pct", 4.0))
         _fs_lev = int(getattr(settings, "futures_leverage", 10))
         _fs_profile = str(metadata.get("peak_quality_profile") or "B").strip().upper()
@@ -7301,11 +8085,25 @@ def _open_arbitrated_range_scalp_short(
     if amount < 10.0:
         print(f"[Futures/SHORT] {symbol}: final amount ${amount:.2f} < $10 after funding — skip")
         return None
+    _short_sl_pct = _atr_anchor_sl_pct(
+        float(getattr(settings, "range_scalp_short_sl_pct", 2.0)), metadata, settings,
+        "range_scalp_short_atr_sl_multiplier", "range_scalp_short_atr_sl_anchor_enabled",
+    )
+    # s110: only re-validate reward:risk against a fresh price if this candidate
+    # actually waited behind a capital or slot block — otherwise open immediately
+    # on the confirmed breakout instead of re-deriving the whole thesis from scratch.
+    if _candidate_delayed_by_capital_or_slots(candidate_data):
+        _revalidate_ok, _revalidate_reason, _revalidate_price = _revalidate_entry_before_submit(
+            symbol, "SHORT", fc, _short_sl_pct, metadata,
+        )
+        if not _revalidate_ok:
+            print(f"[Futures/SHORT] {symbol}: SKIPPED at execution — {_revalidate_reason} (fresh_price={_revalidate_price})")
+            return None
     profile = str(metadata.get("peak_quality_profile") or "B").strip().upper()
     position = fc.open_short(
         symbol,
         usdt_amount=amount,
-        sl_pct=float(getattr(settings, "range_scalp_short_sl_pct", 2.0)),
+        sl_pct=_short_sl_pct,
         tp_pct=float(getattr(settings, "range_scalp_short_tp_pct", 4.0)),
         leverage=int(getattr(settings, "futures_leverage", 10)),
         pnl_prediction=decision.get("short_prediction"),
@@ -7313,6 +8111,7 @@ def _open_arbitrated_range_scalp_short(
         signal_id=signal_id,
         peak_quality_profile=profile if profile in {"A", "B", "C"} else "B",
         peak_quality_score=metadata.get("peak_quality"),
+        entry_context=_build_entry_context(decision, metadata, candidate_data),
     )
     if position is None:
         return None
@@ -7337,6 +8136,7 @@ def _open_arbitrated_range_scalp_long(
     signal_id: Optional[str],
     metadata: Dict[str, Any],
     usdt_override: Optional[float] = None,
+    candidate_data: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     if position_manager and position_manager.get_positions_count(symbol) > 0:
         return None
@@ -7416,16 +8216,26 @@ def _open_arbitrated_range_scalp_long(
     if amount < 10.0:
         print(f"[Futures/LONG] {symbol}: final amount ${amount:.2f} < $10 after funding attempt — skip")
         return None
+    _long_sl_pct = float(getattr(settings, "futures_long_sl_pct", 2.5))
+    # s110: same delay-conditioned gate as the SHORT path above.
+    if _candidate_delayed_by_capital_or_slots(candidate_data):
+        _revalidate_ok, _revalidate_reason, _revalidate_price = _revalidate_entry_before_submit(
+            symbol, "LONG", fc, _long_sl_pct, metadata,
+        )
+        if not _revalidate_ok:
+            print(f"[Futures/LONG] {symbol}: SKIPPED at execution — {_revalidate_reason} (fresh_price={_revalidate_price})")
+            return None
     profile = str(metadata.get("peak_quality_profile") or "B").strip().upper()
     position = fc.open_long(
         symbol,
         usdt_amount=amount,
-        sl_pct=float(getattr(settings, "futures_long_sl_pct", 2.5)),
+        sl_pct=_long_sl_pct,
         tp_pct=float(getattr(settings, "futures_long_tp_pct", 5.0)),
         leverage=int(getattr(settings, "futures_leverage", 10)),
         signal_id=signal_id,
         peak_quality_profile=profile if profile in {"A", "B", "C"} else "B",
         peak_quality_score=metadata.get("peak_quality"),
+        entry_context=_build_entry_context(decision, metadata, candidate_data),
     )
     if position is None:
         return None
@@ -7491,12 +8301,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
     # ── Entry-profile gate (secondary pass) ─────────────────────────────────
     # Always run the profile gate when this function is called directly; it is a
     # no-op duplicate if execute_once() already filtered the same symbols.
-    if not (_regime_mode == "RANGE_SCALP" and bool(getattr(settings, "range_scalp_short_first_enabled", True))):
-        top_signals_with_meta = _filter_buy_candidates(
-            top_signals_with_meta, signal_meta, settings, _regime_mode,
-            precomputed_predictions,
-            news_client,
-        )
+    top_signals_with_meta = _filter_buy_candidates(
+        top_signals_with_meta, signal_meta, settings, _regime_mode,
+        precomputed_predictions,
+        news_client,
+    )
     if top_signals_with_meta and isinstance(top_signals_with_meta[0], dict):
         top_symbols = [s['symbol'] for s in top_signals_with_meta]
     else:
@@ -7583,6 +8392,12 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             print("[BtcDom] timeout — skipping BTC dominance filter this cycle")
         except Exception:
             pass
+
+    # ── s118: Portfolio drawdown circuit breaker — market losses, any cause ──
+    _pf_dd_blocked, _pf_dd_reason = _portfolio_drawdown_circuit_breaker(_db_client_ref, settings, client=client)
+    if _pf_dd_blocked:
+        print(f"[BuyTopSymbols] BLOCKED: {_pf_dd_reason}")
+        return orders
 
     # ── R5: Circuit breaker — abort buys if system has consecutive API failures ──
     if _circuit_breaker_check(settings):
@@ -7678,6 +8493,29 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 update_signal_decision(symbol, "rejected", _arb_decision["reason"], signal_id=_signal_id)
                 continue
             if _arb_decision["selected_mode"] == "FUTURES_SHORT":
+                # s108/Opcion C: reserve against the SAME in-memory
+                # `_CAPITAL_RESERVATIONS` bucket the fast-path uses, so this
+                # main-cycle path cannot commit capital the fast-path already
+                # reserved for another candidate a moment earlier (or vice
+                # versa) — the two execution paths no longer reason about
+                # capital independently. Scoped to the reservation itself
+                # (in-memory, no db_client needed); the persisted
+                # cooldown/retry bookkeeping remains fast-path-specific.
+                _arb_short_amount = float(_arb_decision.get("locked_position_size_usdt") or 0.0)
+                _arb_short_reserved = False
+                if _arb_short_amount > 0:
+                    _arb_fc = _get_futures_client(settings, injected_client=futures_client)
+                    _arb_futures_avail = float(_arb_fc.get_available_usdt()) if _arb_fc else 0.0
+                    _arb_short_ok, _arb_short_snapshot = _reserve_capital_for_candidate(
+                        symbol, "FUTURES_SHORT", _arb_short_amount,
+                        {"usdt_available": usdt_liquid_now, "futures_available": _arb_futures_avail},
+                        reason_context="main_cycle_arbitrated_short",
+                    )
+                    if not _arb_short_ok:
+                        print(f"[DirectionArbiter] SHORT {symbol}: BLOCKED {_arb_short_snapshot.get('reason')} — capital reserved by another path")
+                        update_signal_decision(symbol, "rejected", "CAPITAL_ROUTING_BLOCKED", signal_id=_signal_id, trade_type="futures")
+                        continue
+                    _arb_short_reserved = True
                 try:
                     _arb_order = _open_arbitrated_range_scalp_short(
                         symbol,
@@ -7687,11 +8525,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         position_manager,
                         _signal_id,
                         _arb_meta,
-                        usdt_override=float(_arb_decision.get("locked_position_size_usdt") or 0.0) or None,
+                        usdt_override=(float(_arb_short_snapshot.get("reserved_usdt")) if _arb_short_reserved else _arb_short_amount) or None,
                     )
                 except Exception as exc:
                     print(f"[DirectionArbiter] SHORT {symbol} failed: {exc}")
                     _arb_order = None
+                finally:
+                    if _arb_short_reserved:
+                        _release_capital_reservation(symbol, "FUTURES_SHORT")
                 if _arb_order:
                     orders.append(_arb_order)
                     update_signal_decision(symbol, "executed", "RANGE_SCALP_SHORT_FIRST", signal_id=_signal_id, trade_type="futures", binance_confirmed=True)
@@ -7706,6 +8547,21 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 if not _long_passed:
                     update_signal_decision(symbol, "rejected", "FUTURES_LONG_GATES_REJECTED", signal_id=_signal_id, trade_type="futures")
                     continue
+                _arb_long_amount = float(_arb_decision.get("locked_position_size_usdt") or 0.0)
+                _arb_long_reserved = False
+                if _arb_long_amount > 0:
+                    _arb_fc = _get_futures_client(settings, injected_client=futures_client)
+                    _arb_futures_avail = float(_arb_fc.get_available_usdt()) if _arb_fc else 0.0
+                    _arb_long_ok, _arb_long_snapshot = _reserve_capital_for_candidate(
+                        symbol, "FUTURES_LONG", _arb_long_amount,
+                        {"usdt_available": usdt_liquid_now, "futures_available": _arb_futures_avail},
+                        reason_context="main_cycle_arbitrated_long",
+                    )
+                    if not _arb_long_ok:
+                        print(f"[DirectionArbiter] FUTURES LONG {symbol}: BLOCKED {_arb_long_snapshot.get('reason')} — capital reserved by another path")
+                        update_signal_decision(symbol, "rejected", "CAPITAL_ROUTING_BLOCKED", signal_id=_signal_id, trade_type="futures")
+                        continue
+                    _arb_long_reserved = True
                 try:
                     _arb_order = _open_arbitrated_range_scalp_long(
                         symbol,
@@ -7715,11 +8571,14 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         position_manager,
                         _signal_id,
                         _arb_meta,
-                        usdt_override=float(_arb_decision.get("locked_position_size_usdt") or 0.0) or None,
+                        usdt_override=(float(_arb_long_snapshot.get("reserved_usdt")) if _arb_long_reserved else _arb_long_amount) or None,
                     )
                 except Exception as exc:
                     print(f"[DirectionArbiter] FUTURES LONG {symbol} failed: {exc}")
                     _arb_order = None
+                finally:
+                    if _arb_long_reserved:
+                        _release_capital_reservation(symbol, "FUTURES_LONG")
                 if _arb_order:
                     orders.append(_arb_order)
                     update_signal_decision(symbol, "executed", "RANGE_SCALP_FUTURES_LONG", signal_id=_signal_id, trade_type="futures", binance_confirmed=True)
@@ -8185,6 +9044,33 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                             "VALUES (%s, %s, %s, %s, %s)",
                             (symbol, 'spot', 'wr_screener_block',
                              json.dumps({'consecutive_sl': _wr_n, 'regime': _regime_mode}), False),
+                        )
+                except Exception:
+                    pass
+                continue
+
+        # ── s110: WR Screener corto plazo — bloquear reentradas rápidas tras pérdida ──
+        # Complementa el bloqueo de arriba (N SL consecutivos, pensado para rachas de
+        # días). Cierra el hueco de "doble fallo": reabrir el mismo símbolo/tesis a los
+        # minutos de perder, sin que el screener de racha larga se entere (ver
+        # ALLOUSDT/HYPERUSDT 2026-08-02: 2 pérdidas reales en <1h, 0/5 del contador largo).
+        if position_manager and getattr(settings, 'wr_screener_enabled', True):
+            _wr_window_min = float(getattr(settings, 'wr_screener_short_window_minutes', 120.0))
+            _wr_window_losses = int(getattr(settings, 'wr_screener_short_window_min_losses', 2))
+            if _wr_window_min > 0 and _wr_window_losses > 0 and _recent_losses_in_window(
+                symbol, position_manager, _wr_window_min, _wr_window_losses,
+            ):
+                print(f"[WRScreener] Skipping {symbol}: {_wr_window_losses}+ losses in last "
+                      f"{_wr_window_min:.0f}min — short-window block")
+                update_signal_decision(symbol, "rejected", "WR_BLOCK_SHORT_WINDOW")
+                try:
+                    if _db_client_ref:
+                        _db_client_ref.execute_update(
+                            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                            "VALUES (%s, %s, %s, %s, %s)",
+                            (symbol, 'spot', 'wr_screener_short_window_block',
+                             json.dumps({'window_minutes': _wr_window_min, 'min_losses': _wr_window_losses,
+                                         'regime': _regime_mode}), False),
                         )
                 except Exception:
                     pass
@@ -10219,7 +11105,10 @@ def _maybe_open_range_scalp_shorts(
             continue
 
         # Open short position.
-        _sl = float(getattr(settings, "range_scalp_short_sl_pct", 2.0))
+        _sl = _atr_anchor_sl_pct(
+            float(getattr(settings, "range_scalp_short_sl_pct", 2.0)), short_meta, settings,
+            "range_scalp_short_atr_sl_multiplier", "range_scalp_short_atr_sl_anchor_enabled",
+        )
         _tp = float(getattr(settings, "range_scalp_short_tp_pct", 4.0))
         _lev = int(getattr(settings, "futures_leverage", 10))
         _usdt = float(getattr(settings, "range_scalp_short_usdt_per_trade", 1000.0))
@@ -11151,20 +12040,31 @@ def execute_once(monitor_only: bool = False, components=None):
                     if _cc_sym:
                         _futures_overflow_positions.discard(_cc_sym)
                         # FIX-F1: Register SL cooldown to prevent immediate re-entry on the same symbol
-                        if _cc.get('reason') == 'stop_loss':
+                        # s116: widened from `== 'stop_loss'` exact-match to any losing close (mirrors
+                        # `_is_losing_close`/s110) — a `stop_loss_binance`/`binance_unidentified_close`
+                        # loss is just as real a signal to cool down re-entry on this symbol.
+                        if _is_losing_close_dict(_cc):
                             _sl_count_this_cycle += 1
                             _sl_cd_hours = getattr(settings, 'futures_sl_cooldown_hours', 4.0)
                             _FUTURES_SL_COOLDOWN[_cc_sym] = datetime.now(timezone.utc)
                             _set_cooldown(_cc_sym, 'futures_sl', _sl_cd_hours, {'reason': 'sl_hit'})
                             print(f'[Futures/SL-CD] {_cc_sym}: cooldown {_sl_cd_hours}h — no re-entry until next window')
-                # PB2: Mass SL circuit breaker — global pause if too many positions stopped together
+                # PB2: Mass SL circuit breaker — global pause if too many positions stopped together.
+                # s116: the per-cycle counter (`_sl_count_this_cycle`, reset every ~3-5min iteration)
+                # can never see a slower-moving cascade — 2026-08-03's 8 losses over 2 hours (BTC +2%
+                # dragging nearly every RANGE_SCALP SHORT into its stop) never tripped it. Trip on
+                # EITHER the same-cycle burst (fast, correlated moment) OR a rolling-window count
+                # (slower cascade) — whichever fires first. See calibrar-ciclo-vida-52fe5d.md s116.
                 _mass_sl_threshold = int(getattr(settings, 'futures_mass_sl_threshold', 3))
-                if _sl_count_this_cycle >= _mass_sl_threshold:
+                _mass_sl_window_minutes = float(getattr(settings, 'futures_mass_sl_window_minutes', 75.0))
+                _mass_sl_window_count = _mass_sl_rolling_window_count(_db_client_ref, _mass_sl_window_minutes)
+                if _sl_count_this_cycle >= _mass_sl_threshold or _mass_sl_window_count >= _mass_sl_threshold:
                     _mass_cd_hours = float(getattr(settings, 'futures_mass_sl_cooldown_hours', 4.0))
                     from datetime import timedelta as _td_mass
                     _FUTURES_MASS_SL_COOLDOWN_UNTIL = datetime.now(timezone.utc) + _td_mass(hours=_mass_cd_hours)
-                    print(f'[Futures/MASS-SL] {_sl_count_this_cycle} positions stopped in same cycle! '
-                          f'GLOBAL COOLDOWN {_mass_cd_hours}h — no new shorts until {_FUTURES_MASS_SL_COOLDOWN_UNTIL.strftime("%H:%M UTC")}')
+                    print(f'[Futures/MASS-SL] {_sl_count_this_cycle} in this cycle, {_mass_sl_window_count} in last '
+                          f'{_mass_sl_window_minutes:.0f}min! GLOBAL COOLDOWN {_mass_cd_hours}h — no new shorts '
+                          f'until {_FUTURES_MASS_SL_COOLDOWN_UNTIL.strftime("%H:%M UTC")}')
         except Exception as _fce:
             print(f"[Futures] check_positions error: {_fce}")
 
@@ -11486,6 +12386,18 @@ def execute_once(monitor_only: bool = False, components=None):
                 )
                 if _staged_new:
                     print(f"[StagedEntry] staged new: {[_s.get('symbol') for _s in _staged_new]}")
+                # 2b. s113: optional immediate "leg 1" for freshly-staged RANGE_SCALP
+                # shorts, before direction confirmation (off by default — see
+                # maybe_open_immediate_leg_range_scalp_short docstring).
+                if _regime_mode == "RANGE_SCALP":
+                    try:
+                        _immediate_legs = maybe_open_immediate_leg_range_scalp_short(
+                            settings, getattr(comp, 'futures_client', None), position_manager, _db_client_ref,
+                        )
+                        if _immediate_legs:
+                            print(f"[ImmediateLeg] opened: {[o.get('symbol') for o in _immediate_legs]}")
+                    except Exception as _leg1_exc:
+                        print(f"[ImmediateLeg] error: {_leg1_exc}")
                 # 3. Only pass validated candidates that are still QUBO-selected to execution.
                 _openable_rows = staged_entry.get_openable_candidates(
                     _db_client_ref, _regime_mode, _staged_top_symbols, settings=settings,

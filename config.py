@@ -164,6 +164,19 @@ class Settings(BaseSettings):
     # PB2: Mass SL circuit breaker â€” global pause after N+ positions stop in same check
     futures_mass_sl_threshold: int = Field(default=3)  # trigger if 3+ positions stop together
     futures_mass_sl_cooldown_hours: float = Field(default=4.0)  # 4h global pause
+    # s116: rolling window (minutes) for the mass-SL count, in addition to the same-cycle
+    # burst count — catches slower cascades (e.g. a BTC rally dragging shorts over hours).
+    futures_mass_sl_window_minutes: float = Field(default=75.0)
+    # s117: replicate the legacy BTC-momentum guards in the staged fast-path.
+    futures_staged_btc_momentum_gate_enabled: bool = Field(default=True)
+    # s117: portfolio-wide realized-PnL circuit breaker, SPOT+FUTURES, all regimes.
+    portfolio_drawdown_circuit_breaker_enabled: bool = Field(default=True)
+    portfolio_drawdown_window_minutes: float = Field(default=120.0)
+    portfolio_drawdown_max_loss_usd: float = Field(default=150.0)
+    # s118: "smart pause" re-check — only actually pause if BTC's recent short-term
+    # momentum still opposes the dominant losing side (see _portfolio_drawdown_circuit_breaker).
+    portfolio_drawdown_recheck_momentum_minutes: float = Field(default=30.0)
+    portfolio_drawdown_recheck_momentum_pct: float = Field(default=0.5)
     # PB3: Confirm SHORT entry with red 5m candle (don't short into green momentum)
     futures_confirm_red_candle: bool = Field(default=True)  # require last 5m candle red
     # PB5: BTC 3h rolling momentum filter â€” catches gradual rallies that 1h misses
@@ -300,6 +313,11 @@ class Settings(BaseSettings):
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True)
     wr_screener_consecutive_sl_block: int = Field(default=5)  # block after N consecutive SL
+    # s110: short-window loss circuit-breaker — complements the consecutive-SL block above,
+    # which is meant for multi-day losing streaks and misses fast repeated re-entries into
+    # the same failed setup within the same session (see ALLOUSDT/HYPERUSDT 2026-08-02).
+    wr_screener_short_window_minutes: float = Field(default=120.0)
+    wr_screener_short_window_min_losses: int = Field(default=2)
     # B3: SPOT mass-SL cooldown
     spot_mass_sl_threshold: int = Field(default=3)
     spot_mass_sl_cooldown_hours: float = Field(default=2.0)
@@ -647,6 +665,11 @@ class Settings(BaseSettings):
     hard_risk_monitor_enabled: bool = Field(default=True)
     hard_risk_monitor_interval_seconds: float = Field(default=2.0)
     hard_risk_breakeven_enabled: bool = Field(default=True)
+    # High-frequency telemetry watcher for open positions (behavior observation)
+    position_telemetry_watcher_enabled: bool = Field(default=True)
+    position_telemetry_watcher_interval_seconds: float = Field(default=1.0)
+    position_telemetry_db_throttle_seconds: float = Field(default=5.0)
+    position_reaction_policy_mode: str = Field(default="telemetry_only")  # telemetry_only | hard_rules | ml_assisted
     # S105g: real-time Binance User Data Stream (futures + spot) so position
     # closures are detected in seconds instead of waiting for the next 5-min
     # polling cycle. Falls back silently to polling/reconciliation if disabled,
@@ -665,22 +688,39 @@ class Settings(BaseSettings):
     preservation_upgrade_to_futures: bool = Field(default=False)
     range_scalp_bidirectional_enabled: bool = Field(default=True)
     range_scalp_short_first_enabled: bool = Field(default=False)
-    range_scalp_short_priority_bonus: float = Field(default=0.05)
+    range_scalp_short_priority_bonus: float = Field(default=0.0)
     range_scalp_short_preferred: bool = Field(default=False)  # Neutral = do not bias selection by side
     range_scalp_long_entries_enabled: bool = Field(default=True)
-    range_scalp_long_min_probability: float = Field(default=0.60)
+    range_scalp_long_min_probability: float = Field(default=0.50)
     range_scalp_long_min_expected_pnl: float = Field(default=0.0)
     range_scalp_long_support_zone_max: float = Field(default=0.55)
-    range_scalp_long_superiority_delta: float = Field(default=0.10)
+    range_scalp_long_superiority_delta: float = Field(default=0.0)
+    range_scalp_direction_mode: str = Field(default="ev_symmetric")  # short_priority | ev_symmetric
     range_scalp_direction_min_probability: float = Field(default=0.55)
     range_scalp_short_resistance_threshold: float = Field(default=0.65)
     range_scalp_short_max_per_cycle: int = Field(default=2)
     range_scalp_short_execution_enabled: bool = Field(default=True)
     range_scalp_short_min_expected_pnl: float = Field(default=0.0)
-    range_scalp_short_min_probability: float = Field(default=0.40)
+    range_scalp_short_min_probability: float = Field(default=0.50)
     range_scalp_short_usdt_per_trade: float = Field(default=1000.0)
     range_scalp_short_sl_pct: float = Field(default=2.0)
     range_scalp_short_tp_pct: float = Field(default=4.0)
+    # s113: widen (never tighten) the flat SL % to at least atr_pct x multiplier when
+    # available — see run_trades.py::_atr_anchor_sl_pct. Applies before the USD-loss
+    # guardrail (max_loss_usd_per_trade), which remains the hard $ ceiling.
+    range_scalp_short_atr_sl_anchor_enabled: bool = Field(default=True)
+    range_scalp_short_atr_sl_multiplier: float = Field(default=1.5)
+    spot_atr_sl_anchor_enabled: bool = Field(default=True)
+    spot_atr_sl_multiplier: float = Field(default=1.5)
+    # s113: "leg 1" immediate entry at S/R touch (before direction confirmation), see
+    # run_trades.py::maybe_open_immediate_leg_range_scalp_short. Off by default —
+    # highest-risk mechanism of the s113 plan (commits capital pre-confirmation).
+    staged_immediate_entry_enabled: bool = Field(default=False)
+    staged_immediate_entry_fraction: float = Field(default=0.3)
+    # s115: defensive re-check that a staged SHORT/LONG is actually near the S/R
+    # level its own thesis depends on. See run_trades.py::_staged_sr_thesis_check.
+    range_scalp_sr_thesis_gate_enabled: bool = Field(default=True)
+    range_scalp_sr_thesis_max_dist_pct: float = Field(default=5.0)
     staged_entry_regime_config: Dict[str, Any] = Field(default={
         "SPOT_BULL": {
             "enabled": True,
@@ -732,6 +772,17 @@ class Settings(BaseSettings):
             "direction_required_confirmations": 1,
             "direction_max_adverse_observations": 4,
             "direction_sr_invalidation_pct": 1.5,  # s105: hard SR-proximity-loss terminal threshold
+            # s111: anchor min_progress/max_adverse to this candidate's own stop distance —
+            # 1bps was smaller than routine bid/ask noise (no real false-breakout protection)
+            # while 150bps was a normal excursion inside RANGE_SCALP's own range (measured
+            # 48h: 1,772 confirmations vs. 1,044 demotions, ~59% churn rate).
+            "direction_geometry_anchor_enabled": True,
+            "direction_min_progress_stop_fraction": 0.05,
+            "direction_max_adverse_stop_fraction": 0.6,
+            # s113: VSA-inspired volume corroboration — shadow only (recorded, not
+            # enforced) until validated against real outcomes. See _direction_transition.
+            "direction_volume_gate_enabled": False,
+            "direction_volume_anomaly_multiplier": 3.0,
         },
         "FUTURES_SHORT": {
             "enabled": True,
@@ -739,7 +790,16 @@ class Settings(BaseSettings):
             "required_positive_checks": 2,
             "max_cycles": 100,  # s105: decoupled from the 8h max_age_min ceiling (was 3)
             "max_age_min": 480,  # s105: a breakout candidate may legitimately wait up to 8h (was 20)
-            "intra_mode": "predictor",
+            # s113: was "predictor" (~150s cadence, full ML re-run per candidate) — the
+            # same mechanism s106 already measured costing ~13.6 min median of extra
+            # confirmation delay on RANGE_SCALP before switching it to "watcher" (10s,
+            # lightweight price+direction poll only). FUTURES_SHORT never got the same
+            # fix despite sharing the identical `intra_mode` dispatch in
+            # `_intra_watcher_check` (regime-agnostic). No production data yet for this
+            # regime (0 opens in the last 48-52h) — extending the already-validated fix
+            # rather than leaving a known-slow path in place for whenever it activates.
+            "intra_mode": "watcher",
+            "watcher_interval_seconds": 10,
             "price_source": "ticker",
             "use_fear_greed": False,
             "cooldown_min": 0,
@@ -761,7 +821,11 @@ class Settings(BaseSettings):
             "required_positive_checks": 2,
             "max_cycles": 100,  # s105: decoupled from the 8h max_age_min ceiling (was 3)
             "max_age_min": 480,  # s105: a breakout candidate may legitimately wait up to 8h (was 100)
-            "intra_mode": "predictor",
+            # s113: see FUTURES_SHORT comment above — same rationale. PRESERVATION is a
+            # defensive regime by design, but "defensive" should mean tighter risk
+            # criteria, not a slower reaction to whatever it does decide to confirm.
+            "intra_mode": "watcher",
+            "watcher_interval_seconds": 10,
             "price_source": "avg",
             "use_fear_greed": True,
             "cooldown_min": 0,
@@ -792,7 +856,7 @@ class Settings(BaseSettings):
     # â”€â”€ Futures trading (USDM, fapi.binance.com) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     futures_enabled: bool = Field(default=True)  # s80: disabled under entry-profile gate redesign â€” backtest run_0812 uses futures
     futures_leverage: int = Field(default=10)          # K2: 2â†’10 â€” backtest run_0812 validated 10x
-    futures_max_shorts: int = Field(default=5)       # concentrated: 3-5 shorts simultáneos
+    futures_max_shorts: int = Field(default=4)       # concentrated: balance with LONG slots
     futures_max_largecap_shorts: int = Field(default=3)  # concentrated: no concentrar todo en BTC/ETH
     futures_usdt_per_trade: float = Field(default=150.0)  # concentrated: floor de margen igualado a SPOT
     futures_sl_pct: float = Field(default=2.00)          # concentrated: mayor tolerancia al ruido
@@ -869,7 +933,7 @@ class Settings(BaseSettings):
     # â”€â”€ Futures LONG / hedge bidireccional â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     futures_hedge_mode_enabled: bool = Field(default=True)
     futures_long_enabled: bool = Field(default=True)
-    futures_max_longs: int = Field(default=2)  # concentrated: hedge más concentrado
+    futures_max_longs: int = Field(default=3)  # symmetric LONG capacity in RANGE_SCALP
     futures_long_sl_pct: float = Field(default=2.5)
     futures_long_tp_pct: float = Field(default=5.0)
     futures_long_in_range_scalp: bool = Field(default=True)
@@ -913,7 +977,7 @@ class Settings(BaseSettings):
     entry_quality_max_failures_preservation: int = Field(default=0)
     entry_quality_max_failures_futures_short: int = Field(default=0)
     entry_quality_vol_spike_min_range_scalp: float = Field(default=0.35)  # s72: lateral = low vol; 0.35x floor (vs 1.2x for others)
-    sso_target_contribution_pct_range_scalp: float = Field(default=0.05)  # s73 C2: 5% of half-target=$1.00 min — achievable at TP=1.8%
+    sso_target_contribution_pct_range_scalp: float = Field(default=0.10)  # s110: raised 0.05->0.10, min_contribution was too small vs $18-27 SL guardrail (RR~0.38)
 
     # ── SmartTP EXTEND per regime (s70: replaces smart_tp_extend_disabled_regimes list) ──
     smart_tp_extend_enabled_spot_bull: bool = Field(default=True)

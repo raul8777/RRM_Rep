@@ -19,17 +19,11 @@ _INVALID_ANALYSIS_SYMBOLS = {
 
 _REGIME_CAPS = {
     "SPOT_BULL": 48,
-    "RANGE_SCALP": 40,
+    # TEMP (jul 24 2026): expand RANGE_SCALP analysis universe to ~100 assets per cycle
+    "RANGE_SCALP": 100,
     "PRESERVATION": 24,
     "FUTURES_SHORT": 36,
 }
-
-_PROFILE_MULTIPLIERS = {
-    "A": 1.2,
-    "B": 1.0,
-    "C": 0.8,
-}
-
 
 def _normalize_list(values: Any) -> List[str]:
     if not values:
@@ -66,9 +60,9 @@ def _resolve_cap(settings=None, regime_mode: str = "SPOT_BULL", max_symbols: Opt
 
     _regime = _normalized_mode(regime_mode)
     base_cap = _REGIME_CAPS.get(_regime, 24)
-    profile = _normalized_profile(getattr(settings, "current_regime_profile_label", None))
-    multiplier = _PROFILE_MULTIPLIERS.get(profile or "B", 1.0)
-    cap = max(1, int(round(base_cap * multiplier)))
+    # s95: no global active profile; universe caps are regime-only so every
+    # per-operation profile (A/B/C) has the same candidate pool to choose from.
+    cap = max(1, int(base_cap))
 
     # Keep analysis breadth aligned with screener breadth so top-N quality
     # filtering has enough candidates to rank in short-term windows.
@@ -78,7 +72,7 @@ def _resolve_cap(settings=None, regime_mode: str = "SPOT_BULL", max_symbols: Opt
         except Exception:
             top_n = 100
         try:
-            max_pairs = int(getattr(settings, "screener_max_pairs", 50) or 50)
+            max_pairs = int(getattr(settings, "screener_max_pairs", 100) or 100)
         except Exception:
             max_pairs = 50
 
@@ -100,7 +94,8 @@ def select_analysis_universe(
     """Return a regime-aware universe for technical analysis refresh."""
 
     regime = _normalized_mode(regime_mode or getattr(settings, "current_regime_mode", None))
-    profile = _normalized_profile(profile_label or getattr(settings, "current_regime_profile_label", None))
+    # s95: profile_label argument is retained for API compatibility but is no longer
+    # consulted; per-operation profiles are selected after the universe is built.
     cap = _resolve_cap(settings=settings, regime_mode=regime, max_symbols=max_symbols)
 
     static_symbols = _drop_invalid_symbols(_normalize_list(getattr(settings, "analysis_symbols", [])))
@@ -119,7 +114,7 @@ def select_analysis_universe(
             screened = get_screened_pairs(
                 settings=settings,
                 regime_mode=regime,
-                profile_label=profile,
+                profile_label=None,
                 db_client=db_client,
             )
             source = "screener"
@@ -132,8 +127,8 @@ def select_analysis_universe(
     screened_spot = _drop_invalid_symbols(_normalize_list((screened or {}).get("spot", [])))
     screened_futures = _drop_invalid_symbols(_normalize_list((screened or {}).get("futures", [])))
 
-    if regime == "FUTURES_SHORT":
-        primary = screened_futures + futures_symbols + static_symbols
+    if regime in ("FUTURES_SHORT", "RANGE_SCALP"):
+        primary = screened_futures
     elif regime == "PRESERVATION":
         primary = screened_spot + narrative_tokens + static_symbols[:8]
     else:
@@ -152,7 +147,7 @@ def select_analysis_universe(
         "spot": _dedupe_preserve_order(screened_spot),
         "futures": _dedupe_preserve_order(screened_futures),
         "regime_mode": regime,
-        "profile_label": profile,
+        "profile_label": profile_label,
         "cap": cap,
         "source": source,
         "reason": reason,

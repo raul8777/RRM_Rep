@@ -1,3 +1,71 @@
+2026-07-24 ~17:00 UTC-6 — SR feature injection finalizado, suite 602 verde (s94)
+==========================================================================================================
+- Fases 1-6 completadas:
+  1) SR features inyectadas en pnl_predictor.py (probabilidad + rango de precios).
+  2) entry_profile_gate.py usa distancias/posición de zona SR y bonifica eventos SR.
+  3) autonomous_signals.py extrae, reenvía y genera señales BUY/SELL por eventos SR.
+  4) staged_entry.py reduce fricción para señales SR confirmadas y respeta top_symbols_qubo.
+  5) entry_decision.py min_probability 0.50 en todos los regímenes.
+  6) config.py / config_helpers.py: max_positions_spot_bull=12, range_scalp=8, preservation=4,
+     futures_short=8, max_total_exposure_pct=0.95, max_open_per_cycle=2, category_max_positions_enabled=False.
+  7) market_regime.py: kelly_mult SPOT_BULL=1.05, RANGE_SCALP=1.0, PRESERVATION=0.7,
+     FUTURES_SHORT base=0.6 con boost hasta 1.0 según confianza.
+  8) run_trades.py reenvía SR features y bypass PEAK_QUALITY_DISCARDED para SR confirmados.
+  9) universe_selector.py alineado a screener_max_pairs=100.
+  10) Scripts recalibrate_thresholds_v2.py y build_universal_quality_model.py incluyen features SR.
+- Ajustes a tests para reflejar nuevos defaults: test_staged_entry.py, test_system_health.py,
+  test_range_scalp_entry_pipeline.py, test_entry_evidence.py.
+- Suite completa: 602 passed, 0 failed. tmp_audit_config.py: 0 critical mismatches.
+- Documentación actualizada: SYSTEM_REFERENCE.md, canonical/calibracion_entradas-a20ab8-v3.md,
+  canonical/calibrar-ciclo-vida-52fe5d.md, rules.md.
+- Pendiente: monitorear aperturas SR reales, PnL/drawdown y shadow logs sr_entry_shadow_rejected.
+
+2026-07-24 ~09:32 UTC-6 — FIX actualizado: RANGE_SCALP no abre posiciones (s93b)
+==========================================================================================================
+- Root cause 1: staged_entry.build_range_reversion_prediction buscaba Bollinger Bands en keys anidadas,
+  pero analyze_signal expone lower_band / middle_band / upper_band planos.
+- Root cause 2: pnl_predictor.predict_range_reversion ponía stop estructural exactamente en lower;
+  cuando price tocaba soporte (band_position≈0) stop == price → invalid_reversion_payoff →
+  entry_decision caía a predictor LONG genérico (comportamiento SPOT) → staged_entry descartaba con
+  DIRECTION_TARGET_MISSING.
+- Fix: soportar ambas formas de BB keys + elegir stop más alto entre estructural
+  (lower * (1 - configured_sl/1000)) y configurado (price * (1 - configured_sl))
+  que esté estrictamente por debajo del precio actual. Esto permite entradas cuando
+  price toca/ligeramente debajo de lower (soporte) sin forzar trades en el techo.
+- Tests relevantes pasan (staged_entry + entry_quality_gate + entry_decision 41 passed).
+- Re-aplicados overrides runtime: category_max_positions_enabled=False, entry_quality_vol_spike_min_range_scalp=0.20.
+- Nuevo root cause: `_normalize_autonomous_signal` en `run_trades.py` no reenviaba
+  `range_position`, `rsi_1h`, `rsi_4h`, `trend_1h`, `trend_4h` al modelo universal
+  de `entry_profile_gate`, así que `_extract_universal_features` usaba proxies
+  débiles y los scores de calidad quedaban bajo el umbral C → todos los candidatos
+  `RANGE_SCALP` se descartaban con `PEAK_QUALITY_DISCARDED`.
+- Fix en `run_trades.py`: añadir esas keys al dict normalizado.
+- Tests relevantes pasan (45 passed).
+- Contenedor reiniciado. En el siguiente ciclo `KAITOUSDT` pasó el gate y fue
+  staged como `ready`.
+- Tras relajar calibración agresiva temporal:
+    - `pnl_predictor.predict_range_reversion`: penalizaciones suavizadas para
+      volumen bajo, RSI <35 (sobreventa) y tendencia bajista en soporte.
+    - `entry_decision.py`: umbral mínimo de probabilidad para RANGE_SCALP de
+      0.60 -> 0.50.
+    - `config_helpers.py`: RANGE_SCALP required_positive_checks 2->1,
+      direction_required_confirmations 2->1, direction_min_progress_bps 3.0->1.0,
+      max_open_per_cycle 1->2.
+  Resultado: 5-7 candidatos ACCEPTED por ciclo, KAITOUSDT validado y abierto
+  (`quantity=2078.8`, `entry_price=0.9472`, `unrealized_pnl=-0.51%`).
+- Pendiente: monitorear PnL de apertura y no mantener calibración agresiva más
+  allá de un experimento controlado.
+
+2026-07-24 ~07:40 UTC-6 — SR integration + recalibration universal thresholds
+==========================================================================================================
+- support_resistance.py: no-look-ahead SR levels via local extrema + clustering.
+- autonomous_signals.py: live SR features + SR entry advisory (shadow/active modes) for BUYs near resistance.
+- peak_capture_engine.py: profit_predexit_sr_resistance (priority 91) on positions pressing resistance.
+- universal model rebuilt on current dataset and recalibrated; thresholds A/B/C separated.
+- Tests: test_support_resistance.py + test_peak_capture_engine.py 19 passed.
+- rules.md updated with SR section and rollback notes.
+- Pending: evaluate SR entry advisory shadow logs, consider SR features in universal model v2 after out-of-sample validation.
+
 2026-07-16 ~05:30 UTC — Predictive Profile Calibration Implementation Phase 1-4 Complete
 ==========================================================================================================
 Phase 1: Enrichment & score calibration

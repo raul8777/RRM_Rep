@@ -34,6 +34,8 @@ _QUALITY_MODEL_PATHS = {
     "RANGE_SCALP": Path("Dev/benchmarks/entry_profile_calibration/quality_score_model_range_scalp.pkl"),
 }
 
+_UNIVERSAL_MODEL_PATH = Path("Dev/benchmarks/research_data/quality_score_model_universal_proposal.pkl")
+
 _CATEGORIES = {
     "LARGE_CAP": {"bonus": -0.02},
     "NARRATIVE": {"bonus": 0.02},
@@ -44,7 +46,15 @@ _stats_cache: Optional[Dict[str, Any]] = None
 _thresholds_cache: Optional[Dict[str, Any]] = None
 _model_cache: Dict[str, Optional[Dict[str, Any]]] = {}
 _model_load_attempted: Dict[str, bool] = {}
+_universal_model_cache: Optional[Dict[str, Any]] = None
+_universal_model_attempted: bool = False
 
+
+_UNIVERSAL_FEATURES = [
+    "rsi_1h", "rsi_4h", "bb_position", "atr_pct",
+    "vol_spike", "range_position", "trend_1h", "trend_4h",
+    "sr_zone_position", "sr_support_dist_pct", "sr_resistance_dist_pct",
+]
 
 _QUALITY_SCORE_FEATURES = [
     "expected_pnl_pct",
@@ -174,6 +184,22 @@ def _as_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def _first_present(*candidates: Any) -> Any:
+    """Return the first candidate that is not None.
+
+    Plain `a or b or c` chaining is wrong for numeric features: a falsy-but-
+    legitimate value (most importantly `0.0` — e.g. a symbol sitting exactly
+    at a support level, or a 0% distance to a level) gets silently skipped in
+    favor of the next candidate/default, corrupting the strongest possible SR
+    signal into a "missing data" neutral value. See
+    calibracion_entradas-a20ab8-v3.md (s106b).
+    """
+    for c in candidates:
+        if c is not None:
+            return c
+    return None
+
+
 def _symbol_category(symbol: str) -> str:
     if symbol in {
         "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -219,11 +245,217 @@ def load_thresholds(path: Optional[str] = None) -> Dict[str, Any]:
         return _thresholds_cache
     try:
         with open(p, "r", encoding="utf-8") as f:
-            _thresholds_cache = json.load(f)
+            raw = json.load(f)
+        # Support both legacy {thresholds: {regime: {...}}} and new universal flat layout.
+        if isinstance(raw, dict) and "thresholds" in raw and isinstance(raw["thresholds"], dict):
+            normalized = dict(raw["thresholds"])
+            if isinstance(normalized, dict) and "meta" not in normalized:
+                normalized["meta"] = raw.get("meta", {})
+            _thresholds_cache = normalized
+        elif isinstance(raw, dict):
+            _thresholds_cache = raw
+        else:
+            _thresholds_cache = _default_thresholds()
     except Exception as e:
         logger.error(f"Failed to load entry_profile_thresholds: {e}")
         _thresholds_cache = _default_thresholds()
     return _thresholds_cache or _default_thresholds()
+
+
+def _is_universal_thresholds(thresholds_data: Dict[str, Any]) -> bool:
+    if not isinstance(thresholds_data, dict):
+        return False
+    meta_version = str(thresholds_data.get("meta", {}).get("version", "")).lower()
+    if meta_version.startswith("universal"):
+        return True
+    return any("__" in k for k in thresholds_data.keys() if isinstance(k, str) and k != "meta")
+
+
+def _load_universal_quality_model() -> Optional[Dict[str, Any]]:
+    global _universal_model_cache, _universal_model_attempted
+    if _universal_model_attempted:
+        return _universal_model_cache
+    _universal_model_attempted = True
+    if not _UNIVERSAL_MODEL_PATH.exists():
+        _universal_model_cache = None
+        return None
+    try:
+        import joblib
+        artifact = joblib.load(_UNIVERSAL_MODEL_PATH)
+        if not isinstance(artifact, dict):
+            artifact = None
+        _universal_model_cache = artifact
+        return artifact
+    except Exception as e:
+        logger.warning(f"Could not load universal quality model: {e}")
+        _universal_model_cache = None
+        return None
+
+
+def _normalize_trend(value: Any) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, str):
+        value = value.strip().upper()
+        if value in ("UP", "BULL", "BULLISH", "1"):
+            return 1.0
+        if value in ("DOWN", "BEAR", "BEARISH", "-1"):
+            return -1.0
+        return 0.0
+    try:
+        f = float(value)
+        if f > 0:
+            return 1.0
+        if f < 0:
+            return -1.0
+        return 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _extract_universal_features(signal_meta: Dict[str, Any]) -> List[float]:
+    indicators = signal_meta.get("indicators") or signal_meta.get("indicators_at_entry") or {}
+    if not isinstance(indicators, dict):
+        indicators = {}
+    price = _as_float(
+        _first_present(
+            signal_meta.get("current_price"),
+            signal_meta.get("price"),
+            indicators.get("price"),
+        ),
+        default=1.0,
+    )
+    if price <= 0:
+        price = 1.0
+
+    rsi_1h = _as_float(
+        _first_present(
+            signal_meta.get("rsi"),
+            signal_meta.get("rsi_1h"),
+            indicators.get("rsi"),
+            indicators.get("rsi_1h"),
+        ),
+        default=50.0,
+    )
+    rsi_4h = _as_float(
+        _first_present(signal_meta.get("rsi_4h"), indicators.get("rsi_4h")),
+        default=rsi_1h,
+    )
+
+    bb_position = _as_float(signal_meta.get("bb_position"), default=None)
+    if bb_position is None:
+        upper = _as_float(indicators.get("upper_band"), default=None)
+        lower = _as_float(indicators.get("lower_band"), default=None)
+        if upper is not None and lower is not None and upper > lower:
+            bb_position = (price - lower) / (upper - lower)
+        else:
+            bb_position = 0.5
+
+    atr = _as_float(_first_present(signal_meta.get("atr"), indicators.get("atr")), default=0.0)
+    atr_pct = _as_float(
+        _first_present(signal_meta.get("atr_pct"), indicators.get("atr_pct")),
+        default=(atr / price * 100 if price and atr else 0.0),
+    )
+
+    vol_spike = _as_float(
+        _first_present(
+            signal_meta.get("vol_spike"),
+            signal_meta.get("volume_spike"),
+            indicators.get("vol_spike"),
+            indicators.get("volume_spike"),
+        ),
+        default=1.0,
+    )
+
+    range_position = _as_float(
+        _first_present(
+            signal_meta.get("range_position"),
+            signal_meta.get("weekly_range"),
+            indicators.get("range_position"),
+            indicators.get("weekly_range"),
+        ),
+        default=bb_position,
+    )
+
+    trend_1h = _normalize_trend(
+        _first_present(
+            signal_meta.get("trend_1h"),
+            indicators.get("trend_1h"),
+            indicators.get("ema_cross"),
+        )
+    )
+    if trend_1h == 0.0:
+        trend_1h = 1.0 if str(signal_meta.get("signal", "")).upper() == "BUY" else -1.0
+
+    trend_4h = _normalize_trend(
+        _first_present(
+            signal_meta.get("trend_4h"),
+            indicators.get("trend_4h"),
+            signal_meta.get("higher_tf_trend"),
+        )
+    )
+
+    sr_zone_position = _as_float(
+        _first_present(signal_meta.get("sr_zone_position"), indicators.get("sr_zone_position")),
+        default=0.5,
+    )
+    sr_support_dist_pct = _as_float(
+        _first_present(
+            signal_meta.get("nearest_support_dist_pct"),
+            signal_meta.get("sr_support_dist_pct"),
+            indicators.get("nearest_support_dist_pct"),
+            indicators.get("sr_support_dist_pct"),
+        ),
+        default=0.0,
+    )
+    sr_resistance_dist_pct = _as_float(
+        _first_present(
+            signal_meta.get("nearest_resistance_dist_pct"),
+            signal_meta.get("sr_resistance_dist_pct"),
+            indicators.get("nearest_resistance_dist_pct"),
+            indicators.get("sr_resistance_dist_pct"),
+        ),
+        default=0.0,
+    )
+
+    return [
+        rsi_1h,
+        rsi_4h,
+        bb_position,
+        atr_pct,
+        vol_spike,
+        range_position,
+        trend_1h,
+        trend_4h,
+        sr_zone_position,
+        sr_support_dist_pct,
+        sr_resistance_dist_pct,
+    ]
+
+
+def _universal_quality_score(
+    signal_meta: Dict[str, Any], regime: str, symbol: str
+) -> Tuple[Optional[float], List[str], Optional[str]]:
+    artifact = _load_universal_quality_model()
+    if artifact is None:
+        return None, [], None
+    cat = _symbol_category(symbol)
+    key = f"{regime}__{cat}"
+    entry = artifact.get(key) or artifact.get(regime) or artifact.get("__global__")
+    if entry is None or not isinstance(entry, dict):
+        return None, [], artifact.get("meta", {}).get("trained_at")
+    model = entry.get("model")
+    if model is None:
+        return None, [], artifact.get("meta", {}).get("trained_at")
+    try:
+        import pandas as pd
+        features = _extract_universal_features(signal_meta)
+        df = pd.DataFrame([features], columns=_UNIVERSAL_FEATURES)
+        score = float(model.predict_proba(df)[0, 1])
+        return score, [], artifact.get("meta", {}).get("trained_at")
+    except Exception as e:
+        logger.debug(f"Universal quality score prediction failed: {e}")
+        return None, [], artifact.get("meta", {}).get("trained_at")
 
 
 def _default_thresholds() -> Dict[str, Any]:
@@ -377,6 +609,17 @@ def _range_scalp_score(signal_meta: Dict[str, Any], symbol: str) -> float:
     cat_bonus = _CATEGORIES.get(cat, {}).get("bonus", 0.0)
     score += cat_bonus
 
+    # SR event bonus: confirmed bounce/breakout at support or breakdown for shorts
+    sr_zone = _extract_float(signal_meta, ["sr_zone_position"], default=0.5)
+    if signal_meta.get("support_bounce_buy") or signal_meta.get("sr_bounce"):
+        score += 1.0
+    if signal_meta.get("support_breakout_buy") or signal_meta.get("sr_breakout"):
+        score += 0.8
+    if sr_zone <= 0.25:
+        score += 0.5
+    elif sr_zone >= 0.75:
+        score -= 1.0
+
     return score
 
 
@@ -401,6 +644,26 @@ def _fallback_score(
     regime_term = 0.0
     if regime == "SPOT_BULL":
         regime_term = -0.03 * _as_float(signal_meta.get("ticker_price_change_pct"))
+
+    sr_zone = _extract_float(signal_meta, ["sr_zone_position"], default=0.5)
+    sr_bonus = 0.0
+    if regime == "FUTURES_SHORT":
+        if signal_meta.get("support_breakdown_sell") or signal_meta.get("sr_breakdown"):
+            sr_bonus += 0.8
+        if sr_zone >= 0.75:
+            sr_bonus += 0.5
+        elif sr_zone <= 0.25:
+            sr_bonus -= 0.5
+    else:
+        if signal_meta.get("support_bounce_buy") or signal_meta.get("sr_bounce"):
+            sr_bonus += 0.6
+        if signal_meta.get("support_breakout_buy") or signal_meta.get("sr_breakout"):
+            sr_bonus += 0.4
+        if sr_zone <= 0.25:
+            sr_bonus += 0.4
+        elif sr_zone >= 0.75:
+            sr_bonus -= 0.6
+
     return (
         0.35 * vol_spike
         + 0.30 * expected_pnl
@@ -408,6 +671,7 @@ def _fallback_score(
         + 0.10 * strength
         + cat_bonus
         + regime_term
+        + sr_bonus
     )
 
 
@@ -467,12 +731,41 @@ def classify(
       - Extreme fear (<=20): slightly more permissive to capture value.
       - Extreme greed (>=75): slightly stricter to avoid buying euphoria.
     """
+    # SR-pool signals already carry a calibrated profile and score.  Use it
+    # directly so the legacy gate does not overwrite the pool decision.
+    sr_pool_profile = str(signal_meta.get("sr_pool_profile") or "").strip().upper()
+    if sr_pool_profile in ("A", "B", "C"):
+        info = {
+            "score": signal_meta.get("sr_pool_score"),
+            "score_source": "sr_pool",
+            "thresholds": {},
+            "regime": str(regime or "SR_POOL").upper(),
+            "category": _symbol_category(symbol),
+            "direction": str(direction or "LONG").upper(),
+            "fear_greed_value": fear_greed_value,
+            "model_score": None,
+            "baseline_score": None,
+            "shadow_profile": None,
+            "model_mode": None,
+            "model_version": None,
+            "missing_features": [],
+        }
+        return sr_pool_profile, info
+
     regime = str(regime or "SPOT_BULL").strip().upper() or "SPOT_BULL"
+    category = _symbol_category(symbol)
     _thresholds_data = load_thresholds(thresholds_path)
+    _use_universal = _is_universal_thresholds(_thresholds_data)
+
+    # Select the most specific thresholds: regime+category, then regime,
+    # then legacy nested layout (thresholds->regime), then default.
+    specific_key = f"{regime}__{category}"
+    legacy_thresholds = (_thresholds_data.get("thresholds") or {}) if isinstance(_thresholds_data, dict) else {}
     thresholds = dict(
-        _thresholds_data.get("thresholds", {}).get(regime)
+        _thresholds_data.get(specific_key)
         or _thresholds_data.get(regime)
-        or _default_thresholds()["SPOT_BULL"]
+        or legacy_thresholds.get(regime)
+        or _default_thresholds().get(regime, _default_thresholds()["SPOT_BULL"])
     )
 
     # Dynamic C-threshold adjustment by Fear & Greed.
@@ -486,16 +779,32 @@ def classify(
         if adjustment != 0.0:
             thresholds["C"] = min(thresholds["B"] - 1e-6, thresholds["C"] + adjustment)
 
-    model_score, missing_features, model_version = _model_quality_score(
-        signal_meta, regime, range_scalp_model_path if regime == "RANGE_SCALP" else None,
-    )
-    baseline_score = _fallback_score(signal_meta, regime, symbol) if regime == "RANGE_SCALP" else None
-    model_mode = str(range_scalp_model_mode or "shadow").lower()
-    use_range_model = regime == "RANGE_SCALP" and model_mode == "enforced" and model_score is not None
-    score = model_score if (regime == "SPOT_BULL" or use_range_model) and model_score is not None else compute_quality_score(
-        signal_meta, regime, direction, symbol, model_score=model_score, model_score_resolved=True,
-    )
-    score_source = "model" if model_score is not None and (regime == "SPOT_BULL" or use_range_model) else "fallback"
+    model_score: Optional[float] = None
+    missing_features: List[str] = []
+    model_version: Optional[str] = None
+    baseline_score: Optional[float] = None
+    score_source = "fallback"
+
+    if _use_universal:
+        model_score, missing_features, model_version = _universal_quality_score(
+            signal_meta, regime, symbol
+        )
+        if model_score is not None:
+            score = model_score
+            score_source = "universal_model"
+        else:
+            score = compute_quality_score(signal_meta, regime, direction, symbol)
+    else:
+        model_score, missing_features, model_version = _model_quality_score(
+            signal_meta, regime, range_scalp_model_path if regime == "RANGE_SCALP" else None,
+        )
+        baseline_score = _fallback_score(signal_meta, regime, symbol) if regime == "RANGE_SCALP" else None
+        model_mode = str(range_scalp_model_mode or "shadow").lower()
+        use_range_model = regime == "RANGE_SCALP" and model_mode == "enforced" and model_score is not None
+        score = model_score if (regime == "SPOT_BULL" or use_range_model) and model_score is not None else compute_quality_score(
+            signal_meta, regime, direction, symbol, model_score=model_score, model_score_resolved=True,
+        )
+        score_source = "model" if model_score is not None and (regime == "SPOT_BULL" or use_range_model) else "fallback"
 
     def profile_for(candidate_score: float) -> Optional[str]:
         for candidate_tier in ("A", "B", "C"):
@@ -504,18 +813,19 @@ def classify(
         return None
 
     profile = profile_for(score)
-    shadow_profile = profile_for(model_score) if regime == "RANGE_SCALP" and model_score is not None else None
+    shadow_profile = profile_for(model_score) if not _use_universal and regime == "RANGE_SCALP" and model_score is not None else None
     return profile, {
         "score": score,
         "score_source": score_source,
         "thresholds": {k: v for k, v in thresholds.items() if k in ("A", "B", "C")},
         "regime": regime,
+        "category": category,
         "direction": direction,
         "fear_greed_value": fear_greed_value,
         "model_score": model_score,
         "baseline_score": baseline_score,
         "shadow_profile": shadow_profile,
-        "model_mode": model_mode if regime == "RANGE_SCALP" else None,
+        "model_mode": None if _use_universal else (str(range_scalp_model_mode or "shadow").lower() if regime == "RANGE_SCALP" else None),
         "model_version": model_version,
         "missing_features": missing_features,
     }

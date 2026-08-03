@@ -1,20 +1,63 @@
 ============================= test session starts =============================
 platform win32 -- Python 3.12.10, pytest-8.4.2, pluggy-1.6.0
 rootdir: S:\Tools\AI\crypto-agent
-plugins: anyio-4.14.1
-collected 128 items / 12 deselected / 116 selected
+plugins: anyio-4.14.1, xdist-3.8.0
+collected 131 items / 12 deselected / 119 selected
 
-tests\test_system_health.py ............................................ [ 37%]
-........................................................................ [100%]
+tests\test_system_health.py ............................................ [ 36%]
+........................................................................ [ 97%]
+...                                                                      [100%]
 
 ============================== warnings summary ===============================
-tests/test_system_health.py::TestCat3_FuturesClientCore::test_sl_hit_closes_short
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\site-packages\starlette\formparsers.py:12
+  C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\site-packages\starlette\formparsers.py:12: PendingDeprecationWarning: Please use `import python_multipart` instead.
+    import multipart
+
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\site-packages\feedparser\encodings.py:29
   C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\site-packages\feedparser\encodings.py:29: DeprecationWarning: 'cgi' is deprecated and slated for removal in Python 3.13
     import cgi
 
+error_collector.py:44
+error_collector.py:44
+error_collector.py:44
+  S:\Tools\AI\crypto-agent\tests\..\error_collector.py:44: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "timestamp": datetime.utcnow().isoformat() + "Z",
+
+orchestrator.py:59
+  S:\Tools\AI\crypto-agent\tests\..\orchestrator.py:59: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    self.state_changed_at = datetime.utcnow()
+
+app.py:399
+  S:\Tools\AI\crypto-agent\tests\..\app.py:399: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\site-packages\fastapi\applications.py:4495
+C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\site-packages\fastapi\applications.py:4495
+  C:\Users\raul8\AppData\Local\Programs\Python\Python312\Lib\site-packages\fastapi\applications.py:4495: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)
+
+app.py:12154
+  S:\Tools\AI\crypto-agent\tests\..\app.py:12154: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
 tests/test_system_health.py::TestCat6_PositionManager::test_position_summary_values
-  S:\Tools\AI\crypto-agent\tests\..\position_manager.py:1050: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  S:\Tools\AI\crypto-agent\position_manager.py:1207: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
     "timestamp": datetime.utcnow().isoformat()
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-=============== 116 passed, 12 deselected, 2 warnings in 15.99s ===============
+========= 119 passed, 12 deselected, 11 warnings in 65.46s (0:01:05) ==========

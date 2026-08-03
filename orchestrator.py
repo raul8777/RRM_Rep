@@ -13,6 +13,7 @@ from datetime import datetime
 from enum import Enum
 from binance_truth_guard import is_truth_critical
 import staged_entry
+import position_telemetry_watcher
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,17 @@ class Orchestrator:
         self.learning_cycle_thread = None
         self.staged_entry_intra_thread = None
         self.staged_entry_intra_stop: Optional[threading.Event] = None
+        self.hard_risk_monitor_thread = None
+        self.hard_risk_monitor_stop: Optional[threading.Event] = None
+        self.hard_risk_monitor_last_at: Optional[datetime] = None
+        self.hard_risk_monitor_last_error: Optional[str] = None
+        # s116: high-frequency position telemetry watcher
+        self.position_telemetry_thread = None
+        self.position_telemetry_stop: Optional[threading.Event] = None
+        self.position_telemetry_last_at: Optional[datetime] = None
+        self.position_telemetry_last_error: Optional[str] = None
+        # S105g: real-time Binance User Data Stream (futures + spot)
+        self.event_stream = None
         self.trade_cycle_wake_event = threading.Event()
         self._trade_cycle_lock = threading.RLock()
         self._trade_cycle_func: Optional[Callable] = None
@@ -91,6 +103,11 @@ class Orchestrator:
         self.last_cycle_error: Optional[str] = None
         self.last_cycle_error_at: Optional[datetime] = None
         self.binance_truth_drift_cycles: int = 0
+        # s110: counts consecutive clean truth checks while PAUSED for
+        # binance_truth_drift_critical, so we can auto-resume once resolved instead of
+        # staying paused indefinitely until someone restarts the container (observed
+        # 2026-08-02: 13h46min paused with a real open position unmanaged).
+        self.binance_truth_recovery_cycles: int = 0
         
         # Callbacks
         self.on_state_change: Optional[Callable] = None
@@ -181,6 +198,51 @@ class Orchestrator:
             logger.error(f"Failed to get position status: {e}")
             return {}
     
+    def _evaluate_binance_truth_drift(self) -> None:
+        """s110: pause on sustained critical Binance/runtime drift, and auto-resume once
+        it clears — both gated by 2 consecutive cycles to avoid flapping on a single
+        transient read.
+
+        Before this method existed, only the pause half was implemented: once
+        `binance_truth_drift_critical` fired, the system stayed PAUSED indefinitely
+        until a human or an unrelated restart brought it back to RUNNING. On
+        2026-08-02 that left the system paused for 13h46min with a real open position
+        receiving no active exit management. Positions still get monitor-only SL/TP
+        protection while PAUSED (see `can_monitor_positions()` in `_run_cycle`), so
+        auto-resuming once the drift check comes back clean does not leave an
+        unmanaged position exposed in the meantime — it just stops the system from
+        staying frozen for hours after Binance and the bot's own state have already
+        reconciled.
+        """
+        if is_truth_critical(self.db_client, max_age_seconds=900):
+            self.binance_truth_drift_cycles += 1
+            self.binance_truth_recovery_cycles = 0
+            logger.warning(
+                "[BinanceTruth] critical drift cycle %s/2",
+                self.binance_truth_drift_cycles,
+            )
+            if self.binance_truth_drift_cycles >= 2:
+                self.pause(changed_by="system", reason="binance_truth_drift_critical")
+            return
+        self.binance_truth_drift_cycles = 0
+        # Only auto-resume pauses this exact mechanism caused — never a manual/operator
+        # pause or any other reason string.
+        if self.state != SystemState.PAUSED or self.state_reason != "binance_truth_drift_critical":
+            self.binance_truth_recovery_cycles = 0
+            return
+        self.binance_truth_recovery_cycles += 1
+        logger.info(
+            "[BinanceTruth] clean check %s/2 while paused for drift",
+            self.binance_truth_recovery_cycles,
+        )
+        if self.binance_truth_recovery_cycles >= 2:
+            logger.warning(
+                "[BinanceTruth] drift resolved for %s consecutive cycles — auto-resuming",
+                self.binance_truth_recovery_cycles,
+            )
+            self.start(changed_by="system", reason="binance_truth_resolved")
+            self.binance_truth_recovery_cycles = 0
+
     def pause(self, changed_by: str = "user", reason: str = "Manual pause") -> bool:
         """
         Pause the system (stop new orders, monitor open positions).
@@ -330,6 +392,15 @@ class Orchestrator:
             self.trade_cycle_thread.start()
         logger.info(f"Trade cycle started with {interval_minutes} minute interval")
         self._start_staged_entry_intra_cycle()
+        self._start_hard_risk_monitor()
+        self._start_position_telemetry()
+        # S105g: defer the event stream a few seconds so its websocket handshake
+        # doesn't compete for the GIL with the heavy synchronous startup burst
+        # (futures position sync, regime detection, etc. on trade_cycle_thread)
+        # right after boot — python-binance's socket manager has a fixed internal
+        # init timeout and was observed failing under that startup contention in
+        # production, even though it connects cleanly once things settle.
+        threading.Thread(target=self._delayed_start_event_stream, daemon=True).start()
     
     def start_analysis_cycle(self, cycle_func: Callable, interval_minutes: int = 15) -> None:
         """
@@ -575,19 +646,7 @@ class Orchestrator:
                     self.last_cycle_error = None
                     self.last_cycle_error_at = None
                     if cycle_func == getattr(self, '_trade_cycle_func', None):
-                        if is_truth_critical(self.db_client, max_age_seconds=900):
-                            self.binance_truth_drift_cycles += 1
-                            logger.warning(
-                                "[BinanceTruth] critical drift cycle %s/2",
-                                self.binance_truth_drift_cycles,
-                            )
-                            if self.binance_truth_drift_cycles >= 2:
-                                self.pause(
-                                    changed_by="system",
-                                    reason="binance_truth_drift_critical",
-                                )
-                        else:
-                            self.binance_truth_drift_cycles = 0
+                        self._evaluate_binance_truth_drift()
                 elif _cycle_error is not None:
                     self.consecutive_cycle_failures += 1
                     self.last_cycle_error = _cycle_error
@@ -602,6 +661,127 @@ class Orchestrator:
                             reason=f"consecutive_cycle_failures:{self.consecutive_cycle_failures}",
                         )
     
+    def _start_hard_risk_monitor(self) -> None:
+        if self.hard_risk_monitor_thread and self.hard_risk_monitor_thread.is_alive():
+            return
+        self.hard_risk_monitor_stop = threading.Event()
+        self.hard_risk_monitor_thread = threading.Thread(
+            target=self._hard_risk_monitor_loop,
+            daemon=True,
+        )
+        self.hard_risk_monitor_thread.start()
+        logger.info("Hard-risk monitor started")
+
+    def _hard_risk_monitor_loop(self) -> None:
+        while self.should_run and self.hard_risk_monitor_stop is not None and not self.hard_risk_monitor_stop.is_set():
+            interval = 2.0
+            try:
+                from init_components import get_components as _get_components
+                from hard_risk_monitor import monitor_spot_hard_stops_once, monitor_futures_hard_stops_once
+                comp = _get_components()
+                settings = getattr(comp, "settings", None) if comp else None
+                if settings is not None:
+                    interval = max(0.5, float(getattr(settings, "hard_risk_monitor_interval_seconds", 2.0) or 2.0))
+                    if bool(getattr(settings, "hard_risk_monitor_enabled", True)) and self.can_monitor_positions():
+                        monitor_spot_hard_stops_once(comp)
+                        # s107: futures had no fast (2s) SL/TP safety net before this —
+                        # only the 3-45min trade cycle checked is_sl_hit()/is_tp_hit(),
+                        # while Binance's own algo order was watched in real time.
+                        monitor_futures_hard_stops_once(comp)
+                self.hard_risk_monitor_last_at = datetime.utcnow()
+                self.hard_risk_monitor_last_error = None
+            except Exception as exc:
+                self.hard_risk_monitor_last_error = str(exc)
+                logger.error("Hard-risk monitor error: %s", exc)
+            if self.hard_risk_monitor_stop.wait(interval):
+                break
+        logger.info("Hard-risk monitor stopped")
+
+    def _start_position_telemetry(self) -> None:
+        if self.position_telemetry_thread and self.position_telemetry_thread.is_alive():
+            return
+        self.position_telemetry_stop = threading.Event()
+        self.position_telemetry_thread = threading.Thread(
+            target=self._position_telemetry_loop,
+            daemon=True,
+        )
+        self.position_telemetry_thread.start()
+        logger.info("Position telemetry watcher started")
+
+    def _position_telemetry_loop(self) -> None:
+        while self.should_run and self.position_telemetry_stop is not None and not self.position_telemetry_stop.is_set():
+            interval = 1.0
+            try:
+                from init_components import get_components as _get_components
+                comp = _get_components()
+                settings = getattr(comp, "settings", None) if comp else None
+                if settings is not None:
+                    interval = max(0.5, float(getattr(settings, "position_telemetry_watcher_interval_seconds", 1.0) or 1.0))
+                    if bool(getattr(settings, "position_telemetry_watcher_enabled", True)):
+                        position_telemetry_watcher.run_telemetry_cycle(comp)
+                self.position_telemetry_last_at = datetime.utcnow()
+                self.position_telemetry_last_error = None
+            except Exception as exc:
+                self.position_telemetry_last_error = str(exc)
+                logger.error("Position telemetry watcher error: %s", exc)
+            if self.position_telemetry_stop.wait(interval):
+                break
+        logger.info("Position telemetry watcher stopped")
+
+    def _delayed_start_event_stream(self, delay_seconds: float = 15.0) -> None:
+        """S105g: wait out the initial startup burst before starting the
+        websocket, then start it (see start_trade_cycle for why)."""
+        try:
+            time.sleep(delay_seconds)
+            self._start_event_stream()
+        except Exception as exc:
+            print(f"[EventStream] delayed start failed: {exc}")
+
+    def _start_event_stream(self) -> None:
+        """S105g: start the real-time Binance User Data Stream (futures + spot).
+
+        This is additive, not a replacement: if it fails to connect for any
+        reason (disabled, dry_run, no credentials, network issue), the system
+        keeps working exactly as before via polling/reconciliation. Errors here
+        must never block or fail trade-cycle startup.
+        """
+        try:
+            if self.event_stream is not None and getattr(self.event_stream, "running", False):
+                return
+            from init_components import get_components as _get_components
+            comp = _get_components()
+            settings = getattr(comp, "settings", None) if comp else None
+            if settings is None or not bool(getattr(settings, "binance_event_stream_enabled", True)):
+                print("[EventStream] disabled or settings unavailable — skipping start")
+                return
+            from binance_event_stream import BinanceEventStream
+
+            def _futures_client_getter():
+                from run_trades import _get_futures_client
+                _c = _get_components()
+                return _get_futures_client(
+                    getattr(_c, "settings", None),
+                    db_client=getattr(_c, "db_client", None),
+                    injected_client=getattr(_c, "futures_client", None),
+                )
+
+            self.event_stream = BinanceEventStream(
+                settings=settings,
+                futures_client_getter=_futures_client_getter,
+                db_client=getattr(comp, "db_client", None),
+            )
+            started = self.event_stream.start()
+            print(f"[EventStream] start attempted: connected={started}")
+        except Exception as exc:
+            print(f"[EventStream] failed to start (falling back to polling only): {exc}")
+
+    def _stop_event_stream(self) -> None:
+        try:
+            if self.event_stream is not None:
+                self.event_stream.stop()
+        except Exception as exc:
+            print(f"[EventStream] stop error: {exc}")
+
     def _start_staged_entry_intra_cycle(self) -> None:
         """Start a background thread that runs intra-cycle staged-entry checks.
 
@@ -651,17 +831,63 @@ class Orchestrator:
                         break
                     continue
 
-                # Sleep interval = cycle length / checks_per_cycle (minimum 30s).
-                cycle_min = self.current_cycle_minutes or 5
-                checks = max(1, int(cfg.get('checks_per_cycle', 1)))
-                sleep_seconds = max(30, int(cycle_min * 60 / checks))
+                # Watcher mode: tight, fixed interval; legacy mode: cycle-based.
+                if cfg.get('intra_mode') == 'watcher':
+                    sleep_seconds = max(5, int(cfg.get('watcher_interval_seconds', 10)))
+                else:
+                    cycle_min = self.current_cycle_minutes or 5
+                    checks = max(1, int(cfg.get('checks_per_cycle', 1)))
+                    sleep_seconds = max(30, int(cycle_min * 60 / checks))
 
                 validated = staged_entry.perform_intra_cycle_check(
                     db_client, client, settings, regime_mode, news_client=news_client
                 )
                 if validated:
-                    self.trade_cycle_wake_event.set()
-                    logger.info("Staged-entry validation woke trade cycle: %s", validated)
+                    # Fast-path: execute immediately from this thread if enabled
+                    _fp_enabled = getattr(settings, 'staged_entry_fast_path_enabled', True)
+                    _fp_executed = False
+                    if _fp_enabled and client:
+                        try:
+                            openable = staged_entry.get_openable_candidates(
+                                db_client, regime_mode, settings=settings,
+                            )
+                            if openable:
+                                from run_trades import _execute_validated_fast_path
+                                portfolio_mgr = getattr(comp, 'portfolio_manager', None)
+                                position_mgr = getattr(comp, 'position_manager', None)
+                                futures_client = getattr(comp, 'futures_client', None)
+                                regime_obj = None
+                                try:
+                                    from market_regime import get_regime
+                                    regime_obj = get_regime(client, settings=settings)
+                                except Exception:
+                                    pass
+                                # Watcher mode must not block behind a long-running main cycle.
+                                # Try to acquire the lock briefly; retry next tick if busy.
+                                _lock_ok = self._trade_cycle_lock.acquire(timeout=5)
+                                if not _lock_ok:
+                                    logger.info("[FastPath] trade cycle lock busy, retry next tick for %s", validated)
+                                    continue
+                                try:
+                                    orders = _execute_validated_fast_path(
+                                        client, settings, regime_mode, regime_obj,
+                                        db_client, portfolio_mgr, position_mgr,
+                                        openable, futures_client=futures_client,
+                                    )
+                                    if orders:
+                                        _fp_executed = True
+                                        logger.info(
+                                            "[FastPath] Executed %d orders from intra-cycle: %s",
+                                            len(orders),
+                                            [o.get("symbol") for o in orders if isinstance(o, dict)],
+                                        )
+                                finally:
+                                    self._trade_cycle_lock.release()
+                        except Exception as _fp_err:
+                            logger.warning("[FastPath] intra-cycle execution error: %s", _fp_err)
+                    if not _fp_executed and cfg.get('intra_mode') != 'watcher':
+                        self.trade_cycle_wake_event.set()
+                        logger.info("Staged-entry validation woke trade cycle: %s", validated)
                 if self.staged_entry_intra_stop.wait(sleep_seconds):
                     break
             except Exception as e:
@@ -682,6 +908,18 @@ class Orchestrator:
             self.staged_entry_intra_stop.set()
         if self.staged_entry_intra_thread:
             self.staged_entry_intra_thread.join(timeout=2)
+
+        if self.hard_risk_monitor_stop:
+            self.hard_risk_monitor_stop.set()
+        if self.hard_risk_monitor_thread:
+            self.hard_risk_monitor_thread.join(timeout=2)
+
+        if self.position_telemetry_stop:
+            self.position_telemetry_stop.set()
+        if self.position_telemetry_thread:
+            self.position_telemetry_thread.join(timeout=2)
+
+        self._stop_event_stream()
 
         if self.trade_cycle_thread:
             self.trade_cycle_thread.join(timeout=5)
@@ -708,6 +946,20 @@ class Orchestrator:
             "analysis_cycle_running": self.analysis_cycle_thread.is_alive() if self.analysis_cycle_thread else False,
             "learning_cycle_running": self.learning_cycle_thread.is_alive() if self.learning_cycle_thread else False,
             "staged_entry_intra_cycle_running": self.staged_entry_intra_thread.is_alive() if self.staged_entry_intra_thread else False,
+            "hard_risk_monitor_running": self.hard_risk_monitor_thread.is_alive() if self.hard_risk_monitor_thread else False,
+            "hard_risk_monitor_last_at": self.hard_risk_monitor_last_at.isoformat() if self.hard_risk_monitor_last_at else None,
+            "hard_risk_monitor_last_error": self.hard_risk_monitor_last_error,
+            "position_telemetry_running": self.position_telemetry_thread.is_alive() if self.position_telemetry_thread else False,
+            "position_telemetry_last_at": self.position_telemetry_last_at.isoformat() if self.position_telemetry_last_at else None,
+            "position_telemetry_last_error": self.position_telemetry_last_error,
+            **(self.event_stream.health() if self.event_stream is not None else {
+                "event_stream_running": False,
+                "event_stream_connected": False,
+                "event_stream_last_event_at": None,
+                "event_stream_last_futures_event_at": None,
+                "event_stream_last_spot_event_at": None,
+                "event_stream_last_error": None,
+            }),
             "portfolio_manager_active": self.portfolio_manager is not None,
             "position_manager_active": self.position_manager is not None,
             "backtester_active": self.backtester is not None,

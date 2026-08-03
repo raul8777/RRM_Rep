@@ -1,7 +1,8 @@
 import os, re, json, sys, ast
 from collections import defaultdict
+from pathlib import Path
 
-ROOT = '/app'
+ROOT = str(Path(__file__).resolve().parent)
 sys.path.insert(0, ROOT)
 from config_helpers import _PARAM_DEFAULTS
 
@@ -129,7 +130,7 @@ def find_getattr_defaults(root):
                     expected = CANON.get(attr)
                     if parsed is not None and parsed != expected:
                         severity = 'critical'
-                results.append((fp.replace(root + '/', ''), attr, default.strip() if default else '<no default>', line, severity))
+                results.append((os.path.relpath(fp, root).replace(os.sep, '/'), attr, default.strip() if default else '<no default>', line, severity))
     return results
 
 def find_hardcodes(root):
@@ -149,7 +150,7 @@ def find_hardcodes(root):
                 name, val = m.group(1), m.group(2).strip()
                 if name in ('FAPI_BASE', 'MAX_SHORTS', 'LEVERAGE_MAX', 'FUNDING_LIMIT', '_PRICE_CACHE_TTL'):
                     continue
-                results.append((fp.replace(root + '/', ''), name, val, src.count('\n', 0, m.start())+1))
+                results.append((os.path.relpath(fp, root).replace(os.sep, '/'), name, val, src.count('\n', 0, m.start())+1))
     return results
 
 getattr_res = find_getattr_defaults(ROOT)
@@ -157,7 +158,7 @@ by_file = defaultdict(list)
 for r in getattr_res:
     by_file[r[0]].append(r)
 
-with open('/app/audit_getattr.txt', 'w') as out:
+with open(os.path.join(ROOT, 'audit_getattr.txt'), 'w') as out:
     out.write('=== getattr(settings, ...) audit ===\n')
     out.write(f'Total: {len(getattr_res)} occurrences\n')
     critical = [r for r in getattr_res if r[4] == 'critical']

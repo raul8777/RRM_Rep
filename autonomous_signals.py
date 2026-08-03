@@ -8,6 +8,8 @@ from typing import List, Dict, Optional
 from binance_client import BinanceClient
 from technical_indicators import TechnicalIndicators
 import peak_quality
+from external_data_client import get_external_data_client
+from technical_graph_analyst import extract_graph_features
 import logging
 
 logger = logging.getLogger(__name__)
@@ -218,6 +220,8 @@ class AutonomousSignalGenerator:
 
             analysis = TechnicalIndicators.analyze_signal(closes, highs, lows, volumes)
             logger.info(f"Analysis result for {symbol}: {analysis['signal']} (strength: {analysis['strength']})")
+            if not isinstance(analysis.get('indicators'), dict):
+                analysis['indicators'] = {}
 
             # ── Load learned indicator weights (GAP-A) ────────────────────────
             # Scale boosts/penalties proportionally to the empirical importance of
@@ -422,11 +426,27 @@ class AutonomousSignalGenerator:
                     analysis['strength'] = max(float(analysis.get('strength', 0.5)), 0.70)
                     analysis['reason'] += ' [SR breakout buy]'
                     logger.info(f"SR BREAKOUT BUY {symbol}: zone={_sr_zone_pos:.2f}")
-            if analysis.get('support_breakdown_sell') and float(analysis.get('sr_zone_position', 0.5)) >= 0.55:
-                analysis['signal'] = 'SELL'
-                analysis['strength'] = max(float(analysis.get('strength', 0.5)), 0.65)
-                analysis['reason'] += ' [SR breakdown sell]'
-                logger.info(f"SR BREAKDOWN SELL {symbol}")
+            if analysis.get('signal') != 'SELL':
+                _sr_zone_pos = float(analysis.get('sr_zone_position', 0.5))
+                # Breakdown is a continuation SELL: price already closed below a
+                # confirmed support level, which only happens in the LOWER part
+                # of the range (mirror of support_breakout_buy's zone>=0.55
+                # gate). The previous `>= 0.55` gate here was backwards — it
+                # required the breakdown to also be near resistance, which is
+                # geometrically near-impossible (breakdown implies zone near 0)
+                # and is why support_breakdown_sell never promoted a signal.
+                if analysis.get('support_breakdown_sell') and _sr_zone_pos <= 0.45:
+                    analysis['signal'] = 'SELL'
+                    analysis['strength'] = max(float(analysis.get('strength', 0.5)), 0.65)
+                    analysis['reason'] += ' [SR breakdown sell]'
+                    logger.info(f"SR BREAKDOWN SELL {symbol}: zone={_sr_zone_pos:.2f}")
+                elif analysis.get('resistance_bounce_sell') and _sr_zone_pos >= 0.55:
+                    # Rejection SELL: mirror of support_bounce_buy — a reversal
+                    # candle confirmed near resistance becomes an actionable SELL.
+                    analysis['signal'] = 'SELL'
+                    analysis['strength'] = max(float(analysis.get('strength', 0.5)), 0.65)
+                    analysis['reason'] += ' [SR rejection sell]'
+                    logger.info(f"SR REJECTION SELL {symbol}: zone={_sr_zone_pos:.2f}")
 
             # Always compute vol_spike ratio so signal payload always has a real value
             # (M4 breakout block may overwrite with its own ratio if breakout detected)
@@ -598,6 +618,28 @@ class AutonomousSignalGenerator:
                 logger.debug(f"peak_quality features failed for {symbol}: {_pq_err}")
                 analysis['peak_quality_features'] = {}
 
+            # ── C10: technical chart analyst features ────────────────────────
+            try:
+                _graph = extract_graph_features(klines)
+                analysis.update(_graph)
+                analysis['indicators'].update(_graph)
+            except Exception as _graph_err:
+                logger.debug(f"technical_graph_analyst failed for {symbol}: {_graph_err}")
+
+            # ── C9: optional external data enrichments (fail-open) ───────────
+            try:
+                _cfg = getattr(self, '_settings', None) or getattr(self, 'settings', None)
+                _external = get_external_data_client(settings=_cfg).get_market_features(symbol)
+                analysis.update(_external)
+                analysis['indicators'].update({
+                    'funding_rate_annualized': _external.get('funding_rate_annualized'),
+                    'oi_change_1h_pct': _external.get('oi_change_1h_pct'),
+                    'coinbase_premium_pct': _external.get('coinbase_premium_pct'),
+                    'liquidation_imbalance_1h': _external.get('liquidation_imbalance_1h'),
+                })
+            except Exception as _ext_err:
+                logger.debug(f"external data enrichment failed for {symbol}: {_ext_err}")
+
             # ── Store in cache ────────────────────────────────────────────────
             AutonomousSignalGenerator._cache_signal(symbol, analysis)
 
@@ -727,8 +769,14 @@ class AutonomousSignalGenerator:
             ]
             short_count = 0
             for _sig in buy_signals:
-                _zone = float(_sig.get('sr_zone_position', 0.5) or 0.5)
-                _rsi = float(_sig.get('rsi', 50.0) or 50.0)
+                # s106b: explicit None-check, not `or` — 0.0 is a legitimate value
+                # (e.g. price sitting exactly at support) that `x or default`
+                # would silently treat as missing and replace with the neutral
+                # default, corrupting the strongest possible SR/RSI signal.
+                _zone_raw = _sig.get('sr_zone_position')
+                _zone = float(_zone_raw) if _zone_raw is not None else 0.5
+                _rsi_raw = _sig.get('rsi')
+                _rsi = float(_rsi_raw) if _rsi_raw is not None else 50.0
                 _short_setup = bool(
                     _sig.get('signal') in ('SELL', 'HOLD')
                     or _sig.get('support_breakdown_sell') or _sig.get('sr_breakdown')
@@ -804,7 +852,9 @@ class AutonomousSignalGenerator:
 
             if _regime == 'RANGE_SCALP':
                 _routing_intent = str(signal.get('routing_intent') or '').upper()
-                _zone = float(signal.get('sr_zone_position', 0.5) or 0.5)
+                # s106b: explicit None-check, not `or` — see comment above.
+                _zone_raw = signal.get('sr_zone_position')
+                _zone = float(_zone_raw) if _zone_raw is not None else 0.5
                 _short_score = (
                     120.0 * float(signal.get('signal') == 'SELL')
                     + 100.0 * float(bool(signal.get('support_breakdown_sell') or signal.get('sr_breakdown')))

@@ -3,7 +3,7 @@ title: "Calibración del ciclo de vida de una operación"
 type: canonical-memory
 tags: ["lifecycle", "exit_pipeline", "SSO", "PRS", "UG", "peak_capture", "trailing", "breakeven", "spot", "futures", "profit_preservation", "loss_control"]
 created_at: 2026-07-23
-updated_at: 2026-07-24
+updated_at: 2026-08-03 (s118)
 source_file: "C:\\Users\\raul8\\.windsurf\\plans\\calibrar-ciclo-vida-52fe5d.md"
 ---
 
@@ -16,6 +16,425 @@ Documento vivo que consolida el diseño actual del ciclo de vida de una posició
 **Fase:** calibración del ciclo de vida de posiciones abiertas.
 **Objetivo:** documentar el pipeline actual de salida, diagnosticar por qué las últimas 48h generaron pérdidas grandes / ganancias mínimas, y proponer ajustes canónicos a los módulos de exit (SSO, PRS, UG, PredExit, trailing, breakeven, hard SL/TP) sin romper la arquitectura existente.
 **Alcance:** SPOT y FUTURES, con paridad de criterios salvo que la mecánica de mercado justifique una diferencia documentada.
+
+## Actualización s118 — el circuit-breaker de portafolio de s117 pausaba "a ciegas"; corregido a pausa inteligente que lee la causa (2026-08-03)
+
+### Origen
+
+Feedback directo del usuario tras desplegar s117: *"espera porque vas a pausar el sistema ahora? que no esta ya arreglado el problema? dijiste que se habia estabilizado BTC. no hagas estupideces sin preguntar."* — y luego: *"no debes pausar solo por pausar, debe ser un pausado inteligente, leer la causa y revisar si conviene pausar o no."*
+
+### Problema con el diseño original de s117
+
+`_portfolio_drawdown_circuit_breaker` pausaba puramente por `SUM(pnl) <= -umbral` en una ventana fija de 120 min — un contador que **solo decae por tiempo**, sin mirar si la condición que causó la pérdida sigue activa. Efecto: aunque BTC ya se hubiera estabilizado (verificado: solo +0.20% en los 30 min previos al fix, muy por debajo de cualquier umbral de alerta), el sistema **habría permanecido pausado hasta 2 horas** después de la última pérdida grande, solo porque esa pérdida seguía "dentro de la ventana" de la suma.
+
+### Fix — pausa en 2 pasos: síntoma + causa
+
+`_portfolio_drawdown_circuit_breaker` ahora funciona en 2 fases:
+1. **Síntoma** (igual que s117): ¿el PnL realizado de la ventana sigue por debajo del umbral? Si no, no hay nada que evaluar.
+2. **Causa** (nuevo): si el síntoma está presente, identifica qué lado domina la pérdida (`realized_short` vs `realized_long`, vía `side='SELL'/'BUY'` en `trades_closed`) y **revisa el momentum reciente de BTC** (`portfolio_drawdown_recheck_momentum_minutes`, default 30 min) en la dirección que importaría: si el libro perdió por SHORT, ¿BTC sigue subiendo ahora mismo? Si perdió por LONG, ¿BTC sigue bajando? Solo si la condición adversa **sigue activa** (`portfolio_drawdown_recheck_momentum_pct`, default 0.5%) se pausa. Si el mercado ya se estabilizó, **no pausa**, aunque la suma de la ventana siga negativa.
+- Fail-safe conservador: si no hay `client` disponible para re-chequear el momentum, o la consulta de klines falla, pausa (mismo comportamiento que s117) — nunca falla hacia "no pausar" por un error técnico.
+- Verificado con datos reales al momento del fix: PnL realizado seguía en -$184.74 (dominado 100% por SHORT), pero BTC solo se movió +0.20% en los 30 min previos (vs. umbral de 0.5%) — con la lógica nueva, el sistema **no pausa**, comportamiento correcto y verificado antes de desplegar.
+
+### Decisiones de diseño
+
+- No se eliminó el circuit-breaker, se corrigió su criterio de decisión — la protección contra pérdidas correlacionadas activas sigue intacta (ver test `test_portfolio_drawdown_pauses_when_loss_and_btc_still_adverse_for_shorts`).
+- Se usó BTC como proxy de "condición de mercado adversa" en vez de recalcular el momentum de cada símbolo perdedor individualmente — consistente con el resto del sistema, que ya usa BTC como señal macro (`futures_no_short_btc_*_threshold`).
+
+### Validación
+
+- Tests actualizados/nuevos en `tests/test_s113_entry_pipeline.py`: pausa cuando la causa sigue activa (SHORT y LONG), **no pausa cuando el mercado ya se estabilizó** (el escenario exacto reportado por el usuario), fail-safe sin cliente.
+- Suite completa: 590/593 passed (3 fallas preexistentes, independientes).
+- Desplegado — `system_state=RUNNING`, 4 posiciones sobrevivieron el restart.
+
+### Pendiente explícito
+
+- Calibrar `portfolio_drawdown_recheck_momentum_minutes`/`_pct` con más datos de producción.
+- Confirmar en logs de producción (`[Portfolio/Drawdown] ... NOT pausing (cause has passed)`) que el comportamiento en vivo coincide con lo verificado manualmente antes del despliegue.
+
+---
+
+## Actualización s117 — gate de BTC-momentum replicado en la ruta staged + circuit-breaker de PnL de portafolio (2026-08-03)
+
+### Origen
+
+Continuación directa de s116: reconstruí la línea de tiempo completa desde las 7am hora local (13:00 UTC) y encontré que el daño real fue mayor (12 cierres, 10 pérdidas/2 ganancias, -$221.77 neto) y que **el sistema siguió abriendo SHORTs nuevos activamente durante toda la cascada** (`GIGGLEUSDT` a las 14:14, en el mismo minuto que 3 pérdidas seguidas; `ICPUSDT`, `MIRAUSDT`, `ADAUSDT` después). Se cerró manualmente `INJUSDT` (única posición en riesgo inmediato real, a 0.38% de su SL) antes de implementar los fixes, con confirmación explícita del usuario.
+
+### Diagnóstico — ninguno de los mecanismos existentes (ni los de s115/s116) ataca esta causa
+
+- El gate de BTC-momentum (`BTC_MOMENTUM`/`BTC_1H_BOUNCE`/`BTC_3H_RALLY`) existe desde antes de esta sesión pero **solo en las rutas legacy** (`_buy_top_symbols`, `_maybe_open_range_scalp_shorts`, `_maybe_open_sr_pool_shorts`) — nunca en la ruta staged fast-path, que fue el origen de 6 de las 7 aperturas de la cascada de hoy.
+- El fix de s116 (mass-SL) es **reactivo**: solo actúa después de 3+ pérdidas ya ocurridas. No hay ningún mecanismo **preventivo** que reaccione a "el mercado en general se está moviendo en contra" antes de que se acumule el daño.
+- `circuit_breaker_enabled`/`_circuit_breaker_check` (el único circuit-breaker de propósito general que existía) reacciona **solo a fallas técnicas de API, explícitamente no a pérdidas de mercado** (así lo dice su propio docstring) — confirmando que nunca existió una red de seguridad basada en PnL real.
+
+### Cambios aplicados
+
+1. **`run_trades.py::_btc_momentum_blocks_new_shorts`** (nueva): replica los 3 chequeos de BTC-momentum de la ruta legacy, calculada una sola vez por lote (no por candidato) para eficiencia. Conectada en `_execute_validated_fast_path` justo antes de reservar capital para un SHORT. Config: `futures_staged_btc_momentum_gate_enabled` (default `True`), reutiliza los umbrales ya existentes (`futures_no_short_btc_4h_threshold`, `_1h_threshold`, `_3h_threshold`).
+2. **`run_trades.py::_portfolio_drawdown_circuit_breaker`** (nueva): pausa **todas** las aperturas nuevas (SPOT + FUTUROS, todos los regímenes) si el PnL **realizado** del portafolio completo cayó más de `portfolio_drawdown_max_loss_usd` (default $150) dentro de una ventana móvil (`portfolio_drawdown_window_minutes`, default 120 min). Deliberadamente más simple que un cálculo de PnL no realizado en tiempo real (evita fetches de precio en vivo por cada posición abierta en el hot path) — captura directamente el síntoma que importa. Conectada como Gate 0 en `_execute_validated_fast_path` (staged) y al inicio de `_buy_top_symbols` (legacy) — cobertura completa de ambas rutas de apertura.
+3. Verificado antes de desplegar: el PnL realizado real de los últimos 120 min al momento del despliegue era **-$184.74**, ya por debajo del umbral de -$150 — el circuit-breaker se activa inmediatamente al desplegar, pausando toda apertura nueva hasta que la ventana se recupere.
+
+### Decisiones de diseño
+
+- El circuit-breaker de portafolio usa solo PnL **realizado**, no marca-a-mercado — más simple, más rápido, sin dependencia de fetches de precio en vivo por posición, y ya suficiente para capturar el patrón real observado (una racha de cierres realizados negativos).
+- Se aplicó a **ambas** rutas de apertura (staged y legacy) desde el principio, a diferencia del gate de BTC-momentum (que por ahora solo cubre la ruta staged, ya que la legacy ya lo tenía) — el circuit-breaker de portafolio es nuevo en ambos lados por igual.
+- No se implementó cierre proactivo de posiciones ya abiertas al detectar el drawdown (alcance mayor, requiere diseño propio) — el circuit-breaker de esta sesión solo previene *nuevas* aperturas.
+
+### Validación
+
+- Tests nuevos en `tests/test_s113_entry_pipeline.py`: 11 casos (`_btc_momentum_blocks_new_shorts` con velas 4h/1h/3h reales y gate desactivado; `_portfolio_drawdown_circuit_breaker` con bloqueo/no-bloqueo/desactivado/sin-db/fallo-de-query).
+- Suite completa: 587/590 passed (3 fallas preexistentes, independientes).
+- Desplegado — `system_state=RUNNING`, 4 posiciones sobrevivieron el restart (`INJUSDT` cerrada manualmente antes del despliegue, -$14.19, mejor que dejarla llegar a su SL completo).
+
+### Pendiente explícito
+
+- Confirmar en los logs de producción que el circuit-breaker de portafolio efectivamente pausó las aperturas en el primer ciclo tras el despliegue (esperado dado que -$184.74 < -$150, pero no verificado en vivo dentro de esta sesión por la cadencia de ciclos).
+- Calibrar `portfolio_drawdown_max_loss_usd`/`_window_minutes` con más datos de producción.
+- Evaluar cierre proactivo de posiciones abiertas cuando se detecta un drawdown de portafolio (alcance mayor, pendiente).
+
+---
+
+## Actualización s116 — circuit-breaker Mass-SL nunca se disparó en una cascada real de 8 pérdidas/2h (BTC +2%) (2026-08-03)
+
+### Origen
+
+Usuario reportó "puras pérdidas miserables" desde las 7am hora local. Verificado: BTC subió de $62,670 a $63,956 (+2.05%) entre 13:00-14:45 UTC, arrastrando casi todos los SHORT del portafolio (100% del libro era SHORT). 8 de 10 cierres en esa ventana fueron pérdidas, -$183.36 neto.
+
+### Causa raíz — el circuit-breaker existía pero nunca se activó, por 2 razones + 1 gap de cobertura
+
+1. **Filtro de razón demasiado estricto**: `_sl_count_this_cycle` (PB2, `run_trades.py` ~línea 11800) solo contaba `reason == 'stop_loss'` exacto. De las 8 pérdidas, solo 2 (`LAUSDT`, `RIFUSDT`) tenían esa razón exacta — el resto (`stop_loss_binance` ×3, `binance_unidentified_close` ×2, `adverse_signal_exit` ×1) eran invisibles para el contador. **Mismo patrón de bug ya corregido en s110 para `_consecutive_sl_count` (por símbolo), nunca aplicado a este contador (de portafolio).**
+2. **Ventana demasiado angosta**: el contador se reseteaba a 0 en cada ciclo (~3-5 min) — nunca acumulaba across una cascada que se desarrolló a lo largo de **2 horas**.
+3. **Gap de cobertura**: aunque el cooldown se hubiera disparado correctamente, **la ruta staged fast-path (`_execute_validated_fast_path`, la dominante para RANGE_SCALP desde s110) nunca verificaba `_FUTURES_MASS_SL_COOLDOWN_UNTIL`** — solo las rutas legacy (`_buy_top_symbols`, `_maybe_open_range_scalp_shorts`, `_maybe_open_sr_pool_shorts`) lo hacían. 6 de las 7 posiciones de la cascada de hoy abrieron vía `STAGED_SHORT_DIRECTION` — la ruta sin protección.
+4. Este riesgo ya estaba documentado sin resolver: hipótesis 6 de este mismo documento ("Correlación / mass-SL... la pausa global no es suficiente") y tarea C7 del checklist original ("si múltiples posiciones cierran SL en la misma **hora**, activar pausa global") — nunca completamente implementada; lo que existía (PB2) era una versión más débil (por ciclo, no por hora).
+
+### Cambios aplicados
+
+1. **`run_trades.py::_is_losing_close_dict`** (nueva, mirror de `_is_losing_close` de s110 pero para los dicts que retorna `check_positions()`): cualquier razón con PnL negativo cuenta, no solo `stop_loss` exacto. Conectada en el conteo por-ciclo existente.
+2. **`run_trades.py::_mass_sl_rolling_window_count`** (nueva): cuenta pérdidas reales en `trades_closed` en una ventana móvil real (`futures_mass_sl_window_minutes`, default 75 min), no reseteada por ciclo. El circuit-breaker ahora dispara si **cualquiera** de los dos conteos (mismo ciclo O ventana móvil) alcanza `futures_mass_sl_threshold`.
+3. **`_execute_validated_fast_path`**: agregado el chequeo de `_FUTURES_MASS_SL_COOLDOWN_UNTIL` (antes ausente) justo antes de reservar capital para un SHORT — cierra el gap de cobertura de la ruta staged.
+
+### Decisiones de diseño
+
+- Se mantuvo el conteo por-ciclo original (no se eliminó) — se usa como disparador OR junto con la ventana móvil, para no perder la detección rápida de un evento verdaderamente simultáneo (múltiples SL en el mismo tick de precio).
+- No se tocó el gate de BTC-momentum (ausente en la ruta staged, identificado en el mismo análisis) — queda como tarea separada, de menor prioridad que este fix dado que el circuit-breaker de portafolio cubre el síntoma de forma más general (cualquier causa de pérdidas correlacionadas, no solo BTC).
+
+### Validación
+
+- Tests nuevos en `tests/test_s113_entry_pipeline.py`: 7 casos (`_is_losing_close_dict` con razones variadas incluyendo las de la cascada real, `_mass_sl_rolling_window_count` con conteo correcto/sin db/con error).
+- Suite completa: 578/581 passed (3 fallas preexistentes, independientes).
+- Desplegado — `system_state=RUNNING`, 5 posiciones sobrevivieron el restart.
+
+### Pendiente explícito
+
+- Calibrar `futures_mass_sl_window_minutes` (default 75 min) y `futures_mass_sl_threshold` (default 3) con más datos de producción — la calibración actual es un punto de partida razonable, no validado estadísticamente.
+- Replicar el gate de BTC-momentum (`BTC_MOMENTUM`/`BTC_1H_BOUNCE`/`BTC_3H_RALLY`) en la ruta staged — mismo patrón de gap de cobertura, pendiente como mejora complementaria.
+- Evaluar si el cooldown debería también cerrar proactivamente posiciones SHORT ya abiertas cuando se detecta una cascada (hoy solo bloquea nuevas aperturas) — alcance mayor, requiere diseño propio.
+
+---
+
+## Actualización s114 — fix real de la pierna fantasma SL=TP=entry (s112 quedó solo diagnosticado, no corregido) (2026-08-03)
+
+### Origen
+
+El usuario preguntó por qué `take_profit`/`sso_target_contribution` tomaban ganancias muy pequeñas en 24h. Medición: `take_profit` promedió solo 0.229%/$0.63 en 24h (5 cierres) — verificado que los 5 tenían `order_id` con prefijo `RECONCILE_` (la firma exacta del bug diagnosticado en s112 pero nunca corregido, porque la sesión pivotó al plan s113). Confirmado con un caso nuevo real: `EDENUSDT` cerró con **pérdida** (-0.08%) pero etiquetado como `take_profit` — prueba definitiva de que no es toma de ganancias real, es el artefacto de reconciliación.
+
+### Fix implementado
+
+`binance_truth_guard.py::auto_reconcile_futures` (rama `BINANCE_MISMATCH_RUNTIME_MISSING`):
+- Reemplazado `_pos.get("stopLossPrice")`/`_pos.get("takeProfitPrice")` (campos inexistentes en `/fapi/v2/positionRisk`, siempre 0.0 → colapsaban SL/TP al precio de entrada) por: (1) valores por defecto sanos basados en el precio de entrada (3%/6%, mismas proporciones que `_sync_open_positions`), (2) sobrescritos por el trigger real de la orden algo (`STOP_MARKET`/`TAKE_PROFIT_MARKET`) vía `/fapi/v1/openAlgoOrders` cuando existe, igual que la ruta de sincronización ya correcta.
+- **Guard defensivo nuevo**: si `sl`/`tp` terminan iguales entre sí o iguales al precio de entrada, la importación se descarta (`skipped`, razón `sl_tp_collapsed_to_entry_guard`) en vez de persistir una posición corrupta.
+- `_smart_meta['learning_eligible'] = False` en las posiciones importadas por esta ruta — pero se encontró que `_save_futures_closed` **ignoraba ese campo y hardcodeaba `learning_eligible=True` siempre**; corregido para leer `pos._smart_meta.get('learning_eligible', True)`.
+
+### Validación
+
+- Tests nuevos en `tests/slow/test_position_reconciliation.py`: SL/TP nunca colapsan a la entrada (con o sin fallback), la orden algo real gana sobre el default cuando existe, dirección correcta (SL arriba/TP abajo para SHORT). 17/17 pasan (15 preexistentes + 2 nuevos).
+- Suite completa: 563/566 (mismas 3 fallas preexistentes, independientes).
+- Desplegado — `system_state=RUNNING`, 5 posiciones sobrevivieron el restart.
+
+### Pendiente
+
+- Medir en 7-14 días si el patrón `RECONCILE_` + cierre en segundos desaparece.
+- El `meta_payload` de `_save_futures_closed` sí embebe `smart_meta` completo (incluyendo `synthetic`/`learning_eligible`) anidado bajo `metadata->'smart_meta'` — pero el caso auditado en s112 (`ONDOUSDT` id 1400) llegó por la ruta `ghost_reconciled_close`, que construye su metadata de forma distinta y no preservó `synthetic`. No se investigó esa ruta en esta sesión — queda pendiente si se sigue viendo el flag perdido en cierres futuros.
+
+---
+
+## Actualización s112 — auditoría de todos los cierres 48h: pierna fantasma SL=TP=entry (4 instancias) + duplicado de cierre por horas (3 instancias) (2026-08-02/03)
+
+### Origen: auditoría solicitada de TODOS los cierres de las últimas 48h, tras encontrar el caso ONDOUSDT (ver s110/s111, sección de análisis SR)
+
+El usuario pidió repetir el mismo análisis forense (aplicado inicialmente solo a `ONDOUSDT`) sobre **todos** los cierres de 48h, para ver si era un caso aislado. No lo fue.
+
+### Hallazgo 1 — pierna fantasma con `sl_price == tp_price == entry_price` (4 instancias, no 1)
+
+Mismo patrón exacto en `DOGEUSDT` (1-ago 19:49:43→19:49:46, +$1.34), `WIFUSDT` (1-ago 23:34:05→23:34:09, +$6.06), `TAOUSDT` (2-ago 23:39:44→23:39:47, +$0.19) y `ONDOUSDT` (2-ago 23:55:17→23:55:21, +$4.22): todas con `order_id` prefijo `RECONCILE_`, cerradas por `take_profit` en 2.7-4.0 segundos.
+
+**Causa raíz** (`binance_truth_guard.py::auto_reconcile_futures`, rama `BINANCE_MISMATCH_RUNTIME_MISSING`, línea ~569-570):
+```python
+_sl = _safe_float(_pos.get("stopLossPrice"), 0.0) or _entry
+_tp = _safe_float(_pos.get("takeProfitPrice"), 0.0) or _entry
+```
+El objeto de posición de Binance (`/fapi/v2/positionRisk`) no tiene campos `stopLossPrice`/`takeProfitPrice` (viven en órdenes algo separadas, `/fapi/v1/openAlgoOrders`) — la llamada siempre devuelve 0.0, y el `or _entry` de Python fija ambos al precio de entrada. La siguiente observación de precio en cualquier dirección satisface trivialmente "TP alcanzado". `_sync_open_positions` (la ruta "hermana" de sincronización al arrancar) ya resuelve esto correctamente leyendo `openAlgoOrders`; esta ruta de `binance_truth_guard.py` reimplementó el mismo problema sin reutilizar esa lógica ya probada — mismo patrón de "rutas de reconciliación independientes sin contexto compartido" documentado en s105f/s105h más abajo.
+
+**Impacto verificado con velas reales:** `TAOUSDT` siguió cayendo de 192.28 a 190.56 (-0.9% adicional) en la hora siguiente; `ONDOUSDT` de 0.378 a 0.3714 (-1.75% adicional) en 20 minutos. Las 4 cerraron "a favor" por casualidad (el precio ya venía moviéndose en la dirección correcta al crearse la pierna fantasma) — con la misma probabilidad podrían haber cerrado en pérdida instantánea, ya que el diseño no depende de nada real, solo de en qué dirección se movió el siguiente tick.
+
+### Hallazgo 2 — duplicado de cierre por horas (variante distinta del caso HYPERUSDT de 47ms)
+
+`ONDOUSDT` (ids 1398/1400, separados 32min), `WIFUSDT` (ids 1377/1387, separados 4h) y `DOGEUSDT` (ids 1372/1386, separados 3h44m) — cada uno cuenta el mismo PnL 2 veces en `trades_closed`. A diferencia de la duplicación de `HYPERUSDT` (2 hilos procesando la misma fila en 47ms, ya corregido con el claim atómico de s110), aquí la fila de `trades_open` huérfana (creada por el Hallazgo 1) sobrevive hasta el **siguiente restart del contenedor**, momento en que `_sync_open_positions`/Ghost-L1/L2 la encuentra de nuevo (ya no existe en Binance) y la cierra una segunda vez. El claim atómico de s110 no cubre este caso porque no es una carrera entre 2 procesos simultáneos — es la misma fila, procesada correctamente dos veces en momentos distintos porque nunca debió existir.
+
+### Hallazgo 3 (confirmación retroactiva) — `binance_safety_close` con PnL=$0 enmascarado (ya corregido en s110, Fase 1)
+
+`HYPERUSDT` (id 1389, -$29.05 real vs $0 registrado) y `ALLOUSDT` (id 1383, -$22.22 real vs $0 registrado) — ambos anteriores al fix de hoy. Sin acción adicional requerida; confirma que el fix era necesario.
+
+### Cambios pendientes de implementar (no aplicados aún — pendiente confirmación del usuario)
+
+1. `binance_truth_guard.py::auto_reconcile_futures` (rama `BINANCE_MISMATCH_RUNTIME_MISSING`): reemplazar el cálculo de `_sl`/`_tp` reutilizando la lógica de `openAlgoOrders` ya existente en `_sync_open_positions`, en vez de leer campos inexistentes del objeto de posición.
+2. Guard defensivo: rechazar/alertar si se intenta persistir una `FuturesPosition` con `sl_price == tp_price` o con cualquiera de los dos igual a `entry_price` — nunca debe pasar silenciosamente.
+3. Verificar que `learning_eligible=False` se propague para estos cierres sintéticos (igual que Ghost-L1/L2), para no contaminar entrenamiento de modelos con resultados de azar.
+4. Confirmar si `_smart_meta["synthetic"]=True` (puesto al crear la pierna fantasma) sobrevive hasta `trades_closed.metadata` — en el caso auditado (`ONDOUSDT` id 1400) no apareció, solo `ghost_reconciled: true`.
+
+### Validación pendiente
+
+- Tests nuevos para `auto_reconcile_futures` con el fix de SL/TP real, y para el guard defensivo de `sl==tp`.
+- Medir en 7-14 días si el patrón `RECONCILE_` + cierre en <10s desaparece por completo.
+
+---
+
+## Actualización s107 — Hard SL/TP (Binance) vs System SL/TP (software): el margen de seguridad colapsaba en el primer trailing, y no había monitoreo rápido para futuros (2026-08-01)
+
+### Contexto / pregunta del usuario
+
+El operador preguntó, tras revisar dos cierres `binance_unidentified_close` reales (`ESPUSDT` +$12.33, `XPLUSDT` -$35.95, ambos 31-jul), si Binance "movía" el SL/TP por su cuenta, y planteó: *"de nada nos sirve tener un SL más holgado que Binance si al final Binance va a cerrar la posición"*. Terminología adoptada: **Hard SL/TP** = la orden algo real en Binance (lo único que puede ejecutar la posición); **System SL/TP** = lo que el software trackea (`pos.sl_price`/`pos.tp_price`, usado por `is_sl_hit()`/`is_tp_hit()`).
+
+### Causa raíz 1 — no existía monitoreo rápido (2s) para futuros
+
+`hard_risk_monitor.py` (loop de 2s) solo cubría **SPOT** (`monitor_spot_hard_stops_once`, fix de s99d para el mismo patrón: *"el hard-risk monitor revisa cada 2s pero el trade cycle corre cada 3-5 min; si el pico ocurre entre ciclos, no se protege"*). Ese mismo gap **nunca se extendió a futuros**: `FuturesClient.check_positions()` (que evalúa `is_sl_hit()`/`is_tp_hit()`) solo se llamaba dentro del ciclo principal de trading — cada 3 a 45 minutos según el régimen — mientras Binance vigila su orden algo en tiempo real.
+
+### Causa raíz 2 (la más grave) — el margen de seguridad colapsaba en el primer trailing/breakeven
+
+Al abrir una posición futures (`FIX-T2A`), el Hard SL se coloca deliberadamente 1.5x más ancho que el System SL (red de seguridad de último recurso). Pero en `FuturesClient.update_sl_tp()`, cada vez que trailing/breakeven/SSO movían el SL, la nueva orden en Binance se colocaba **exactamente** en el mismo precio que el System SL — sin volver a aplicar el margen. Es decir: desde el primer ajuste de trailing en adelante, Hard SL == System SL, y como el motor de Binance reacciona instantáneamente mientras el software revisa cada 3-45 min, **Binance ganaba la carrera casi siempre** — el System SL dejaba de ser el mecanismo real de cierre.
+
+### Causa raíz 3 — atribución incorrecta de `close_reason` para cierres por algo-order
+
+Cuando una orden STOP_MARKET/TAKE_PROFIT_MARKET (algo order) se dispara, Binance la ejecuta internamente como `MARKET`. Tanto la consulta REST (`/fapi/v1/order`) como el evento del user-data-stream describen el fill resultante con `type=MARKET`, nunca `STOP_MARKET`/`TAKE_PROFIT_MARKET` — por lo que `_classify_close_reason()` nunca podía mapear el tipo de orden correctamente para nuestras propias órdenes SL/TP, y caía al bucket genérico `binance_unidentified_close`.
+
+### Tamaño del problema (datos reales, 7 días, futuros)
+
+| close_reason | n | PnL promedio | PnL total |
+|---|---|---|---|
+| `binance_unidentified_close` | 23 | -$15.52 | **-$356.86** |
+| `stop_loss_binance` | 6 | -$18.49 | -$110.96 |
+| `stop_loss` (software) | 3 | -$15.56 | -$46.69 |
+
+`binance_unidentified_close` era el segundo bucket más frecuente de todo el sistema en futuros y el de peor PnL promedio — casi con certeza compuesto en su mayoría por SL/TP reales de Binance mal etiquetados, varios potencialmente evitables si el software hubiera cerrado primero.
+
+### Cambios aplicados
+
+- **`futures_client.py`**: nueva constante `_SL_SAFETY_MARGIN_MULTIPLIER = 1.5` (antes hardcodeada como `1.5` solo en la apertura). `update_sl_tp()` ahora recibe `current_price` opcional y, en cada ajuste de SL (trailing/breakeven/SSO/SyncSL), coloca el Hard SL en Binance con el mismo margen relativo a precio actual usado al abrir, mientras `pos.sl_price` (software) se queda en el valor solicitado tal cual. Se persiste `pos._smart_meta['hard_sl_price']` en apertura y en cada ajuste, para trazabilidad y para la Opción C. TP nunca se ensancha (no hay concepto de red de seguridad para una salida favorable — Hard TP == System TP siempre, sin cambios).
+- **`futures_client.py::_infer_close_reason_from_price()`** (nuevo): heurística de respaldo — compara el precio de cierre contra `pos.sl_price`/`pos._smart_meta['hard_sl_price']`/`pos.tp_price` con tolerancia de 1.5% (calibrada contra los casos reales `ESPUSDT`/`XPLUSDT`, que tuvieron ~0.02%-0.54% de slippage sobre el nivel). Conectada en `_classify_close_reason()` (antes del fallback genérico) y en el handler del evento de cierre del user-data-stream, vía nuevo parámetro `pos` propagado a través de `_get_realized_pnl_from_trades()`.
+- **`hard_risk_monitor.py`**: nueva función `monitor_futures_hard_stops_once()`, paralela a `monitor_spot_hard_stops_once` (s99d) — revisa `is_sl_hit()`/`is_tp_hit()` de posiciones futures cada 2s y cierra proactivamente, sin duplicar la lógica pesada de trailing/SmartTP/SSO (que se queda en el ciclo principal).
+- **`orchestrator.py::_hard_risk_monitor_loop`**: ahora llama a `monitor_futures_hard_stops_once(comp)` junto con la de spot.
+- **No se tocó**: la Opción E del plan (verificación periódica de que las órdenes SL/TP siguen vivas en Binance, ante cancelación por liquidación/ADL) y la Opción D (alimentar el SL real al sizing/EV de Kelly) quedan pendientes para una sesión separada, dado su mayor alcance/impacto en capital arriesgado.
+
+### Validación
+
+- Tests nuevos: `tests/test_futures_hard_sl.py` (8 casos) — el margen se preserva en trailing SHORT/LONG, TP nunca se ensancha, la heurística de precio clasifica correctamente SL/TP/sin-match, el monitor rápido cierra en hit y no hace nada sin hit.
+- Sanity check contra los dos casos reales que motivaron esta investigación: con la heurística y tolerancia final (1.5%), `ESPUSDT`/`XPLUSDT` se habrían clasificado como `take_profit_binance`/`stop_loss_binance` en vez de `binance_unidentified_close`.
+- `pytest tests/ -q -m "not slow and not integration"`: **456 passed** (448 + 8 nuevos), mismas 3 fallas preexistentes de `test_config_governance.py` ya documentadas como independientes en s106.
+- Restart de `crypto-agent-app` aplicado (`2026-08-01T00:38:35Z`), arranque limpio sin tracebacks ni errores nuevos en logs. Las alertas de operador activas al momento del restart (`binance_truth_critical`, `health_critical`, `loss_focus_zrousdt_short`) son previas al restart y no relacionadas con este cambio.
+- **Pendiente**: no hubo ningún cierre real de futuros en la ventana inmediatamente posterior al restart para confirmar en producción que el monitor rápido/margen preservado reducen `binance_unidentified_close`. Re-medir la distribución de `close_reason` en futuros (7 días) una vez transcurrida una ventana representativa, y comparar contra el baseline de esta entrada.
+
+### Rollback
+
+Revertir `futures_client.py` (`update_sl_tp`, `_infer_close_reason_from_price`, `_classify_close_reason`), `hard_risk_monitor.py` (`monitor_futures_hard_stops_once`) y la línea añadida en `orchestrator.py::_hard_risk_monitor_loop`. Cambio aditivo — no se modificó ningún umbral de SL/TP software (`sl_pct`/`tp_pct`) ni la lógica de trailing/SSO/PRS/UG existente, solo el precio al que se coloca la orden real en Binance y la clasificación posterior del motivo de cierre.
+
+## Actualización s105h — `binance_unidentified_close`: condición de carrera duplicaba cierres tras s105g (2026-07-31)
+
+### Causa raíz
+
+- El usuario pidió revisar `binance_unidentified_close`: 2ª peor categoría de pérdidas en 7 días (`trades_closed`, 18 cierres, -266.62 USDT, 5.6% WR, avg -14.81/cierre).
+- Al analizar la muestra se encontró un bug independiente del problema de atribución: **dos pares de filas duplicadas** en `trades_closed` (mismo symbol/side/entry_time/exit_price/pnl, separadas por ~1 segundo) — `RIFUSDT`/`DOGEUSDT` el mismo día del despliegue de s105g. El bug se reprodujo en vivo durante el diagnóstico (`CRVUSDT`, ids 1321/1322, duplicado real detectado en logs de producción mientras se investigaba).
+- Root cause: desde s105g, `binance_event_stream.py` ejecuta `_on_futures_message()` → `FuturesClient.handle_order_fill_event()` en el **hilo propio** de `ThreadedWebsocketManager`, en paralelo al ciclo de polling (`check_positions()` Ghost-L1/L2) y al manejo de `-2022`/`ReduceOnly` en `close_long()`/`close_short()`. Los tres caminos comparten el mismo patrón "leer `pos.closed` → reconciliar vía red (`_get_realized_pnl_from_trades`) → `_save_futures_closed()` → marcar `pos.closed=True`" **sin ningún lock** (`futures_client.py` no tenía un solo `threading.Lock`/`RLock`). Entre la lectura de `pos.closed` y las llamadas HTTP bloqueantes de en medio, dos hilos podían pasar la guarda antes de que cualquiera terminara, y ambos `INSERT` en `trades_closed` prosperaban (sin `ON CONFLICT` ni constraint único).
+- Impacto medido: 3 pares duplicados totales (2 históricos + 1 en vivo durante el diagnóstico) en la ventana analizada. Las filas duplicadas ya tenían `learning_eligible=false` (no contaminan el pipeline de ML), pero sí inflaban `pnl_by_close_reason`/dashboard con pérdidas fantasma (-32.44 USDT extra en 7 días).
+
+### Cambio aplicado
+
+- `futures_client.py`: nuevo `self._close_lock = threading.RLock()` en `__init__` que serializa el ciclo completo "detectar cierre → reconciliar → persistir → marcar `pos.closed`" en los 4 puntos de entrada: `handle_order_fill_event()` (event stream), el bloque `FIX-T4-L1`/`FIX-T4-L2` de `check_positions()` (Ghost cleanup), y el handler `-2022`/`ReduceOnly` de `close_long()`/`close_short()`. Un lock global (no por símbolo) porque los cierres son eventos poco frecuentes por ciclo — el costo de latencia es despreciable frente a la seguridad de no reordenar nada.
+- `_save_futures_closed()`: defensa en profundidad adicional a nivel DB — antes de insertar un cierre completo (no aplica a parciales), consulta si ya existe una fila con mismo `symbol`+`side`+`entry_time` cerrada en los últimos 5 minutos; si existe, salta el insert y audita `close_duplicate_skipped` en vez de duplicar. Cubre cualquier ruta futura que no pase por `_close_lock`.
+- Corrección histórica: los 3 pares duplicados encontrados (ids 1309/1310 dobles de 1307/1308, e id 1322 doble de 1321) se marcaron `is_corrupted=TRUE, corrupt=TRUE` con `metadata.duplicate_of`/`duplicate_marked_at`/`duplicate_reason='s105h_event_stream_polling_race'` — mismo mecanismo que ya usa `app.py` para excluir cierres no-estratégicos de stats/aprendizaje. No se borraron filas (se preserva rastro de auditoría, igual que el criterio de s105f).
+
+### Validación
+
+- `pytest tests/test_futures_manual_close_parity.py tests/test_futures_ghost.py tests/test_binance_event_stream.py -o addopts=""`: 36/36 pasan.
+- `pytest tests/ -o addopts="" -k "futures or event_stream or ghost"`: 88/88 pasan.
+- `pytest tests/ -o addopts=""`: 443 passed, 3 failed — las 3 fallas (`test_config_governance.py`) son preexistentes y no relacionadas (drift/audit de config, sin tocar `futures_client.py`).
+- Desplegado en producción (`docker compose restart app`, 2026-07-31 17:19 UTC): `/health` post-restart con `event_stream_connected=true`, `consecutive_cycle_failures=0`, `last_cycle_error=null`; el ciclo de trading abrió/gestionó posiciones normalmente inmediatamente después (XLMUSDT open, trailing stops en EULUSDT/VIRTUALUSDT/AVAXUSDT). Cero cierres duplicados nuevos en la ventana observada post-restart (pendiente de confirmación sostenida en 48-72h de operación real).
+
+### Respuesta a la norma de 6 puntos (`.windsurf/rules.md`)
+
+1. **SPOT/FUTURES:** solo FUTURES — el event stream futuros y `handle_order_fill_event` son los únicos con SL/TP algo-orders reconciliables; el stream SPOT es de solo auditoría.
+2. **Perfiles A/B/C:** sin impacto — bug de concurrencia en persistencia, no de sizing/entrada.
+3. **Gate/rollback:** gate = 0 pares duplicados nuevos en `trades_closed` en 48-72h. Rollback si aparece cualquier regresión: `PATCH /config/kelly {"binance_event_stream_enabled": false}` (vuelve a operar 100% por polling — con un solo camino activo, la duplicación deja de ser posible incluso sin el lock) o revertir el commit + `docker compose restart app`.
+4. **Persistencia/auditoría:** nuevo evento `close_duplicate_skipped` en `trades_audit` cuando el guard de DB detecta un duplicado. Sin cambios de esquema (reutiliza `is_corrupted`/`corrupt`/`metadata`).
+5. **Baseline/changepoint:** baseline = 3 pares duplicados detectados en la ventana de diagnóstico desde que existe el event stream (2026-07-31). Changepoint esperado: 0 duplicados nuevos sostenido.
+6. **Dashboard:** `pnl_by_close_reason` deja de contar dos veces el mismo cierre; los duplicados históricos ya no aparecen en vistas que filtren `corrupt=false`.
+
+### Alcance no cubierto en esta ronda
+
+- La atribución real de los ~16 cierres restantes de `binance_unidentified_close` (no duplicados) sigue pendiente: son cierres `MARKET` cuyo `clientOrderId` no decodifica a un motivo `x-<reason>-<uuid>` (probablemente algo-orders o `MARKET` colocadas antes del despliegue de s105g, sin tag). Requiere una sesión de diagnóstico dedicada con más muestra una vez que el tráfico post-s105g/s105h sea mayoritario, siguiendo el mismo patrón que s105e/f/g.
+
+---
+
+## Actualización s105g — Binance como límite del ciclo de vida: client-order-ids estructurados + User Data Stream en tiempo real (2026-07-31)
+
+### Motivación (pedido explícito del usuario)
+
+El usuario reportó que "nos ha pasado muchas veces que tenemos posiciones abiertas en nuestro sistema que en Binance no existen" y pidió que el ciclo de vida de una posición **anticipe** el comportamiento de Binance en vez de descubrirlo después del hecho, manteniendo a Binance como fuente de verdad final pero con el control operativo de nuestro lado.
+
+### Diagnóstico
+
+- El ciclo principal corre cada **5 minutos** (`orchestrator.py::_trade_cycle_interval_minutes`). Las órdenes SL/TP de futuros son algo-orders nativas de Binance (`STOP_MARKET`/`TAKE_PROFIT_MARKET`) que Binance ejecuta de forma **autónoma**, sin avisar a nuestro proceso — entre que Binance cierra y que el siguiente ciclo lo nota, hay hasta 5 min de estado desincronizado ("ghost").
+- Cero uso de websockets/`listenKey`/user data stream en todo el repo — toda la verdad viene de **polling REST**.
+- La detección de "ghost" estaba duplicada en 5 lugares con lógica ligeramente distinta (`_sync_open_positions` FIX-S4, `check_positions()` FIX-T4-L1/L2, el manejo de `-2022` en `close_long`/`close_short`, `sync_manual_closes_from_audit`) — de ahí el bug s105f (`manual_close` mal etiquetado): la adivinanza existe porque nunca capturábamos el evento real en el momento en que ocurrió.
+- Ninguna orden que el bot coloca (entrada, SL, TP, cierres) llevaba `newClientOrderId` — Binance no tenía forma de saber "por qué" hicimos algo; toda la atribución dependía de heurísticas post-hoc.
+
+### Cambios aplicados
+
+**Fase 1 — Client Order IDs estructurados** (`futures_client.py`):
+- Nuevos helpers `_gen_client_order_id(kind, reason=None)` / `_slugify_reason()` / `_decode_close_reason_from_client_order_id()`. Esquema: `e-<uuid8>` (entradas), `sl-<uuid8>` / `tp-<uuid8>` (algo orders), `x-<reason_slug>-<uuid8>` (cierres/cierres parciales iniciados por el bot).
+- `newClientOrderId` agregado a **todas** las órdenes que `futures_client.py` envía a Binance: entradas (`open_long`/`open_short`), SL/TP algo orders (apertura y `update_sl_tp`), cierres totales (`close_long`/`close_short`) y parciales (SSO, Unified Governance), y los cierres de limpieza por aborto de entrada.
+- `_classify_close_reason()`: nuevo paso 0 (antes de la heurística de tipo de orden) que lee el `clientOrderId` real de Binance y, si es uno de los nuestros, usa el motivo tal cual — sin adivinar. El audit de cierre manual (paso 1) y el mapeo por tipo de orden (paso 2, s105f) se mantienen como defensa en profundidad para órdenes previas a este cambio.
+- Como `manual_position_closer.py` también pasa por `close_long`/`close_short`, los cierres genuinamente manuales **también** quedan etiquetados automáticamente (`x-manual_close-...`) sin depender del match de auditoría por ventana de tiempo.
+
+**Fase 2 — Binance User Data Stream en tiempo real** (`binance_event_stream.py`, nuevo módulo):
+- Usa `python-binance` (ya en `requirements.txt`) `ThreadedWebsocketManager` — maneja creación/keepalive de `listenKey` internamente, sin necesidad de implementarlo a mano ni agregar dependencias.
+- Futuros: escucha `ORDER_TRADE_UPDATE`; cuando `X=FILLED` y `rp` (realized profit) ≠ 0, llama a `FuturesClient.handle_order_fill_event()` — nuevo método que reconcilia el cierre **en segundos** en vez de esperar al próximo ciclo, reutilizando `_get_realized_pnl_from_trades`/`_classify_close_reason` ya probados (el stream reduce la *latencia* de detección, no duplica la lógica de cálculo de PnL).
+- Spot: escucha `executionReport`; cada fill real se audita de inmediato (`event_stream_spot_execution`) para darle a `binance_truth_guard.evaluate_spot_parity()` un rastro en el mismo segundo. SPOT no tiene SL/TP en Binance (es 100% local), así que aquí el valor es visibilidad temprana, no mutación de estado autónoma — se mantiene deliberadamente conservador para no ampliar el radio de riesgo de este cambio.
+- Idempotente: si la posición ya está cerrada (carrera ganada por el polling existente), el evento es un no-op silencioso. Ningún callback puede tumbar el hilo del socket — cualquier excepción se atrapa y registra.
+- `orchestrator.py`: `_start_event_stream()`/`_stop_event_stream()` con el mismo patrón que `_start_hard_risk_monitor()`; se arranca junto con el trade cycle y se detiene en `stop_all_cycles()`. Nuevos campos de salud en `get_health_status()`/`/health`: `event_stream_running`, `event_stream_connected`, `event_stream_last_event_at`, `event_stream_last_futures_event_at`, `event_stream_last_spot_event_at`, `event_stream_last_error`.
+- Nuevos flags en `config.py`/`config_helpers.py`/`app.py` `_KELLY_EDITABLE_FIELDS`: `binance_event_stream_enabled` (default `True`), `binance_event_stream_futures_enabled`, `binance_event_stream_spot_enabled`.
+- **El polling cada 5 min y las 5 rutinas de reconciliación existentes (FIX-S4, FIX-T4-L1/L2, `-2022` handler, `sync_manual_closes_from_audit`) no se tocan** — siguen siendo la red de seguridad para cuando el stream se desconecta. Sin credenciales reales o en `dry_run`, el stream simplemente no arranca y el sistema opera exactamente igual que antes.
+
+### Alcance no cubierto en esta ronda (hoja de ruta)
+
+- **Fase 3 (consolidación):** reemplazar las 5 rutinas de reconciliación dispersas por una única máquina de estados (`position_lifecycle.py`) alimentada primero por el stream y en su defecto por polling. Requiere tocar código central con mucha superficie de tests — se deja para una sesión dedicada.
+- **Fase 4 (idempotencia de intención):** persistir un `close_intent` *antes* de emitir cualquier orden de cierre, para que carreras entre rutas internas nunca produzcan ambigüedad ni reintentos duplicados.
+- Client-order-id estructurado para **SPOT** (`run_trades.py` tiene decenas de sitios que colocan órdenes de venta por distintos motivos) — se dejó fuera para no ampliar el radio de riesgo; el stream SPOT de esta ronda es solo de auditoría/visibilidad.
+- ~~Actualizar `python-binance`~~ — hecho en esta misma sesión (`1.0.16` → `1.0.37`, con `websockets` pineado a `16.1.1`), ver "Verificado en producción" abajo.
+
+### Validación
+
+- `pytest tests/test_futures_manual_close_parity.py tests/test_futures_ghost.py tests/test_binance_event_stream.py tests/test_config_governance.py tests/ -q`: sin fallos.
+- `tmp_audit_config.py` (vía `test_config_governance.py`): 0 mismatches críticos (se corrigieron dos fallbacks `getattr` que no coincidían con el default canónico: `binance_use_testnet` y `binance_event_stream_spot_enabled`).
+- **Verificado en producción (2026-07-31, real, con credenciales reales):**
+  - **Incompatibilidad de dependencia confirmada Y corregida de raíz:** `python-binance==1.0.16` (pineado en `requirements.txt`) usaba un endpoint de `listenKey` de spot obsoleto (`/api/v1/userDataStream` → `410 Gone`) y su capa de websockets no era compatible con `websockets>=16`, causando además que `stop()` pudiera colgarse indefinidamente (`AttributeError` en el teardown async). **Fix: actualizado `python-binance` a `1.0.37`** (`requirements.txt`) — resuelve ambos problemas en la librería misma, no son workarounds. Verificado: spot ya no da `410 Gone`, `stop()` completa en ~3s.
+  - **`websockets` pineado explícitamente a `16.1.1`:** durante la verificación, `websockets==17.0.1` (resuelto automáticamente en un rebuild sin pin) rompió la inicialización del socket manager de `python-binance` 1.0.37 (`"Binance Socket Manager failed to initialize after 5 seconds"`) — regresión de una librería de rápido movimiento. Se fijó `websockets==16.1.1` en `requirements.txt` (versión verificada funcionando) para evitar que un futuro rebuild sin pin reintroduzca el problema.
+  - **Contención de arranque descubierta y corregida:** incluso con las versiones correctas, `_start_event_stream()` fallaba consistentemente (mismo error de timeout de 5s) cuando se invocaba sincrónicamente dentro de `start_trade_cycle()` en el arranque de la app, compitiendo por el GIL con el trabajo síncrono pesado del primer ciclo (sync de posiciones de futuros, detección de régimen, llamadas de red). En una prueba aislada (`docker exec` sin esa contención) conectaba sin problema. Fix: `orchestrator._delayed_start_event_stream()` — el arranque del stream ahora ocurre en un hilo separado con un delay de 15s, después de que el arranque pesado inicial se asiente.
+  - **Bug de truthiness corregido:** `start_futures_user_socket()`/`start_user_socket()` devuelven un identificador de conexión que puede ser un string "falsy" incluso en éxito — el estado `running`/`connected` ahora se determina con flags explícitos seteados solo si la llamada no lanzó excepción, nunca por `bool(valor_de_retorno)`.
+  - **Visibilidad:** los mensajes de `binance_event_stream.py`/`orchestrator.py::_start_event_stream` usan `print()` en vez de `logging` — se confirmó que el logger de `orchestrator.py` no llega a `docker logs` en este proyecto (comportamiento preexistente, no introducido por este cambio), mientras que `print()` sí.
+  - Se confirmó que `orchestrator.pause()`/`orchestrator.stop()` (los endpoints `/control/pause`/`/control/stop` que usa el operador) **no invocan `stop_all_cycles()`** — solo cambian flags de estado; los hilos daemon (incluido el del event stream) siguen vivos hasta que el proceso completo termina. El timeout en `stop()` (ya no necesario para el bug original, corregido en la librería) se mantiene como salvaguarda defensiva.
+  - **Resultado final confirmado en `/health` tras el despliegue completo (rebuild + recreate):** `event_stream_running=true`, `event_stream_connected=true`, `event_stream_last_error=null`, **`event_stream_last_futures_event_at` poblado** (evento real recibido de Binance vía websocket), sostenido 60s+ sin errores ni spam de reconexión; spot conectado también, pendiente su primer evento real. `consecutive_cycle_failures=0` en todo momento — el trading nunca se vio afectado durante las pruebas.
+- Pendiente: monitorear ausencia de errores las próximas 24-48h; confirmar que `event_stream_last_spot_event_at` se puebla en el primer fill spot real.
+
+### Respuesta a la norma de 6 puntos (`.windsurf/rules.md`)
+
+1. **SPOT/FUTURES:** Fase 1 (client-order-id) es solo FUTURES. Fase 2 (stream) cubre ambos, pero con profundidad distinta: FUTURES reconcilia estado automáticamente, SPOT solo audita en tiempo real.
+2. **Perfiles A/B/C:** sin impacto — ninguno de los cambios depende de perfil.
+3. **Gate/rollback:** gate = `event_stream_connected=true` sostenido en producción sin incremento de `event_stream_last_error`; el `close_reason` de nuevos cierres automatizados debe coincidir con el `clientOrderId` tageado. Rollback: `PATCH /config/kelly {"binance_event_stream_enabled": false}` (el sistema vuelve a operar 100% por polling, sin tocar `futures_client.py`) o revertir el commit completo + `docker compose restart app`.
+4. **Persistencia/auditoría:** nuevo evento `event_stream_close_detected` (futuros, `binance_confirmed=true`) y `event_stream_spot_execution` (spot) en `trades_audit`. Sin cambios de esquema.
+5. **Baseline/changepoint:** baseline = latencia de detección de cierre actual (hasta 5 min, ventana del ciclo). Changepoint esperado: la mayoría de los cierres automatizados deberían quedar registrados en segundos vía `event_stream_close_detected` en vez de en el siguiente ciclo de polling.
+6. **Dashboard/endpoint:** `/health` expone el estado del stream; recomendable agregar un indicador visual en el dashboard operativo en una iteración futura.
+
+---
+
+## Actualización s105f — `close_reason='manual_close'` en cierres 100% automatizados de futuros (2026-07-31)
+
+### Causa raíz
+
+- El usuario reportó cierres `manual_close` en FUTURES sin haber cerrado nada manualmente. Verificado con datos reales: de 17 cierres `manual_close` en `trades_closed`, **6 eran manuales genuinos** (SPOT, vía dashboard, jul-27/29, con audit `manual_position_close_start`/`manual_position_close_binance_filled`) y **10 eran cierres 100% automatizados de FUTURES mal etiquetados** — todos precedidos 1-15s antes por un audit `BINANCE_MISMATCH_GHOST_RUNTIME` (`binance_truth_guard.py`), es decir, la posición ya no existía en Binance cuando el ciclo la revisó.
+- Root cause en `futures_client.py::_classify_close_reason()`: cuando no hay match de auditoría de cierre manual (`manual_position_futures_close_done`), la función consulta el tipo de orden real en Binance y trata `type=MARKET` como evidencia de cierre manual. **Pero `MARKET` es el tipo de orden que usa absolutamente todo cierre automatizado del bot** (`close_long()`/`close_short()` en sí — línea ~2574/2696 `"type": "MARKET"` —, los cierres parciales de `unified_governance_supervisor` dentro de `check_positions()` — línea ~3924 —, y los callers `regime_change`, `regime_change_to_short`, `regime_futures_short`, `basket_reset_auto` en `run_trades.py`). Solo las órdenes algo nativas de Binance (`STOP_MARKET`/`TAKE_PROFIT_MARKET`/`TRAILING_STOP_MARKET`) son evidencia inequívoca; `MARKET` es ambiguo y el código lo resolvía siempre a favor de "manual" sin evidencia real.
+- Esta función de clasificación sólo se invoca desde la ruta de **reconciliación** (`_get_realized_pnl_from_trades`), que se dispara en: (a) el manejo de error `-2022`/`ReduceOnly` en `close_long()`/`close_short()` cuando Binance ya cerró la posición antes que nuestro intento, y (b) la detección de "ghost" (FIX-T4, `Ghost-L1`/`Ghost-L2`) dentro de `check_positions()`, que corre **cada ciclo** (no solo al reiniciar) y reconcilia posiciones que desaparecieron de Binance sin pasar por nuestro flujo normal de cierre. En ambos casos se descartaba el motivo real (el `reason` que el caller original tenía, o simplemente "no lo sabemos") y se sustituía por `"manual_close"` sin evidencia.
+
+### Cambio aplicado
+
+- `futures_client.py::_classify_close_reason()` y `_get_realized_pnl_from_trades()`: nuevo parámetro `fallback_reason`. Cuando no hay match de audit manual y la orden es `MARKET` (o se cae al heurístico de signo), ya no se asume `"manual_close"`:
+  - Si el caller conocía su intención real (p. ej. `close_long()`/`close_short()` en el manejo de `-2022`, que ahora pasa su propio `reason` como `fallback_reason`) → se preserva ese motivo real.
+  - Si no hay contexto (ghost cleanup en `_sync_open_positions()`, `Ghost-L1`/`Ghost-L2` en `check_positions()`) → se usa la etiqueta neutral explícita `"binance_unidentified_close"`, nunca `"manual_close"` sin evidencia.
+- `frontend/dashboard.js`: agregado `binance_unidentified_close` a `_CLOSE_REASON_MAP` (❓ Cierre no identificado).
+- Tests nuevos en `tests/test_futures_manual_close_parity.py`: MARKET sin audit → `binance_unidentified_close` (sin fallback) o el `fallback_reason` (con); heurístico de signo también respeta `fallback_reason`; regresión específica del caso real (`close_short` pierde la carrera contra Binance, debe conservar el motivo original, nunca `manual_close`).
+
+### Corrección histórica (aprobada por el usuario)
+
+- Se identificaron los 10 cierres de FUTURES mal etiquetados (`ids 1236,1237,1245,1253,1254,1260,1270,1277,1289,1305` — SYNUSDT, EULUSDT, LINKUSDT, UNIUSDT, ZAMAUSDT, KAITOUSDT, ESPUSDT×3, MMTUSDT) mediante el criterio verificable: `close_reason='manual_close'` AND sin match de `trades_audit.event='manual_position_futures_close_done'` en una ventana de ±25min/2min alrededor de `exit_time`.
+- Se reclasificaron a `close_reason='binance_unidentified_close'` preservando PnL/precios/comisiones intactos, con `metadata.close_reason_corrected_from='manual_close'` y `close_reason_corrected_at` para trazabilidad del propio fix.
+- Los 6 cierres SPOT genuinamente manuales (WLDUSDT, ZAMAUSDT, BTCUSDT, LTCUSDT, ENAUSDT, PENGUUSDT, DIAUSDT) **no se tocaron** — audit real confirmado.
+
+### Validación
+
+- `pytest tests/test_futures_manual_close_parity.py tests/test_futures_ghost.py tests/ -q`: sin fallos.
+- Query de verificación (repetible): `SELECT close_reason, COUNT(*) FROM trades_closed tc WHERE close_reason='manual_close' AND NOT EXISTS (SELECT 1 FROM trades_audit ta WHERE ta.symbol=tc.symbol AND ta.event='manual_position_futures_close_done' AND ta.ts BETWEEN tc.exit_time - INTERVAL '25 minutes' AND tc.exit_time + INTERVAL '2 minutes') GROUP BY close_reason;` — debe tender a 0 tras el fix.
+
+### Respuesta a la norma de 6 puntos (`.windsurf/rules.md`)
+
+1. **SPOT/FUTURES:** solo aplica a FUTURES (la reconciliación de `_classify_close_reason` sólo se usa en `futures_client.py`); SPOT no se toca.
+2. **Perfiles A/B/C:** sin impacto — la clasificación no depende de perfil.
+3. **Gate/rollback:** gate = 0 nuevos `manual_close` sin match de audit real en 48-72h. Rollback: revertir el fallback_reason (dejar que `_classify_close_reason` vuelva a inferir `manual_close` por MARKET) y `docker compose restart app`.
+4. **Persistencia/auditoría:** sin cambios de esquema; se preserva PnL/precios en la corrección histórica, solo se corrige `close_reason` + metadata de trazabilidad.
+5. **Baseline/changepoint:** baseline = 10/17 cierres `manual_close` de 7 días eran falsos positivos (58.8%). Changepoint: la proporción de `manual_close` sin audit real debe caer a ~0.
+6. **Dashboard:** `pnl_by_close_reason` y la tabla de cierres ahora deberían mostrar `binance_unidentified_close` (❓) en vez de `manual_close` para estos casos.
+
+---
+
+## Actualización s105e — `close_reason='regime_change'` era un stop de tiempo mal calibrado, 0% WR en 7 días (2026-07-31)
+
+### Causa raíz
+
+- El usuario reportó sospecha de que el cierre tipo `regime_change` (futuros SHORT) sólo generaba pérdidas en los últimos días. Verificado con datos reales (`trades_closed`, 7 días): **34 cierres, 0 ganadores, 34 perdedores, -275.50 USDT, 0% WR**, el peor `close_reason` de la ventana (peor que `hard_risk_stop` -231.39 y `stop_loss_binance` -110.96). Sólo el 2026-07-31 generó -204.62 USDT en 21 cierres.
+- Root cause en `run_trades.py` (bloque `# A3: Auto-close ALL shorts...`, línea ~10935): el guardia anti-whipsaw (`_non_short_regime_cycles`, introducido N35 jun-18) incrementa un contador **global** cada ciclo en que `_regime_mode not in ("PRESERVATION", "FUTURES_SHORT")`, y fuerza el cierre de **todos** los SHORT abiertos cuando el contador alcanza `min_cycles_before_close_shorts` (default 5), salvo que ya estén en ganancia por encima de `futures_protect_profit_usdt` (-5 USD).
+- Este guardia se diseñó cuando los SHORT sólo se abrían en régimen `FUTURES_SHORT`, así que "régimen ≠ FUTURES_SHORT/PRESERVATION" equivalía correctamente a "el régimen cambió y ya no toca tener shorts". Desde s99e (`range_scalp_short_preferred`), **`RANGE_SCALP` abre y sostiene sus propios SHORT como estrategia legítima**, pero nadie agregó `RANGE_SCALP` a la tupla de regímenes "short-friendly". Como el sistema opera en `RANGE_SCALP` de forma prácticamente continua (`regime_confidence.mode='RANGE_SCALP'` sostenido, sin transición real registrada en `regime_transition_state`), el contador **nunca se resetea** y termina cerrando cualquier SHORT de `RANGE_SCALP` a los ~5 ciclos de vida (2–90 min observados), **sin que haya ocurrido ningún cambio de régimen real**. Confirmado con `metadata.smart_meta.regime_at_entry='RANGE_SCALP'` y `metadata.smart_meta.unified_governance_loss_state.regime_applied='RANGE_SCALP'` en los cierres `regime_change` más recientes — el régimen al abrir y al cerrar es el mismo.
+- Efecto: un stop de tiempo ciego (no depende de estructura, SL/TP, ni señal de reversión) etiquetado engañosamente como "cambio de régimen", que corta posiciones apenas entran en pérdida leve (avg -0.13% a -0.5%) antes de que puedan revertir, con 0% de tasa de acierto histórica en la ventana analizada.
+
+### Cambio aplicado
+
+- `run_trades.py`: se agregó `RANGE_SCALP` al conjunto de regímenes "short-friendly" (`_short_friendly_regimes = ("PRESERVATION", "FUTURES_SHORT", "RANGE_SCALP")`) usado en el contador `_non_short_regime_cycles` y en el gate de auto-cierre por `regime_change` (dos sitios) y en el mensaje informativo de pre-switch. Efecto: el auto-cierre por `regime_change` sólo se activa ante una transición real hacia un régimen que no admite SHORT (p. ej. `SPOT_BULL`), y deja de disparar contra los SHORT nativos de `RANGE_SCALP` mientras el régimen no cambie de verdad.
+- No se tocó `futures_protect_profit_usdt` ni `min_cycles_before_close_shorts`: siguen protegiendo shorts ganadores/cerrando en una transición real a `SPOT_BULL`.
+- No se escribió un test unitario aislado: la lógica vive inline dentro del monolito `execute_once()` (9000+ líneas) sin punto de extracción sencillo; se validó con la suite completa (`pytest tests/ -q`, sin regresiones) y con evidencia directa de producción (query SQL de 7 días antes/después del fix).
+
+### Validación
+
+- `pytest tests/ -q`: sin fallos (mismo resultado que baseline pre-cambio).
+- Pendiente: confirmar en producción tras reiniciar `crypto-agent-app` que ya no aparezcan cierres `regime_change` con `regime_at_entry == regime_at_close == 'RANGE_SCALP'`; sólo deberían seguir ocurriendo ante una transición real de régimen (`regime_transition_state.active=true` con `to_mode` fuera de `PRESERVATION/FUTURES_SHORT/RANGE_SCALP`).
+
+### Respuesta a la norma de 6 puntos (`.windsurf/rules.md`)
+
+1. **SPOT/FUTURES:** sólo aplica a FUTURES (el guardia sólo opera sobre `_open_short_keys`, futuros). SPOT no se toca.
+2. **Perfiles A/B/C:** sin impacto — el guardia no distingue perfil, sólo régimen y PnL no realizado.
+3. **Gate de aceptación / rollback:** gate = 0 cierres `regime_change` con `regime_at_entry='RANGE_SCALP'` sin transición real en las siguientes 48-72h. Rollback: revertir el commit (quitar `RANGE_SCALP` de `_short_friendly_regimes`) y `docker compose restart app`.
+4. **Persistencia/auditoría:** no se modificó el esquema de `trades_closed`/`trades_audit`; los cierres reales por transición a `SPOT_BULL` se seguirán registrando igual como `regime_change`.
+5. **Baseline/changepoint:** baseline = 34 cierres/0% WR/-275.50 USDT en 7 días previos (query documentada arriba). Changepoint a monitorear: conteo de `regime_change` con `regime_at_entry==regime_at_close` debe caer a ~0 tras el fix.
+6. **Dashboard/endpoint:** `GET /dashboard/summary` → `pnl_by_close_reason` (ya expone `regime_change`); verificar que su frecuencia y PnL neto mejoren en los próximos días.
+
+---
+
+## Actualización s105d — Ghost cleanup de futuros borraba PnL real (ganador y perdedor) sin registrar el cierre (2026-07-31)
+
+### Causa raíz (caso real: ALLOUSDT +$74.11, LAUSDT -$9.53)
+
+- Investigando un reporte de "ALLOUSDT marcaba >100 de PnL no real y de pronto desapareció" del dashboard, se confirmó con el historial real de Binance (`FuturesClient._get_realized_pnl_from_trades`, `/fapi/v1/userTrades`) que la posición **sí se cerró con una ganancia real neta de +$74.11** (bruto +$77.65, comisión -$3.54, exit≈0.27324). Una posición hermana, `LAUSDT`, cerrada en la misma ventana, tuvo una **pérdida real neta de -$9.53**.
+- Ninguna de las dos quedó jamás en `trades_closed`: el mecanismo **"Ghost cleanup" (FIX-S4)** en `futures_client.py._sync_open_positions()` detecta filas de `trades_open` sin posición correspondiente en Binance y las **borra directamente** (`DELETE FROM trades_open`) sin reconciliar el resultado real. Esto ocurre cuando una posición se cierra por una vía que no pasa por el flujo normal de cierre (`close_position`/`_save_futures_closed`) — p. ej. una orden MARKET clasificada como `"manual_close"` por `_classify_close_reason`.
+- Impacto: pérdida silenciosa de trazabilidad de PnL real (ganador o perdedor) cada vez que se dispara esta ruta — las estadísticas, `daily_pnl`, y el dashboard nunca se enteran de esos cierres, aunque el dinero sí se movió en la cuenta real.
+
+### Cambio aplicado
+
+- `futures_client.py`, bloque FIX-S4 (dentro de `_sync_open_positions`): antes de borrar una fila fantasma de `trades_open`, se llama a `_get_realized_pnl_from_trades(symbol, side, opened_at=...)` (método ya existente, usado por la recuperación normal de SL/TP perdidos) para reconstruir el cierre real desde Binance. Si se obtiene un `exit_price` válido, se inserta un registro completo en `trades_closed` (entry/exit price real, PnL neto real, `close_reason` real, comisiones, `pnl_prediction`/`indicators_at_entry` heredados de la fila original) con `metadata.ghost_reconciled=true` y `learning_eligible=False` (excluido de entrenamiento por ser una reconciliación reactiva, conforme a las reglas de exclusión de `calibrar_datos.md`). Se audita el evento (`ghost_reconciled_close`, `binance_confirmed=true`). Si Binance no devuelve historial reconciliable, se preserva el comportamiento anterior (sólo `DELETE`, sin insertar nada falso).
+- Tests: `tests/test_futures_ghost.py::test_ghost_cleanup_reconciles_real_close_before_deleting` y `test_ghost_cleanup_deletes_without_reconciling_when_no_binance_history`.
+
+### Validación
+
+- `pytest tests/test_futures_ghost.py tests/test_futures_manual_close_parity.py tests/test_close_persistence_hardening.py tests/slow/test_futures_smart_exits.py tests/ -q`: todo passed.
+- Desplegado en producción (reinicio de `crypto-agent-app`); pendiente confirmar en las próximas horas que un ghost-cleanup real efectivamente inserte en `trades_closed` (`metadata->>'ghost_reconciled'='true'`).
+
+### Nota de auditoría de esta sesión
+
+- El diagnóstico requirió instanciar `FuturesClient` en el contenedor para consultar el historial real de Binance; su constructor ejecuta la misma sincronización/ghost-cleanup como efecto secundario, por lo que las filas ya-fantasma de `ALLOUSDT` (ids 1394, 1395) y `LAUSDT` (id 1390) se borraron en ese momento — **antes** de que este fix estuviera desplegado, por lo que esos dos cierres reales quedaron sin reconciliar. Ningún registro de `trades_open` se cerró/canceló por esta investigación; ambas posiciones ya estaban cerradas en Binance cuando se consultaron.
+
+---
 
 ## Actualización s93b — Fix RANGE_SCALP + trigger SR en salida (2026-07-24)
 
@@ -509,3 +928,40 @@ El PnL real reportado por `userTrades` fue +$128.41, neto ~+$125.45.
 ### 15.5 Rollback
 
 Revertir los commits que toquen `futures_client.py`, `run_trades.py`, `manual_position_closer.py` y el test; reiniciar el contenedor; ejecutar `auto_reconcile_futures(dry_run=False)` si aparecen discrepancias.
+
+---
+
+## 16. Reconexión automática del WebSocket de Binance — s105i (2026-08-01)
+
+### Problema
+
+Logs de Docker repetían: `Error receiving message: Read loop has been closed, please reset the websocket connection and listen to the message error.` El websocket del User Data Stream de Binance moría y `BinanceEventStream` no reconectaba, dejando al sistema dependiente del polling de 5 min.
+
+### Causa
+
+`python-binance` cierra el read loop del websocket ante determinadas condiciones de error. `BinanceEventStream` iniciaba la conexión pero no escuchaba mensajes de error del websocket ni reconectaba automáticamente.
+
+### Cambios aplicados
+
+- `binance_event_stream.py`:
+  - `_is_socket_error_payload()` detecta strings/dicts con "read loop has been closed", "error receiving message", "connection closed" o "websocket error".
+  - `_on_futures_message` / `_on_spot_message` detectan el error, registran `last_error` y llaman `_schedule_reconnect()`.
+  - `_reconnect()` destruye el `ThreadedWebsocketManager` muerto, crea uno nuevo, reinicia los user data streams de futuros y spot, y re-suscribe los mark-price streams activos.
+  - `_watchdog_loop()` actúa como red de seguridad: 30 min sin ningún evento dispara reconexión.
+  - Cooldown de 60s entre reconexiones para evitar loops.
+  - `health()` expone `event_stream_reconnect_count`, `event_stream_last_reconnect_at` y `event_stream_pending_reconnect`.
+- Tests añadidos en `tests/test_binance_event_stream.py`.
+
+### Relación con el pipeline de salida
+
+El event stream acelera la detección de fills/cierres (segundos en vez de minutos), pero el polling y la reconciliación existentes (`FIX-S4`, `FIX-T4-L1/L2`) siguen siendo la red de seguridad. El fix no modifica la lógica de cierre, solo mejora la disponibilidad del canal de eventos.
+
+### Rollback / desactivación
+
+- Deshabilitar websocket: variable de entorno `BINANCE_EVENT_STREAM_ENABLED=False` (o flag equivalente en config) y reiniciar el contenedor.
+- Forzar reconexión manual: `event_stream.force_reconnect()` o reiniciar el proceso (Python no recarga módulos en caliente).
+
+### Validación
+
+- `python -m pytest tests/test_binance_event_stream.py -q` => `19 passed`.
+- Requiere reiniciar el contenedor para que Python cargue el módulo modificado.

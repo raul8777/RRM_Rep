@@ -100,6 +100,41 @@ class PeakCaptureEngine:
         self.settings = settings
         self.db_client = db_client
 
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _sr_exit_trigger(ctx: PeakCaptureContext) -> Tuple[bool, Dict[str, Any]]:
+        """Return (triggered, details) if price is in an SR resistance zone."""
+        metadata = ctx.metadata or {}
+        sr_zone = metadata.get("sr_zone_position")
+        res_dist = metadata.get("nearest_resistance_dist_pct")
+        if sr_zone is None and res_dist is None:
+            return False, {}
+
+        # Conservative trigger: price near the top of the local S/R zone or
+        # within one ATR%% of the nearest resistance.
+        _atr_pct = None
+        if isinstance(ctx.indicators, dict):
+            _atr_pct = ctx.indicators.get("atr_pct")
+            if _atr_pct is None:
+                _atr = ctx.indicators.get("atr")
+                if _atr and ctx.current_price:
+                    _atr_pct = _atr / ctx.current_price * 100.0
+
+        near_resistance = bool(
+            (sr_zone is not None and sr_zone > 0.85)
+            or (
+                res_dist is not None
+                and _atr_pct is not None
+                and _atr_pct > 0
+                and res_dist <= max(_atr_pct, 0.5)
+            )
+        )
+        return near_resistance, {
+            "sr_zone_position": sr_zone,
+            "nearest_resistance_dist_pct": res_dist,
+        }
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def evaluate(self, ctx: PeakCaptureContext) -> PeakCaptureDecision:
@@ -141,7 +176,9 @@ class PeakCaptureEngine:
         # 95 PRS peak protection
         # 93 Profit PredExit momentum exhausted
         # 92 Profit PredExit regime fear / trend reversal
+        # 91 Profit PredExit SR resistance zone
         # 85 Profit PredExit value-based capture
+        sr_exit, sr_detail = self._sr_exit_trigger(ctx)
         if ctx.momentum_exhausted:
             decision.should_close = True
             decision.close_pct = 1.0
@@ -159,6 +196,15 @@ class PeakCaptureEngine:
                 f"pnl={ctx.current_pnl_usdt:.2f}"
             )
             decision.priority = 92
+        elif sr_exit:
+            decision.should_close = True
+            decision.close_pct = self._dynamic_close_pct(prob_higher_peak)
+            decision.reason = "profit_predexit_sr_resistance"
+            decision.detail = (
+                f"price in SR resistance zone; pnl={ctx.current_pnl_usdt:.2f} "
+                f"details={sr_detail}"
+            )
+            decision.priority = 91
         elif ctx.current_pnl_usdt > risk_adjusted_wait:
             decision.should_close = True
             decision.close_pct = self._dynamic_close_pct(prob_higher_peak)

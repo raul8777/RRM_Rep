@@ -163,7 +163,7 @@ def _base_settings(profile: str, symbols: List[str]) -> Any:
     settings.screener_enabled = False
     settings.screener_top_n_enabled = False
     settings.category_max_positions_enabled = True
-    settings.current_regime_profile_label = profile
+    # s95: no global active profile; simulation uses forced_profile as per-entry peak_quality_profile via runner.
     settings.min_signal_strength = 0.55
     settings.min_success_probability = 0.55
     settings.stop_loss_pct = 3.36

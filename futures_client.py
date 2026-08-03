@@ -17,6 +17,7 @@ Usage:
     fc.close_short("BTCUSDT", pos["qty"])
 """
 
+import copy
 import json
 import re
 import time
@@ -188,10 +189,31 @@ class FuturesClient:
     # ── DB persistence helpers (FIX-G) ──────────────────────────────────────
 
     def _save_futures_open(self, pos: 'FuturesPosition') -> None:
-        """Persist a newly opened futures position to trades_open."""
+        """Persist a newly opened futures position to trades_open.
+
+        s109: made idempotent on `order_id` — this is the single choke point
+        every open flows through (`open_short`/`open_long` call it once per
+        real fill, but `_consolidate_futures_open_records()`'s "ensure DB
+        record" step can also call it for a position it believes is missing
+        from `trades_open`; if that belief is stale/racy relative to a very
+        recent insert for the SAME real order, it previously created a
+        genuine duplicate row sharing the same `order_id` — see the BABYUSDT
+        incident in calibracion_entradas s109, and the pre-existing BNBUSDT
+        case from before this fix confirming it is a long-standing bug, not
+        specific to any one caller).
+        """
         if not self.db_client:
             return
         try:
+            if pos.order_id and not str(pos.order_id).startswith(('SYNC_', 'DRY_', 'RECONCILE_')):
+                _dupe_order = self.db_client.execute_query(
+                    "SELECT id FROM trades_open WHERE metadata->>'order_id' = %s LIMIT 1",
+                    (str(pos.order_id),),
+                )
+                if _dupe_order:
+                    print(f"[Futures/DB] {pos.symbol} {pos.side} OPEN skipped — order_id={pos.order_id} "
+                          f"already persisted as trades_open id={_dupe_order[0]['id']}")
+                    return
             # Paso 4: detect escalonamiento — count existing DB records for same symbol
             _db_side = 'SELL' if pos.side == 'SHORT' else 'BUY'
             _existing = self.db_client.execute_query(
@@ -442,13 +464,13 @@ class FuturesClient:
                 _pred_pnl = float(pos.pnl_prediction.get('expected_pnl', 0) or 0)
                 if _pred_pnl != 0:
                     _pred_accuracy = round((pnl - _pred_pnl) / abs(_pred_pnl), 4)
-            # S105h: defense-in-depth duplicate guard. The in-memory `_close_lock`
-            # (see __init__) is the primary fix for the event-stream/polling race that
-            # produced duplicate trades_closed rows (RIFUSDT/DOGEUSDT, 2026-07-31), but
-            # this DB-level check catches anything the lock doesn't cover (e.g. a second
-            # process, a retried call after a transient error). Same symbol/side/entry_time
-            # (the anchor of a specific opened position) closed again within 5 minutes is
-            # treated as the same close event, not a new one.
+            # S105h/s112: defense-in-depth duplicate guard. The in-memory `_close_lock`
+            # (see __init__, now covering ALL close paths including the happy path since
+            # s112) is the primary fix for the race that produced LAUSDT ids 1412/1413
+            # (2026-08-03, 2ms apart). This DB-level SELECT guard catches anything the
+            # lock doesn't cover (e.g. a second process, a retried call after a transient
+            # error). Same symbol/side/entry_time closed again within 5 minutes is treated
+            # as the same close event, not a new one.
             if not partial_close:
                 try:
                     _dupe = self.db_client.execute_query(
@@ -489,7 +511,12 @@ class FuturesClient:
                 _pnl_pred_json,
                 _ind_json,
                 _pred_accuracy,
-                True,
+                # s114: honor `_smart_meta['learning_eligible']=False` set at open time
+                # for synthetic/reconciled positions (see binance_truth_guard.py's
+                # `truth_reconcile_import`) — previously hardcoded True regardless,
+                # so reconciliation artifacts with essentially random outcomes could
+                # silently enter model training data.
+                bool(pos._smart_meta.get('learning_eligible', True)),
                 _entry_comm,
                 _exit_comm,
             )
@@ -719,7 +746,7 @@ class FuturesClient:
                 relevant.append(t)
             closing_trades = [t for t in relevant if float(t.get("realizedPnl", 0) or 0) != 0]
             if not closing_trades:
-                return {"exit_price": 0, "pnl": 0, "reason": "binance_safety_close"}
+                return self._estimate_pnl_fallback(symbol, side, pos)
             latest_close = max(closing_trades, key=lambda trade: int(trade.get("time", 0) or 0))
             latest_order_id = str(latest_close.get("orderId") or "")
             if latest_order_id:
@@ -779,7 +806,47 @@ class FuturesClient:
             }
         except Exception as e:
             print(f"[Futures] _get_realized_pnl_from_trades {symbol}: {e}")
-        return {"exit_price": 0, "pnl": 0, "reason": "binance_safety_close"}
+        return self._estimate_pnl_fallback(symbol, side, pos)
+
+    def _estimate_pnl_fallback(
+        self, symbol: str, side: str, pos: Optional['FuturesPosition'] = None,
+    ) -> dict:
+        """s110: last-resort PnL estimate when Binance userTrades has no reconciliable
+        closing fill (API error, or the fill hasn't propagated yet).
+
+        Previously this returned a hardcoded `pnl=0`, which silently masked real losses
+        (or gains) whenever `pos` had already moved away from entry — breaking downstream
+        loss-tracking (`_consecutive_sl_count`, WR screener) since a real -1% close would
+        be recorded as a flat $0 trade. When we have the position's entry price/qty we
+        estimate PnL from the current mark price instead; the estimate is explicitly
+        flagged (`pnl_accounting_mode=price_estimated_fallback`) so it's never confused
+        with a Binance-confirmed value and can be re-reconciled later if needed.
+        """
+        if pos is not None and getattr(pos, 'entry_price', None) and getattr(pos, 'qty', None):
+            try:
+                current_price = self.get_price(symbol)
+                if current_price and current_price > 0:
+                    qty = float(pos.qty)
+                    entry_price = float(pos.entry_price)
+                    if str(side).upper() == "LONG":
+                        estimated_pnl = (current_price - entry_price) * qty
+                    else:
+                        estimated_pnl = (entry_price - current_price) * qty
+                    print(f"[Futures] {symbol}: no confirmed Binance close fill — "
+                          f"estimating PnL=${estimated_pnl:.2f} from mark price (was hardcoded $0)")
+                    return {
+                        "exit_price": current_price,
+                        "pnl": estimated_pnl,
+                        "realized_pnl": estimated_pnl,
+                        "commission": 0.0,
+                        "funding": 0.0,
+                        "pnl_accounting_mode": "price_estimated_fallback",
+                        "pnl_estimated": True,
+                        "reason": "binance_safety_close",
+                    }
+            except Exception as estimate_error:
+                print(f"[Futures] {symbol}: PnL estimate fallback failed: {estimate_error}")
+        return {"exit_price": 0, "pnl": 0, "reason": "binance_safety_close", "pnl_estimated": True}
 
     def _get_position_qty_real(self, symbol: str, side: str) -> float:
         """Return absolute positionAmt for symbol/side from Binance positionRisk."""
@@ -1609,6 +1676,32 @@ class FuturesClient:
                         _fdr_key = self._pos_key(_fdr['symbol'], _fdr_side)
                         if _fdr_key in self._open_positions:
                             continue
+                        # s110: atomic claim before reconciling — if two FuturesClient
+                        # instances run _sync_open_positions() concurrently at startup (seen
+                        # 2026-08-02: HYPERUSDT's ghost row was reconciled+inserted twice, 47ms
+                        # apart, same trades_open.id, double-counting -$29.11 as -$58.22 in
+                        # trades_closed), only the instance whose UPDATE actually matches a row
+                        # proceeds; the other sees 0 rows affected and skips it. A 5-minute
+                        # staleness window lets a genuinely crashed/interrupted claim be retried
+                        # instead of orphaning the row forever.
+                        try:
+                            _claim = self.db_client.execute_query(
+                                """
+                                UPDATE trades_open
+                                SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{ghost_claimed_at}', to_jsonb(NOW()::text))
+                                WHERE id = %s
+                                  AND (metadata->>'ghost_claimed_at' IS NULL
+                                       OR (metadata->>'ghost_claimed_at')::timestamptz < NOW() - INTERVAL '5 minutes')
+                                RETURNING id
+                                """,
+                                (_fdr['id'],),
+                            )
+                        except Exception as _claim_err:
+                            print(f"[Futures/Sync] Ghost claim failed for {_fdr['symbol']} (id={_fdr['id']}): {_claim_err}")
+                            continue
+                        if not _claim:
+                            print(f"[Futures/Sync] {_fdr['symbol']} (id={_fdr['id']}): ghost already claimed by another instance — skipping")
+                            continue
                         _ghost_reconciled = False
                         try:
                             _opened_at = _fdr.get('entry_time')
@@ -2364,6 +2457,28 @@ class FuturesClient:
 
     # ── Position management ───────────────────────────────────────────────────
 
+    # Keys allowlisted for propagation from `entry_context` into `_smart_meta`.
+    # Kept explicit (rather than merging the whole dict) so callers can pass a
+    # richer payload (e.g. the full directional_arbiter decision) without
+    # accidentally overwriting unrelated smart_meta fields set elsewhere.
+    _ENTRY_CONTEXT_KEYS = (
+        "directional_arbitration_reason",
+        "sr_zone_position_at_entry",
+        "range_reversion_valid_at_entry",
+    )
+
+    @classmethod
+    def _apply_entry_context(cls, smart_meta: Dict, entry_context: Optional[Dict]) -> None:
+        """Persist SR/directional decision context onto `smart_meta` so it
+        survives into `trades_open`/`trades_closed.metadata` and can be
+        measured later without fragile time-window joins against
+        `ready_candidates` (which is not designed for long-term analytics)."""
+        if not entry_context:
+            return
+        for key in cls._ENTRY_CONTEXT_KEYS:
+            if key in entry_context and entry_context[key] is not None:
+                smart_meta[key] = entry_context[key]
+
     def open_short(
         self,
         symbol: str,
@@ -2376,6 +2491,7 @@ class FuturesClient:
         signal_id: Optional[str] = None,
         peak_quality_profile: Optional[str] = None,
         peak_quality_score: Optional[float] = None,
+        entry_context: Optional[Dict] = None,  # directional_arbitration_reason, sr_zone_position_at_entry, etc.
     ) -> Optional[FuturesPosition]:
         """
         Open a SHORT position with mandatory SL and TP orders.
@@ -2565,6 +2681,7 @@ class FuturesClient:
                     pass
             if signal_id:
                 pos._smart_meta['signal_id'] = signal_id
+            self._apply_entry_context(pos._smart_meta, entry_context)
             # USD loss guard audit fields
             pos._smart_meta['max_loss_usd_per_trade'] = _max_loss_usd
             pos._smart_meta['effective_sl_usd'] = min(_max_loss_usd, actual_notional * 0.95) if _max_loss_usd > 0 else None
@@ -2606,6 +2723,7 @@ class FuturesClient:
         signal_id: Optional[str] = None,
         peak_quality_profile: Optional[str] = None,
         peak_quality_score: Optional[float] = None,
+        entry_context: Optional[Dict] = None,  # directional_arbitration_reason, sr_zone_position_at_entry, etc.
     ) -> Optional[FuturesPosition]:
         """
         Open a LONG position with mandatory SL and TP orders.
@@ -2789,6 +2907,7 @@ class FuturesClient:
                     pass
             if signal_id:
                 pos._smart_meta['signal_id'] = signal_id
+            self._apply_entry_context(pos._smart_meta, entry_context)
             # USD loss guard audit fields
             pos._smart_meta['max_loss_usd_per_trade'] = _max_loss_usd
             pos._smart_meta['effective_sl_usd'] = min(_max_loss_usd, actual_notional * 0.95) if _max_loss_usd > 0 else None
@@ -2884,35 +3003,46 @@ class FuturesClient:
                     pos.qty = _real_qty
                     self._persist_smart_meta(pos)
                 return result
+            # s112: serialize the persistence+mark-closed block against every other
+            # close path (event-stream, Ghost-L1/L2, -2022 handler) via _close_lock.
+            # Before this fix, only the exception/-2022 paths held the lock — the happy
+            # path here did not, allowing a race where hard_risk_monitor and manage_positions
+            # both detected is_sl_hit() at the same tick, both called close_long(), both
+            # succeeded at Binance (one real fill, the other gets -2022), and both persisted
+            # to trades_closed within ~2ms (LAUSDT 2026-08-03, ids 1412/1413).
             if pos:
-                # Use real fill price from order response for PnL persistence (not current market price)
-                _fill_price = self._average_fill_price(result, current_price)
-                pos.exit_price = _fill_price
-                _real = self._get_realized_pnl_from_trades(symbol, "LONG", pos.opened_at, pos=pos)
-                if _real.get('pnl_accounting_mode'):
-                    pos.pnl = _real['pnl']
-                    pos._smart_meta['pnl_accounting_mode'] = _real['pnl_accounting_mode']
-                    pos._smart_meta['binance_realized_pnl'] = _real.get('realized_pnl')
-                    pos._smart_meta['binance_close_commission'] = _real.get('commission')
-                    pos._smart_meta['binance_funding'] = _real.get('funding', 0.0)
-                _saved = self._save_futures_closed(pos, reason)  # FIX-G: persist to DB
-                if _saved:
-                    pos.closed = True
-                    pos.closed_at = datetime.now(timezone.utc)
-                    if pos.pnl is None:
-                        pos.pnl = pnl
-                    self._persist_truth_transition(
-                        "CLOSE_BINANCE_CONFIRMED",
-                        symbol,
-                        "LONG",
-                        {"qty": aligned_qty, "reason": reason, "exit_price": pos.exit_price, "pnl": pos.pnl},
-                        confirmed=True,
-                    )
-                    print(f"[Futures] LONG {symbol} CLOSED: PnL~${pos.pnl:.2f}")
-                    return result
-                else:
-                    print(f"[Futures/WARN] LONG {symbol}: close persist failed — leaving position tracked for retry")
-                    return result
+                with self._close_lock:
+                    if pos.closed:
+                        print(f"[Futures] close_long {symbol}: already closed (race won by another path)")
+                        return result
+                    # Use real fill price from order response for PnL persistence (not current market price)
+                    _fill_price = self._average_fill_price(result, current_price)
+                    pos.exit_price = _fill_price
+                    _real = self._get_realized_pnl_from_trades(symbol, "LONG", pos.opened_at, pos=pos)
+                    if _real.get('pnl_accounting_mode'):
+                        pos.pnl = _real['pnl']
+                        pos._smart_meta['pnl_accounting_mode'] = _real['pnl_accounting_mode']
+                        pos._smart_meta['binance_realized_pnl'] = _real.get('realized_pnl')
+                        pos._smart_meta['binance_close_commission'] = _real.get('commission')
+                        pos._smart_meta['binance_funding'] = _real.get('funding', 0.0)
+                    _saved = self._save_futures_closed(pos, reason)  # FIX-G: persist to DB
+                    if _saved:
+                        pos.closed = True
+                        pos.closed_at = datetime.now(timezone.utc)
+                        if pos.pnl is None:
+                            pos.pnl = pnl
+                        self._persist_truth_transition(
+                            "CLOSE_BINANCE_CONFIRMED",
+                            symbol,
+                            "LONG",
+                            {"qty": aligned_qty, "reason": reason, "exit_price": pos.exit_price, "pnl": pos.pnl},
+                            confirmed=True,
+                        )
+                        print(f"[Futures] LONG {symbol} CLOSED: PnL~${pos.pnl:.2f}")
+                        return result
+                    else:
+                        print(f"[Futures/WARN] LONG {symbol}: close persist failed — leaving position tracked for retry")
+                        return result
             print(f"[Futures] LONG {symbol} CLOSED: PnL~${pnl:.2f}")
             return result
         except Exception as e:
@@ -3014,35 +3144,40 @@ class FuturesClient:
                     pos.qty = _real_qty
                     self._persist_smart_meta(pos)
                 return result
+            # s112: serialize the persistence+mark-closed block — see close_long for rationale.
             if pos:
-                # Use real fill price from order response for PnL persistence (not current market price)
-                _fill_price = self._average_fill_price(result, current_price)
-                pos.exit_price = _fill_price
-                _real = self._get_realized_pnl_from_trades(symbol, "SHORT", pos.opened_at, pos=pos)
-                if _real.get('pnl_accounting_mode'):
-                    pos.pnl = _real['pnl']
-                    pos._smart_meta['pnl_accounting_mode'] = _real['pnl_accounting_mode']
-                    pos._smart_meta['binance_realized_pnl'] = _real.get('realized_pnl')
-                    pos._smart_meta['binance_close_commission'] = _real.get('commission')
-                    pos._smart_meta['binance_funding'] = _real.get('funding', 0.0)
-                _saved = self._save_futures_closed(pos, reason)  # FIX-G: persist to DB
-                if _saved:
-                    pos.closed     = True
-                    pos.closed_at  = datetime.now(timezone.utc)
-                    if pos.pnl is None:
-                        pos.pnl = pnl
-                    self._persist_truth_transition(
-                        "CLOSE_BINANCE_CONFIRMED",
-                        symbol,
-                        "SHORT",
-                        {"qty": aligned_qty, "reason": reason, "exit_price": pos.exit_price, "pnl": pos.pnl},
-                        confirmed=True,
-                    )
-                    print(f"[Futures] SHORT {symbol} CLOSED: PnL~${pos.pnl:.2f}")
-                    return result
-                else:
-                    print(f"[Futures/WARN] SHORT {symbol}: close persist failed — leaving position tracked for retry")
-                    return result
+                with self._close_lock:
+                    if pos.closed:
+                        print(f"[Futures] close_short {symbol}: already closed (race won by another path)")
+                        return result
+                    # Use real fill price from order response for PnL persistence (not current market price)
+                    _fill_price = self._average_fill_price(result, current_price)
+                    pos.exit_price = _fill_price
+                    _real = self._get_realized_pnl_from_trades(symbol, "SHORT", pos.opened_at, pos=pos)
+                    if _real.get('pnl_accounting_mode'):
+                        pos.pnl = _real['pnl']
+                        pos._smart_meta['pnl_accounting_mode'] = _real['pnl_accounting_mode']
+                        pos._smart_meta['binance_realized_pnl'] = _real.get('realized_pnl')
+                        pos._smart_meta['binance_close_commission'] = _real.get('commission')
+                        pos._smart_meta['binance_funding'] = _real.get('funding', 0.0)
+                    _saved = self._save_futures_closed(pos, reason)  # FIX-G: persist to DB
+                    if _saved:
+                        pos.closed     = True
+                        pos.closed_at  = datetime.now(timezone.utc)
+                        if pos.pnl is None:
+                            pos.pnl = pnl
+                        self._persist_truth_transition(
+                            "CLOSE_BINANCE_CONFIRMED",
+                            symbol,
+                            "SHORT",
+                            {"qty": aligned_qty, "reason": reason, "exit_price": pos.exit_price, "pnl": pos.pnl},
+                            confirmed=True,
+                        )
+                        print(f"[Futures] SHORT {symbol} CLOSED: PnL~${pos.pnl:.2f}")
+                        return result
+                    else:
+                        print(f"[Futures/WARN] SHORT {symbol}: close persist failed — leaving position tracked for retry")
+                        return result
             print(f"[Futures] SHORT {symbol} CLOSED: PnL~${pnl:.2f}")
             return result
         except Exception as e:
@@ -4314,17 +4449,56 @@ class FuturesClient:
                                     except Exception as _uge:
                                         print(f"[UnifiedGov/Futures] {symbol} partial FAILED: {_uge}")
                                 if _ug_ok:
+                                    # s109: mirror the SSO partial-close persistence pattern
+                                    # (`_save_futures_closed(partial_close=True, remaining_qty=...)`)
+                                    # — previously this branch only mutated `pos.qty` in memory
+                                    # and never updated `trades_open.quantity` nor created a
+                                    # `trades_closed` record for the partial fill, leaving the DB
+                                    # permanently stale after a UG partial close (root cause of the
+                                    # recurring BINANCE_MISMATCH_RUNTIME_MISSING investigated for
+                                    # DOGEUSDT/FETUSDT).
                                     _ug_pnl = (entry - price) * _ug_qty if pos.side == "SHORT" else (price - entry) * _ug_qty
                                     pos.qty -= _ug_qty
                                     self._persist_smart_meta(pos)
+                                    _ug_save_ok = True
                                     if pos.qty > 0:
+                                        _ug_partial_pos = copy.copy(pos)
+                                        _ug_partial_pos._smart_meta = dict(pos._smart_meta)
+                                        _ug_partial_pos.qty = _ug_qty
+                                        _ug_partial_pos.exit_price = price
+                                        _ug_partial_pos.closed_at = datetime.now(timezone.utc)
+                                        _ug_partial_pos.pnl = None
+                                        _ug_save_ok = self._save_futures_closed(
+                                            _ug_partial_pos,
+                                            _ug_decision.reason,
+                                            partial_close=True,
+                                            remaining_qty=pos.qty,
+                                        )
+                                        if not _ug_save_ok:
+                                            print(f"[UnifiedGov/Futures] {symbol} {pos.side}: partial close persist failed — reverting in-memory qty, will retry next cycle")
+                                            pos.qty += _ug_qty
+                                            continue
                                         self.update_sl_tp(symbol, pos.side, new_sl=pos.sl_price, new_tp=pos.tp_price)
+                                    else:
+                                        # Rounding pushed the residual to zero/negative — treat as a
+                                        # full close so trades_open/trades_closed stay consistent.
+                                        pos.exit_price = price
+                                        pos.pnl = _ug_pnl
+                                        pos.qty = _ug_qty
+                                        _ug_save_ok = self._save_futures_closed(pos, _ug_decision.reason)
+                                        if _ug_save_ok:
+                                            pos.closed = True
+                                            pos.closed_at = datetime.now(timezone.utc)
+                                            pos.qty = 0
+                                        else:
+                                            print(f"[UnifiedGov/Futures] {symbol} {pos.side}: full close persist failed — will retry next cycle")
+                                            continue
                                     closed.append({
                                         "symbol": symbol,
                                         "side": pos.side,
                                         "reason": _ug_decision.reason,
                                         "pnl": _ug_pnl,
-                                        "partial": True,
+                                        "partial": pos.qty > 0 if not pos.closed else False,
                                     })
                                     continue
                         else:
@@ -4721,12 +4895,27 @@ class FuturesClient:
                 ) if pos._smart_meta.get('btc_price_at_entry') else None,
             })
 
-        # Fase 2.2: advisory futures reconciliation report (dry-run by default)
+        # Fase 2.2: advisory futures reconciliation report (dry-run by default).
+        # s109: BINANCE_MISMATCH_RUNTIME_MISSING is auto-applied even though the
+        # rest stays advisory-only — importing a position that genuinely exists
+        # on Binance into `_open_positions` is strictly additive (it never
+        # closes or mutates anything), unlike BINANCE_MISMATCH_GHOST_RUNTIME
+        # (marks a runtime position closed) which stays manual-review-only.
+        # Without this, a runtime/Binance desync (e.g. the UG partial-close gap
+        # fixed above) would page as "critical" every ~5-7 min indefinitely,
+        # self-healing only on a full container restart (see AVAXUSDT/DOGEUSDT/
+        # FETUSDT incident, calibracion_entradas s109).
         try:
             if not self.dry_run:
-                _rec_report = auto_reconcile_futures(self, self.db_client, dry_run=True)
+                _rec_report = auto_reconcile_futures(
+                    self, self.db_client, dry_run=True,
+                    auto_fix_codes={"BINANCE_MISMATCH_RUNTIME_MISSING"},
+                )
                 if _rec_report.get("mismatch_count", 0) > 0:
                     print(f"[Futures/Reconcile] advisory report: {_rec_report['mismatch_count']} mismatches")
+                if _rec_report.get("applied"):
+                    print(f"[Futures/Reconcile] auto-applied {len(_rec_report['applied'])} fix(es): "
+                          f"{[a.get('symbol') for a in _rec_report['applied']]}")
         except Exception as _rec_err:
             print(f"[Futures/Reconcile] advisory reconciliation failed: {_rec_err}")
 

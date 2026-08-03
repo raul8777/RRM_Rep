@@ -67,13 +67,15 @@ def get_daily_realized_pnl(db_client, trade_type: str = "futures") -> float:
             rows_futures = db_client.execute_query(
                 "SELECT COALESCE(SUM(pnl), 0.0) AS total FROM trades_closed "
                 "WHERE exit_time >= CURRENT_DATE "
-                "AND metadata->>'trade_type' = 'futures'",
+                "AND metadata->>'trade_type' = 'futures' "
+                "AND COALESCE(is_corrupted, FALSE) = FALSE",
                 ()
             )
             rows_spot = db_client.execute_query(
                 "SELECT COALESCE(SUM(pnl), 0.0) AS total FROM trades_closed "
                 "WHERE exit_time >= CURRENT_DATE "
-                "AND metadata->>'trade_type' = 'spot'",
+                "AND metadata->>'trade_type' = 'spot' "
+                "AND COALESCE(is_corrupted, FALSE) = FALSE",
                 ()
             )
             futures_val = float(rows_futures[0]["total"]) if rows_futures else 0.0

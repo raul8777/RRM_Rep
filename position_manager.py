@@ -6,6 +6,7 @@ Manages open and closed trades, tracks PnL, and handles automatic position closu
 
 import json
 import logging
+import threading
 import time
 import uuid
 from decimal import Decimal
@@ -103,6 +104,16 @@ class PositionManager:
         self._perf_cache: Optional[tuple] = None
         self._perf_cache_ttl = 60.0  # seconds
         self._missing_balance_streak: Dict[str, int] = {}
+        # s113: SPOT never had the equivalent of futures_client.py's `_close_lock`
+        # (added in s105h) serializing close-persistence across concurrent callers —
+        # the main trade cycle (SSO/PRS/UG, every 3-45min) and
+        # `hard_risk_monitor.monitor_spot_hard_stops_once` (its own thread, every 2s)
+        # can both call `close_position` for the same position with no mutual
+        # exclusion, risking the same double-close-in-`trades_closed` bug already
+        # found and fixed on the futures side (HYPERUSDT/ONDOUSDT/WIFUSDT/DOGEUSDT,
+        # s110-s112). One lock across symbols (not per-symbol) mirrors the futures
+        # design: closes are rare enough that a single lock costs negligible latency.
+        self._close_lock = threading.RLock()
         logger.info("Position Manager initialized")
         
         # Load positions from database if available
@@ -235,6 +246,7 @@ class PositionManager:
                        strategy_id, metadata, entry_commission, exit_commission,
                        pnl_prediction, indicators_at_entry, prediction_accuracy
                 FROM trades_closed
+                WHERE COALESCE(is_corrupted, FALSE) = FALSE
                 ORDER BY exit_time DESC
                 LIMIT 100
             """
@@ -826,6 +838,14 @@ class PositionManager:
         """
         Close a specific open position for a symbol.
 
+        s113: serialized by `self._close_lock` — the main trade cycle and
+        `hard_risk_monitor.monitor_spot_hard_stops_once` (separate thread, 2s
+        cadence) can both reach this method for the same position; without a
+        lock, both could read the same in-memory `Position` before either
+        persists its close, producing the same double-close-in-`trades_closed`
+        bug already found and fixed on the futures side (see
+        `calibrar-ciclo-vida-52fe5d.md` s105h/s112).
+
         Args:
             symbol: Trading pair symbol
             exit_price: Exit price
@@ -839,6 +859,23 @@ class PositionManager:
         Returns:
             ClosedPosition if position was found, None otherwise
         """
+        with self._close_lock:
+            return self._close_position_impl(
+                symbol, exit_price, close_reason, commission_rate,
+                position_id, exit_context, qty_closed, exit_fill,
+            )
+
+    def _close_position_impl(
+        self,
+        symbol: str,
+        exit_price: float,
+        close_reason: str = "manual",
+        commission_rate: Optional[float] = None,
+        position_id: Optional[str] = None,
+        exit_context: Optional[Dict[str, Any]] = None,
+        qty_closed: Optional[float] = None,
+        exit_fill: Optional[Dict[str, Any]] = None,
+    ) -> Optional[ClosedPosition]:
         positions = self._open_positions.get(symbol)
         if not positions:
             logger.warning(f"No open position found for {symbol}")
@@ -920,6 +957,27 @@ class PositionManager:
             prediction_accuracy=pred_acc
         )
 
+        # Try to persist to DB BEFORE mutating in-memory state.
+        # If the DB transaction fails, the position remains tracked and will be retried/reconciled.
+        _db_ok = True
+        if self.db_client:
+            _db_ok = self._close_position_in_db(
+                target, closed_position, is_partial=_is_partial,
+                residual_qty=full_qty - _closed_qty if _is_partial else None,
+                residual_entry_commission=_entry_comm_remaining if _is_partial else None,
+            )
+
+        if not _db_ok:
+            logger.error(f"Position close NOT applied in memory because DB persist failed: {symbol}")
+            ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"Position close DB persist failed: {symbol}")
+            self._audit(symbol, 'close_persist_failed', {
+                'side': closed_position.side, 'qty': float(closed_position.quantity or 0),
+                'entry_price': float(closed_position.entry_price or 0),
+                'exit_price': float(closed_position.exit_price or 0),
+                'pnl': round(float(pnl), 4), 'reason': close_reason, 'partial': _is_partial,
+            }, binance_confirmed=bool(exit_fill and exit_fill.get('binance_confirmed')))
+            return None
+
         # Update or remove the open entry depending on whether this was a full or partial close
         if _is_partial:
             target.quantity = full_qty - _closed_qty
@@ -936,13 +994,6 @@ class PositionManager:
                 del self._open_positions[symbol]
 
         self._closed_positions.append(closed_position)
-
-        if self.db_client:
-            try:
-                self._close_position_in_db(target, closed_position, is_partial=_is_partial)
-            except Exception as e:
-                logger.error(f"Failed to close position in database: {e}")
-                ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"Failed to close position {symbol} in DB: {e}")
 
         _cp_meta = closed_position.metadata if isinstance(closed_position.metadata, dict) else {}
         self._audit(symbol, 'close', {
@@ -970,9 +1021,28 @@ class PositionManager:
         Close open positions for a symbol. If qty_closed is provided, it closes up to that
         total quantity across entries (FIFO). Otherwise, closes all entries.
 
+        s113: serialized by `self._close_lock` (RLock — safe to nest with the
+        per-entry `close_position` calls below). See `close_position` docstring.
+
         Returns:
             List of ClosedPosition objects
         """
+        with self._close_lock:
+            return self._close_all_positions_for_symbol_impl(
+                symbol, exit_price, close_reason, commission_rate,
+                exit_context, qty_closed, exit_fill,
+            )
+
+    def _close_all_positions_for_symbol_impl(
+        self,
+        symbol: str,
+        exit_price: float,
+        close_reason: str = "manual",
+        commission_rate: float = 0.001,
+        exit_context: Optional[Dict[str, Any]] = None,
+        qty_closed: Optional[float] = None,
+        exit_fill: Optional[Dict[str, Any]] = None,
+    ) -> List[ClosedPosition]:
         positions = list(self._open_positions.get(symbol, []))
         # ── SPOT Escalamiento: assign shared close_group_id when closing N entries ──
         _close_group = str(uuid.uuid4()) if len(positions) > 1 else None
@@ -1013,8 +1083,12 @@ class PositionManager:
         position: Position,
         closed_position: ClosedPosition,
         is_partial: bool = False,
-    ) -> None:
-        """Persist a close in trades_closed. For partial closes, update trades_open quantity instead of deleting."""
+        residual_qty: Optional[float] = None,
+        residual_entry_commission: Optional[float] = None,
+    ) -> bool:
+        """Persist a close in trades_closed. For partial closes, update trades_open quantity instead of deleting.
+        Returns True on success, False on failure. Caller must not update in-memory state unless this returns True.
+        """
         def _to_json(v):
             return json.dumps(v) if isinstance(v, (dict, list)) else v
 
@@ -1070,52 +1144,57 @@ class PositionManager:
         )
 
         _residual_meta = json.dumps(position.metadata) if isinstance(position.metadata, dict) else '{}'
-        if is_partial and position.db_id:
-            # Update residual quantity, entry commission and partial-close metadata in the open record
-            update_query = "UPDATE trades_open SET quantity = %s, entry_commission = %s, metadata = metadata || %s::jsonb WHERE id = %s"
-            update_params = (
-                _safe_float(position.quantity),
-                _safe_float(position.entry_commission),
-                _residual_meta,
-                position.db_id,
-            )
-            self.db_client.execute_transaction([
-                (insert_query, insert_params),
-                (update_query, update_params),
-            ])
-        elif is_partial:
-            # No db_id fallback: update by symbol+entry_time
-            update_query = "UPDATE trades_open SET quantity = %s, entry_commission = %s, metadata = metadata || %s::jsonb WHERE symbol = %s AND entry_time = %s"
-            update_params = (
-                _safe_float(position.quantity),
-                _safe_float(position.entry_commission),
-                _residual_meta,
-                position.symbol,
-                position.entry_time,
-            )
-            self.db_client.execute_transaction([
-                (insert_query, insert_params),
-                (update_query, update_params),
-            ])
-        else:
-            # Delete by primary key when available, otherwise fallback to symbol+entry_time.
-            if position.db_id:
-                delete_query = "DELETE FROM trades_open WHERE id = %s"
-                delete_params = (position.db_id,)
-            else:
-                delete_query = "DELETE FROM trades_open WHERE symbol = %s AND entry_time = %s"
-                delete_params = (position.symbol, position.entry_time)
-
-            self.db_client.execute_transaction([
-                (insert_query, insert_params),
-                (delete_query, delete_params),
-            ])
-        # P1.1: Invalidate daily PnL cache — next SSO-4 evaluation will read updated total from BD
         try:
-            from daily_pnl_tracker import invalidate_cache as _inv_dpnl
-            _inv_dpnl()
-        except Exception:
-            pass
+            if is_partial:
+                _res_qty = residual_qty if residual_qty is not None else position.quantity
+                _res_comm = residual_entry_commission if residual_entry_commission is not None else position.entry_commission
+                # Update residual quantity, entry commission and partial-close metadata in the open record
+                if position.db_id:
+                    update_query = "UPDATE trades_open SET quantity = %s, entry_commission = %s, metadata = metadata || %s::jsonb WHERE id = %s"
+                    update_params = (
+                        _safe_float(_res_qty),
+                        _safe_float(_res_comm),
+                        _residual_meta,
+                        position.db_id,
+                    )
+                else:
+                    # No db_id fallback: update by symbol+entry_time
+                    update_query = "UPDATE trades_open SET quantity = %s, entry_commission = %s, metadata = metadata || %s::jsonb WHERE symbol = %s AND entry_time = %s"
+                    update_params = (
+                        _safe_float(_res_qty),
+                        _safe_float(_res_comm),
+                        _residual_meta,
+                        position.symbol,
+                        position.entry_time,
+                    )
+                self.db_client.execute_transaction([
+                    (insert_query, insert_params),
+                    (update_query, update_params),
+                ])
+            else:
+                # Delete by primary key when available, otherwise fallback to symbol+entry_time.
+                if position.db_id:
+                    delete_query = "DELETE FROM trades_open WHERE id = %s"
+                    delete_params = (position.db_id,)
+                else:
+                    delete_query = "DELETE FROM trades_open WHERE symbol = %s AND entry_time = %s"
+                    delete_params = (position.symbol, position.entry_time)
+
+                self.db_client.execute_transaction([
+                    (insert_query, insert_params),
+                    (delete_query, delete_params),
+                ])
+            # P1.1: Invalidate daily PnL cache — next SSO-4 evaluation will read updated total from BD
+            try:
+                from daily_pnl_tracker import invalidate_cache as _inv_dpnl
+                _inv_dpnl()
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            logger.error(f"Failed to close position in database: {e}")
+            ec.add_error(ec.SOURCE_DB, ec.LEVEL_ERROR, f"Failed to close position {position.symbol} in DB: {e}")
+            return False
     
     def check_stop_loss_take_profit(self, current_prices: Dict[str, float]) -> List[ClosedPosition]:
         """
@@ -1203,6 +1282,7 @@ class PositionManager:
                            strategy_id, metadata, entry_commission, exit_commission,
                            pnl_prediction, indicators_at_entry, prediction_accuracy
                     FROM trades_closed
+                    WHERE COALESCE(is_corrupted, FALSE) = FALSE
                     ORDER BY exit_time DESC
                     LIMIT %s
                 """
@@ -1255,6 +1335,7 @@ class PositionManager:
                            pnl_prediction, indicators_at_entry, prediction_accuracy
                     FROM trades_closed
                     WHERE exit_time >= %s
+                      AND COALESCE(is_corrupted, FALSE) = FALSE
                     ORDER BY exit_time DESC
                     LIMIT %s
                 """

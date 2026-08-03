@@ -1,7 +1,7 @@
 ============================= test session starts =============================
 platform win32 -- Python 3.12.10, pytest-8.4.2, pluggy-1.6.0
 rootdir: S:\Tools\AI\crypto-agent
-plugins: anyio-4.14.1
+plugins: anyio-4.14.1, xdist-3.8.0
 collected 98 items
 
 tests\test_futures_smart_exits.py ...................................... [ 38%]
@@ -13,4 +13,4 @@ tests/test_futures_smart_exits.py::TestBreakevenSL::test_breakeven_triggers_for_
     import cgi
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-======================= 98 passed, 1 warning in 40.15s ========================
+================== 98 passed, 1 warning in 99.09s (0:01:39) ===================

@@ -514,6 +514,7 @@ def auto_reconcile_futures(
     dry_run: bool = True,
     qty_tol: float = 1e-8,
     entry_tol_pct: float = 0.002,
+    auto_fix_codes: Optional[set] = None,
 ) -> Dict[str, Any]:
     """Advisory reconciliation of FUTURES runtime/Binance discrepancies.
 
@@ -522,21 +523,30 @@ def auto_reconcile_futures(
       - BINANCE_MISMATCH_GHOST_RUNTIME: mark runtime position as closed.
       - BINANCE_MISMATCH_QTY: update runtime qty to Binance qty.
       - BINANCE_MISMATCH_ENTRY_PRICE: update runtime entry_price to Binance entry.
+
+    s109: `auto_fix_codes` lets a caller stay in `dry_run=True` overall (safe
+    default) while still allowing specific, low-risk mismatch codes to be
+    auto-applied — e.g. `{"BINANCE_MISMATCH_RUNTIME_MISSING"}`, which is
+    purely additive (importing a position that genuinely exists on Binance
+    can never close/modify anything, unlike `BINANCE_MISMATCH_GHOST_RUNTIME`
+    which marks a runtime position as closed and deserves more caution).
     """
     status = evaluate_futures_parity(futures_client, qty_tol=qty_tol, entry_tol_pct=entry_tol_pct)
     recommendations: List[Dict[str, Any]] = []
     applied: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
     _now = _utc_now_iso()
+    _auto_fix_codes = auto_fix_codes or set()
 
     for mm in status.get("mismatches", []):
         code = mm.get("code")
         symbol = mm.get("symbol", "UNKNOWN")
         side = mm.get("side", "UNKNOWN")
         key = _pos_key(symbol, side)
-        rec = {**mm, "dry_run": dry_run, "ts": _now}
+        _code_dry_run = dry_run and code not in _auto_fix_codes
+        rec = {**mm, "dry_run": _code_dry_run, "ts": _now}
         recommendations.append(rec)
-        if dry_run:
+        if _code_dry_run:
             skipped.append({**rec, "reason": "dry_run"})
             continue
 
@@ -556,19 +566,69 @@ def auto_reconcile_futures(
                     continue
                 _qty = abs(_safe_float(_pos.get("positionAmt"), 0.0))
                 _entry = _safe_float(_pos.get("entryPrice"), 0.0)
-                _sl = _safe_float(_pos.get("stopLossPrice"), 0.0) or _entry
-                _tp = _safe_float(_pos.get("takeProfitPrice"), 0.0) or _entry
+                # s114: `/fapi/v2/positionRisk` (what `get_positions()` returns) has no
+                # `stopLossPrice`/`takeProfitPrice` fields — reading them here always
+                # returned 0.0, and `0.0 or _entry` silently collapsed both SL and TP to
+                # the entry price. The very next price tick then satisfied either
+                # `is_sl_hit()` or `is_tp_hit()` trivially, closing the "reconciled"
+                # position within seconds (TAOUSDT/ONDOUSDT/WIFUSDT/DOGEUSDT/EDENUSDT —
+                # some even closed at a LOSS while labeled `take_profit`). Mirrors
+                # `_sync_open_positions`'s already-correct recovery: sane entry-based
+                # defaults (3%/6%, same as that function), overridden by the real
+                # STOP_MARKET/TAKE_PROFIT_MARKET algo order trigger price when one
+                # exists. See calibrar-ciclo-vida-52fe5d.md s114.
+                # Entry-based defaults (3%/6%, same ratios as `_sync_open_positions`) —
+                # plain arithmetic, deliberately not tick-aligned here: the goal is a
+                # sane, never-collapsed-to-entry starting point, not exchange-precise
+                # rounding (the real algo order trigger price, when found below, is
+                # already exchange-aligned by construction).
+                if side == "SHORT":
+                    _sl = _entry * 1.03
+                    _tp = _entry * 0.94
+                else:
+                    _sl = _entry * 0.97
+                    _tp = _entry * 1.06
+                _sl_order_id = None
+                _tp_order_id = None
+                try:
+                    _algo_resp = futures_client._get("/fapi/v1/openAlgoOrders", signed=True)
+                    _algo_list = _algo_resp if isinstance(_algo_resp, list) else _algo_resp.get("orders", _algo_resp.get("algoOrders", []))
+                    for _ao in _algo_list:
+                        if str(_ao.get("symbol") or "").strip().upper() != symbol:
+                            continue
+                        _ao_pos_side = _ao.get("positionSide", "BOTH")
+                        if not (_ao_pos_side == side or _ao_pos_side == "BOTH"):
+                            continue
+                        _ao_type = _ao.get("type") or _ao.get("orderType", "")
+                        _trigger = _safe_float(_ao.get("triggerPrice"), 0.0)
+                        if _trigger <= 0:
+                            continue
+                        if _ao_type == "STOP_MARKET":
+                            _sl = _trigger
+                            _sl_order_id = str(_ao.get("algoId", _ao.get("orderId", "")))
+                        elif _ao_type == "TAKE_PROFIT_MARKET":
+                            _tp = _trigger
+                            _tp_order_id = str(_ao.get("algoId", _ao.get("orderId", "")))
+                except Exception as _algo_err:
+                    print(f"[TruthGuard] {symbol}: openAlgoOrders lookup failed ({_algo_err}), using entry-based SL/TP defaults")
+                # Defensive guard: never persist a position where SL/TP collapsed onto
+                # the entry price (or onto each other) — that is the exact signature of
+                # the bug this fix addresses, not a legitimate zero-risk position.
+                if _sl is None or _tp is None or _entry <= 0 or abs(_sl - _entry) < 1e-12 or abs(_tp - _entry) < 1e-12 or abs(_sl - _tp) < 1e-12:
+                    skipped.append({**rec, "reason": "sl_tp_collapsed_to_entry_guard"})
+                    continue
                 from futures_client import FuturesPosition
                 _new_pos = FuturesPosition(
                     symbol=symbol, side=side, qty=_qty, entry_price=_entry,
                     sl_price=_sl, tp_price=_tp,
                     order_id=f"RECONCILE_{_now}",
-                    metadata={"source": "truth_reconcile_import", "synthetic": True},
+                    sl_order_id=_sl_order_id, tp_order_id=_tp_order_id,
+                    _smart_meta={"source": "truth_reconcile_import", "synthetic": True, "learning_eligible": False},
                 )
                 futures_client._open_positions[key] = _new_pos
                 if hasattr(futures_client, "_save_futures_open"):
                     futures_client._save_futures_open(_new_pos)
-                applied.append({**rec, "action": "import", "qty": _qty, "entry_price": _entry})
+                applied.append({**rec, "action": "import", "qty": _qty, "entry_price": _entry, "sl_price": _sl, "tp_price": _tp})
                 continue
             except Exception as e:
                 skipped.append({**rec, "reason": f"import_error: {e}"})
@@ -581,14 +641,18 @@ def auto_reconcile_futures(
                 if _pos is None:
                     skipped.append({**rec, "reason": "runtime_position_not_found"})
                     continue
-                _pos.closed = True
                 _pos.pnl = 0.0
+                _persisted = False
                 if db_client and hasattr(futures_client, "_save_futures_closed"):
                     try:
-                        futures_client._save_futures_closed(_pos, "truth_reconcile_ghost")
+                        _persisted = futures_client._save_futures_closed(_pos, "truth_reconcile_ghost")
                     except Exception:
-                        pass
-                applied.append({**rec, "action": "mark_ghost"})
+                        _persisted = False
+                if _persisted:
+                    _pos.closed = True
+                    applied.append({**rec, "action": "mark_ghost"})
+                else:
+                    skipped.append({**rec, "reason": "persist_failed"})
                 continue
             except Exception as e:
                 skipped.append({**rec, "reason": f"ghost_error: {e}"})
@@ -864,6 +928,7 @@ def _fetch_db_closed_positions(
                    metadata, entry_commission, exit_commission
             FROM trades_closed
             WHERE exit_time >= %s
+              AND COALESCE(is_corrupted, FALSE) = FALSE
             ORDER BY exit_time DESC
             LIMIT %s
         """

@@ -7,6 +7,7 @@ since a live websocket test is out of scope for this environment.
 """
 import sys
 import os
+import time
 import types
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
@@ -61,7 +62,8 @@ def test_health_shape():
     assert set(h.keys()) == {
         "event_stream_running", "event_stream_connected", "event_stream_last_event_at",
         "event_stream_last_futures_event_at", "event_stream_last_spot_event_at", "event_stream_last_error",
-        "event_stream_mark_price_subscriptions",
+        "event_stream_mark_price_subscriptions", "event_stream_reconnect_count",
+        "event_stream_last_reconnect_at", "event_stream_pending_reconnect",
     }
     assert h["event_stream_running"] is False
 
@@ -187,3 +189,54 @@ def test_handle_order_fill_event_never_raises_on_malformed_event():
     # Missing/garbage fields must not raise.
     assert fc.handle_order_fill_event({}) is None
     assert fc.handle_order_fill_event({"X": "FILLED", "rp": "not_a_number"}) is None
+
+
+# ── S105h: websocket error detection + reconnect scheduling ─────────────────
+
+def test_socket_error_payload_detection():
+    stream = BinanceEventStream(settings=_make_settings())
+    assert stream._is_socket_error_payload("Read loop has been closed, please reset the websocket connection and listen to the message error")
+    assert stream._is_socket_error_payload({"e": "error", "m": "Read loop has been closed"})
+    assert stream._is_socket_error_payload({"message": "websocket error"})
+    assert not stream._is_socket_error_payload({"e": "ORDER_TRADE_UPDATE", "o": {}})
+    assert not stream._is_socket_error_payload("random benign text")
+
+
+def test_on_futures_message_error_triggers_reconnect():
+    stream = BinanceEventStream(settings=_make_settings())
+    reconnects = []
+    stream._schedule_reconnect = lambda: reconnects.append(True)
+    stream._on_futures_message({"e": "error", "m": "Read loop has been closed, please reset the websocket connection"})
+    assert len(reconnects) == 1
+    assert stream.last_error is not None
+
+
+def test_on_spot_message_error_triggers_reconnect():
+    stream = BinanceEventStream(settings=_make_settings())
+    reconnects = []
+    stream._schedule_reconnect = lambda: reconnects.append(True)
+    stream._on_spot_message("Read loop has been closed, please reset the websocket connection and listen to the message error")
+    assert len(reconnects) == 1
+    assert stream.last_error is not None
+
+
+def test_force_reconnect_schedules_reconnect():
+    stream = BinanceEventStream(settings=_make_settings())
+    reconnects = []
+    stream._schedule_reconnect = lambda: reconnects.append(True)
+    assert stream.force_reconnect() is True
+    assert len(reconnects) == 1
+
+
+def test_watchdog_detects_stale_connection():
+    stream = BinanceEventStream(settings=_make_settings())
+    stream.running = True
+    stream.last_event_at = datetime.now(timezone.utc).replace(year=2000)
+    stream.WATCHDOG_INTERVAL_SECONDS = 0.05
+    stream.EVENT_TIMEOUT_SECONDS = 0.01
+    reconnects = []
+    stream._schedule_reconnect = lambda: reconnects.append(True)
+    stream._start_watchdog()
+    time.sleep(0.2)
+    stream.stop()
+    assert len(reconnects) >= 1

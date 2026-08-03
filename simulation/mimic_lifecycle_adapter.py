@@ -593,7 +593,7 @@ class SimulationLifecycleAdapter:
                 return
             from datetime import datetime, timezone
             self.db_client.execute_query(
-                "INSERT INTO trades_audit (symbol, trade_type, event, detail, created_at) VALUES (%s, %s, %s, %s, %s)",
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, ts) VALUES (%s, %s, %s, %s, %s)",
                 (
                     getattr(decision, "symbol", None) or getattr(decision.signal, "symbol", None),
                     "spot",

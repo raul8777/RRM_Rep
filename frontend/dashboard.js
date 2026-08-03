@@ -31,19 +31,34 @@ let _cachedFuturesClosed = [];     // Updated by renderFuturesClosed each cycle
 const CACHE_TTL_MS = 5000;    // 5 s frontend cache for fresher mode/profile
 const POLL_INTERVAL_MS = 15000; // 15 s poll for near-real-time status
 const BACKTEST_PROGRESS_POLL_MS = 5000;
+const FETCH_TIMEOUT_MS = 12000; // abort a hung fetch (e.g. backend restart mid-request)
 let _fetchInProgress = false;
+let _fetchStartedAt = 0;
 let _lastSuccessfulFetch = 0;
 let _lastFetchErrorAt = 0;
 
+// Wrap fetch with a hard timeout so a connection reset mid-request (e.g. `docker compose
+// restart app`) can never leave the browser fetch() neither resolved nor rejected — that
+// used to leave `_fetchInProgress` stuck `true` forever and freeze the whole dashboard
+// until a manual page reload.
+function _fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
 async function fetchDashboardData() {
     const now = Date.now();
-    if (_fetchInProgress) return _cachedData;
+    // Watchdog: if a previous fetch has been "in progress" longer than the timeout allows,
+    // it's stuck (should not happen with _fetchWithTimeout, but never block polling forever).
+    if (_fetchInProgress && (now - _fetchStartedAt) < (FETCH_TIMEOUT_MS + 5000)) return _cachedData;
     if (_cachedData && (now - _lastFetch) < CACHE_TTL_MS) return _cachedData;
     _fetchInProgress = true;
+    _fetchStartedAt = now;
     try {
         const [summaryRes, controlRes] = await Promise.all([
-            fetch(`${API_BASE}/dashboard/summary?days=${_dashboardDays}`),
-            fetch(`${API_BASE}/control/status`, { headers: _authHeaders() }),
+            _fetchWithTimeout(`${API_BASE}/dashboard/summary?days=${_dashboardDays}`),
+            _fetchWithTimeout(`${API_BASE}/control/status`, { headers: _authHeaders() }),
         ]);
         if (!summaryRes.ok) throw new Error(`HTTP ${summaryRes.status}`);
         _cachedData = await summaryRes.json();
@@ -175,6 +190,7 @@ const _CLOSE_REASON_MAP = {
     'orphan_asset_cleanup':        ['🧹 Activo sin registro',   'reason-neutral'],
     'prediction_realloc':          ['🔄 Reemplazo por EV',      'reason-rebal'],
     'regime_change':               ['⚡ Cambio de régimen',     'reason-neutral'],
+    'binance_unidentified_close':  ['❓ Cierre no identificado', 'reason-neutral'],
     'manual':                      ['✋ Manual',                 'reason-neutral'],
     'sso_stagnant_profit':         ['⏱️ SSO Estancada',          'reason-tp'],
     'sso_momentum_exhausted':      ['📉 SSO Momentum Agotado',   'reason-tp'],
@@ -817,6 +833,8 @@ let _opsMainTab = 'open';  // 'open' | 'closed'
 let _opsSubFilter = 'all'; // 'all' | 'spot' | 'fut'
 let _selectionObservabilityTab = 'under_review'; // 'under_review' | 'reviewed'
 let _lastSelectionObservabilityData = null;
+let _selectionObservabilityRenderHash = '';
+let _selectionObservabilityRenderTab = 'under_review';
 let _lastSrPoolStatus = null;
 let _openSortMode = localStorage.getItem('ops_open_sort') || 'entry_desc'; // 'entry_desc' | 'entry_asc' | 'pnl_desc' | 'pnl_asc'
 let _openProfileFilter = 'all';   // 'all' | 'A' | 'B' | 'C'
@@ -1466,8 +1484,8 @@ function renderOpenPositions(d) {
             <td class="direction-cell">${tradeDirectionBadge}</td>
             <td class="profile-cell">${profileBadge}</td>
             <td class="mode-cell">${modeBadge}</td>
-            <td>$${fmt(entryP)}<br><small class="entry-time">${entryTimeStr}</small></td>
-            <td>$${fmt(curP)}</td>
+            <td>$${fmt(entryP, 5)}<br><small class="entry-time">${entryTimeStr}</small></td>
+            <td>$${fmt(curP, 5)}</td>
             <td class="inv-cell" title="${p.trade_type === 'futures' ? 'Notional invertido' : 'Costo total'}">$${fmt(invVal)} USDT${invMargin}</td>
             <td class="sl-tp-cell">${fmtSlTpCell(p)}</td>
             <td class="sl-tp-badges">${fmtSlTpBadges(p)}</td>
@@ -1728,7 +1746,7 @@ function renderClosedPositions(d) {
                         <td class="direction-cell">${tradeDirectionBadge}</td>
                         <td class="profile-cell">${profileBadge}</td>
                         <td class="mode-cell">${modeBadge}</td>
-                        <td>$${fmt(p.entry_price)} → $${fmt(p.exit_price)}</td>
+                        <td>$${fmt(p.entry_price, 5)} → $${fmt(p.exit_price, 5)}</td>
                         <td class="inv-cell" title="${p.trade_type === 'futures' ? 'Notional invertido' : 'Costo total'}">$${fmt(p.invested_usdt || 0)} USDT</td>
                         <td class="${pnlClass(actualPnl)}">${actualPnl >= 0 ? '+' : ''}${fmt(actualPnl)} USDT<br><small>${fmt(p.pnl_percentage)}%</small></td>
                         <td>${fmtCloseReason(p.close_reason)}</td>
@@ -2061,6 +2079,7 @@ function renderSelectionObservability(data) {
     _lastSelectionObservabilityData = data || null;
     renderSROperationalFlow(_lastSrPoolStatus, _lastSelectionObservabilityData);
     if (!data?.available) {
+        _selectionObservabilityRenderHash = '';
         el.innerHTML = '<p class="loading">La observabilidad estará disponible después del próximo ciclo.</p>';
         return;
     }
@@ -2095,6 +2114,7 @@ function renderSelectionObservability(data) {
     };
 
     const fmtMoney = v => (v == null || Number.isNaN(Number(v))) ? '—' : Number(v).toFixed(6);
+    const fmtPrice = v => (v == null || Number.isNaN(Number(v))) ? '—' : Number(v).toFixed(4);
     const fmtSec = s => {
         const n = Number(s);
         if (!Number.isFinite(n) || n < 0) return '—';
@@ -2102,24 +2122,46 @@ function renderSelectionObservability(data) {
         if (n < 3600) return `${Math.round(n / 60)}m`;
         return `${(n / 3600).toFixed(1)}h`;
     };
+
+    const discardStepFromReason = reason => {
+        const r = String(reason || '').trim().toUpperCase();
+        if (!r) return null;
+        if (['SETUP_INVALID', 'QUALITY_BELOW_C'].includes(r)) return 2;
+        if (['TRIGGER_INVALID', 'DIRECTION_TARGET_INVALID', 'DIRECTION_STOP_BREACHED', 'TRIGGER_TIMEOUT', 'MAX_AGE_EXPIRED', 'MAX_CYCLES_REACHED', 'DIRECTION_NOT_CONFIRMED', 'DIRECTION_DRAWDOWN_LIMIT'].includes(r)) return 5;
+        if (['ROUTING_BLOCKED', 'RISK_BLOCKED', 'EXECUTION_BLOCKED'].includes(r)) return 8;
+        if (r.startsWith('DIRECTION_') || r.startsWith('TRIGGER_')) return 5;
+        if (r.startsWith('ROUTING_') || r.startsWith('RISK_') || r.startsWith('EXECUTION_') || r.startsWith('CAPITAL_ROUTING_')) return 8;
+        return null;
+    };
+
     const routeMeta = c => {
         const status = String(c.status || '').toLowerCase();
         const stage = String(c.stage_kind || '').toLowerCase();
         const display = String(c.display_status || '').toLowerCase();
+        const reason = String(c.stage_reason || c.display_reason || c.reason || c.discard_reason || '').toUpperCase();
         if (status === 'opened') return { step: 10, label: 'Fill confirmado', cls: 'status-positive' };
         if (display === 'preflight_pending' || stage === 'execution_attempted') return { step: 8, label: 'Preflight/Riesgo', cls: 'status-pending' };
         if (display === 'ready_to_open') return { step: 8, label: 'Lista para orden', cls: 'status-positive' };
         if (status === 'validated' || display === 'validated_queue') return { step: 7, label: 'Validación final', cls: 'status-neutral' };
         if (display === 'direction_pending') return { step: 5, label: 'Esperando rompimiento', cls: 'status-pending' };
         if (status === 'ready' || stage === 'trigger_monitoring' || stage === 'setup_detected') return { step: 4, label: 'En re-check SR', cls: 'status-pending' };
-        if (status === 'discarded') return { step: null, label: 'Descartada', cls: 'status-negative' };
-        if (status === 'expired') return { step: null, label: 'Expirada', cls: 'status-neutral' };
+        if (status === 'discarded' || status === 'expired') {
+            const step = discardStepFromReason(reason);
+            const label = step
+                ? `${status === 'discarded' ? 'Descartada' : 'Expirada'} en paso ${step}`
+                : (status === 'discarded' ? 'Descartada' : 'Expirada');
+            return { step, label, cls: status === 'discarded' ? 'status-negative' : 'status-neutral' };
+        }
         return { step: null, label: 'Sin ruta', cls: 'status-neutral' };
     };
+
     const buildCandidateTimeline = c => {
         const r = routeMeta(c);
         const status = String(c.status || '').toLowerCase();
-        const terminal = status === 'discarded' ? 'D' : (status === 'expired' ? 'E' : null);
+        const terminalStep = discardStepFromReason(c.stage_reason || c.display_reason || c.reason || c.discard_reason);
+        const terminal = status === 'discarded'
+            ? `D${terminalStep || ''}`
+            : (status === 'expired' ? `E${terminalStep || ''}` : null);
         const activeStep = Number(r.step);
         const cells = [];
         for (let i = 1; i <= 10; i += 1) {
@@ -2133,7 +2175,10 @@ function renderSelectionObservability(data) {
             }
             cells.push(`<span class="${cls}" title="Paso ${i}">${i}</span>`);
         }
-        if (terminal) cells.push(`<span class="sr-pt term" title="Terminal">${terminal}</span>`);
+        if (terminal) {
+            const tip = terminalStep ? `Terminal en paso ${terminalStep}` : 'Terminal';
+            cells.push(`<span class="sr-pt term" title="${tip}">${terminal}</span>`);
+        }
         return `<div class="sr-mini-timeline" aria-label="Timeline 1 a 10">${cells.join('')}</div>`;
     };
 
@@ -2159,6 +2204,45 @@ function renderSelectionObservability(data) {
         discardReasonMap[key] = (discardReasonMap[key] || 0) + 1;
     });
     const topDiscardReasons = Object.entries(discardReasonMap).sort((a, b) => b[1] - a[1]).slice(0, 8);
+
+    const renderHash = JSON.stringify({
+        tab: activeTab,
+        total: data.total,
+        display_counts: displayCounts,
+        stage_counts: stageCounts,
+        latest_cycle: latestCycle,
+        candidates: candidates.map(c => ({
+            id: c.id,
+            symbol: c.symbol,
+            status: c.status,
+            display_status: c.display_status,
+            display_reason: c.display_reason,
+            stage_kind: c.stage_kind,
+            stage_reason: c.stage_reason,
+            decision: c.decision,
+            last_review_at: c.last_review_at,
+            positive_checks: c.positive_checks,
+            total_checks: c.total_checks,
+            expected_side: c.expected_side,
+            trade_type: c.trade_type,
+            arbiter_mode: c.arbiter_mode,
+            expected_pnl: c.expected_pnl,
+            quality_score: c.quality_score,
+            direction: c.direction,
+            time_in_stage_sec: c.time_in_stage_sec,
+            under_review: c.under_review,
+            reviewed: c.reviewed,
+            priority: c.priority,
+            signal_price: c.signal_price,
+            live_price: c.live_price,
+            reject_price: c.reject_price,
+        })),
+    });
+    if (renderHash === _selectionObservabilityRenderHash && _selectionObservabilityRenderTab === activeTab) {
+        return;
+    }
+    _selectionObservabilityRenderHash = renderHash;
+    _selectionObservabilityRenderTab = activeTab;
 
     const countsSummary = `
         <div class="selection-summary">
@@ -2235,7 +2319,7 @@ function renderSelectionObservability(data) {
             ${waitingBreakout.length ? `
                 <div class="sr-mini-table">
                     <div class="sr-mini-row sr-mini-head">
-                        <span>Símbolo</span><span>Estado</span><span>Precio base</span><span>Target</span><span>Stop</span><span>Confirmaciones</span><span>Tiempo etapa</span><span>Razón actual</span>
+                        <span>Símbolo</span><span>Estado</span><span>Precio base</span><span>Precio vivo</span><span>Target</span><span>Stop</span><span>Confirmaciones</span><span>Tiempo etapa</span><span>Razón actual</span>
                     </div>
                     ${waitingBreakout.slice(0, 30).map(c => {
                         const d = c.direction || {};
@@ -2245,7 +2329,8 @@ function renderSelectionObservability(data) {
                         return `<div class="sr-mini-row">
                             <span><b>${c.symbol || '—'}</b></span>
                             <span><span class="selection-col-status ${r.cls}">${r.step ? `Paso ${r.step}` : 'Terminal'}</span></span>
-                            <span>${fmtMoney(d.base_price)}</span>
+                            <span>${fmtPrice(c.signal_price ?? d.base_price)}</span>
+                            <span>${fmtPrice(c.live_price)}</span>
                             <span>${fmtMoney(d.target_price)}</span>
                             <span>${fmtMoney(d.stop_price)}</span>
                             <span>${conf}/${req}</span>
@@ -2268,13 +2353,68 @@ function renderSelectionObservability(data) {
             <div class="sr-blockers-title">Razones de descarte (más frecuentes)</div>
             <div class="sr-blockers-list">
                 ${topDiscardReasons.length
-                    ? topDiscardReasons.map(([reason, count]) => `<span class="sr-blocker-pill">${reason}: <b>${count}</b></span>`).join('')
+                    ? topDiscardReasons.map(([reason, count]) => {
+                        const step = discardStepFromReason(reason);
+                        const stepTag = step ? ` · Paso ${step}` : '';
+                        return `<span class="sr-blocker-pill">${reason}${stepTag}: <b>${count}</b></span>`;
+                    }).join('')
                     : '<span class="sr-blocker-pill">Sin descartes en la ventana actual.</span>'}
             </div>
         </div>` : '';
 
-    const rows = shown.length ? shown.map(c => `
-        <div class="selection-candidate-row">
+    if (!document.getElementById('selectionObsShell')) {
+        el.innerHTML = `
+            <div id="selectionObsShell">
+                <div class="sr-detail-title">Detalle de candidatas SR</div>
+                <div id="selectionCountsSummary"></div>
+                <div id="selectionFunnelSummary"></div>
+                <div id="selectionCycleSummary"></div>
+                <div id="selectionCycleTiming"></div>
+                <div id="selectionCycleLatency"></div>
+                <div id="selectionStageLegend"></div>
+                <div id="selectionTabs"></div>
+                <div id="selectionWaitingBoard"></div>
+                <div id="selectionReviewedBoard"></div>
+                <div class="selection-candidates-header">
+                    <span>Símbolo</span>
+                    <span>Operación</span>
+                    <span>Régimen</span>
+                    <span>Perfil</span>
+                    <span>Score</span>
+                    <span>Checks</span>
+                    <span>Precio inicial</span>
+                    <span>Precio vivo / rechazo</span>
+                    <span>Estado</span>
+                    <span>Decisión / Razón</span>
+                    <span>Últ. revisión</span>
+                    <span>Acciones</span>
+                </div>
+                <div id="selectionCandidatesList" class="selection-candidates"></div>
+            </div>
+        `;
+    }
+
+    const setHtml = (id, html) => {
+        const node = document.getElementById(id);
+        if (!node) return;
+        if (node.innerHTML !== html) node.innerHTML = html;
+    };
+
+    setHtml('selectionCountsSummary', countsSummary);
+    setHtml('selectionFunnelSummary', funnelSummary);
+    setHtml('selectionCycleSummary', cycleSummary);
+    setHtml('selectionCycleTiming', cycleTiming);
+    setHtml('selectionCycleLatency', cycleLatency);
+    setHtml('selectionStageLegend', stageLegend);
+    setHtml('selectionTabs', tabs);
+    setHtml('selectionWaitingBoard', waitingBoard);
+    setHtml('selectionReviewedBoard', reviewedBoard);
+
+    const rowHtml = c => {
+        const r = routeMeta(c);
+        const discardStep = discardStepFromReason(c.stage_reason || c.display_reason || c.reason || c.discard_reason);
+        const discardNote = discardStep ? `<br><small class="sr-route-note">Descartada en paso ${discardStep}</small>` : '';
+        return `
             <div class="selection-col-symbol"><strong>${c.symbol || '—'}</strong>${buildCandidateTimeline(c)}</div>
             <div class="selection-col-direction">${fmtTradeDirectionBadge({
                 trade_type: c.trade_type,
@@ -2285,41 +2425,63 @@ function renderSelectionObservability(data) {
             <div class="selection-col-profile">${c.profile_label ? `Perfil <b>${c.profile_label}</b>` : '—'}</div>
             <div class="selection-col-score">Score <b>${c.quality_score != null ? parseFloat(c.quality_score).toFixed(2) : '—'}</b><br><small>EV ${c.expected_pnl != null ? parseFloat(c.expected_pnl).toFixed(2) : '—'}</small></div>
             <div class="selection-col-checks">${c.positive_checks ?? 0}/${c.total_checks ?? 0} checks</div>
-            <div class="selection-col-status ${statusClass[c.display_status] || 'status-neutral'}">${c.display_label || c.status}<br><small class="sr-route-note">${(() => { const r = routeMeta(c); return r.step ? `Paso ${r.step} · ${r.label}` : r.label; })()}</small></div>
-            <div class="selection-col-decision" title="${c.display_reason || c.reason || ''}">${c.decision || '—'}<br><small>${c.display_reason || c.reason || ''}</small><br><small>stage=${c.stage_kind || '—'} · reason=${c.stage_reason || '—'}</small></div>
+            <div class="selection-col-price-init">${fmtPrice(c.signal_price)}</div>
+            <div class="selection-col-price-live">${fmtPrice(c.status === 'discarded' || c.status === 'expired' ? c.reject_price : c.live_price)}</div>
+            <div class="selection-col-status ${statusClass[c.display_status] || 'status-neutral'}">${c.display_label || c.status}<br><small class="sr-route-note">${r.step ? `Paso ${r.step} · ${r.label}` : r.label}</small></div>
+            <div class="selection-col-decision" title="${c.display_reason || c.reason || ''}">${c.decision || '—'}<br><small>${c.display_reason || c.reason || ''}</small>${discardNote}<br><small>stage=${c.stage_kind || '—'} · reason=${c.stage_reason || '—'}</small></div>
             <div class="selection-col-time">${formatTime(c.last_review_at)}</div>
             <div class="selection-col-actions">
                 <button class="selection-action-btn" onclick="openSelectionSymbolChart('${c.symbol || ''}', '${c.trade_type || 'spot'}', '${c.expected_side || c.side || 'LONG'}')">Ver gráfico</button>
                 <button class="selection-action-btn" onclick="openSymbolChart('${c.symbol || ''}', 'tradingview', '${c.trade_type || 'spot'}')">TV</button>
                 <button class="selection-action-btn" onclick="openSymbolChart('${c.symbol || ''}', 'binance', '${c.trade_type || 'spot'}')">BIN</button>
             </div>
-        </div>`).join('') : '<p class="loading">Sin candidatos en esta pestaña.</p>';
+        `;
+    };
 
-    el.innerHTML = `
-        <div class="sr-detail-title">Detalle de candidatas SR</div>
-        ${countsSummary}
-        ${funnelSummary}
-        ${cycleSummary}
-        ${cycleTiming}
-        ${cycleLatency}
-        ${stageLegend}
-        ${tabs}
-        ${waitingBoard}
-        ${reviewedBoard}
-        <div class="selection-candidates-header">
-            <span>Símbolo</span>
-            <span>Operación</span>
-            <span>Régimen</span>
-            <span>Perfil</span>
-            <span>Score</span>
-            <span>Checks</span>
-            <span>Estado</span>
-            <span>Decisión / Razón</span>
-            <span>Últ. revisión</span>
-            <span>Acciones</span>
-        </div>
-        <div class="selection-candidates">${rows}</div>
-    `;
+    const candidateKey = c => String(c.id || `${c.symbol || 'NA'}:${c.trade_type || 'spot'}:${c.status || 'unknown'}`);
+    const listEl = document.getElementById('selectionCandidatesList');
+    if (!listEl) return;
+    const prevScroll = listEl.scrollTop;
+
+    if (!shown.length) {
+        listEl.innerHTML = '<p class="loading">Sin candidatos en esta pestaña.</p>';
+        return;
+    }
+
+    const existingRows = new Map(
+        Array.from(listEl.querySelectorAll('.selection-candidate-row[data-candidate-key]'))
+            .map(node => [node.dataset.candidateKey, node])
+    );
+    const desiredRows = [];
+    shown.forEach(c => {
+        const key = candidateKey(c);
+        const html = rowHtml(c);
+        let row = existingRows.get(key);
+        if (!row) {
+            row = document.createElement('div');
+            row.className = 'selection-candidate-row';
+            row.dataset.candidateKey = key;
+        }
+        if (row.dataset.rowHtml !== html) {
+            row.innerHTML = html;
+            row.dataset.rowHtml = html;
+        }
+        desiredRows.push(row);
+        existingRows.delete(key);
+    });
+
+    existingRows.forEach(node => node.remove());
+    desiredRows.forEach((row, idx) => {
+        const current = listEl.children[idx];
+        if (current !== row) {
+            listEl.insertBefore(row, current || null);
+        }
+    });
+    while (listEl.children.length > desiredRows.length) {
+        listEl.removeChild(listEl.lastElementChild);
+    }
+
+    listEl.scrollTop = prevScroll;
 }
 
 async function renderVolSpikeAudit() {
@@ -2610,7 +2772,7 @@ function showPositionDetailModal(symbol, positionId, status) {
                     <div class="modal-section">
                         <h4>💰 ${status === 'open' ? 'RESULTADO ACTUAL' : 'RESULTADO FINAL'}</h4>
                         <div class="detail-grid">
-                            <div><label>Precio ${status === 'open' ? 'Actual' : 'Salida'}:</label><span>$${fmt(status === 'open' ? position.current_price : position.exit_price)}</span></div>
+                            <div><label>Precio ${status === 'open' ? 'Actual' : 'Salida'}:</label><span>$${fmt(status === 'open' ? position.current_price : position.exit_price, 5)}</span></div>
                             <div><label>PnL Real:</label><span class="${actualPnl >= 0 ? 'positive' : 'negative'}">${actualPnl >= 0 ? '+' : ''}${fmt(actualPnl)} USDT</span></div>
                             <div><label>vs Esperado:</label><span class="${diff >= 0 ? 'positive' : 'negative'}">${diff >= 0 ? '↑' : '↓'} ${Math.abs(diff).toFixed(2)} USDT</span></div>
                             <div><label>Accuracy:</label><span>${fmtAccuracy(actualPnl, expectedPnl)}</span></div>
@@ -2872,13 +3034,13 @@ function buildTimeSeriesChart(priceData, entryPrice, exitPrice, slInitial, tpIni
         <!-- Entry marker -->
         <circle cx="${xScale(entryPoint.timestamp).toFixed(1)}" cy="${yScale(entryPrice).toFixed(1)}" 
                 r="4" fill="#888" stroke="white" stroke-width="1">
-            <title>Entrada: $${fmt(entryPrice)}</title>
+            <title>Entrada: $${fmt(entryPrice, 5)}</title>
         </circle>
         
         <!-- Exit/Current marker -->
         <circle cx="${xScale(exitPoint.timestamp).toFixed(1)}" cy="${yScale(exitPrice).toFixed(1)}" 
                 r="4" fill="${exitPrice >= entryPrice ? '#4ecca3' : '#e74c3c'}" stroke="white" stroke-width="1">
-            <title>${exitPrice >= entryPrice ? 'Salida' : 'Actual'}: $${fmt(exitPrice)}</title>
+            <title>${exitPrice >= entryPrice ? 'Salida' : 'Actual'}: $${fmt(exitPrice, 5)}</title>
         </circle>
         
         <!-- SL markers -->
@@ -3253,8 +3415,8 @@ function showFuturesDetailModal(symbol, side) {
                     <div class="modal-section">
                         <h4>💵 PRECIOS</h4>
                         <div class="detail-grid">
-                            <div><label>Entrada:</label><span>$${fmt(pos.entry_price)}</span></div>
-                            <div><label>Actual:</label><span class="${upnlCls}">$${fmt(pos.current_price)}</span></div>
+                            <div><label>Entrada:</label><span>$${fmt(pos.entry_price, 5)}</span></div>
+                            <div><label>Actual:</label><span class="${upnlCls}">$${fmt(pos.current_price, 5)}</span></div>
                         </div>
                     </div>
                     <div class="modal-section">
@@ -4818,8 +4980,8 @@ async function renderFuturesPositions() {
                     <td style="color:#9b59b6;font-weight:600">${p.symbol}${contextBadge}${_fEscBadge}</td>
                     <td>${sideLabel}</td>
                     <td>${parseFloat(p.qty || 0).toFixed(4)}</td>
-                    <td>$${fmt(p.entry_price)}</td>
-                    <td>$${fmt(p.current_price)}</td>
+                    <td>$${fmt(p.entry_price, 5)}</td>
+                    <td>$${fmt(p.current_price, 5)}</td>
                     <td class="${slCls}">$${fmt(p.sl_price)}</td>
                     <td class="${tpCls}">$${fmt(p.tp_price)}</td>
                     <td class="${slCls}">${p.sl_dist_pct >= 0 ? '+' : ''}${fmt(p.sl_dist_pct)}%</td>
@@ -4919,7 +5081,7 @@ async function renderFuturesClosed() {
                 return `<tr class="${rowCls}" style="cursor:pointer" onclick="showFuturesClosedDetailModal('${p.symbol}','${p.side}',${i})">
                     <td><span class="badge-futures">FUT</span> <strong style="color:#9b59b6">${p.symbol}</strong>${contextBadge}${_fcEscBadge}</td>
                     <td><span style="color:#9b59b6">${p.side === 'SHORT' ? '▼ SHORT' : '▲ LONG'}</span></td>
-                    <td>$${fmt(p.entry_price)} → $${fmt(p.exit_price)}</td>
+                    <td>$${fmt(p.entry_price, 5)} → $${fmt(p.exit_price, 5)}</td>
                     <td class="${pnlCls}">${p.pnl >= 0 ? '+' : ''}${fmt(p.pnl, 4)} USDT</td>
                     <td>${closedAt}</td>
                 </tr>`;
@@ -5014,8 +5176,8 @@ function showFuturesClosedDetailModal(symbol, side, idx) {
                     <div class="modal-section">
                         <h4>💵 PRECIOS</h4>
                         <div class="detail-grid">
-                            <div><label>Entrada:</label><span>$${fmt(entryP)}</span></div>
-                            <div><label>Salida:</label><span class="${pnlCls}">$${fmt(exitP)}</span></div>
+                            <div><label>Entrada:</label><span>$${fmt(entryP, 5)}</span></div>
+                            <div><label>Salida:</label><span class="${pnlCls}">$${fmt(exitP, 5)}</span></div>
                         </div>
                     </div>
                     
@@ -5076,8 +5238,8 @@ function showFuturesClosedDetailModal(symbol, side, idx) {
                         </div>
                     </div>
                     <div style="display:flex;gap:16px;font-size:11px;color:#888;margin-top:4px">
-                        <span>● Entrada: <strong style="color:#ccc">$${fmt(entryP)}</strong></span>
-                        <span style="color:${pnl >= 0 ? '#4caf50' : '#f44336'}">● Salida: <strong>$${fmt(exitP)}</strong></span>
+                        <span>● Entrada: <strong style="color:#ccc">$${fmt(entryP, 5)}</strong></span>
+                        <span style="color:${pnl >= 0 ? '#4caf50' : '#f44336'}">● Salida: <strong>$${fmt(exitP, 5)}</strong></span>
                     </div>
                 `;
             }

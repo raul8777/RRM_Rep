@@ -1,7 +1,613 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: jul 23 2026 | s92: Opportunity shadow 2h/4h y timing RANGE_SCALP 15m
+> Última actualización: ago 1 2026 | s109: AVAXUSDT — precio obsoleto en validación, dirección ciega en `ready`, capital todo-o-nada
+
+---
+
+## 🟢 Estado del Sistema — ago 1 2026 — s109: Precio obsoleto en validación, dirección ciega en `ready`, confirmación sin referencia al precio de señal, capital todo-o-nada (auditoría AVAXUSDT)
+
+### Problema
+
+Usuario reportó brecha de precio en `AVAXUSDT` SHORT: detección 6.3460, aceptación ~6.312, apertura real 6.3100. La posición solo capturó ~30% del movimiento favorable ocurrido desde la señal; el resto se perdió esperando confirmación de dirección y 4 intentos de ejecución bloqueados por capital en ~10 minutos.
+
+### Causa (6 hallazgos)
+
+1. `evaluate_inter_cycle` usaba precio de hasta 8 min de antigüedad para decidir `ready→validated`.
+2. La FSM de confirmación de dirección no corría en estado `ready`, solo tras `validated`.
+3. La confirmación nunca comparaba contra el precio de la señal (`base_progress_bps`), solo contra el tick anterior — descartaba movimientos favorables ya ocurridos.
+4. `_reserve_capital_for_candidate` era todo-o-nada (bloqueaba en vez de reducir tamaño); el fast-path SHORT usaba $1000 fijo sin Kelly dinámico.
+5. Cooldown de reintento fijo en 5 min frente a un watcher de 10s.
+6. Ciclo principal y fast-path no compartían estado de capital (riesgo de doble-compromiso).
+
+### Fix
+
+- `staged_entry.py::evaluate_inter_cycle`: precio fresco siempre.
+- `staged_entry.py::_watcher_process_row`: FSM de dirección activa desde `ready` (descarta ante rotura adversa, persiste confirmación temprana sin promover).
+- `staged_entry.py::_direction_transition`: acepta `base_progress_bps` en la primera observación; nuevo `direction.first_confirmed_price`/`first_confirmed_at`.
+- `run_trades.py::_revalidate_entry_before_submit` (nuevo): gate final con SR ya calculado como target + R:R≥2.0 antes de ejecutar.
+- `run_trades.py::_reserve_capital_for_candidate`: escala al capital disponible (`OK_SCALED_DOWN`) en vez de bloquear todo-o-nada.
+- `run_trades.py`: cooldown de capital 5min→30s (max_retries escalado a 960); ciclo principal y fast-path comparten `_CAPITAL_RESERVATIONS`.
+- `run_trades.py::_build_entry_context`: persiste precio de señal y de primera confirmación en `smart_meta`.
+
+### Validación
+
+- Suite completa: `518 passed`, 3 fallos preexistentes en `test_config_governance.py` (no relacionados).
+
+### Rollback
+
+- Revertir `staged_entry.py` y `run_trades.py` a los commits previos a s109. Sin cambios de configuración obligatorios.
+
+### Nota operativa
+
+Pendiente: medir impacto real en producción (baseline: 87 bloqueos de capital/48h antes de este fix). Requiere reiniciar el contenedor: `docker compose restart app`.
+
+---
+
+## 🟢 Estado del Sistema — ago 1 2026 — s108: Modelo de reversión y arbitraje direccional ciegos a dirección/resistencia (auditoría DIAUSDT SHORT)
+
+### Problema
+
+El usuario reportó un `FUTURES_SHORT` en `DIAUSDT` (`trades_closed.id=1350`, -37.19 USDT) y pidió verificar si se abrió en soporte o resistencia. Verificado: se abrió en zona 0.27 (lado del soporte, `short_resistance_setup=false`, ningún evento SR real). Un análisis cuantitativo posterior de 313 aperturas `RANGE_SCALP` mostró que la relación "resistencia→short, soporte→long" no se sostenía tal como estaba implementada: `SHORT_GEOMETRY_PRIORITY` superaba a `SHORT_RESISTANCE_PRIORITY` en PnL, y `range_reversion_prediction.valid=true` predecía peor que `valid=false` en ambos lados.
+
+### Causa
+
+Tres bugs independientes (no descalibración):
+1. `pnl_predictor.py::predict_range_reversion` no recibía `trade_side` — siempre evaluaba la rama LONG (target arriba/stop abajo) sin importar el lado real del candidato.
+2. `support_resistance.py` no tenía ningún detector de "rechazo en resistencia" (vela roja cerca de resistencia), simétrico a `sr_bounce` para el soporte.
+3. `autonomous_signals.py` promovía `support_breakdown_sell` a señal SELL con el umbral de zona invertido (`>=0.55` en vez de `<=0.45`), por lo que nunca se activaba en la práctica (0/157 casos medidos).
+
+### Fix
+
+- `pnl_predictor.py::predict_range_reversion(..., trade_side="LONG")`: rama SHORT completa y simétrica; rama LONG sin cambios de comportamiento.
+- `staged_entry.py::build_range_reversion_prediction`: pasa `meta["expected_side"]` al predictor.
+- `support_resistance.py::compute_sr_features`: nuevo `sr_rejection`/`resistance_bounce_sell` + `resistance_strength`/`resistance_volume_ratio`.
+- `autonomous_signals.py`: umbral de `support_breakdown_sell` corregido a `<=0.45`; nueva promoción a SELL por `resistance_bounce_sell` con `>=0.55`.
+- `directional_arbiter.py::short_resistance_setup`: reconoce `resistance_bounce_sell`/`sr_rejection` (aditivo, no elimina ninguna vía existente).
+- `futures_client.py::open_short/open_long` + `run_trades.py::_build_entry_context`: persisten `directional_arbitration_reason`, `sr_zone_position_at_entry`, `range_reversion_valid_at_entry` en `smart_meta`.
+
+### Validación
+
+- Tests nuevos en `test_pnl_predictor_side.py`, `test_support_resistance.py`, `test_directional_arbiter.py`.
+- Suite completa: `497 passed`, 3 fallos preexistentes en `test_config_governance.py` (no relacionados, no importan ningún módulo tocado).
+
+### Rollback
+
+- Revertir los commits de `pnl_predictor.py`, `staged_entry.py`, `support_resistance.py`, `autonomous_signals.py`, `directional_arbiter.py`, `futures_client.py`, `run_trades.py`. Sin flags de configuración nuevas que revertir.
+
+### Nota operativa
+
+Pendiente a propósito (no implementado en esta sesión): calibración del umbral de confirmación direccional (`direction_min_progress_bps`) y cualquier rediseño más amplio del arbitraje (score de confluencia) — se pospuso hasta observar en producción el efecto de estos fixes con los campos nuevos de `smart_meta`. Requiere reiniciar el contenedor para que Python cargue los módulos modificados: `docker compose restart app`.
+
+---
+
+## 🟢 Estado del Sistema — ago 1 2026 — s105i: WebSocket self-healing reconnect
+
+### Problema
+
+Logs de Docker repetían: `Error receiving message: Read loop has been closed, please reset the websocket connection and listen to the message error.` El websocket de Binance User Data Stream se cerraba y no se reconectaba, forzando al sistema a depender del polling de 5 min.
+
+### Causa
+
+`python-binance` cierra el read loop del websocket ante determinadas condiciones de error. `BinanceEventStream` iniciaba la conexión pero no detectaba esos mensajes ni reconectaba automáticamente.
+
+### Fix
+
+- `binance_event_stream.py`:
+  - `_is_socket_error_payload()` detecta strings/dicts con "read loop has been closed", "error receiving message", "connection closed" o "websocket error".
+  - `_on_futures_message` / `_on_spot_message` detectan el error, registran `last_error` y llaman `_schedule_reconnect()`.
+  - `_reconnect()` crea un `ThreadedWebsocketManager` nuevo, reinicia futures/spot user data streams y re-suscribe los mark-price streams activos.
+  - `_watchdog_loop()` actúa como red de seguridad: 30 min sin ningún evento dispara reconexión.
+  - Cooldown de 60s entre reconexiones para evitar loops de reconexión.
+  - `health()` expone `event_stream_reconnect_count`, `event_stream_last_reconnect_at` y `event_stream_pending_reconnect`.
+- Tests actualizados en `tests/test_binance_event_stream.py`.
+
+### Validación
+
+- `python -m pytest tests/test_binance_event_stream.py -q` => `19 passed`.
+
+### Rollback / desactivación
+
+- Deshabilitar websocket: variable de entorno `BINANCE_EVENT_STREAM_ENABLED=False` (o equivalente config flag) y reiniciar.
+- Forzar reconexión manual: `event_stream.force_reconnect()` o reiniciar el contenedor.
+
+### Nota operativa
+
+Requiere reiniciar el contenedor para que Python cargue el módulo modificado: `docker compose restart app`.
+
+---
+
+## 🟢 Estado del Sistema — jul 29 2026 — s104c: Corrección de falsos `DIRECTION_TARGET_INVALID`
+
+### Problema
+
+En `RANGE_SCALP`, candidatos staged SR podían terminar en `terminal_reject` con `DIRECTION_TARGET_INVALID` aunque el precio ya hubiera cruzado el target en dirección favorable.
+
+### Causa
+
+La validación de orientación del target se hacía contra `current_price` en vez del precio base staged (`base_price`).
+
+### Fix
+
+- La orientación del target se valida contra `base_price`.
+- Rompimiento favorable del target ahora cuenta como progreso válido:
+  - LONG: `price >= target_price`
+  - SHORT: `price <= target_price`
+- Se añadió regresión en `tests/test_staged_entry.py`.
+
+### Validación
+
+- `pytest crypto-agent/tests/test_staged_entry.py crypto-agent/tests/test_selection_display_states.py -q` => `30 passed`.
+
+---
+
+## 🟢 Estado del Sistema — jul 29 2026 — s104b: Sincronización del contrato SR de espera por rompimiento
+
+### Objetivo
+
+Sincronizar la documentación operativa para que el flujo SR desde setup hasta apertura quede explícito y consistente en canónico, reglas y referencia del sistema.
+
+### Cambios implementados
+
+- `canonical/calibracion_entradas-a20ab8-v3.md` define explícitamente:
+  - selección de candidatos SR,
+  - espera en `ready`,
+  - checks inter/intra ciclo hasta confirmación direccional,
+  - paso por preflight,
+  - apertura solo con fill confirmado.
+- `rules.md` y `.windsurf/rules.md` ahora incluyen el contrato SR sin bypass:
+  - `ready` no autoriza apertura,
+  - no hay apertura por score/QUBO/predictor sin confirmación direccional,
+  - bloqueo de ejecución se persiste y audita,
+  - prohibida apertura sin fill confirmado.
+
+### Contrato operativo consolidado
+
+`setup_detected -> ready -> re-check inter/intra -> direction_confirmed -> validated -> preflight -> order -> fill confirmado -> opened`.
+
+### Validación
+
+- Cambios documentales únicamente; no se alteró lógica de trading ni configuración runtime.
+
+---
+
+## 🟢 Estado del Sistema — jul 29 2026 — s104: Sincronización documental canónica (arquitectura primero)
+
+### Objetivo
+
+Estandarizar la documentación para que el punto de entrada de calibración quede explícito y único: diagrama de arquitectura + responsabilidades de módulos al inicio del canónico de entradas.
+
+### Cambios implementados
+
+- `canonical/calibracion_entradas-a20ab8-v3.md` ahora abre con:
+  - diagrama Mermaid del pipeline de calibración de entrada,
+  - tabla de descripción de módulos (régimen, señales, gate, selección, staged, validación, ejecución, observabilidad, C8/C9/C10).
+- `canonical/README.md` actualizado para reflejar estructura architecture-first y estado actual.
+- `canonical/calibrar_datos.md` añade sección de acoplamiento canónico (datos vs flujo operativo).
+- `rules.md` y `.windsurf/rules.md` sincronizados con la regla operativa: cualquier cambio de flujo de entrada se documenta primero en el bloque inicial canónico.
+
+### Contrato documental vigente
+
+1. El flujo operativo de entrada se define en `canonical/calibracion_entradas-a20ab8-v3.md` (sección inicial).
+2. `SYSTEM_REFERENCE.md` resume estado y rollout; no reemplaza el canónico.
+3. `rules.md` y `.windsurf/rules.md` fijan disciplina de actualización cruzada.
+
+### Validación
+
+- Sin cambios de lógica de trading en esta actualización documental.
+- Integridad de edición validada sin errores de sintaxis/reportes en archivos modificados.
+
+---
+
+## 🟢 Estado del Sistema — jul 26 2026 — s98: Staged entry fast-path execution
+
+### Objetivo
+
+Eliminar el delay de ~5 minutos entre que un candidato staged-entry es validado ("Lista para abrir") y la ejecución real de la compra. El sistema ahora ejecuta inmediatamente desde el thread intra-cycle.
+
+### Cambios implementados
+
+- **`run_trades.py`**:
+  - Nueva función `_execute_validated_fast_path()` (~335 líneas): ejecuta la compra de candidatos validados con solo gates de seguridad (MAX_POSITIONS, exposure cap, per-symbol limit, circuit breaker, balance USDT). Bypassa los ~15 gates de mercado redundantes de `_buy_top_symbols`.
+  - Nueva función `_update_fast_path_gate()`: persiste resultado del fast-path en `ready_candidates.data` para observabilidad.
+- **`orchestrator.py`**:
+  - `_staged_entry_intra_loop` ahora llama `_execute_validated_fast_path()` directamente cuando `perform_intra_cycle_check` valida candidatos. Usa `_trade_cycle_lock` para evitar race conditions con el trade cycle.
+  - Fallback: si fast-path deshabilitado o falla, wakes el trade cycle normalmente.
+- **`config.py`**: nuevo campo `staged_entry_fast_path_enabled: bool = True`.
+- **`config_helpers.py`**: campo añadido a `_PARAM_DEFAULTS`.
+- **`app.py`**: campo añadido a `_KELLY_EDITABLE_FIELDS` para hot-config.
+
+### Validación
+
+- Tests: `688 passed, 0 failed` (suite completa).
+- Tests nuevos: `tests/test_staged_entry_fast_path.py` (9 tests):
+  - Ejecución con gates de seguridad pasados
+  - Bloqueo por disabled, circuit breaker, max_positions, exposure cap, per-symbol limit
+  - Observabilidad de gate
+  - Respeto de max_open_per_cycle
+
+### Rollback
+
+```
+PATCH /config/kelly {"staged_entry_fast_path_enabled": false}
+```
+
+### Monitoreo
+
+- Buscar en logs: `[FastPath]` — muestra cada evaluación, bloqueo y ejecución.
+- En DB: `SELECT data->'last_execution_gate' FROM ready_candidates WHERE status IN ('validated', 'opened')` para ver resultados del fast-path.
+
+---
+
+## 🟢 Estado del Sistema — jul 25 2026 — s97: Predictor a velas + ajuste de confirmación
+
+### Objetivo
+
+Reemplazar la extrapolación ATR de 1h del predictor PnL por velas reales de Binance (1m/5m), usar un horizonte dinámico por régimen y desbloquear el ciclo de vida staged-entry para que las señales aceptadas no se descarten por `EV_NON_POSITIVE` ni por falta de confirmación de dirección en mercado lateral.
+
+### Cambios implementados
+
+- **`pnl_predictor.py`**:
+  - `predict_pnl` ahora acepta `candles` e `interval_minutes`.
+  - Métodos `_estimate_price_range_from_candles` y `_micro_momentum_adjustment` para estimar el rango y ajustar la probabilidad con drift/volumen de velas reales.
+  - Cuando hay velas, reemplaza la extrapolación ATR por `realized_range`, `drift` y `volume_boost`.
+- **`pnl_service.py`**:
+  - Importa `_fetch_candles` de `technical_analysis`.
+  - `predict_for_symbol` obtiene velas según `predictor_interval` y `predictor_horizon_minutes` cuando `predictor_use_real_candles=True`.
+  - Pasa velas e intervalo al predictor; corrige el default literal de `trade_horizon_minutes` para que la auditoría de gobernanza pase.
+- **`config.py`**:
+  - Nuevos campos `predictor_use_real_candles`, `predictor_interval`, `predictor_horizon_minutes`.
+  - Revisión de `RANGE_SCALP` en `staged_entry_regime_config`: se probó relajar `direction_min_progress_bps`, `max_cycles`, `max_age_min` y `price_source`, pero se **revirtió** tras revisar `rules.md` y `calibrar_datos.md`: forzar aperturas largas en mercado lateral/agresivo aumenta el riesgo documentado. Se mantiene la configuración canónica:
+    - `direction_min_progress_bps`: `1.0`
+    - `max_cycles`: `4`, `max_age_min`: `20`
+    - `price_source`: `"avg"`
+- **`app.py`**: los tres parámetros del predictor se agregaron a `_KELLY_EDITABLE_FIELDS` para hot-config.
+- **`entry_decision.py`**: fallback de `target_price`/`stop_price` desde `prediction.price_range` cuando el modelo de reversión a rango no los genera, evitando que `DIRECTION_TARGET_MISSING` descarte candidatos con predictor genérico positivo.
+- **`tests/test_pnl_predictor_candles.py`**: nuevos tests para predicción basada en velas (alcista, plano, bajista, fallback ATR).
+- **`tests/test_range_scalp_bidirectional.py`**: actualizados los asserts a los nuevos defaults de `RANGE_SCALP`.
+
+### Validación
+
+- Tests focalizados pasan:
+  ```powershell
+  docker-compose exec app python -m pytest tests/test_config_governance.py tests/test_staged_entry.py tests/test_entry_quality_gate.py tests/test_pnl_predictor_candles.py tests/test_pnl_service_side.py tests/test_range_scalp_bidirectional.py -q
+  # 68 passed, 0 failed
+  ```
+- Predicciones en vivo (`tmp_eval_predictor.py`) confirman `candle_based=True`:
+  - Ejemplos: `UNIUSDT EV=8.628 prob=0.635`, `DOGEUSDT EV=5.114 prob=0.435`, `NEARUSDT EV=0.288 prob=0.629`.
+- Ciclos de trading aceptan señales (`A2ZUSDT`, `NFPUSDT`, `DENTUSDT`, `ZECUSDT`, `KAITOUSDT`, `HBARUSDT`) y las pasan a `StagedEntry`.
+
+### Diagnóstico del ciclo staged-entry
+
+- Las señales ya no son rechazadas masivamente por `EV_NON_POSITIVE`; el predictor de velas las hace positivas.
+- El cuello de botella restante es la **confirmación de dirección** del `staged_entry`: exige un movimiento favorable hacia el target dentro de unos ciclos.
+- En mercado lateral actual (`RANGE_SCALP`) el precio no se mueve lo suficiente y los candidatos terminan descartados (`DIRECTION_NOT_CONFIRMED`); el `DIRECTION_TARGET_MISSING` ya está resuelto gracias al fallback de target/stop desde `price_range`.
+- Bug corregido en `staged_entry.py::get_openable_candidates`: usaba `required_confirmations = max(2, ...)`, ignorando el valor de `direction_required_confirmations` de la config (que es `1` en `RANGE_SCALP`). Se cambió a `max(1, ...)` para respetar la configuración.
+- Gate de liquidez calibrado por régimen: `min_liquidity_vol_usdt` sigue en $3M por defecto, pero en `RANGE_SCALP` se añadió `min_liquidity_vol_usdt_range_scalp = $1M` porque en mercado lateral el volumen spot de altcoins cae estructuralmente. Así evitamos que ese gate sea un cuello de botella en `RANGE_SCALP` sin bajar la protección en `SPOT_BULL` o `PRESERVATION`.
+- Estado observado en DB: `discarded=474`, `opened=100`, `ready=0`. No hay posiciones abiertas en este momento porque ningún candidato confirmó dirección.
+
+### Recomendación basada en rules.md y calibrar_datos.md
+
+- **No deshabilitar la confirmación de dirección en `RANGE_SCALP`.** `rules.md` §1/§6 y `calibrar_datos.md` §10 muestran que:
+  - El lado `BUY` ha perdido netamente en los últimos 30 días (`-677.23 USDT`) mientras `SELL` ganó `+670.08 USDT`.
+  - Las últimas 48h tuvieron `34` cierres con `WR 38.24%` y `-137.11 USDT`; el daño provino principalmente de `unified_governance_*` (`-199.91 USDT`).
+  - Hubo sobre-trading de hasta `68` aperturas en un solo día; forzar más entradas largas en mercado lateral/agresivo aumentaría el riesgo de acumular posiciones que luego cierren en pérdida.
+  - Los criterios de entrada validados (`calibrar_datos.md` §10.5 / memoria de análisis experto) sostienen que no se debe bajar umbrales para forzar operaciones cuando el mercado está lateral o en techo sin volumen.
+- Por tanto, **el hecho de que no abra posiciones ahora es una señal correcta del sistema**, no un bug. El predictor a velas y el staged-entry están filtrando setups sin convicción direccional.
+- Se revierte la relajación temporal de `direction_min_progress_bps`, `max_cycles` y `price_source` en `config.py`; se mantiene el fix de fallback de `target_price`/`stop_price` en `entry_decision.py`.
+
+### Opción si se quiere exposure ahora
+
+Si el objetivo es poner capital a trabajar en lugar de esperar, la vía menos riesgosa según los datos históricos sería **evaluar activar `FUTURES_SHORT`/hedge** (lado corto con edge demostrado) en lugar de forzar entradas largas `RANGE_SCALP`. Eso requiere su propio análisis de riesgo y no está en el alcance de este ajuste.
+
+---
+
+## 🟢 Estado del Sistema — jul 25 2026 — s96: SR Pool Dashboard Integration
+
+### Objetivo
+
+Activar el SR Pool vía hot-config sin reinicio, exponer su estado a través de un endpoint dedicado y darle visibilidad permanente en el dashboard de operaciones.
+
+### Cambios implementados
+
+- **Hot-config SR Pool aplicado y persistido** vía `PATCH /config/kelly`:
+  - `sr_pool_enabled=true`, `sr_pool_trade_enabled=true`, `sr_pool_intra_cycle_enabled=true`
+  - `sr_pool_full_scan_minutes=5`, `sr_pool_lookback_minutes=150`, `sr_pool_max_open_per_cycle=2`
+- **`app.py`**:
+  - Nuevo endpoint `GET /sr_pool/status` que regresa flags de runtime, settings, timestamp del último full scan, tamaño del pool, hasta 20 señales recientes y ahora también `pool_analysis` (lista de candidatos cerca de S/R con distancias, volumen y lado potencial).
+  - `_apply_kelly_config_patch` sincroniza el `settings` singleton a nivel módulo con `components.settings` para que el endpoint vea los cambios inmediatamente.
+  - Exclusión de los 6 flags SR-pool de las verificaciones de config drift (`_check_config_drift` y `/config/verify`) porque son intencionalmente controlados por hot-config.
+- **`run_trades.py`**: ring-buffer global `_SR_POOL_LAST_SIGNALS` para almacenar las señales SR detectadas en el scan.
+- **`universe_selector.py`**: fix de `NameError: name 'profile' is not defined` en `select_analysis_universe` tras el refactor s95; ahora retorna `profile_label` en lugar de la variable inexistente `profile`.
+- **Frontend**:
+  - Nuevo panel **🌊 SR Pool** en `frontend/index.html`, ubicado en la pestaña **Operaciones** entre las tarjetas de Operaciones y Selección de candidatos.
+  - `frontend/dashboard.js`: función `updateSRPoolPanel()` con botón de refresh y auto-refresh cada 30 s.
+  - Fix de race condition: el dashboard ahora espera a que `/dashboard/config` entregue la API key antes de lanzar las llamadas que requieren autenticación, eliminando los 401 en `/sr_pool/status`, `/range_scalp/dual_stats`, `/system/position-reconciliation`, etc.
+  - El panel ahora muestra también una tabla de **Análisis del pool** con los símbolos cerca de soporte/resistencia, distancias en %, volumen relativo y lado potencial (`LONG`/`SHORT`), para que el operador vea el trabajo de análisis incluso cuando no haya señales confirmadas.
+
+### Diagnóstico — ¿por qué el SR Pool aparece vacío?
+
+- Los flags están activos y el full scan funciona: `GET /sr_pool/status` responde con `pool_symbols_count=36` y `last_full_scan` reciente.
+- El panel vacío es correcto **cuando no hay rupturas de soporte/resistencia confirmadas** con volumen en el universo monitoreado.
+- Diagnóstico manual sobre 37 símbolos:
+  - Muchos pares están cerca de la resistencia (`dist_res_pct` 0.02–0.25%) pero **ninguno la rompió**.
+  - El volumen 1m es bajo en la mayoría (`vol_ratio` < 0.5x), salvo excepciones aisladas; el filtro de volumen del scanner impide señales sin convicción.
+- **Bug encontrado y corregido en `sr_pool_scanner.py`**:
+  - `detect_sr_pool_breaks` usaba `sr_1m["support_distance_atr"]` como si fuera el ATR%; en realidad es la distancia a soporte en múltiplos de ATR. Eso generaba `cluster_pct` artificialmente grande (hasta ~2.5%) y penalizaba el cálculo de riesgo/beneficio.
+  - Fix: `atr_pct = _atr_pct_from_klines(klines_1m, period=20)` y `cluster_pct = max(0.003, atr_pct / 200.0)`.
+
+### SR Pool bidireccional en `RANGE_SCALP`
+
+- Se habilitó que `sr_pool_scanner.py` emita señales `SHORT` además de `LONG` cuando `regime_mode == "RANGE_SCALP"` y `range_scalp_bidirectional_enabled=True`.
+- `_allowed_sides_for_regime` ahora recibe `settings` y devuelve `["LONG", "SHORT"]` bajo esa condición.
+- Las señales `SHORT` generadas por el pool ya se enrutan a `_maybe_open_sr_pool_shorts` en `run_trades.py` (canal futures existente).
+- `SPOT_BULL` y `PRESERVATION` siguen LONG-only; `FUTURES_SHORT` sigue SHORT-only.
+- Tests añadidos para `_allowed_sides_for_regime` y para `classify_trigger` con `direction="SHORT"` en `RANGE_SCALP`.
+
+### Conclusión sobre SR Pool
+
+El pool está operativo; simplemente **no hay setups válidos ahora**. En cuanto un símbolo rompa resistencia con volumen (>0.8x avg en el scanner) aparecerá en `recent_signals`. Si se quieren señales más frecuentes, habría que relajar el filtro de volumen o el `cluster_pct`, pero eso contradice los criterios de calibración (no forzar operaciones sin convicción de volumen/dirección).
+
+### Validación
+
+- Endpoint `/sr_pool/status` responde `ok: true` con todos los flags activos.
+- `POST /config/drift-check` devuelve `drift_count: 0`.
+- Tests específicos:
+  - `docker-compose exec app python -m pytest tests/test_config_governance.py tests/test_sr_pool_quality.py tests/test_range_scalp_bidirectional.py -q`
+  - **34 passed, 0 failed**.
+  - `docker-compose exec app python -m pytest tests/test_universe_selector_caps.py -q`
+  - **3 passed, 0 failed** (regresión del fix de `profile`).
+- Ciclos de trading ya completan sin excepción; log de ejemplo:
+  ```
+  [SRPool] full scan: 36 symbols near SR levels
+  [SRPool] signals: 0 (LONG=0, SHORT=0)
+  Completed cycle. Next cycle in 5 min (regime=RANGE_SCALP)
+  ```
+
+### Monitorización
+
+- Revisar el panel **🌊 SR Pool** en la pestaña **Operaciones** para confirmar:
+  - `Pool activo`, `Trade activo`, `Intra-cycle` en verde.
+  - Valores de scan, lookback y `max_open_per_cycle`.
+  - `Pool size` y `Último scan` actualizándose tras el primer ciclo SR.
+  - Señales recientes con símbolo, lado, perfil, score y categoría.
+
+### Rollback inmediato
+
+```powershell
+PATCH /config/kelly {
+  "sr_pool_enabled": false,
+  "sr_pool_trade_enabled": false,
+  "sr_pool_intra_cycle_enabled": false
+}
+```
+
+---
+
+## 🟢 Estado del Sistema — jul 24 2026 — s95: Refactor de perfiles por operación
+
+### Objetivo
+
+Eliminar el concepto de "perfil activo global" (`current_regime_profile_label`) del runtime. Cada operación recibe su perfil A/B/C en la entrada vía `entry_profile_gate` (`peak_quality_profile`). Kelly sizing, universe caps, screener, supervisores de salida (PRS/UG/SSO) y futuros usan ese perfil por posición/señal.
+
+### Cambios implementados
+
+- **`run_trades.py`**: removida consulta y persistencia de perfil activo global; transiciones solo por modo de régimen; Kelly sizing y metadata de entrada usan `peak_quality_profile` por operación; salidas SPOT/FUTURES propagan `_pos_profile` a supervisores.
+- **`universe_selector.py`**: caps por régimen sin multiplicador de perfil; `select_analysis_universe` ignora `profile_label`.
+- **`profit_realization_supervisor.py`**: `_peak_protection_pct` usa `profile_label` del contexto, no `settings.current_regime_profile_label`.
+- **`futures_client.py`**: aperturas y salidas futuros usan `peak_quality_profile` de la posición; fallback global reemplazado por 'B'.
+- **`app.py`**: dashboard no muestra perfil activo global; expone "Per operation" y conserva el perfil real de cada posición en su metadata.
+- **`rules.md`**: nueva sección §11 documentando el modelo por operación.
+- **`config_helpers.py`**: defaults canónicos alineados a calibración agresiva (`kelly_max_pct_liquid=0.90`, `futures_kelly_max_pct_liquid=0.90`, `kelly_dynamic_base_pct=0.22`).
+- **`Dev/scripts/mimic_mode_profile_sweep.py`**: simulación/backtest MIMIC usa `forced_profile` como `peak_quality_profile` por operación; no escribe `current_regime_profile_label` global.
+- **Tests**: actualizados/extendidos para validar caps por régimen, sizing por perfil y salidas por perfil.
+
+### Resultado de verificación
+
+- **Suite completa**: `611 passed, 2 skipped, 0 failed` (`python -m pytest tests/ -q -n 4 --max-worker-restart=1`).
+- Con `-n 10` aparecen fallos intermitentes en `TestCat7_APIEndpoints` por competencia entre workers; se recomienda 4 workers localmente.
+- `pytest-xdist` instalado para paralelismo.
+
+### Notas
+
+- `config.py` mantiene `current_regime_profile_label='B'` por compatibilidad de serialización/configuración; el runtime no lo consulta.
+- Los perfiles A/B/C siguen existiendo como conceptos de calidad de entrada, pero son propiedad de cada señal/posición, no del sistema.
+
+---
+
+## 🟢 Estado del Sistema — jul 24 2026 — s94: Inyección completa de features SR, relajación de gates y suite 602 verde
+
+### Objetivo
+
+Completar la inyección de features de soporte/resistencia (SR) en todo el pipeline de señales, decisiones, ranking y lifecycle; relajar los gates de entrada para captura agresiva en soporte; y verificar que no hay regresiones.
+
+### Cambios implementados
+
+- **`pnl_predictor.py`**: ajuste direccional de probabilidad de éxito con `sr_zone_position`, `sr_bounce`, `sr_breakout`, `sr_breakdown` y distancias SR. Estimación de rango de precios anclada a niveles SR.
+- **`entry_profile_gate.py`**: features de distancia a SR y posición de zona en el modelo universal; scoring heurístico con bonus por eventos SR.
+- **`autonomous_signals.py`**: extracción y reenvío de features SR; señales BUY/SELL generadas por rebote de soporte, breakout y breakdown; ranking por régimen bonificado por eventos SR.
+- **`entry_decision.py`**: `entry_decision_min_probability` por defecto **0.50** en todos los regímenes.
+- **`staged_entry.py`**: reducción de fricción para señales SR confirmadas (`required_positive_checks=1`, `direction_required_confirmations=1`, `direction_min_progress_bps=1.0`, `max_cycles>=4`) y filtro por `top_symbols_qubo` en `get_openable_candidates`.
+- **`run_trades.py`**: reenvío de SR features y bypass del descarte inicial de perfil para eventos SR confirmados; `category_max_positions_enabled` default `False` en `_check_category_limit`.
+- **`config.py` / `config_helpers.py`**: límites de posiciones y exposición agresivos para captura SR:
+  - `max_positions_spot_bull=12`, `max_positions_range_scalp=8`, `max_positions_preservation=4`, `max_positions_futures_short=8`.
+  - `max_total_exposure_pct=0.95`, `max_positions=8`, `max_open_per_cycle=2`.
+  - `category_max_positions_enabled=False`.
+- **`market_regime.py`**: multiplicadores Kelly ajustados para SR:
+  - `SPOT_BULL=1.05`, `RANGE_SCALP=1.0`, `PRESERVATION=0.7`.
+  - `FUTURES_SHORT`: base `0.6`; con `confirmed=True`: `1.0` si `confidence>=0.80`, `0.85` si `>=0.60`, `0.7` en otro caso.
+- **`universe_selector.py`**: default `screener_max_pairs=100` alineado con config.
+- **Calibración**: scripts `recalibrate_thresholds_v2.py` y `build_universal_quality_model.py` incluyen features SR en el feature set.
+
+### Validación
+
+- Suite completa: **602 passed, 0 failed**.
+- `tmp_audit_config.py`: 0 critical mismatches tras alinear defaults canónicos.
+
+### Monitorización obligatoria
+
+- Confirmar aperturas validadas en próximos ciclos, especialmente señales con `sr_bounce` / `sr_breakout` / `sr_breakdown`.
+- Revisar que `category_max_positions_enabled=False` permite entradas transversales sin bloqueo por categoría.
+- Auditar PnL neto y drawdown dados los nuevos multiplicadores Kelly y límites de exposición.
+
+### Rollback inmediato
+
+```powershell
+PATCH /config/kelly {"staged_entry_enabled": false}
+# o revertir los commits de pnl_predictor.py, entry_profile_gate.py, staged_entry.py y config.py
+```
+
+----
+
+## 🟢 Estado del Sistema — jul 24 2026 — s93b: Fix RANGE_SCALP + integración S/R
+
+### Objetivo
+
+Corregir el bloqueo de aperturas en `RANGE_SCALP` e integrar cálculo de soportes/resistencias sin look-ahead en el pipeline de señales y salidas.
+
+### Cambios implementados
+
+- **`staged_entry.py` (s93b)**: `build_range_reversion_prediction` ahora lee Bollinger Bands tanto de la forma anidada (`bollinger_bands.{lower,middle,upper}`) como de la forma plana que genera `analyze_signal` (`lower_band`, `middle_band`, `upper_band`).
+- **`pnl_predictor.py` (s93b)**: `predict_range_reversion` ponía el stop estructural exactamente en `lower`, rechazando entradas legítimas en soporte (`band_position ≈ 0`) con `invalid_reversion_payoff` → `DIRECTION_TARGET_MISSING`. Ahora el stop se selecciona como el más alto entre el stop estructural (`lower * (1 - configured_sl/1000)`) y el stop configurado (`current_price * (1 - configured_sl)`) que esté estrictamente por debajo del precio actual. Esto permite entradas en soporte/inferior a la banda inferior sin forzar operaciones en el techo del rango.
+- **`run_trades.py` (s93b)**: `_normalize_autonomous_signal` no reenviaba a `_filter_buy_candidates` las features que el modelo universal espera (`range_position`, `rsi_1h`, `rsi_4h`, `trend_1h`, `trend_4h`). Sin ellas, `_extract_universal_features` usaba proxies débiles (bb_position para range_position, `ema_cross` para trend, mismo rsi para 1h/4h), bajando sistemáticamente el score de calidad y descartando todos los candidatos `RANGE_SCALP` con `PEAK_QUALITY_DISCARDED`. Se añadieron esas keys al dict normalizado; el siguiente ciclo ya staged a `KAITOUSDT`.
+- **Overrides runtime re-aplicados** en `trading_runtime_state.kelly_config_override` y contenedor reiniciado:
+  - `category_max_positions_enabled = False`
+  - `entry_quality_vol_spike_min_range_scalp = 0.20`
+- **Integración Soporte/Resistencia**:
+  - `support_resistance.py`: pivotes locales + clustering, sin look-ahead.
+  - `autonomous_signals.py`: inyecta `support_level`, `resistance_level`, `nearest_support_dist_pct`, `nearest_resistance_dist_pct`, `sr_zone_position` y alias `sr_support_dist_pct` / `sr_resistance_dist_pct`.
+  - Filtro de entrada SR en modo `shadow`: marca `sr_entry_shadow_rejected` cuando un BUY presiona resistencia (`sr_zone_position > 0.85` o distancia ≤ ATR%%).
+  - `peak_capture_engine.py`: nuevo disparador `profit_predexit_sr_resistance` (prioridad 91) para capturar ganancias cerca de la resistencia.
+- **Calibración agresiva temporal para RANGE_SCALP** (post-feature-forwarding):
+  - `pnl_predictor.py`: se suavizaron penalizaciones del predictor de reversión por volumen bajo, RSI en sobreventa (<35) y tendencia bajista en soporte.
+  - `entry_decision.py`: umbral mínimo de probabilidad para `RANGE_SCALP` de 0.60 -> 0.50.
+  - `config_helpers.py`: `required_positive_checks` 2->1, `direction_required_confirmations` 2->1, `direction_min_progress_bps` 3.0->1.0, `max_open_per_cycle` 1->2.
+  - Resultado inmediato: 5-7 candidatos ACCEPTED por ciclo, `KAITOUSDT` validado y abierto (`entry_price=0.9472`, size ~$1,970, unrealized -0.51%).
+  - ⚠️ Esta calibración es **experimental**; rollback documentado en `rules.md`.
+- **Modelo universal recalibrado** sobre `cross_symbol_dataset.jsonl` actual (397.081 filas); thresholds A/B/C separados por régimen + categoría.
+
+### Umbrales activos (forward_net_4h, coste 0.001)
+
+| Régimen + Categoría | A | B | C |
+|---|---|---|---|
+| SPOT_BULL | 0.5421 | 0.5105 | 0.4834 |
+| SPOT_BULL__LARGE_CAP | 0.5268 | 0.4952 | 0.4687 |
+| SPOT_BULL__NARRATIVE | 0.5801 | 0.4920 | 0.4458 |
+| SPOT_BULL__MIDCAP_ALT | 0.5314 | 0.5012 | 0.4751 |
+| RANGE_SCALP | 0.6253 | 0.5730 | 0.4803 |
+| RANGE_SCALP__LARGE_CAP | 0.6362 | 0.5784 | 0.4721 |
+| RANGE_SCALP__NARRATIVE | 0.5593 | 0.5270 | 0.4348 |
+| RANGE_SCALP__MIDCAP_ALT | 0.6054 | 0.5597 | 0.4755 |
+
+### Validación
+
+- Tests relevantes: **63 passed** (staged_entry, entry_quality_gate, autonomous_signals, support_resistance, peak_capture_engine).
+- Smoke test: `entry_decision.evaluate` con perfil A en `RANGE_SCALP` devuelve `eligible=True` usando el predictor de reversión.
+
+### Monitorización obligatoria
+
+- Próximas 6-12h: confirmar que `ready_candidates` en `RANGE_SCALP` deja de descartar por `DIRECTION_TARGET_MISSING` y aparecen aperturas validadas.
+- Revisar logs `sr_entry_shadow_rejected` para validar que el filtro SR no esté bloqueando trades rentables.
+- Comparar PnL/wr de trades abiertos bajo `score_source == "universal_model"` vs cohortes previas.
+
+### Rollback inmediato
+
+```powershell
+# Revertir staged_entry.py vía git
+# Restaurar config anterior
+PATCH /config/kelly {"staged_entry_enabled": false}
+```
+
+---
+
+## Estado del Sistema — jul 23 2026 — s93: Despliegue umbrales universal (régimen + categoría)
+
+### Objetivo
+
+Activar en producción el Escenario 2 del plan de universalización: modelo de calidad entrenado cross-symbol sobre features genéricas OHLCV y thresholds A/B/C recalibrados por **régimen + categoría** (LARGE_CAP, NARRATIVE, MIDCAP_ALT).
+
+### Cambios implementados
+
+- `Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json` reemplazado por umbrales universales.
+  - Backup: `entry_profile_thresholds_pre_universal_20260723.json`.
+- `entry_profile_gate.py`:
+  - Detecta el formato universal vía marcador `meta.version` o claves `regime__categoria`.
+  - Carga `Dev/benchmarks/research_data/quality_score_model_universal_proposal.pkl`.
+  - Extrae features `rsi_1h`, `rsi_4h`, `bb_position`, `atr_pct`, `vol_spike`, `range_position`, `trend_1h`, `trend_4h` de `signal_meta`, `indicators` e `indicators_at_entry`.
+  - Predice probabilidad de `forward_net_4h > 0` y aplica el umbral A/B/C más específico.
+  - Mantiene compatibilidad con el formato legacy de thresholds y el pipeline SPOT_BULL/RANGE_SCALP anterior.
+- `tests/test_entry_quality_gate.py`: tests legacy actualizados para usar thresholds pre-universales y evitar regresiones.
+- App reiniciada (`docker compose restart app`); el gate ya opera con el nuevo modelo.
+
+### Umbrales activos (forward_net_4h, coste 0.0)
+
+| Regime + Categoría | A/B/C |
+|---|---|
+| SPOT_BULL | 0.6340 |
+| SPOT_BULL__LARGE_CAP | 0.6216 |
+| SPOT_BULL__NARRATIVE | 0.6455 |
+| SPOT_BULL__MIDCAP_ALT | 0.6346 |
+| RANGE_SCALP | 0.6002 |
+| RANGE_SCALP__LARGE_CAP | 0.5662 |
+| RANGE_SCALP__NARRATIVE | 0.6216 |
+| RANGE_SCALP__MIDCAP_ALT | 0.6024 |
+
+### Validación previa
+
+- Walk-forward purgado (76 ventanas): WR medio 69.7%, PF medio 4.55, cobertura 11.6%.
+- MIMIC retrospective sweep ligero (3 ventanas): WR medio 66.2%, PF medio 2.90, cobertura 12.3%.
+
+### Monitorización obligatoria 24-48h
+
+Verificar en `ready_candidates.signal_meta->entry_profile_gate_info`:
+- `score_source == "universal_model"`.
+- Cobertura real ~8-15%.
+- Comparar PnL neto y win rate contra proyecciones.
+
+```sql
+-- Decisiones recientes por score_source
+SELECT
+  trade_type,
+  regime_mode,
+  profile_label,
+  signal_meta->'entry_profile_gate_info'->>'score_source' AS score_source,
+  (signal_meta->'entry_profile_gate_info'->>'score')::float AS score,
+  COUNT(*)
+FROM ready_candidates
+WHERE ready_at >= NOW() - INTERVAL '24 hours'
+GROUP BY 1,2,3,4,5
+ORDER BY ready_at DESC
+LIMIT 100;
+
+-- Trades abiertos con score universal
+SELECT
+  symbol,
+  trade_type,
+  metadata->>'peak_quality_profile' AS profile,
+  metadata->'entry_profile_gate_info'->>'score_source' AS source,
+  metadata->'entry_profile_gate_info'->>'score' AS score,
+  pnl_prediction,
+  opened_at
+FROM trades_open
+WHERE metadata->'entry_profile_gate_info'->>'score_source' = 'universal_model'
+ORDER BY opened_at DESC;
+```
+
+### Rollback inmediato
+
+```powershell
+# Restaurar thresholds previos
+Copy-Item Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds_pre_universal_20260723.json Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json -Force
+# O dentro del contenedor:
+docker compose exec app cp Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds_pre_universal_20260723.json Dev/benchmarks/entry_profile_calibration/entry_profile_thresholds.json
+docker compose restart app
+```
+
+### Próximos pasos
+
+1. Recolectar trades reales bajo el nuevo gate durante 1-2 semanas.
+2. Comparar PnL neto, PF, WR y drawdown vs. baseline y proyecciones de walk-forward/MIMIC.
+3. Si falla, restaurar backup y renombrar propuesta a `universal_thresholds_proposal_rejected_YYYYMMDD.json`.
 
 ---
 

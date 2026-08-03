@@ -14,6 +14,7 @@ from typing import Optional, Dict, Tuple, TYPE_CHECKING
 from pnl_predictor import PnLPredictor
 from trade_utils import format_indicators_for_predictor
 from config_helpers import get_param
+from technical_analysis import _fetch_candles
 
 if TYPE_CHECKING:
     from binance_client import BinanceClient
@@ -73,10 +74,35 @@ def predict_for_symbol(
             indicators_raw = signal_data.get("indicators", {})
         formatted = format_indicators_for_predictor(indicators_raw, price)
 
-        # Use realistic trade horizon (240 min = 4h) for PnL estimation.
-        # The trade cycle is 5 min (SL/TP check frequency), but actual
-        # position duration until SL/TP hit is typically 1-8 hours.
-        trade_horizon_minutes = getattr(settings, "trade_horizon_minutes", 240)
+        # Determine dynamic prediction horizon and candle interval.
+        # Defaults keep the previous 240min effective horizon but align
+        # the micro-structure inputs to the candles actually traded.
+        predictor_interval = getattr(settings, "predictor_interval", "5m")
+        predictor_horizon = getattr(settings, "predictor_horizon_minutes", None)
+        if predictor_horizon is None:
+            _regime_ctx = str(getattr(settings, 'current_regime_mode', 'SPOT_BULL')).upper()
+            predictor_horizon = 30 if _regime_ctx == 'RANGE_SCALP' else 120
+        # Do not exceed the legacy global ceiling if it is set tighter.
+        _global_horizon = getattr(settings, "trade_horizon_minutes", 240)
+        predictor_horizon = min(predictor_horizon, _global_horizon)
+
+        use_real_candles = getattr(settings, "predictor_use_real_candles", True)
+        candles = None
+        interval_minutes = 5
+        if use_real_candles:
+            try:
+                interval_minutes = int(predictor_interval.replace("m", "").replace("h", ""))
+                if predictor_interval.endswith("h"):
+                    interval_minutes *= 60
+            except ValueError:
+                interval_minutes = 5
+            candle_limit = max(50, int((predictor_horizon // max(interval_minutes, 1)) * 2) + 5)
+            try:
+                candles = _fetch_candles(client, symbol, interval=predictor_interval, limit=candle_limit)
+            except Exception as exc:
+                logger.warning("Could not fetch %s candles for %s: %s", predictor_interval, symbol, exc)
+
+        trade_horizon_minutes = predictor_horizon
         _side = str(trade_side or '').strip().upper()
         if _side not in ("LONG", "SHORT"):
             if str(trade_type or '').strip().lower() == 'futures':
@@ -93,6 +119,8 @@ def predict_for_symbol(
             trade_type=trade_type,
             trade_side=_side,
             settings=settings,
+            candles=candles,
+            interval_minutes=interval_minutes,
         )
         if isinstance(prediction, dict) and not prediction.get("bootstrap_mode"):
             _ev = float(prediction.get("expected_pnl", 0.0) or 0.0)

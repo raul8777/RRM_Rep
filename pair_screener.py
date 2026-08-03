@@ -64,8 +64,8 @@ def _futures_short_score(c: dict, cached_indicators: dict = None) -> float:
     Goal: short bounces inside a bearish trend, NOT already-overextended dumps.
     A positive 24h change in a bearish context is often a bounce to short.
     """
-    vol = c.get("vol_usdt", 0.0)
-    chg = c.get("chg_pct", 0.0)
+    vol = c.get("futures_vol_usdt", c.get("vol_usdt", 0.0))
+    chg = c.get("futures_chg_pct", c.get("chg_pct", 0.0))
     base = vol * abs(chg)
     if base == 0:
         return 0.0
@@ -108,8 +108,10 @@ def _score_for_regime(c: dict, regime_mode: str, cached_indicators: dict = None)
     - PRESERVATION / FUTURES_SHORT: spot score is zeroed (no new buys);
       futures uses the bear-bounce score.
     """
-    vol = c.get("vol_usdt", 0.0)
+    vol = c.get("spot_vol_usdt", c.get("vol_usdt", 0.0))
+    futures_vol = c.get("futures_vol_usdt", vol)
     chg = c.get("chg_pct", 0.0)
+    futures_chg = c.get("futures_chg_pct", chg)
     futures_short = _futures_short_score(c, cached_indicators=cached_indicators)
 
     if regime_mode in ("PRESERVATION", "FUTURES_SHORT"):
@@ -124,9 +126,10 @@ def _score_for_regime(c: dict, regime_mode: str, cached_indicators: dict = None)
 
     return {
         "spot_score": round(spot_score, 2),
-        "futures_score": round(vol * abs(chg), 2),
+        "futures_score": round(futures_vol * abs(futures_chg), 2),
         "futures_short_score": futures_short,
         "range_score": round(range_score, 2),
+        "futures_range_score": round(futures_vol * abs(futures_chg), 2),
     }
 
 
@@ -287,9 +290,9 @@ def _snapshot_is_usable(
 
 def get_screened_pairs(
     spot_min_vol: float = 10_000_000,       # $10M min for spot eligibility
-    futures_min_vol: float = 100_000_000,   # $100M min for futures eligibility
+    futures_min_vol: float = 10_000_000,    # $10M min for futures eligibility
     max_spot: int = 50,                     # max spot candidates
-    max_futures: int = 15,                  # max futures candidates
+    max_futures: int = 100,                 # max futures candidates
     cache_seconds: int = 900,               # 15 min default TTL
     settings=None,                          # optional: override defaults from settings
     regime_mode: str = "SPOT_BULL",         # active market regime
@@ -309,6 +312,7 @@ def get_screened_pairs(
         spot_min_vol    = get_param(settings, 'screener_min_vol_usdt')
         futures_min_vol = get_param(settings, 'screener_futures_min_vol')
         max_spot        = get_param(settings, 'screener_max_pairs')
+        max_futures     = get_param(settings, 'screener_max_futures_pairs', max_futures)
         cache_seconds   = int(get_param(settings, 'screener_cache_minutes') * 60)
         regime_mode     = get_param(settings, 'current_regime_mode', regime_mode)
 
@@ -354,10 +358,15 @@ def get_screened_pairs(
     # ── Fetch Binance 24h ticker (public endpoint, no auth) ───────────────────
     try:
         import socket as _sock
-        url = "https://api.binance.com/api/v3/ticker/24hr"
-        req = urllib.request.Request(url, headers={"User-Agent": "crypto-agent/1.0"})
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            tickers = json.loads(resp.read())
+        def _fetch_public_json(url: str) -> Any:
+            req = urllib.request.Request(url, headers={"User-Agent": "crypto-agent/1.0"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                return json.loads(resp.read())
+
+        tickers = _fetch_public_json("https://api.binance.com/api/v3/ticker/24hr")
+        spot_exchange = _fetch_public_json("https://api.binance.com/api/v3/exchangeInfo")
+        futures_tickers = _fetch_public_json("https://fapi.binance.com/fapi/v1/ticker/24hr")
+        futures_exchange = _fetch_public_json("https://fapi.binance.com/fapi/v1/exchangeInfo")
     except (_sock.timeout, TimeoutError) as e:
         print(f"[Screener] ticker/24hr timeout ({e}) — trying DB snapshot fallback")
         snapshot = _load_screener_snapshot(db_client)
@@ -426,42 +435,72 @@ def get_screened_pairs(
         _cached_all = {}
 
     # ── Parse, tier, and rank ─────────────────────────────────────────────────
+    spot_active = {
+        row.get("symbol")
+        for row in spot_exchange.get("symbols", [])
+        if row.get("status") == "TRADING"
+        and row.get("quoteAsset") == "USDT"
+        and bool(row.get("isSpotTradingAllowed", True))
+    }
+    futures_active = {
+        row.get("symbol")
+        for row in futures_exchange.get("symbols", [])
+        if row.get("status") == "TRADING"
+        and row.get("quoteAsset") == "USDT"
+        and row.get("contractType") == "PERPETUAL"
+    }
+    triple_active = spot_active & futures_active
+    futures_ticker_map = {row.get("symbol"): row for row in futures_tickers}
     candidates = []
     observe_candidates = []
     structural_excluded = 0
     for t in tickers:
         symbol = t.get("symbol", "")
+        futures_ticker = futures_ticker_map.get(symbol)
         try:
             price = float(t.get("lastPrice", 0))
-            vol = float(t.get("quoteVolume", 0))
+            spot_vol = float(t.get("quoteVolume", 0))
             chg_pct = float(t.get("priceChangePercent", 0))
+            futures_vol = float((futures_ticker or {}).get("quoteVolume", 0))
+            futures_chg_pct = float((futures_ticker or {}).get("priceChangePercent", 0))
         except (ValueError, TypeError):
             structural_excluded += 1
             continue
 
-        if not _is_valid_pair(symbol, price):
+        if symbol not in triple_active or not futures_ticker or not _is_valid_pair(symbol, price):
             structural_excluded += 1
             continue
 
         cached_ind = _cached_all.get(symbol, {}).get("indicators", {}) if _cached_all else {}
-        scores = _score_for_regime(
-            {"vol_usdt": vol, "chg_pct": chg_pct}, regime_mode, cached_indicators=cached_ind
+        score_input = {
+            "vol_usdt": spot_vol,
+            "spot_vol_usdt": spot_vol,
+            "futures_vol_usdt": futures_vol,
+            "chg_pct": chg_pct,
+            "futures_chg_pct": futures_chg_pct,
+        }
+        scores = _score_for_regime(score_input, regime_mode, cached_indicators=cached_ind)
+        opportunity_score = max(abs(chg_pct), abs(futures_chg_pct)) * max(
+            1.0, math.log10(max(spot_vol + futures_vol, 1.0))
         )
-        opportunity_score = abs(chg_pct) * max(1.0, math.log10(max(vol, 1.0)))
         candidate = {
             "symbol": symbol,
-            "vol_usdt": round(vol),
+            "vol_usdt": round(spot_vol),
+            "spot_vol_usdt": round(spot_vol),
+            "futures_vol_usdt": round(futures_vol),
             "chg_pct": round(chg_pct, 2),
+            "futures_chg_pct": round(futures_chg_pct, 2),
             "score": scores["spot_score"],
             "futures_score": scores["futures_score"],
             "futures_short_score": scores["futures_short_score"],
             "range_score": scores["range_score"],
+            "futures_range_score": scores["futures_range_score"],
             "opportunity_score": round(opportunity_score, 4),
-            "tier": "ELIGIBLE" if vol >= spot_min_vol else "OBSERVE",
+            "tier": "ELIGIBLE" if spot_vol >= spot_min_vol and futures_vol >= futures_min_vol else "OBSERVE",
             "execution_enabled": False,
         }
         observe_candidates.append(candidate)
-        if vol >= spot_min_vol:
+        if spot_vol >= spot_min_vol and futures_vol >= futures_min_vol:
             candidates.append(candidate)
 
     # Spot ranking depends on regime: bear modes avoid new longs
@@ -483,23 +522,23 @@ def get_screened_pairs(
     # Futures ranking depends on regime: FUTURES_SHORT prioritizes short-bounce candidates
     if regime_mode == "FUTURES_SHORT":
         futures_candidates = sorted(
-            [c for c in candidates if c["vol_usdt"] >= futures_min_vol],
+            [c for c in candidates if c["futures_vol_usdt"] >= futures_min_vol],
             key=lambda x: x["futures_short_score"], reverse=True
         )
     elif regime_mode == "RANGE_SCALP":
         futures_candidates = sorted(
-            [c for c in candidates if c["vol_usdt"] >= futures_min_vol],
-            key=lambda x: x["range_score"], reverse=True
+            [c for c in candidates if c["futures_vol_usdt"] >= futures_min_vol],
+            key=lambda x: x["futures_short_score"], reverse=True
         )
     else:  # SPOT_BULL or unknown — futures long candidates by momentum
         futures_candidates = sorted(
-            [c for c in candidates if c["vol_usdt"] >= futures_min_vol],
+            [c for c in candidates if c["futures_vol_usdt"] >= futures_min_vol],
             key=lambda x: x["futures_score"], reverse=True
         )
     futures_pairs = [c["symbol"] for c in futures_candidates[:max_futures]]
 
     top_bearish = sorted(
-        [c for c in candidates if c["vol_usdt"] >= futures_min_vol],
+        [c for c in candidates if c["futures_vol_usdt"] >= futures_min_vol],
         key=lambda x: x["futures_short_score"], reverse=True
     )[:5]
     top_bullish = sorted(candidates, key=lambda x: x["score"], reverse=True)[:5]
@@ -524,11 +563,13 @@ def get_screened_pairs(
             "spot_count": len(spot_pairs),
             "futures_count": len(futures_pairs),
             "universe_funnel": {
-                "ticker_rows": len(tickers),
+                "spot_ticker_rows": len(tickers),
+                "futures_ticker_rows": len(futures_tickers),
+                "triple_active": len(triple_active),
                 "structural_excluded": structural_excluded,
                 "observe": len(observe_candidates),
                 "liquid_eligible": len(candidates),
-                "futures_volume_eligible": sum(1 for candidate in candidates if candidate["vol_usdt"] >= futures_min_vol),
+                "futures_volume_eligible": sum(1 for candidate in candidates if candidate["futures_vol_usdt"] >= futures_min_vol),
                 "shadow_ranked": len(opportunity_shadow),
                 "execution_enabled": 0,
             },

@@ -22,6 +22,66 @@ Si una propuesta no responde estos 6 puntos, no está lista para rollout.
 
 **🔴 Regla dura — cierres parciales:** todo cierre parcial (SSO, PRS, UG, PredExit) debe insertar un registro en `trades_closed` con `metadata.partial_close=True` y reducir `quantity` en `trades_open`. Nunca se limita a mutar `quantity` o metadata sin fila de cierre. El dashboard debe mostrar PnL realizado + no realizado + total por posición abierta.
 
+**🔴 Regla dura — visibilidad de shadow evidence:** todo mecanismo que se despliegue "en observación"/shadow (no activo en producción real) debe ser visible en `/metrics/shadow-readiness` — agregar una entrada en `app.py::get_shadow_readiness` con `id`, `name`, `mode` (leído de la config real, no hardcodeado), `state`, `summary` con métricas reales, y `gates` con los umbrales de graduación a activo. No es aceptable dejar un flag `*_enabled=False`/modo shadow en el código sin su contraparte visible en el dashboard — la falta de visibilidad fue precisamente lo que permitió que el bug de `range_reversion_shadow`/`invalid_reversion_payoff` (ver s108/s115) pasara desapercibido durante semanas. Al implementar un mecanismo nuevo en shadow, agregar su entrada al dashboard es parte de la misma tarea, no un paso separado opcional.
+
+**�🟡 Guía — limpieza de candidatos activos tras un fix de evaluación/priorización:** todo cambio que altere cómo se evalúan, confirman o priorizan candidatos (`staged_entry.py::_direction_transition`, `get_openable_candidates`, gates de ejecución en `run_trades.py`) debe cerrar con una revisión de `ready_candidates` en estado `ready`/`validated`: consultar `data.last_execution_gate`, `data.direction`, y el conteo de `risk_queue_selected`/`execution_attempt_blocked` en `ready_candidate_checks` por candidato, para detectar y descartar (`_discard_ready`) cualquiera que haya quedado en un estado inconsistente con la lógica nueva o arrastrando el patrón que motivó el fix (ver s110/s111, HEIUSDT/RIFUSDT monopolizando la cola). No dar el fix por cerrado sin este chequeo, aunque el resultado sea "nada que limpiar".
+
+## s115 — revalidación de tesis S/R al ejecutar (activo, 5%) + visibilidad shadow obligatoria (ago 3 2026)
+
+- **`_staged_sr_thesis_check` (`run_trades.py`):** antes de ejecutar un SHORT/LONG vía `STAGED_SHORT_DIRECTION`/`STAGED_FUTURES_LONG_DIRECTION`/`STAGED_SPOT_LONG_DIRECTION` (la ruta que bypassea el arbitraje una vez la FSM de dirección confirma el lado), revalida que el precio esté realmente cerca del nivel S/R de su propia tesis (`resistance_dist_pct`/`support_dist_pct` ≤ 5%, o una continuación de breakdown/breakout genuina). Config: `range_scalp_sr_thesis_gate_enabled` (default `True`), `range_scalp_sr_thesis_max_dist_pct` (default `5.0`). Activo, no shadow — backtest de 48h mostró +$212 de mejora neta incluso descontando el costo de oportunidad de ganadores reales bloqueados.
+- **Regla de visibilidad shadow** (ver regla dura arriba): se agregaron a `/metrics/shadow-readiness` las entradas `direction_volume_gate` y `staged_immediate_entry` (mecanismos shadow de s113 que no tenían visibilidad hasta ahora) y `sr_thesis_gate` (este mecanismo, activo).
+- Ver `canonical/calibracion_entradas-a20ab8-v3.md` §s115 para el detalle completo, incluida la simulación retrospectiva de 48h con el trade-off exacto (pérdidas evitadas vs. ganancias sacrificadas).
+- Rollback: `range_scalp_sr_thesis_gate_enabled=false` revierte al comportamiento anterior sin tocar ningún otro mecanismo.
+
+## s113 — plan completo de ciclo de entradas: concurrencia SPOT, escalonamiento, ATR, VSA, watcher universal, entrada inmediata (ago 3 2026)
+
+- **Lock de concurrencia en SPOT (`position_manager.py`):** nuevo `self._close_lock` (RLock), mismo patrón que `futures_client.py` desde s105h — el ciclo normal y `monitor_spot_hard_stops_once` (2s) ya no pueden duplicar un cierre.
+- **Escalonamiento sin descarte terminal:** `_symbol_has_open_futures_position(..., allow_scale_in_ready_id=X)` — una posición etiquetada con `scale_in_ready_id=X` no bloquea a su propio candidato agregando una segunda pierna.
+- **Anclaje ATR al SL real (`_atr_anchor_sl_pct`):** ensancha (nunca aprieta) el SL de % fijo en SPOT y FUTUROS. El guardarrail `max_loss_usd_per_trade` sigue siendo el techo — esto solo corrige el punto de partida.
+- **Corroboración de volumen (VSA/Wyckoff) en `_direction_transition`:** shadow por defecto (`direction_volume_gate_enabled=False`) — se mide, no se exige, hasta validar contra resultados reales.
+- **`intra_mode="watcher"` en `FUTURES_SHORT`/`PRESERVATION`:** mismo fix de s106 ya validado en `RANGE_SCALP`, extendido a los otros 2 regímenes que comparten el mismo dispatch genérico.
+- **Entrada inmediata escalonada (`maybe_open_immediate_leg_range_scalp_short`):** apagada por defecto (`staged_immediate_entry_enabled=False`) — el mecanismo de mayor riesgo del plan, valida con fracción pequeña antes de ampliar.
+- Ver `canonical/calibracion_entradas-a20ab8-v3.md` §s113 para el detalle completo, datos que motivaron el plan, y pendientes.
+- Rollback: cada mecanismo tiene su propio flag (`*_enabled`) independiente — se puede revertir uno sin afectar los demás. El lock de SPOT y el fix de escalonamiento son aditivos (sin flag, pero inertes si nada los ejercita).
+
+## s111 — cola de riesgo consciente de viabilidad + confirmación de dirección anclada a geometría (ago 2 2026)
+
+- **Prioridad de cola (`staged_entry.py::get_openable_candidates`):** un candidato cuyo último intento real de ejecución falló (`data.last_execution_gate.passed=False`) cae detrás de todos los que no han fallado, sin importar su score de EV/calidad. Medido en 48h: 93% de las selecciones de cola las consumían candidatos que nunca abrían, monopolizando `max_open_per_cycle` y bloqueando candidatos viables.
+- **Confirmación de dirección (`staged_entry.py::_direction_transition`):** `RANGE_SCALP` ancla `direction_min_progress_bps`/`direction_max_adverse_bps` a un % de la distancia al stop real del trade (`direction_geometry_anchor_enabled`, opt-in por régimen) en vez de bps fijos idénticos para todo símbolo. Las degradaciones (`DIRECTION_RECOVERY_PENDING`/`DIRECTION_DRAWDOWN_SOFT`) decrementan `directional_confirmations` en vez de resetear a 0.
+- Ver `canonical/calibracion_entradas-a20ab8-v3.md` §s111 para el detalle completo (causas raíz, datos de 48h, decisiones de diseño).
+- Rollback: `direction_geometry_anchor_enabled=false` en el config de `RANGE_SCALP` revierte a bps fijos; revertir `priority()` a la tupla original de 4 elementos revierte la deprioritización por fallo de ejecución.
+
+## s110 — gates finales de ejecución condicionados a demora real (ago 2 2026)
+
+- **Regla de diseño (explícita del usuario):** la única razón legítima para volver a validar recompensa:riesgo o elegibilidad de un candidato `validated`/`direction_confirmed` es que haya esperado genuinamente por falta de capital o de slots disponibles. Fuera de ese escenario, debe abrir de inmediato al primer indicio de rompimiento hacia la dirección esperada — no re-derivar la tesis desde cero.
+- `run_trades.py::_candidate_delayed_by_capital_or_slots()`: único punto de verdad para "¿esto esperó de verdad?" — capital (`data.capital_routing.retry_count`/`status`) o slots (`data.stage_reason in (RISK_BLOCKED, ROUTING_BLOCKED)`).
+- `_revalidate_entry_before_submit` (R:R≥2.0, s109) y `futures_executable` (cacheado desde `signal_meta.directional_arbitration` en vez de re-derivar del top-N rotativo del screener) deben respetar esta condición — ver `canonical/calibracion_entradas-a20ab8-v3.md` §s110 para el detalle completo.
+- Rollback: revertir `_candidate_delayed_by_capital_or_slots` a `return True` incondicional (comportamiento pre-s110) si se detectan aperturas prematuras sobre setups genuinamente agotados.
+
+## s104 — disciplina documental architecture-first (jul 29 2026)
+
+- El canónico `canonical/calibracion_entradas-a20ab8-v3.md` debe iniciar siempre con:
+  - diagrama de arquitectura del pipeline de calibración de entrada,
+  - descripción de módulos y límites operativos.
+- Cambios de flujo de entrada: primero se actualiza ese bloque canónico, después `rules.md` y `SYSTEM_REFERENCE.md`.
+- Módulos que deben permanecer sincronizados en documentación:
+  - `market_regime.py`, `pair_screener.py`, `autonomous_signals.py`, `entry_profile_gate.py`, `portfolio_selector.py`, `staged_entry.py`, `pnl_service.py`, `entry_decision.py`, `run_trades.py`, `analysis_cycle.py`, `external_data_client.py`, `technical_graph_analyst.py`, `app.py`.
+
+### Contrato SR canónico (sin bypass)
+
+- Para señales SR, el estado `ready` representa espera activa de rompimiento/progreso direccional; no autoriza apertura por sí solo.
+- La secuencia obligatoria es: `ready` -> checks inter/intra -> `direction_confirmed` -> `validated` -> preflight -> ejecución -> fill confirmado -> `opened`.
+- Si preflight o ejecución bloquean, se persiste razón terminal/no terminal en `ready_candidates.data` y se audita el evento.
+- Queda prohibido abrir posición sin confirmación de fill Binance/futures.
+
+## s93 — Despliegue de umbrales universal (jul 23 2026)
+
+- `entry_profile_thresholds.json` activo con umbrales por **régimen + categoría** (LARGE_CAP, NARRATIVE, MIDCAP_ALT).
+- `entry_profile_gate.py` aplica el modelo universal `quality_score_model_universal_proposal.pkl` cuando detecta el marcador `universal` en el archivo de thresholds.
+- Backup de thresholds disponible en `entry_profile_thresholds_pre_universal_20260723.json`.
+- Monitorización obligatoria: `score_source == "universal_model"`, cobertura real ~8-15%, PnL neto y win rate vs. proyecciones.
+- Rollback: restaurar backup thresholds y `docker compose restart app`.
+
 ---
 
 ## 1. ARQUITECTURA GENERAL
