@@ -709,6 +709,11 @@ class Settings(BaseSettings):
     drawdown_cut_velocity_threshold: float = Field(default=-0.0003)
     drawdown_cut_min_data_points: int = Field(default=20)
     drawdown_cut_min_consecutive: int = Field(default=3)
+    # s120: Profit erosion detection (monitors ALL positions, only tightens SL)
+    erosion_min_peak_usdt: float = Field(default=5.0)
+    erosion_lock_fraction: float = Field(default=0.30)
+    erosion_lock_fraction_gentle: float = Field(default=0.15)
+    erosion_velocity_threshold: float = Field(default=-0.00015)
     # S105g: real-time Binance User Data Stream (futures + spot) so position
     # closures are detected in seconds instead of waiting for the next 5-min
     # polling cycle. Falls back silently to polling/reconciliation if disabled,

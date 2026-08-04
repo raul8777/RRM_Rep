@@ -500,10 +500,79 @@ def _evaluate_drawdown_intelligence(
     return {"action": "HOLD", "reason": "no_clear_signal", "confidence": 0.4}
 
 
+def _evaluate_profit_erosion(
+    snapshot: Dict[str, Any],
+    trend: Dict[str, Any],
+    settings: Any,
+) -> Dict[str, Any]:
+    """Evaluate profit erosion for positions still in profit but losing momentum.
+
+    CRITICAL: This function NEVER closes a profitable position. It only tightens
+    SL to lock in a portion of realized gains. The philosophy is defensive:
+    - If momentum is positive or neutral → do nothing (let winners run)
+    - If momentum reverses AND accelerates → protect gains by tightening SL
+    - Always leave room for normal volatility (ATR-aware buffer)
+
+    Anti-strangulation guarantees:
+    1. Only acts when velocity is negative for >= 15s (not a single bad tick)
+    2. Only tightens to protect 30-50% of peak, never locks 100%
+    3. Never moves SL above current price (which would trigger immediate close)
+    4. Respects resistance/support proximity — if near resistance on a LONG, the
+       pullback is expected (partial retracement at resistance)
+    5. Recent velocity must be negative (last 10s still falling, not just noise)
+    """
+    velocity = trend["velocity_per_sec"]
+    recent_velocity = trend.get("recent_velocity", 0.0)
+    acceleration = trend["acceleration"]
+    recovery_signal = trend["recovery_signal"]
+    data_points = trend["data_points"]
+
+    # Need at least 15s of data before any erosion decision
+    if data_points < 15:
+        return {"action": "HOLD", "reason": "erosion_insufficient_data", "confidence": 0.2}
+
+    # If recent velocity is positive (last 10s bouncing back) → never act
+    if recovery_signal or recent_velocity > 0:
+        return {"action": "HOLD", "reason": "erosion_recovery_detected", "confidence": 0.7}
+
+    # If velocity is positive or neutral → do nothing (still running)
+    erosion_velocity_threshold = _to_float(
+        get_param(settings, "erosion_velocity_threshold", -0.00015), -0.00015)
+    if velocity >= erosion_velocity_threshold:
+        return {"action": "HOLD", "reason": "erosion_velocity_neutral", "confidence": 0.6}
+
+    # Near resistance on LONG (or near support on SHORT) — expected pullback zone
+    dist_to_resistance = snapshot.get("dist_to_resistance_pct")
+    side = str(snapshot.get("side") or "LONG").upper()
+    if side == "LONG" and dist_to_resistance is not None and abs(dist_to_resistance) < 0.008:
+        return {"action": "HOLD", "reason": "erosion_near_resistance_expected_pullback", "confidence": 0.5}
+    dist_to_support = snapshot.get("dist_to_support_pct")
+    if side == "SHORT" and dist_to_support is not None and abs(dist_to_support) < 0.008:
+        return {"action": "HOLD", "reason": "erosion_near_support_expected_pullback", "confidence": 0.5}
+
+    # Erosion confirmed: velocity negative + recent also negative + accelerating
+    if velocity < erosion_velocity_threshold and recent_velocity < 0 and acceleration < 0:
+        return {"action": "PROTECT_PROFIT", "reason": "erosion_accelerating_reversal", "confidence": 0.7}
+
+    # Moderate erosion: velocity negative but decelerating — gentler protection
+    if velocity < erosion_velocity_threshold and recent_velocity < 0:
+        return {"action": "PROTECT_PROFIT_GENTLE", "reason": "erosion_steady_decline", "confidence": 0.5}
+
+    return {"action": "HOLD", "reason": "erosion_no_clear_signal", "confidence": 0.4}
+
+
 def _run_drawdown_monitor_cycle(
     components: Any, snapshots: List[Dict[str, Any]], settings: Any
 ) -> List[Dict[str, Any]]:
-    """Evaluate all positions in drawdown and take intelligent action."""
+    """Evaluate ALL positions (in profit and in loss) with intelligent analysis.
+
+    Two modes of operation:
+    - Positions in loss (< threshold): drawdown analysis → CUT or TIGHTEN_SL
+    - Positions in profit but eroding: erosion analysis → PROTECT_PROFIT (lock gains)
+
+    Anti-strangulation: profit erosion NEVER closes. It only tightens SL to protect
+    a fraction of the peak, always leaving 50%+ headroom for normal retracement.
+    """
     if not snapshots:
         return []
     mode = str(get_param(settings, "position_reaction_policy_mode", "telemetry_only") or "telemetry_only").strip().lower()
@@ -514,98 +583,164 @@ def _run_drawdown_monitor_cycle(
 
     threshold_usdt = _to_float(
         get_param(settings, "drawdown_monitor_threshold_usdt", -10.0), -10.0)
+    # Erosion: only activate when position has had meaningful profit first
+    erosion_min_peak_usdt = _to_float(
+        get_param(settings, "erosion_min_peak_usdt", 5.0), 5.0)
+    # How much of peak to protect (0.30 = lock 30% of peak as floor)
+    erosion_lock_fraction = _to_float(
+        get_param(settings, "erosion_lock_fraction", 0.30), 0.30)
+    erosion_lock_fraction_gentle = _to_float(
+        get_param(settings, "erosion_lock_fraction_gentle", 0.15), 0.15)
 
     actions: List[Dict[str, Any]] = []
     for snapshot in snapshots:
         unrealized = _to_float(snapshot.get("unrealized_pnl_usdt"), 0.0)
-        if unrealized >= threshold_usdt:
-            # Not in drawdown territory — still update buffer for continuity
-            pos_id = snapshot.get("position_id", "")
-            if pos_id:
-                _update_drawdown_buffer(pos_id, _to_float(snapshot.get("current_price"), 0.0), unrealized)
-            continue
-
         pos_id = snapshot.get("position_id", "")
         if not pos_id:
             continue
-
         price = _to_float(snapshot.get("current_price"), 0.0)
+
+        # Always update buffer for all positions (provides continuity)
         buf = _update_drawdown_buffer(pos_id, price, unrealized)
         side = str(snapshot.get("side") or "LONG").upper()
+
+        # Analyze trend from buffer (shared for both cases)
         trend = _analyze_drawdown_trend(buf, side)
-        decision = _evaluate_drawdown_intelligence(snapshot, trend, settings)
 
-        # Merge with previous decision (avoid flip-flopping)
-        prev = _drawdown_decisions.get(pos_id, {})
-        prev_action = prev.get("action", "")
-        # Require 3 consecutive CUT decisions before acting
-        consecutive_cuts = prev.get("_consecutive_cuts", 0)
-        if decision["action"] == "CUT":
-            consecutive_cuts += 1
-        else:
-            consecutive_cuts = 0
-        decision["_consecutive_cuts"] = consecutive_cuts
-        _drawdown_decisions[pos_id] = decision
+        # ── Case A: Position in loss territory ──
+        if unrealized < threshold_usdt:
+            decision = _evaluate_drawdown_intelligence(snapshot, trend, settings)
 
-        min_consecutive_for_cut = int(get_param(settings, "drawdown_cut_min_consecutive", 3) or 3)
+            # Merge with previous decision (avoid flip-flopping)
+            prev = _drawdown_decisions.get(pos_id, {})
+            consecutive_cuts = prev.get("_consecutive_cuts", 0)
+            if decision["action"] == "CUT":
+                consecutive_cuts += 1
+            else:
+                consecutive_cuts = 0
+            decision["_consecutive_cuts"] = consecutive_cuts
+            _drawdown_decisions[pos_id] = decision
 
-        if decision["action"] == "CUT" and consecutive_cuts >= min_consecutive_for_cut:
-            # Execute emergency cut via existing SL tightening (move SL to current price - buffer)
+            min_consecutive_for_cut = int(get_param(settings, "drawdown_cut_min_consecutive", 3) or 3)
+
+            if decision["action"] == "CUT" and consecutive_cuts >= min_consecutive_for_cut:
+                entry_price = _to_float(snapshot.get("entry_price"), 0.0)
+                current_price = _to_float(snapshot.get("current_price"), 0.0)
+                if entry_price > 0 and current_price > 0:
+                    if side == "LONG":
+                        emergency_sl = current_price * 0.999
+                    else:
+                        emergency_sl = current_price * 1.001
+                    actions.append({
+                        "action": "CUT",
+                        "symbol": snapshot.get("symbol"),
+                        "position_id": pos_id,
+                        "trade_type": snapshot.get("trade_type"),
+                        "side": side,
+                        "emergency_sl": round(emergency_sl, 8),
+                        "unrealized_usdt": round(unrealized, 2),
+                        "trend": trend,
+                        "decision": decision,
+                    })
+
+            elif decision["action"] == "TIGHTEN_SL":
+                current_sl = _to_float(snapshot.get("stop_loss"), 0.0)
+                current_price = _to_float(snapshot.get("current_price"), 0.0)
+                if current_sl > 0 and current_price > 0:
+                    if side == "LONG":
+                        gap = current_price - current_sl
+                        tighter_sl = current_sl + gap * 0.05
+                        if tighter_sl > current_sl and tighter_sl < current_price * 0.998:
+                            actions.append({
+                                "action": "TIGHTEN_SL",
+                                "symbol": snapshot.get("symbol"),
+                                "position_id": pos_id,
+                                "trade_type": snapshot.get("trade_type"),
+                                "side": side,
+                                "target_sl": round(tighter_sl, 8),
+                                "unrealized_usdt": round(unrealized, 2),
+                                "trend": trend,
+                                "decision": decision,
+                            })
+                    elif side == "SHORT":
+                        gap = current_sl - current_price
+                        tighter_sl = current_sl - gap * 0.05
+                        if tighter_sl < current_sl and tighter_sl > current_price * 1.002:
+                            actions.append({
+                                "action": "TIGHTEN_SL",
+                                "symbol": snapshot.get("symbol"),
+                                "position_id": pos_id,
+                                "trade_type": snapshot.get("trade_type"),
+                                "side": side,
+                                "target_sl": round(tighter_sl, 8),
+                                "unrealized_usdt": round(unrealized, 2),
+                                "trend": trend,
+                                "decision": decision,
+                            })
+
+        # ── Case B: Position in profit but eroding ──
+        # Only evaluate if position has had meaningful profit (avoid noise on
+        # positions that just opened and are oscillating near entry)
+        elif unrealized > 0:
+            peak_pnl_pct = _to_float(snapshot.get("peak_pnl_pct"), 0.0)
+            # Estimate peak USD from peak_pnl_pct and entry_price/qty
             entry_price = _to_float(snapshot.get("entry_price"), 0.0)
-            current_price = _to_float(snapshot.get("current_price"), 0.0)
-            if entry_price > 0 and current_price > 0:
-                # Set SL very tight — 0.1% from current price (effectively a market exit next cycle)
-                if side == "LONG":
-                    emergency_sl = current_price * 0.999
-                else:
-                    emergency_sl = current_price * 1.001
-                actions.append({
-                    "action": "CUT",
-                    "symbol": snapshot.get("symbol"),
-                    "position_id": pos_id,
-                    "trade_type": snapshot.get("trade_type"),
-                    "side": side,
-                    "emergency_sl": round(emergency_sl, 8),
-                    "unrealized_usdt": round(unrealized, 2),
-                    "trend": trend,
-                    "decision": decision,
-                })
+            qty = _to_float(snapshot.get("quantity"), 0.0)
+            peak_usdt_estimate = abs(peak_pnl_pct / 100.0) * entry_price * qty if entry_price > 0 and qty > 0 else 0.0
+            # Also check buffer history for peak
+            buf_peak = max((tick["pnl_usdt"] for tick in buf), default=0.0)
+            effective_peak = max(peak_usdt_estimate, buf_peak, unrealized)
 
-        elif decision["action"] == "TIGHTEN_SL":
-            # Gradually tighten SL — reduce allowed loss by 20% of remaining gap
-            current_sl = _to_float(snapshot.get("stop_loss"), 0.0)
-            entry_price = _to_float(snapshot.get("entry_price"), 0.0)
-            current_price = _to_float(snapshot.get("current_price"), 0.0)
-            if current_sl > 0 and entry_price > 0 and current_price > 0:
-                if side == "LONG":
-                    gap = current_price - current_sl
-                    tighter_sl = current_sl + gap * 0.05  # 5% tighter per second
-                    if tighter_sl > current_sl and tighter_sl < current_price * 0.998:
+            if effective_peak >= erosion_min_peak_usdt:
+                erosion_decision = _evaluate_profit_erosion(snapshot, trend, settings)
+
+                if erosion_decision["action"] in ("PROTECT_PROFIT", "PROTECT_PROFIT_GENTLE"):
+                    # Calculate protective SL: lock a fraction of peak profit
+                    lock_frac = (erosion_lock_fraction
+                                 if erosion_decision["action"] == "PROTECT_PROFIT"
+                                 else erosion_lock_fraction_gentle)
+                    current_sl = _to_float(snapshot.get("stop_loss"), 0.0)
+                    current_price = _to_float(snapshot.get("current_price"), 0.0)
+
+                    if entry_price > 0 and current_price > 0:
+                        # Target SL = entry + lock_frac * (peak_price - entry)
+                        # This guarantees we keep at least lock_frac of the peak move
+                        if side == "LONG":
+                            peak_price_est = entry_price * (1.0 + abs(peak_pnl_pct) / 100.0)
+                            target_sl = entry_price + (peak_price_est - entry_price) * lock_frac
+                            # Safety: never set SL above 97% of current price
+                            target_sl = min(target_sl, current_price * 0.97)
+                            # Only tighten, never loosen
+                            if current_sl > 0 and target_sl <= current_sl:
+                                continue
+                            # Sanity: SL must be below current price
+                            if target_sl >= current_price:
+                                continue
+                        elif side == "SHORT":
+                            peak_price_est = entry_price * (1.0 - abs(peak_pnl_pct) / 100.0)
+                            target_sl = entry_price - (entry_price - peak_price_est) * lock_frac
+                            # Safety: never set SL below 103% of current price
+                            target_sl = max(target_sl, current_price * 1.03)
+                            # Only tighten, never loosen
+                            if current_sl > 0 and target_sl >= current_sl:
+                                continue
+                            if target_sl <= current_price:
+                                continue
+                        else:
+                            continue
+
                         actions.append({
-                            "action": "TIGHTEN_SL",
+                            "action": "PROTECT_PROFIT",
                             "symbol": snapshot.get("symbol"),
                             "position_id": pos_id,
                             "trade_type": snapshot.get("trade_type"),
                             "side": side,
-                            "target_sl": round(tighter_sl, 8),
+                            "target_sl": round(target_sl, 8),
                             "unrealized_usdt": round(unrealized, 2),
+                            "peak_usdt_estimate": round(effective_peak, 2),
+                            "lock_fraction": lock_frac,
                             "trend": trend,
-                            "decision": decision,
-                        })
-                elif side == "SHORT":
-                    gap = current_sl - current_price
-                    tighter_sl = current_sl - gap * 0.05
-                    if tighter_sl < current_sl and tighter_sl > current_price * 1.002:
-                        actions.append({
-                            "action": "TIGHTEN_SL",
-                            "symbol": snapshot.get("symbol"),
-                            "position_id": pos_id,
-                            "trade_type": snapshot.get("trade_type"),
-                            "side": side,
-                            "target_sl": round(tighter_sl, 8),
-                            "unrealized_usdt": round(unrealized, 2),
-                            "trend": trend,
-                            "decision": decision,
+                            "decision": erosion_decision,
                         })
 
     return actions

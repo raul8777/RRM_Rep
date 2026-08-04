@@ -9087,6 +9087,10 @@ _KELLY_EDITABLE_FIELDS = {
     "drawdown_cut_velocity_threshold",
     "drawdown_cut_min_data_points",
     "drawdown_cut_min_consecutive",
+    "erosion_min_peak_usdt",
+    "erosion_lock_fraction",
+    "erosion_lock_fraction_gentle",
+    "erosion_velocity_threshold",
 }
 
 _REGIME_MODES = {"SPOT_BULL", "RANGE_SCALP", "PRESERVATION", "FUTURES_SHORT"}

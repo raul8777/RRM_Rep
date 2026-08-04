@@ -265,6 +265,11 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'drawdown_cut_velocity_threshold': -0.0003,
     'drawdown_cut_min_data_points': 20,
     'drawdown_cut_min_consecutive': 3,
+    # s120: Profit erosion detection (anti-strangulation: only tightens SL, never closes)
+    'erosion_min_peak_usdt': 5.0,
+    'erosion_lock_fraction': 0.30,
+    'erosion_lock_fraction_gentle': 0.15,
+    'erosion_velocity_threshold': -0.00015,
     'binance_event_stream_enabled': True,
     'binance_event_stream_futures_enabled': True,
     'binance_event_stream_spot_enabled': False,
