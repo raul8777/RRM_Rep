@@ -192,9 +192,17 @@ class Settings(BaseSettings):
     futures_momentum_reversal_drawback: float = Field(default=0.8)  # close if given back 0.8% from peak
     # Early adverse exit: if signal flips against open futures position while already in loss, cut earlier than hard SL
     futures_adverse_exit_enabled: bool = Field(default=True)
-    futures_adverse_exit_loss_pct: float = Field(default=1.2)  # concentrated: corte más amplio
-    futures_adverse_exit_min_hours: float = Field(default=1.5)
-    futures_adverse_exit_min_strength: float = Field(default=0.55)
+    futures_adverse_exit_loss_pct: float = Field(default=0.8)
+    futures_adverse_exit_min_hours: float = Field(default=0.75)
+    futures_adverse_exit_min_strength: float = Field(default=0.45)
+    # SR structure invalidation early exit (shadow first)
+    sr_invalidation_exit_enabled: bool = Field(default=True)
+    sr_invalidation_shadow_mode: bool = Field(default=True)
+    sr_invalidation_loss_pct: float = Field(default=0.5)
+    sr_invalidation_confirmation_bars: int = Field(default=3)
+    sr_invalidation_min_strength: float = Field(default=0.50)
+    sr_invalidation_only_with_loss: bool = Field(default=True)
+    sr_invalidation_lookback_minutes: float = Field(default=10.0)
     # SSO (Smart Scale-Out) â€” adaptive multi-signal exit system
     sso_enabled: bool = Field(default=True)
     sso_stagnant_min_profit_factor: float = Field(default=0.02)
@@ -224,6 +232,7 @@ class Settings(BaseSettings):
     sso_multilevel_l1_close_pct: float = Field(default=0.30)
     sso_multilevel_l2_close_pct: float = Field(default=0.30)
     sso_multilevel_l3_close_pct: float = Field(default=0.25)
+    sso_target_contribution_enabled: bool = Field(default=True)
     sso_target_contribution_pct: float = Field(default=0.15)
     sso_target_daily_usd: float = Field(default=40.0)
     sso_target_min_hours: float = Field(default=1.0)
@@ -720,7 +729,7 @@ class Settings(BaseSettings):
     # s115: defensive re-check that a staged SHORT/LONG is actually near the S/R
     # level its own thesis depends on. See run_trades.py::_staged_sr_thesis_check.
     range_scalp_sr_thesis_gate_enabled: bool = Field(default=True)
-    range_scalp_sr_thesis_max_dist_pct: float = Field(default=5.0)
+    range_scalp_sr_thesis_max_dist_pct: float = Field(default=0.5)
     staged_entry_regime_config: Dict[str, Any] = Field(default={
         "SPOT_BULL": {
             "enabled": True,

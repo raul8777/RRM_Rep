@@ -130,6 +130,7 @@ class SmartScaleOut:
         self.ml_l2_close = self._cfg('sso_multilevel_l2_close_pct', 0.30)
         self.ml_l3_close = self._cfg('sso_multilevel_l3_close_pct', 0.25)
         # SSO-4: Target Contribution
+        self.target_contribution_enabled = self._cfg('sso_target_contribution_enabled', True)
         self.target_contribution_pct = self._cfg('sso_target_contribution_pct', 0.15)
         self.target_daily_usd = _dyn_daily if _dyn_daily else self._cfg('sso_target_daily_usd', 40.0)
         self.target_min_hours = self._cfg('sso_target_min_hours', 1.0)
@@ -856,7 +857,13 @@ class SmartScaleOut:
     # ── SSO-4: Target Contribution ────────────────────────────────────────────
     def _check_sso4_target_contribution(self, pos: SSOPositionData) -> Optional[SSOAction]:
         """Close 100% if profit contributes meaningfully toward daily target."""
+        if not self.target_contribution_enabled:
+            return None
         target = pos.daily_target or self.target_daily_usd
+        # s118: disable target-contribution closes when daily target is set to 0,
+        # preventing the trigger from closing winners while the system is red.
+        if target <= 0:
+            return None
         _target_contribution_pct = self.target_contribution_pct
         _target_min_hours = self.target_min_hours
         _regime = str(pos.regime_mode or '').strip().upper()

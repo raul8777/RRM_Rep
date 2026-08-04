@@ -394,7 +394,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'staged_immediate_entry_enabled': False,
     'staged_immediate_entry_fraction': 0.3,
     'range_scalp_sr_thesis_gate_enabled': True,
-    'range_scalp_sr_thesis_max_dist_pct': 5.0,
+    'range_scalp_sr_thesis_max_dist_pct': 0.5,
     # s106 NOTE: config.py::Settings.staged_entry_regime_config is the REAL,
     # LIVE-EFFECTIVE source for these values in production — this dict is only
     # the fallback used if _sync_canonical_defaults_from_settings() (below)
@@ -538,6 +538,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
 
     # SSO
     'sso_enabled': True,
+    'sso_target_contribution_enabled': True,
     'sso_target_daily_usd': 40.0,
     'sso_stagnant_min_hours': 2.5,          # concentrated: ligeramente más agresivo en rotación
     'sso_stagnant_velocity_window_min': 60, # jul07: 30→60 (wolf-hunter: more stable window)
@@ -638,9 +639,17 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'futures_momentum_reversal_min_peak': 2.0,
     'futures_momentum_reversal_drawback': 0.8,
     'futures_adverse_exit_enabled': True,
-    'futures_adverse_exit_loss_pct': 1.2,
-    'futures_adverse_exit_min_hours': 1.5,
-    'futures_adverse_exit_min_strength': 0.55,
+    'futures_adverse_exit_loss_pct': 0.8,
+    'futures_adverse_exit_min_hours': 0.75,
+    'futures_adverse_exit_min_strength': 0.45,
+    # SR structure invalidation early exit (shadow first)
+    'sr_invalidation_exit_enabled': True,
+    'sr_invalidation_shadow_mode': True,
+    'sr_invalidation_loss_pct': 0.5,
+    'sr_invalidation_confirmation_bars': 3,
+    'sr_invalidation_min_strength': 0.50,
+    'sr_invalidation_only_with_loss': True,
+    'sr_invalidation_lookback_minutes': 10.0,
     'profit_realization_enabled': True,
     'profit_realization_spot_enabled': True,
     'profit_realization_spot_min_profit_pct': 0.0025,

@@ -29,6 +29,7 @@ from param_optimizer import get_optimizer
 from orchestrator import SystemState
 from init_components import get_components
 from audit_tools import check_signal_audit_consistency
+from position_telemetry_watcher import get_sr_invalidation_shadow_metrics
 import error_collector as ec
 from super_mimic.api import router as super_mimic_router
 from binance_truth_guard import (
@@ -330,6 +331,13 @@ _HEALTH_RESULTS_EVENT = asyncio.Event()
 _HEALTH_RESULTS_LEVEL = {"ok": 0, "inconclusive": 1, "warning": 2, "critical": 3, "error": 3}
 _ENTRY_EVIDENCE_CACHE: Dict[tuple, Dict[str, Any]] = {}
 _ENTRY_EVIDENCE_CACHE_TTL_SECONDS = 15
+
+# Dashboard summary cache: the full summary is expensive (~25-40s), so keep a
+# warm cache per `days` and refresh it in the background. Dashboard polling gets
+# the warm copy instantly; stale copies age out after TTL.
+_DASHBOARD_SUMMARY_CACHE: Dict[int, Dict[str, Any]] = {}
+_DASHBOARD_SUMMARY_TTL_SECONDS = 10
+_DASHBOARD_SUMMARY_MAX_STALE_SECONDS = 90
 
 # Wire db_client into Signal Store
 if db_client:
@@ -1573,6 +1581,10 @@ async def health_check() -> Dict:
             "available": False,
             "error": str(e),
         }
+    try:
+        health["sr_invalidation_shadow"] = get_sr_invalidation_shadow_metrics()
+    except Exception as e:
+        health["sr_invalidation_shadow"] = {"available": False, "error": str(e)}
     return health
 
 
@@ -3105,9 +3117,53 @@ async def get_dashboard_config(request: Request) -> Dict:
     return {"api_key": api_key}
 
 
+async def _background_refresh_dashboard_summary(days: int) -> Dict:
+    """Compute and store a fresh dashboard summary for a given `days`."""
+    try:
+        payload = await _compute_dashboard_summary(days)
+        _DASHBOARD_SUMMARY_CACHE[days] = {
+            "payload": payload,
+            "last_success_at": time.monotonic(),
+            "refreshing": False,
+        }
+        return payload
+    except Exception as exc:
+        entry = _DASHBOARD_SUMMARY_CACHE.get(days)
+        cached = entry.get("payload") if entry else None
+        if cached:
+            cached = {**cached, "_live_error": str(exc)}
+            entry["payload"] = cached
+            return cached
+        return {"ok": False, "error": str(exc), "timestamp": datetime.now(timezone.utc).isoformat()}
+    finally:
+        entry = _DASHBOARD_SUMMARY_CACHE.get(days)
+        if entry:
+            entry["refreshing"] = False
+
+
 @app.get("/dashboard/summary")
 async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
-    """Single endpoint that returns all dashboard data to minimize API calls."""
+    """Return the dashboard summary, using a warm cache refreshed in the background."""
+    entry = _DASHBOARD_SUMMARY_CACHE.setdefault(days, {
+        "payload": None,
+        "last_success_at": 0.0,
+        "refreshing": False,
+    })
+    now = time.monotonic()
+    payload = entry.get("payload")
+    last = entry.get("last_success_at") or 0
+    if payload and now - last < _DASHBOARD_SUMMARY_TTL_SECONDS:
+        return payload
+    if payload and now - last < _DASHBOARD_SUMMARY_MAX_STALE_SECONDS:
+        if not entry.get("refreshing"):
+            entry["refreshing"] = True
+            asyncio.create_task(_background_refresh_dashboard_summary(days))
+        return payload
+    return await _background_refresh_dashboard_summary(days)
+
+
+async def _compute_dashboard_summary(days: int) -> Dict:
+    """Compute the full dashboard summary (expensive)."""
     comp = get_components()
     _snapshot_started_at = datetime.now(timezone.utc)
     result = {}
@@ -6024,6 +6080,8 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
         """)
         sr_thesis_blocked_count = int((sr_thesis_rows[0] or {}).get("n") or 0) if sr_thesis_rows else 0
 
+        sr_invalidation_metrics = get_sr_invalidation_shadow_metrics()
+
         entries = [
             {
                 "id": "directional_v2",
@@ -6139,6 +6197,21 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
                 "state": "ACTIVE" if _cfg_param(live_settings, "range_scalp_sr_thesis_gate_enabled", True) else "DISABLED",
                 "summary": f"Candidatos bloqueados por tesis S/R inconsistente (snapshot actual): {sr_thesis_blocked_count}. Umbral: {_cfg_param(live_settings, 'range_scalp_sr_thesis_max_dist_pct', 5.0)}%.",
                 "gates": [],
+            },
+            {
+                "id": "sr_structure_invalidation_exit",
+                "name": "Early exit por invalidación de estructura S/R (shadow)",
+                "mode": "shadow" if _cfg_param(live_settings, "sr_invalidation_shadow_mode", True) else ("active" if _cfg_param(live_settings, "sr_invalidation_exit_enabled", True) else "disabled"),
+                "state": _shadow_readiness_state(
+                    "shadow" if _cfg_param(live_settings, "sr_invalidation_shadow_mode", True) else ("active" if _cfg_param(live_settings, "sr_invalidation_exit_enabled", True) else "disabled"),
+                    [
+                        _shadow_readiness_gate("shadow_decisions", sr_invalidation_metrics.get("would_exit_total", 0), 10, sr_invalidation_metrics.get("would_exit_total", 0) >= 10, "Recolectar al menos 10 decisiones shadow antes de activar."),
+                    ],
+                ),
+                "summary": f"Evaluaciones: {sr_invalidation_metrics.get('evaluations', 0)}; decisiones de salida: {sr_invalidation_metrics.get('would_exit_total', 0)}; por símbolo: {sr_invalidation_metrics.get('would_exit_per_symbol', {})}.",
+                "gates": [
+                    _shadow_readiness_gate("shadow_decisions", sr_invalidation_metrics.get("would_exit_total", 0), 10, sr_invalidation_metrics.get("would_exit_total", 0) >= 10, "Recolectar al menos 10 decisiones shadow antes de activar."),
+                ],
             },
             {
                 "id": "retired_gates",
@@ -8780,12 +8853,16 @@ _KELLY_EDITABLE_FIELDS = {
     "spot_bounce_rescue_enabled", "spot_bounce_rescue_max_peak_pct", "spot_bounce_rescue_min_hours", "spot_bounce_rescue_target_pnl",
     "futures_momentum_reversal_enabled", "futures_momentum_reversal_min_peak", "futures_momentum_reversal_drawback",
     "futures_adverse_exit_enabled", "futures_adverse_exit_loss_pct", "futures_adverse_exit_min_hours", "futures_adverse_exit_min_strength",
+    "sr_invalidation_exit_enabled", "sr_invalidation_shadow_mode", "sr_invalidation_loss_pct",
+    "sr_invalidation_confirmation_bars", "sr_invalidation_min_strength", "sr_invalidation_only_with_loss", "sr_invalidation_lookback_minutes",
     "profit_realization_enabled", "profit_realization_spot_enabled", "profit_realization_spot_min_profit_pct",
     "profit_realization_spot_partial_minutes", "profit_realization_spot_full_minutes", "profit_realization_spot_drawback_pct",
     "profit_realization_spot_partial_close_pct", "profit_realization_spot_max_extensions",
+    "profit_realization_spot_partial_minutes_range_scalp", "profit_realization_spot_full_minutes_range_scalp",
     "profit_realization_futures_enabled", "profit_realization_futures_min_profit_pct",
     "profit_realization_futures_partial_minutes", "profit_realization_futures_full_minutes", "profit_realization_futures_drawback_pct",
     "profit_realization_futures_partial_close_pct", "profit_realization_futures_max_extensions",
+    "range_scalp_breakeven_pct",
     "rescue_smart_gate_enabled", "rescue_stay_strength_min", "rescue_stay_ev_multiplier", "rescue_velocity_min_pct", "rescue_gate_min_concurrent",
     "rescue_gate_g1_min_pct", "rescue_gate_g1_spot_min_pct", "rescue_gate_vol_min_spike", "rescue_gate_max_blocks", "rescue_gate_min_pnl_improvement",
     "volspike_override_enabled", "volspike_override_min_spike", "volspike_override_max_rsi", "volspike_override_trend_required",
@@ -8795,6 +8872,7 @@ _KELLY_EDITABLE_FIELDS = {
     "wr_screener_enabled", "wr_screener_consecutive_sl_block",
     "wr_screener_short_window_minutes", "wr_screener_short_window_min_losses",
     "sso_target_daily_usd",
+    "sso_target_contribution_enabled",
     "sl_confirmation_candles",
     "circuit_breaker_enabled", "circuit_breaker_consecutive_failures", "circuit_breaker_pause_minutes",
     "screener_min_vol_usdt", "screener_futures_min_vol",
@@ -8844,6 +8922,7 @@ _KELLY_EDITABLE_FIELDS = {
     "range_scalp_direction_min_probability",
     "range_scalp_short_min_probability",
     "range_scalp_short_resistance_threshold",
+    "range_scalp_sr_thesis_gate_enabled", "range_scalp_sr_thesis_max_dist_pct",
     # s116: position telemetry watcher
     "position_telemetry_watcher_enabled",
     "position_telemetry_watcher_interval_seconds",

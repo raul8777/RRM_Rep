@@ -617,6 +617,23 @@ def auto_reconcile_futures(
                 if _sl is None or _tp is None or _entry <= 0 or abs(_sl - _entry) < 1e-12 or abs(_tp - _entry) < 1e-12 or abs(_sl - _tp) < 1e-12:
                     skipped.append({**rec, "reason": "sl_tp_collapsed_to_entry_guard"})
                     continue
+                # s118: cleanup stale synthetic rows before importing the current
+                # Binance position, so partial closes do not accumulate duplicate
+                # trades_open rows for the same underlying position.
+                if db_client:
+                    try:
+                        _db_side = "SELL" if side == "SHORT" else "BUY"
+                        db_client.execute_update(
+                            """
+                            DELETE FROM trades_open
+                            WHERE symbol = %s AND side = %s
+                              AND metadata->>'trade_type' = 'futures'
+                              AND metadata->>'source' = 'truth_reconcile_import'
+                            """,
+                            (symbol, _db_side),
+                        )
+                    except Exception as _cleanup_err:
+                        print(f"[TruthGuard] {symbol}: failed to cleanup stale synthetic rows ({_cleanup_err})")
                 from futures_client import FuturesPosition
                 _new_pos = FuturesPosition(
                     symbol=symbol, side=side, qty=_qty, entry_price=_entry,
