@@ -334,13 +334,21 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
 
     # F11: Peak protection — close immediately if significant gains are being given back
     # W7: Minimum threshold is ATR-aware to avoid triggering on normal volatility noise
+    # s120: momentum-aware — when momentum is high, relax threshold to let winners run
     _peak_protect = _peak_protection_pct(context.regime_mode, trade_type, settings, profile_label=context.profile_label)
+    if momentum_high:
+        # High momentum: reduce protection aggressiveness — allow up to 50% giveback
+        # before cutting (instead of 35%). This prevents cutting runners mid-trend.
+        _peak_protect = min(_peak_protect, 0.50)
     _atr_4h_pct = float(context.metadata.get("atr_4h_pct", 0.0) or 0.0)
     _atr_floor = _atr_4h_pct * 1.5 if _atr_4h_pct > 0 else 0.0
     _peak_protect_min = max(min_profit_pct * 3.0, _atr_floor)
     # FUTURES: needs higher threshold due to leverage amplifying noise
     if trade_type == "futures":
         _peak_protect_min = max(_peak_protect_min, 0.015)
+    # s120: higher floor when momentum is active — don't trigger on small peaks
+    if momentum_high:
+        _peak_protect_min = max(_peak_protect_min, 0.02)
     _peak_protection_fired = (
         peak >= _peak_protect_min
         and float(context.pnl_pct or 0.0) < peak * _peak_protect

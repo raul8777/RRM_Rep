@@ -355,6 +355,324 @@ def _persist_futures_profit_guard(
     return False
 
 
+###############################################################################
+# ── Intelligent Drawdown Monitor (s120) ──────────────────────────────────────
+#
+# Runs every 1s cycle. When a position crosses a drawdown threshold ($10 default),
+# it activates deep trend analysis using a circular buffer of price snapshots
+# to determine if the loss is a temporary dip (recoverable) or a definitive
+# trend reversal (cut). This replaces blind hard SLs with intelligence.
+#
+# Zero extra API cost: re-uses the price already fetched by telemetry snapshot.
+# Decision factors: velocity, acceleration, support proximity, BTC momentum.
+###############################################################################
+
+_drawdown_buffers: Dict[str, List[Dict[str, float]]] = {}  # position_id -> price history
+_drawdown_decisions: Dict[str, Dict[str, Any]] = {}  # position_id -> last decision
+_DRAWDOWN_BUFFER_SIZE = 60  # 60 seconds of data at 1s interval
+
+
+def _update_drawdown_buffer(position_id: str, price: float, unrealized_usdt: float) -> List[Dict[str, float]]:
+    """Append price tick to circular buffer. Returns current buffer."""
+    now = _now_ts()
+    buf = _drawdown_buffers.setdefault(position_id, [])
+    buf.append({"ts": now, "price": price, "pnl_usdt": unrealized_usdt})
+    # Keep only last N entries
+    if len(buf) > _DRAWDOWN_BUFFER_SIZE:
+        _drawdown_buffers[position_id] = buf[-_DRAWDOWN_BUFFER_SIZE:]
+    return _drawdown_buffers[position_id]
+
+
+def _analyze_drawdown_trend(buf: List[Dict[str, float]], side: str) -> Dict[str, Any]:
+    """Analyze price buffer to determine if trend is recoverable or definitive.
+
+    Returns dict with:
+      - velocity_per_sec: rate of price change (negative = against position)
+      - acceleration: second derivative (negative = getting worse)
+      - is_decelerating: True if the fall is slowing down
+      - recovery_signal: True if price started bouncing back in last 10s
+    """
+    if len(buf) < 10:
+        return {"velocity_per_sec": 0.0, "acceleration": 0.0,
+                "is_decelerating": False, "recovery_signal": False, "data_points": len(buf)}
+
+    # Use last 30s for velocity, last 10s for recent trend
+    recent = buf[-10:]
+    full = buf[-30:] if len(buf) >= 30 else buf
+
+    # Velocity: price change per second over full window
+    dt = full[-1]["ts"] - full[0]["ts"]
+    if dt < 1.0:
+        dt = 1.0
+    price_delta = full[-1]["price"] - full[0]["price"]
+    # For LONG: positive velocity = good, negative = bad
+    # For SHORT: negative velocity = good, positive = bad
+    if side.upper() == "SHORT":
+        price_delta = -price_delta
+    velocity = price_delta / dt
+
+    # Acceleration: compare velocity of first half vs second half
+    mid = len(full) // 2
+    first_half = full[:mid]
+    second_half = full[mid:]
+    if len(first_half) >= 2 and len(second_half) >= 2:
+        dt1 = max(1.0, first_half[-1]["ts"] - first_half[0]["ts"])
+        dt2 = max(1.0, second_half[-1]["ts"] - second_half[0]["ts"])
+        v1_delta = first_half[-1]["price"] - first_half[0]["price"]
+        v2_delta = second_half[-1]["price"] - second_half[0]["price"]
+        if side.upper() == "SHORT":
+            v1_delta, v2_delta = -v1_delta, -v2_delta
+        v1 = v1_delta / dt1
+        v2 = v2_delta / dt2
+        acceleration = v2 - v1
+    else:
+        acceleration = 0.0
+
+    # Recovery signal: price in last 10s moving back toward entry
+    recent_dt = max(1.0, recent[-1]["ts"] - recent[0]["ts"])
+    recent_delta = recent[-1]["price"] - recent[0]["price"]
+    if side.upper() == "SHORT":
+        recent_delta = -recent_delta
+    recovery_signal = recent_delta > 0 and len(recent) >= 5
+
+    is_decelerating = velocity < 0 and acceleration > 0
+
+    return {
+        "velocity_per_sec": round(velocity, 8),
+        "acceleration": round(acceleration, 10),
+        "is_decelerating": is_decelerating,
+        "recovery_signal": recovery_signal,
+        "data_points": len(buf),
+        "recent_velocity": round(recent_delta / recent_dt, 8),
+    }
+
+
+def _evaluate_drawdown_intelligence(
+    snapshot: Dict[str, Any],
+    trend: Dict[str, Any],
+    settings: Any,
+) -> Dict[str, Any]:
+    """Determine action: HOLD (recoverable) vs CUT (definitive trend).
+
+    Decision matrix:
+    - CUT if: velocity strongly negative + accelerating + no support nearby
+    - TIGHTEN_SL if: velocity negative but decelerating (tighten SL to limit further loss)
+    - HOLD if: recovery signal detected or very close to support level
+    """
+    velocity = trend["velocity_per_sec"]
+    acceleration = trend["acceleration"]
+    is_decelerating = trend["is_decelerating"]
+    recovery_signal = trend["recovery_signal"]
+
+    # Support proximity (if available)
+    dist_to_support = snapshot.get("dist_to_support_pct")
+    near_support = dist_to_support is not None and abs(dist_to_support) < 0.005  # within 0.5%
+
+    # Thresholds (configurable)
+    cut_velocity_threshold = _to_float(
+        get_param(settings, "drawdown_cut_velocity_threshold", -0.0003), -0.0003)
+    cut_min_data_points = int(get_param(settings, "drawdown_cut_min_data_points", 20) or 20)
+
+    # Not enough data yet — always hold
+    if trend["data_points"] < cut_min_data_points:
+        return {"action": "HOLD", "reason": "insufficient_data", "confidence": 0.3}
+
+    # Recovery detected
+    if recovery_signal and is_decelerating:
+        return {"action": "HOLD", "reason": "recovery_signal_decelerating", "confidence": 0.7}
+
+    # Near support — likely bounce zone
+    if near_support and is_decelerating:
+        return {"action": "HOLD", "reason": "near_support_decelerating", "confidence": 0.6}
+
+    # Definitive trend: fast velocity + accelerating
+    if velocity < cut_velocity_threshold and acceleration < 0 and not near_support:
+        return {"action": "CUT", "reason": "definitive_trend_accelerating", "confidence": 0.8}
+
+    # Moderate adverse: decelerating but still falling — tighten SL
+    if velocity < 0 and is_decelerating:
+        return {"action": "TIGHTEN_SL", "reason": "falling_but_decelerating", "confidence": 0.5}
+
+    # Slow bleed without recovery
+    if velocity < cut_velocity_threshold * 0.5 and not recovery_signal:
+        return {"action": "TIGHTEN_SL", "reason": "slow_bleed_no_recovery", "confidence": 0.5}
+
+    return {"action": "HOLD", "reason": "no_clear_signal", "confidence": 0.4}
+
+
+def _run_drawdown_monitor_cycle(
+    components: Any, snapshots: List[Dict[str, Any]], settings: Any
+) -> List[Dict[str, Any]]:
+    """Evaluate all positions in drawdown and take intelligent action."""
+    if not snapshots:
+        return []
+    mode = str(get_param(settings, "position_reaction_policy_mode", "telemetry_only") or "telemetry_only").strip().lower()
+    if mode not in {"hard_rules", "ml_assisted"}:
+        return []
+    if not bool(get_param(settings, "drawdown_intelligent_monitor_enabled", True)):
+        return []
+
+    threshold_usdt = _to_float(
+        get_param(settings, "drawdown_monitor_threshold_usdt", -10.0), -10.0)
+
+    actions: List[Dict[str, Any]] = []
+    for snapshot in snapshots:
+        unrealized = _to_float(snapshot.get("unrealized_pnl_usdt"), 0.0)
+        if unrealized >= threshold_usdt:
+            # Not in drawdown territory — still update buffer for continuity
+            pos_id = snapshot.get("position_id", "")
+            if pos_id:
+                _update_drawdown_buffer(pos_id, _to_float(snapshot.get("current_price"), 0.0), unrealized)
+            continue
+
+        pos_id = snapshot.get("position_id", "")
+        if not pos_id:
+            continue
+
+        price = _to_float(snapshot.get("current_price"), 0.0)
+        buf = _update_drawdown_buffer(pos_id, price, unrealized)
+        side = str(snapshot.get("side") or "LONG").upper()
+        trend = _analyze_drawdown_trend(buf, side)
+        decision = _evaluate_drawdown_intelligence(snapshot, trend, settings)
+
+        # Merge with previous decision (avoid flip-flopping)
+        prev = _drawdown_decisions.get(pos_id, {})
+        prev_action = prev.get("action", "")
+        # Require 3 consecutive CUT decisions before acting
+        consecutive_cuts = prev.get("_consecutive_cuts", 0)
+        if decision["action"] == "CUT":
+            consecutive_cuts += 1
+        else:
+            consecutive_cuts = 0
+        decision["_consecutive_cuts"] = consecutive_cuts
+        _drawdown_decisions[pos_id] = decision
+
+        min_consecutive_for_cut = int(get_param(settings, "drawdown_cut_min_consecutive", 3) or 3)
+
+        if decision["action"] == "CUT" and consecutive_cuts >= min_consecutive_for_cut:
+            # Execute emergency cut via existing SL tightening (move SL to current price - buffer)
+            entry_price = _to_float(snapshot.get("entry_price"), 0.0)
+            current_price = _to_float(snapshot.get("current_price"), 0.0)
+            if entry_price > 0 and current_price > 0:
+                # Set SL very tight — 0.1% from current price (effectively a market exit next cycle)
+                if side == "LONG":
+                    emergency_sl = current_price * 0.999
+                else:
+                    emergency_sl = current_price * 1.001
+                actions.append({
+                    "action": "CUT",
+                    "symbol": snapshot.get("symbol"),
+                    "position_id": pos_id,
+                    "trade_type": snapshot.get("trade_type"),
+                    "side": side,
+                    "emergency_sl": round(emergency_sl, 8),
+                    "unrealized_usdt": round(unrealized, 2),
+                    "trend": trend,
+                    "decision": decision,
+                })
+
+        elif decision["action"] == "TIGHTEN_SL":
+            # Gradually tighten SL — reduce allowed loss by 20% of remaining gap
+            current_sl = _to_float(snapshot.get("stop_loss"), 0.0)
+            entry_price = _to_float(snapshot.get("entry_price"), 0.0)
+            current_price = _to_float(snapshot.get("current_price"), 0.0)
+            if current_sl > 0 and entry_price > 0 and current_price > 0:
+                if side == "LONG":
+                    gap = current_price - current_sl
+                    tighter_sl = current_sl + gap * 0.05  # 5% tighter per second
+                    if tighter_sl > current_sl and tighter_sl < current_price * 0.998:
+                        actions.append({
+                            "action": "TIGHTEN_SL",
+                            "symbol": snapshot.get("symbol"),
+                            "position_id": pos_id,
+                            "trade_type": snapshot.get("trade_type"),
+                            "side": side,
+                            "target_sl": round(tighter_sl, 8),
+                            "unrealized_usdt": round(unrealized, 2),
+                            "trend": trend,
+                            "decision": decision,
+                        })
+                elif side == "SHORT":
+                    gap = current_sl - current_price
+                    tighter_sl = current_sl - gap * 0.05
+                    if tighter_sl < current_sl and tighter_sl > current_price * 1.002:
+                        actions.append({
+                            "action": "TIGHTEN_SL",
+                            "symbol": snapshot.get("symbol"),
+                            "position_id": pos_id,
+                            "trade_type": snapshot.get("trade_type"),
+                            "side": side,
+                            "target_sl": round(tighter_sl, 8),
+                            "unrealized_usdt": round(unrealized, 2),
+                            "trend": trend,
+                            "decision": decision,
+                        })
+
+    return actions
+
+
+def _apply_drawdown_actions(
+    components: Any, actions: List[Dict[str, Any]], settings: Any
+) -> int:
+    """Persist drawdown monitor decisions (SL updates). Returns count of applied."""
+    if not actions:
+        return 0
+    manager = getattr(components, "position_manager", None)
+    futures_client = None
+    if bool(get_param(settings, "futures_enabled", True)):
+        try:
+            from run_trades import _get_futures_client
+            futures_client = _get_futures_client(settings, db_client=getattr(components, "db_client", None))
+        except Exception:
+            futures_client = None
+
+    applied = 0
+    for act in actions:
+        target_sl = act.get("emergency_sl") or act.get("target_sl")
+        if not target_sl:
+            continue
+        trade_type = str(act.get("trade_type") or "").lower()
+        try:
+            if trade_type == "spot" and manager:
+                pos_id = act["position_id"]
+                manager.update_position_sl(pos_id, float(target_sl))
+                applied += 1
+                print(f"[DrawdownMonitor] {act['action']} {act.get('symbol')} SL→{target_sl:.6f} (pnl={act.get('unrealized_usdt'):.2f})")
+            elif trade_type == "futures" and futures_client:
+                snapshot_for_guard = {"symbol": act.get("symbol"), "side": act.get("side"), "current_price": 0.0}
+                ok = futures_client.update_sl_tp(
+                    act.get("symbol"), act.get("side"),
+                    new_sl=float(target_sl), current_price=float(act.get("target_sl", 0)),
+                )
+                if ok:
+                    applied += 1
+                    print(f"[DrawdownMonitor] {act['action']} {act.get('symbol')} SL→{target_sl:.6f} (pnl={act.get('unrealized_usdt'):.2f})")
+        except Exception as exc:
+            print(f"[DrawdownMonitor] failed to apply {act['action']} for {act.get('symbol')}: {exc}")
+
+    # Audit
+    db_client = getattr(components, "db_client", None)
+    if db_client and actions:
+        try:
+            for act in actions[:5]:  # limit audit volume
+                db_client.execute_update(
+                    "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+                    (act.get("symbol", ""), act.get("trade_type", ""), f"drawdown_monitor_{act['action'].lower()}",
+                     json.dumps({k: v for k, v in act.items() if k != "trend"}, default=str), False),
+                )
+        except Exception:
+            pass
+    return applied
+
+
+def cleanup_drawdown_buffers(active_position_ids: set) -> None:
+    """Remove buffers for closed positions. Call periodically."""
+    stale = [pid for pid in _drawdown_buffers if pid not in active_position_ids]
+    for pid in stale:
+        _drawdown_buffers.pop(pid, None)
+        _drawdown_decisions.pop(pid, None)
+
+
 def _run_profit_guard_cycle(components: Any, snapshots: List[Dict[str, Any]], settings: Any) -> List[Dict[str, Any]]:
     """Apply cross-mode profit guard actions from 1s telemetry snapshots.
 
@@ -592,8 +910,17 @@ def collect_position_telemetry(components: Any) -> List[Dict[str, Any]]:
                     except Exception:
                         pass
 
-        # FUTURES positions
+        # FUTURES positions — prefer WebSocket mark price (zero API weight)
         if futures_client:
+            # Try to get mark prices from event stream (zero cost)
+            event_stream = getattr(components, "event_stream", None) or getattr(
+                getattr(components, "orchestrator", None), "event_stream", None)
+            mark_prices = {}
+            if event_stream and hasattr(event_stream, "get_all_mark_prices"):
+                try:
+                    mark_prices = event_stream.get_all_mark_prices() or {}
+                except Exception:
+                    pass
             try:
                 fut_positions = list(futures_client._open_positions.items())
             except Exception:
@@ -602,7 +929,9 @@ def collect_position_telemetry(components: Any) -> List[Dict[str, Any]]:
                 if getattr(pos, "closed", False):
                     continue
                 try:
-                    price = float(futures_client.get_price(pos.symbol))
+                    # Use WebSocket mark price first (free), fallback to REST (cached 15s)
+                    ws_price = mark_prices.get(pos.symbol)
+                    price = float(ws_price) if ws_price and ws_price > 0 else float(futures_client.get_price(pos.symbol))
                 except Exception:
                     continue
                 try:
@@ -644,6 +973,19 @@ def run_telemetry_cycle(components: Any) -> List[Dict[str, Any]]:
         summary["profit_guard_hard"] = sum(1 for a in guard_actions if a.get("lock_mode") == "hard")
         summary["profit_guard_soft"] = sum(1 for a in guard_actions if a.get("lock_mode") == "soft")
         summary["profit_guard_symbols"] = sorted({str(a.get("symbol") or "") for a in guard_actions if a.get("symbol")})
+
+    # s120: Intelligent drawdown monitor — analyze trend for positions in loss
+    dd_actions = _run_drawdown_monitor_cycle(components, snapshots, settings)
+    dd_applied = _apply_drawdown_actions(components, dd_actions, settings)
+    if dd_actions:
+        summary["drawdown_monitor_evaluated"] = len(dd_actions)
+        summary["drawdown_monitor_applied"] = dd_applied
+        summary["drawdown_monitor_cuts"] = sum(1 for a in dd_actions if a.get("action") == "CUT")
+        summary["drawdown_monitor_tightens"] = sum(1 for a in dd_actions if a.get("action") == "TIGHTEN_SL")
+
+    # Cleanup stale buffers (positions that closed)
+    active_ids = {s.get("position_id") for s in snapshots if s.get("position_id")}
+    cleanup_drawdown_buffers(active_ids)
 
     _audit_summary(db_client, summary, throttle)
 

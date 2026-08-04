@@ -703,6 +703,12 @@ class Settings(BaseSettings):
     position_profit_guard_floor_lock_pct: float = Field(default=0.05)
     position_profit_guard_sl_buffer_pct: float = Field(default=0.20)
     position_profit_guard_min_step_pct: float = Field(default=0.03)
+    # s120: Intelligent drawdown monitor — evaluates trend before cutting losers
+    drawdown_intelligent_monitor_enabled: bool = Field(default=True)
+    drawdown_monitor_threshold_usdt: float = Field(default=-10.0)
+    drawdown_cut_velocity_threshold: float = Field(default=-0.0003)
+    drawdown_cut_min_data_points: int = Field(default=20)
+    drawdown_cut_min_consecutive: int = Field(default=3)
     # S105g: real-time Binance User Data Stream (futures + spot) so position
     # closures are detected in seconds instead of waiting for the next 5-min
     # polling cycle. Falls back silently to polling/reconciliation if disabled,
@@ -718,6 +724,13 @@ class Settings(BaseSettings):
     binance_event_stream_spot_enabled: bool = Field(default=True)
     directional_policy_mode: str = Field(default="shadow")
     range_reversion_predictor_mode: str = Field(default="shadow")
+    # s120 phase controls: keep shadow-first to avoid choking execution.
+    sr_attempt_sequence_mode: str = Field(default="shadow")
+    realtime_open_rerank_mode: str = Field(default="shadow")
+    anti_monopoly_decay_mode: str = Field(default="shadow")
+    sr_pool_attempt_memory_mode: str = Field(default="shadow")
+    realtime_open_score_half_life_min: float = Field(default=45.0)
+    realtime_open_score_sr_max_dist_pct: float = Field(default=5.0)
     preservation_upgrade_to_futures: bool = Field(default=False)
     range_scalp_bidirectional_enabled: bool = Field(default=True)
     range_scalp_short_first_enabled: bool = Field(default=False)
@@ -753,7 +766,7 @@ class Settings(BaseSettings):
     # s115: defensive re-check that a staged SHORT/LONG is actually near the S/R
     # level its own thesis depends on. See run_trades.py::_staged_sr_thesis_check.
     range_scalp_sr_thesis_gate_enabled: bool = Field(default=True)
-    range_scalp_sr_thesis_max_dist_pct: float = Field(default=0.5)
+    range_scalp_sr_thesis_max_dist_pct: float = Field(default=5.0)
     staged_entry_regime_config: Dict[str, Any] = Field(default={
         "SPOT_BULL": {
             "enabled": True,
