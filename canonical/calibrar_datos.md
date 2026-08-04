@@ -53,6 +53,8 @@ Este documento es la referencia única de datos para análisis, calibración, en
 | Checks staged | `ready_candidate_checks` | check de candidata | alta para trayectoria | dirección, precios, profile, features y decisión |
 | Estado runtime | `trading_runtime_state` | key/value | operativa | régimen/perfil/config efectiva; no entrenamiento directo |
 | Sizing | `kelly_sizing_log` | decisión de sizing | auditoría | exposición y multiplicadores; no label de señal |
+| Telemetry snapshots | `position_telemetry` | 1s por posición (throttled 5s a DB) | operativa | velocidad/aceleración de precio en tiempo real; no label |
+| Drawdown/erosion audit | `trades_audit` (event=`drawdown_monitor_*`) | por acción tomada | auditoría | decisiones de CUT/TIGHTEN_SL/PROTECT_PROFIT con trend data |
 
 ### 3.2 Históricos de mercado — repositorio
 

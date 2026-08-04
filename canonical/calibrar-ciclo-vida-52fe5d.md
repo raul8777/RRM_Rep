@@ -1,9 +1,9 @@
 ---
 title: "Calibración del ciclo de vida de una operación"
 type: canonical-memory
-tags: ["lifecycle", "exit_pipeline", "SSO", "PRS", "UG", "peak_capture", "trailing", "breakeven", "spot", "futures", "profit_preservation", "loss_control"]
+tags: ["lifecycle", "exit_pipeline", "SSO", "PRS", "UG", "peak_capture", "trailing", "breakeven", "spot", "futures", "profit_preservation", "loss_control", "drawdown_monitor", "erosion_detection"]
 created_at: 2026-07-23
-updated_at: 2026-08-03 (s118)
+updated_at: 2026-08-03 (s120b)
 source_file: "C:\\Users\\raul8\\.windsurf\\plans\\calibrar-ciclo-vida-52fe5d.md"
 ---
 
@@ -16,6 +16,138 @@ Documento vivo que consolida el diseño actual del ciclo de vida de una posició
 **Fase:** calibración del ciclo de vida de posiciones abiertas.
 **Objetivo:** documentar el pipeline actual de salida, diagnosticar por qué las últimas 48h generaron pérdidas grandes / ganancias mínimas, y proponer ajustes canónicos a los módulos de exit (SSO, PRS, UG, PredExit, trailing, breakeven, hard SL/TP) sin romper la arquitectura existente.
 **Alcance:** SPOT y FUTURES, con paridad de criterios salvo que la mecánica de mercado justifique una diferencia documentada.
+
+## Actualización s120/s120b — Intelligent Drawdown Monitor + Profit Erosion + Anti-estrangulación PRS (2026-08-03)
+
+### Origen
+
+Análisis cuantitativo de los últimos 14-30 días de producción reveló:
+- Net PnL: -$2,138 (30d), -$1,277 (14d)
+- Average Winner: +$5.35 vs Average Loser: -$9.17 (ratio 1:1.7)
+- Losers held 33% más tiempo que winners
+- **$700 left on table** por peak_protection prematura en 14 días
+- **21 trades con peak avg +$18** antes de revertir a SL (-$493 total)
+- Regime change closures: -$336 inútiles en 30 días
+
+### Cambios aplicados — s120: Intelligent Drawdown Monitor
+
+Nuevo subsistema dentro de `position_telemetry_watcher.py` que monitorea TODAS las posiciones a 1s usando el mismo ciclo de telemetry existente (zero API extra).
+
+**Arquitectura:**
+```
+1s tick → update buffer circular (60 entries) → analyze trend → decide action
+                                                       ↓
+                                            ┌─────────────────────┐
+                                            │  Case A: PnL < -$10 │
+                                            │  → CUT / TIGHTEN_SL │
+                                            ├─────────────────────┤
+                                            │  Case B: PnL > 0    │
+                                            │  but eroding         │
+                                            │  → PROTECT_PROFIT   │
+                                            └─────────────────────┘
+```
+
+**Case A — Posición en pérdida (unrealized < threshold_usdt):**
+- Trend analysis: velocity ($/s), acceleration, recovery signal, support proximity
+- Decision: `CUT` (3 confirmaciones consecutivas requeridas) → emergency SL a 0.1% del precio
+- Decision: `TIGHTEN_SL` → 5% tighter por segundo (gradual, no abrupto)
+- Decision: `HOLD` → recovery detectada o near support, no actúa
+
+**Case B — Posición en profit pero erosionándose (s120b):**
+- Solo se activa si peak fue >= $5 (filtra ruido)
+- Evalúa: velocity adversa sostenida >= 15s, aceleración, recovery signal last 10s
+- `PROTECT_PROFIT`: lock 30% del peak (cuando velocidad negativa + acelerando)
+- `PROTECT_PROFIT_GENTLE`: lock 15% del peak (cuando velocidad negativa pero decelerando)
+- `HOLD`: si hay recovery, near resistance/support, o velocity neutral
+
+**Garantías anti-estrangulación (Case B):**
+1. **NUNCA cierra** — solo mueve SL para proteger una fracción del peak
+2. Solo tightens, nunca loosens (SL solo sube/baja según side)
+3. Nunca mueve SL arriba del 97% del precio actual (siempre deja 3% buffer)
+4. Recovery signal (últimos 10s bouncing) → siempre HOLD
+5. Near resistance/support → siempre HOLD (pullback esperado)
+6. Min peak $5 antes de activar erosion detection (ignora ruido)
+7. Lock fractions conservadores: max 30%, gentle 15%
+
+### Cambios aplicados — s120: Anti-estrangulación PRS
+
+**Peak protection momentum-aware:**
+- Cuando `momentum_score >= 70`, peak_protection threshold se relaja a 0.50 (antes 0.65)
+- Permite hasta 50% de giveback antes de cortar (antes 35%)
+- Floor mínimo de peak subido a 2% cuando momentum activo (evita trigger en peaks triviales)
+- Estimación de impacto: +$700 recuperados por no cortar runners prematuramente
+
+### Cambios aplicados — s120: Hot-config de trailing/timing
+
+| Parámetro | Antes | Ahora | Efecto |
+|-----------|-------|-------|--------|
+| `trailing_stop_distance_pct` | 1.0% | 1.4% | Más espacio para runners |
+| `trailing_stop_activation_pct` | 2.0% | 2.5% | Trailing arranca más tarde |
+| `peak_protection_spot_bull_pct` | 0.65 | 0.50 | Permite 50% giveback |
+| `peak_protection_spot_bull_profile_a_pct` | 0.70 | 0.45 | Profile A más permisivo |
+| `smart_tp_max_extensions` | 3 | 4 | Runners pueden extender más |
+| `smart_tp_extend_score_threshold` | 2 | 1 | Más fácil extender |
+| `smart_tp_max_pnl_pct` | 15% | 20% | Cap extensión más alto |
+| `profit_realization_spot_bull_min_partial_minutes` | 90 | 120 | No cortar antes de 2h |
+| `profit_realization_futures_partial_minutes` | 30 | 120 | Futures: no cortar antes de 2h |
+| `lifecycle_structure_partial_close_pct` | 0.35 | 0.20 | Parciales más pequeños |
+
+### Config nuevo (hot-configurable vía PATCH /config/kelly)
+
+```
+drawdown_intelligent_monitor_enabled: true    # master switch
+drawdown_monitor_threshold_usdt: -10.0        # umbral Case A
+drawdown_cut_velocity_threshold: -0.0003      # min velocity adversa para CUT
+drawdown_cut_min_data_points: 20              # min data antes de decidir
+drawdown_cut_min_consecutive: 3               # 3 CUT seguidos antes de actuar
+erosion_min_peak_usdt: 5.0                    # min peak para activar Case B
+erosion_lock_fraction: 0.30                   # lock 30% peak (PROTECT_PROFIT)
+erosion_lock_fraction_gentle: 0.15            # lock 15% peak (PROTECT_PROFIT_GENTLE)
+erosion_velocity_threshold: -0.00015          # min velocity adversa para erosion
+```
+
+### Rollback inmediato
+
+```json
+PATCH /config/kelly {
+  "position_reaction_policy_mode": "telemetry_only",
+  "drawdown_intelligent_monitor_enabled": false,
+  "trailing_stop_distance_pct": 1.0,
+  "trailing_stop_activation_pct": 2.0,
+  "peak_protection_spot_bull_pct": 0.65
+}
+```
+
+### Costos de recurso
+
+- **API**: Zero extra — reutiliza precios del ciclo de telemetry (spot REST) y WebSocket mark prices (futures)
+- **CPU**: ~60 operaciones float por posición por segundo — negligible
+- **Memoria**: buffer circular de 60 entries/posición (~4KB/posición)
+- **Rate limit**: con 12 posiciones spot = 720 weight/min (< 1200 limit Binance)
+
+### Validación
+
+- Module load test: OK
+- Unit tests de trend analysis y erosion evaluator: OK
+- Suite completa: pass (excepto 1 falla preexistente en `test_portfolio_selector`)
+- Desplegado — `RUNNING_FULL`, 4 posiciones activas, sin errores en logs
+
+### Decisiones de diseño
+
+- El monitor evalúa TODAS las posiciones (profit y loss) porque los datos muestran que el mayor daño viene de posiciones que **estaban en profit y se revirtieron** ($493 de 21 trades con avg peak +$18), no de posiciones que entraron directamente en pérdida.
+- La evaluación de erosión NUNCA cierra — solo protege una fracción del peak. Esto evita el "estrangulamiento" que fue el problema original (system cutting winners too early).
+- Se usa un buffer circular de 60s en vez de un modelo ML porque: (a) zero latencia adicional, (b) interpretable, (c) rollback trivial vía config, (d) no requiere training data.
+- El threshold de CUT requiere 3 decisiones consecutivas (3 segundos) — evita flip-flopping por un solo tick adverso.
+- Peak protection relajada con momentum porque los datos muestran correlación directa: posiciones cortadas por `prs_peak_protection` con momentum > 70 tenían avg peak $71 pero realized only $7.89 — el peak no era el techo real.
+
+### Pendiente explícito
+
+- Monitorear en producción la frecuencia de PROTECT_PROFIT vs HOLD decisions para calibrar `erosion_velocity_threshold` (puede necesitar ajuste según volatilidad del mercado actual).
+- Evaluar si `erosion_lock_fraction` de 30% es demasiado conservador o agresivo con datos reales de las próximas 48h.
+- Considerar incorporar ATR dinámico al threshold de erosion velocity (mercados más volátiles necesitan threshold más permisivo).
+- Confirmar que `drawdown_cut_min_consecutive=3` es suficiente para evitar falsos positivos en flash crashes temporales.
+
+---
 
 ## Actualización s118 — el circuit-breaker de portafolio de s117 pausaba "a ciegas"; corregido a pausa inteligente que lee la causa (2026-08-03)
 
