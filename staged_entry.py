@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from config_helpers import get_staged_entry_regime_config
+from config_helpers import get_param, get_staged_entry_regime_config
 from directional_confirmation import evaluate_shadow as evaluate_directional_shadow
 from entry_decision import evaluate as evaluate_entry_decision
 from entry_profile_gate import _DEFAULT_THRESHOLDS_PATH as _ENTRY_PROFILE_THRESHOLDS_PATH
@@ -113,6 +113,136 @@ def _terminal_stage_reason(reason: str) -> str:
     if normalized.startswith("EXECUTION_"):
         return "EXECUTION_BLOCKED"
     return "SETUP_INVALID"
+
+
+def _minutes_since(ts: Optional[Any]) -> Optional[float]:
+    if ts is None:
+        return None
+    try:
+        if isinstance(ts, datetime):
+            dt = ts
+        else:
+            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0.0, (_now() - dt).total_seconds() / 60.0)
+    except Exception:
+        return None
+
+
+def _is_slot_or_capital_block_reason(reason: Optional[str], tokens: List[str]) -> bool:
+    reason_norm = str(reason or "").strip().upper()
+    if not reason_norm:
+        return False
+    for token in tokens:
+        token_norm = str(token or "").strip().upper()
+        if token_norm and token_norm in reason_norm:
+            return True
+    return False
+
+
+def _candidate_has_slot_or_capital_block(data: Dict[str, Any], tokens: List[str]) -> bool:
+    if not isinstance(data, dict):
+        return False
+
+    capital_routing = data.get("capital_routing") or {}
+    if isinstance(capital_routing, dict):
+        status = str(capital_routing.get("status") or "").strip().lower()
+        retry_count = int(capital_routing.get("retry_count") or 0)
+        reason = str(capital_routing.get("reason") or "")
+        if status in {"blocked", "exhausted"} and retry_count > 0:
+            return True
+        if _is_slot_or_capital_block_reason(reason, tokens):
+            return True
+
+    last_gate = data.get("last_execution_gate") or {}
+    if isinstance(last_gate, dict):
+        gate_reason = str(last_gate.get("reason") or "")
+        if _is_slot_or_capital_block_reason(gate_reason, tokens):
+            return True
+
+    stage_reason = str(data.get("stage_reason") or "")
+    if _is_slot_or_capital_block_reason(stage_reason, tokens):
+        return True
+
+    return False
+
+
+def _apply_stale_hold_policy(
+    db_client: Any,
+    row: Dict[str, Any],
+    cfg: Dict[str, Any],
+    settings: Any,
+) -> bool:
+    """Discard stale validated rows that are waiting without a slot/capital block reason.
+
+    Policy:
+      - hard TTL: always discard when exceeded.
+      - soft TTL + require-block: after soft TTL, keep waiting only if there is
+        evidence of slot/capital blocking in the latest execution gate trail.
+    """
+    if not bool(get_param(settings, "staged_hold_policy_enabled", True)):
+        return False
+
+    data = row.get("data") or {}
+    expected_revision = int(data.get("candidate_revision", 0) or 0)
+    age_base = row.get("validated_at") or row.get("ready_at")
+    age_min = _minutes_since(age_base)
+    if age_min is None:
+        return False
+
+    soft_ttl = float(get_param(settings, "staged_hold_soft_ttl_min", 60.0) or 0.0)
+    hard_ttl = float(get_param(settings, "staged_hold_hard_ttl_min", 120.0) or 0.0)
+    require_block = bool(get_param(settings, "staged_hold_require_block_reason", True))
+    tokens = list(get_param(settings, "staged_hold_allowed_block_reason_tokens", [
+        "CAPITAL_ROUTING",
+        "INSUFFICIENT_USDT",
+        "MAX_POSITIONS",
+        "PER_SYMBOL_LIMIT",
+        "EXPOSURE_CAP",
+        "SLOT",
+    ]) or [])
+
+    discard_reason: Optional[str] = None
+    if hard_ttl > 0 and age_min >= hard_ttl:
+        discard_reason = "STALE_HOLD_HARD_TTL_EXPIRED"
+    elif require_block and soft_ttl > 0 and age_min >= soft_ttl:
+        blocked = _candidate_has_slot_or_capital_block(data, tokens)
+        if not blocked:
+            discard_reason = "STALE_HOLD_NO_SLOT_OR_CAPITAL_BLOCK"
+
+    if not discard_reason:
+        return False
+
+    if _discard_ready(db_client, int(row["id"]), discard_reason, expected_revision=expected_revision):
+        _record_check(
+            db_client,
+            int(row["id"]),
+            None,
+            _next_check_sequence(db_client, int(row["id"])),
+            "lifecycle",
+            None,
+            None,
+            None,
+            0.0,
+            {},
+            None,
+            {
+                "age_min": round(age_min, 3),
+                "soft_ttl_min": soft_ttl,
+                "hard_ttl_min": hard_ttl,
+                "require_block_reason": require_block,
+                "stage_reason": data.get("stage_reason"),
+                "last_execution_gate": data.get("last_execution_gate"),
+            },
+            False,
+            "terminal_reject",
+            discard_reason,
+            0,
+            writer="risk_selector",
+        )
+        return True
+    return False
 
 
 def _trade_type_for_regime(regime_mode: str) -> str:
@@ -1995,6 +2125,8 @@ def get_openable_candidates(
                         None, None, None, 0.0, {}, None, {"validated_at": str(age_base), "max_age_min": max_age},
                         False, "terminal_reject", "MAX_AGE_EXPIRED", 0, writer="risk_selector",
                     )
+                continue
+            if _apply_stale_hold_policy(db_client, row, cfg, settings):
                 continue
             direction = (row.get("data") or {}).get("direction") or {}
             required_confirmations = max(1, int(cfg.get("direction_required_confirmations", 2) or 2))

@@ -671,6 +671,19 @@ class Settings(BaseSettings):
     staged_entry_fast_path_enabled: bool = Field(default=True)
     staged_entry_price_source: str = Field(default="avg")  # 'avg' (VWAP 5m) or 'ticker'
     staged_entry_persist_checks: bool = Field(default=True)
+    # Hold policy for validated candidates: keep waiting only for slot/capital constraints.
+    staged_hold_policy_enabled: bool = Field(default=True)
+    staged_hold_soft_ttl_min: float = Field(default=60.0)
+    staged_hold_hard_ttl_min: float = Field(default=120.0)
+    staged_hold_require_block_reason: bool = Field(default=True)
+    staged_hold_allowed_block_reason_tokens: List[str] = Field(default=[
+        "CAPITAL_ROUTING",
+        "INSUFFICIENT_USDT",
+        "MAX_POSITIONS",
+        "PER_SYMBOL_LIMIT",
+        "EXPOSURE_CAP",
+        "SLOT",
+    ])
     hard_risk_monitor_enabled: bool = Field(default=True)
     hard_risk_monitor_interval_seconds: float = Field(default=2.0)
     hard_risk_breakeven_enabled: bool = Field(default=True)
@@ -678,7 +691,18 @@ class Settings(BaseSettings):
     position_telemetry_watcher_enabled: bool = Field(default=True)
     position_telemetry_watcher_interval_seconds: float = Field(default=1.0)
     position_telemetry_db_throttle_seconds: float = Field(default=5.0)
-    position_reaction_policy_mode: str = Field(default="telemetry_only")  # telemetry_only | hard_rules | ml_assisted
+    position_reaction_policy_mode: str = Field(default="hard_rules")  # telemetry_only | hard_rules | ml_assisted
+    # Dynamic 1s profit-follow guard (all modes, SPOT + FUTURES).
+    position_profit_guard_enabled: bool = Field(default=True)
+    position_profit_guard_activation_pct: float = Field(default=0.35)
+    position_profit_guard_min_peak_pct: float = Field(default=0.50)
+    position_profit_guard_min_giveback_pct: float = Field(default=0.25)
+    position_profit_guard_giveback_factor: float = Field(default=0.55)
+    position_profit_guard_soft_lock_factor: float = Field(default=0.25)
+    position_profit_guard_hard_lock_factor: float = Field(default=0.45)
+    position_profit_guard_floor_lock_pct: float = Field(default=0.05)
+    position_profit_guard_sl_buffer_pct: float = Field(default=0.20)
+    position_profit_guard_min_step_pct: float = Field(default=0.03)
     # S105g: real-time Binance User Data Stream (futures + spot) so position
     # closures are detected in seconds instead of waiting for the next 5-min
     # polling cycle. Falls back silently to polling/reconciliation if disabled,

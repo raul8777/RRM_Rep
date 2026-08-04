@@ -1118,6 +1118,52 @@ def test_mark_opened(fake_db, settings):
     assert row["data"]["stage_reason"] == "EXECUTION_CONFIRMED"
 
 
+def test_get_openable_candidates_discards_stale_hold_without_block_reason(fake_db, settings):
+    meta = {"BTCUSDT": _make_signal("BTCUSDT")}
+    top = [_make_signal("BTCUSDT")]
+    staged_entry.stage_ready_candidates(top, {}, meta, "SPOT_BULL", fake_db, settings=settings)
+    row = fake_db.ready[0]
+    row["status"] = "validated"
+    row["validated_at"] = datetime.now(timezone.utc) - timedelta(minutes=75)
+    row["data"] = dict(row.get("data") or {})
+    row["data"]["candidate_revision"] = int(row["data"].get("candidate_revision", 0) or 0)
+    row["data"]["last_execution_gate"] = {
+        "passed": False,
+        "reason": "QUALITY_RECHECK_PENDING",
+    }
+
+    selected = staged_entry.get_openable_candidates(fake_db, "SPOT_BULL", settings=settings)
+
+    assert selected == []
+    assert fake_db.ready[0]["status"] == "discarded"
+    assert fake_db.ready[0]["discard_reason"] == "STALE_HOLD_NO_SLOT_OR_CAPITAL_BLOCK"
+    assert any(
+        c["check_type"] == "lifecycle" and c["reason"] == "STALE_HOLD_NO_SLOT_OR_CAPITAL_BLOCK"
+        for c in fake_db.checks
+    )
+
+
+def test_get_openable_candidates_keeps_stale_hold_when_capital_blocked(fake_db, settings):
+    meta = {"BTCUSDT": _make_signal("BTCUSDT")}
+    top = [_make_signal("BTCUSDT")]
+    staged_entry.stage_ready_candidates(top, {}, meta, "SPOT_BULL", fake_db, settings=settings)
+    row = fake_db.ready[0]
+    row["status"] = "validated"
+    row["validated_at"] = datetime.now(timezone.utc) - timedelta(minutes=75)
+    row["data"] = dict(row.get("data") or {})
+    row["data"]["candidate_revision"] = int(row["data"].get("candidate_revision", 0) or 0)
+    row["data"]["last_execution_gate"] = {
+        "passed": False,
+        "reason": "CAPITAL_ROUTING_COOLDOWN_ACTIVE",
+    }
+
+    selected = staged_entry.get_openable_candidates(fake_db, "SPOT_BULL", settings=settings)
+
+    assert len(selected) == 1
+    assert selected[0]["symbol"] == "BTCUSDT"
+    assert fake_db.ready[0]["status"] == "validated"
+
+
 def test_stage_kind_progresses_setup_trigger_risk(fake_db, settings):
     meta = {"BTCUSDT": _make_signal("BTCUSDT")}
     top = [_make_signal("BTCUSDT")]
