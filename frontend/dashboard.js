@@ -29,9 +29,9 @@ let _futuresUnrealPnl = 0;  // Updated by renderFuturesPositions each cycle
 let _cachedFuturesPositions = [];  // Updated by renderFuturesPositions each cycle
 let _cachedFuturesClosed = [];     // Updated by renderFuturesClosed each cycle
 const CACHE_TTL_MS = 5000;    // 5 s frontend cache for fresher mode/profile
-const POLL_INTERVAL_MS = 15000; // 15 s poll for near-real-time status
+const POLL_INTERVAL_MS = 30000; // 30 s poll: /dashboard/summary is heavy (~25-40s)
 const BACKTEST_PROGRESS_POLL_MS = 5000;
-const FETCH_TIMEOUT_MS = 12000; // abort a hung fetch (e.g. backend restart mid-request)
+const FETCH_TIMEOUT_MS = 60000; // allow the heavy summary endpoint enough time
 let _fetchInProgress = false;
 let _fetchStartedAt = 0;
 let _lastSuccessfulFetch = 0;
@@ -841,7 +841,7 @@ let _openProfileFilter = 'all';   // 'all' | 'A' | 'B' | 'C'
 let _openModeFilter = 'all';      // 'all' | 'SPOT_BULL' | 'RANGE_SCALP' | 'PRESERVATION' | 'FUTURES_SHORT'
 let _closedProfileFilter = 'all';
 let _closedModeFilter = 'all';
-let _dashboardDays = Math.min(365, Math.max(1, parseInt(localStorage.getItem('dashboard_closed_days'), 10) || 7));
+let _dashboardDays = Math.min(365, Math.max(1, parseInt(localStorage.getItem('dashboard_closed_days'), 10) || 1));
 
 function switchOpsMainTab(main) {
     _opsMainTab = main;
@@ -938,6 +938,37 @@ function renderSystemStatus(d, unified) {
     const color = state === 'running' ? '#4ecca3' : state === 'paused' ? '#f39c12' : '#e74c3c';
     if (hDot)  { hDot.style.background = color; hDot.style.boxShadow = `0 0 5px ${color}`; }
     if (hText) hText.textContent = statusLabel;
+    // Resume banner — prominent CTA when system is paused
+    _renderResumeBanner(state, unified);
+}
+
+function _renderResumeBanner(state, unified) {
+    let banner = document.getElementById('resumeBanner');
+    if (state !== 'paused') {
+        if (banner) banner.style.display = 'none';
+        return;
+    }
+    if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'resumeBanner';
+        banner.style.cssText = 'background:#7c4700;border-bottom:2px solid #f39c12;padding:10px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;';
+        banner.innerHTML = `
+            <span style="font-size:18px">&#9208;</span>
+            <span style="color:#ffe0b2;font-weight:600;font-size:13px" id="resumeBannerText">Sistema en pausa — no se abren nuevas posiciones.</span>
+            <button id="resumeBannerBtn" style="margin-left:auto;background:#4ecca3;color:#1a1a2e;border:none;padding:7px 18px;border-radius:5px;cursor:pointer;font-size:13px;font-weight:700">&#9654; REANUDAR</button>
+        `;
+        const statusBar = document.getElementById('statusBar');
+        if (statusBar) statusBar.parentNode.insertBefore(banner, statusBar);
+        else document.body.prepend(banner);
+        document.getElementById('resumeBannerBtn').addEventListener('click', () => controlAction('/control/resume-all'));
+    }
+    const reason = unified?.pause_reason || 'operator_manual_stop';
+    const remaining = unified?.pause_remaining_minutes;
+    let txt = 'Sistema en pausa — no se abren nuevas posiciones.';
+    if (reason === 'operator_manual_stop') txt = 'Sistema DETENIDO por operador — nuevas entradas pausadas.';
+    if (remaining) txt += ` (auto-resume en ${Math.ceil(remaining)}min)`;
+    document.getElementById('resumeBannerText').textContent = txt;
+    banner.style.display = 'flex';
 }
 
 function renderPortfolio(d) {

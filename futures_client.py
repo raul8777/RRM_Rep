@@ -2305,6 +2305,43 @@ class FuturesClient:
                             result["error"] = err_msg
                             print(f"[CapBridge] ERROR: spot→futures transfer failed — {err_msg}")
                         return result
+                # s119: Futures has enough capital — fall through to check if spot needs capital.
+                # When arbiter is active, reserve 1×kelly_margin for futures and send excess to spot.
+                from config import get_settings as _gs
+                from config_helpers import get_param
+                try:
+                    _s = _gs()
+                    _max_spot = get_param(_s, 'max_positions')
+                except Exception:
+                    _max_spot = 12
+                spot_open_slots = max(0, _max_spot - open_spot_count)
+                if spot_open_slots > 0:
+                    needed_spot = spot_open_slots * kelly_spot_amount
+                    spot_shortfall = needed_spot - spot_usdt
+                    if spot_shortfall >= min_transfer:
+                        # Reserve 1×kelly_margin in futures for arbiter, transfer the rest
+                        _arbiter_reserve = kelly_margin
+                        futures_excess = max(0.0, futures_available - max(futures_min_reserve, _arbiter_reserve))
+                        transfer_amount = round(min(spot_shortfall, futures_excess), 2)
+                        if transfer_amount >= min_transfer:
+                            reason = (f"{regime} (arbiter_active): {spot_open_slots} spot slot(s) × ${kelly_spot_amount:.0f}/slot "
+                                      f"= need ${needed_spot:.0f}, have ${spot_usdt:.0f}, "
+                                      f"futures_reserve=${_arbiter_reserve:.0f} "
+                                      f"→ transfer ${transfer_amount:.2f} futures→spot")
+                            print(f"[CapBridge] {reason}")
+                            ok = self.transfer_to_spot(transfer_amount, spot_api_key, spot_api_secret)
+                            result["direction"] = "futures->spot"
+                            result["amount"] = transfer_amount
+                            result["reason"] = reason
+                            result["success"] = ok
+                            if ok:
+                                time.sleep(1.0)
+                                print(f"[CapBridge] Post-transfer: spot USDT ~${spot_usdt + transfer_amount:.2f}")
+                            else:
+                                err_msg = "transfer_to_spot returned False (arbiter+spot)"
+                                result["error"] = err_msg
+                                print(f"[CapBridge] ERROR: futures→spot transfer failed — {err_msg}")
+                            return result
 
             # ── Case 2: Spot needs capital (non-bear regime, spot has open slots) ─
             elif regime in ("SPOT_BULL", "RANGE_SCALP"):

@@ -342,6 +342,21 @@ Fix: `auto_reconcile_spot()` / `auto_reconcile_futures()` o endpoint `/reconcile
 **"Trailing/BreakEven no activó después de restart"**
 → Estado vive en `trades_open.metadata._smart_meta`. Para FUTURES: `_sync_smart_meta_from_db()` en `FuturesClient` reconstruye desde DB; verificar que `_persist_smart_meta()` se haya llamado en el ciclo anterior. Para SPOT: `run_trades.py` recarga metadata al inicio del ciclo.
 
+**"El sistema no abre posiciones tras docker compose up (reinicio post-stop)"**
+→ Cuando el operador presiona DETENER en el dashboard, se persiste `pause_new_entries=True` con reason=`operator_manual_stop` en `trading_runtime_state`. Este flag persiste en DB incluso tras `docker compose down/up`. El sistema arranca normalmente (SL/TP funcionan) pero nunca evalúa entradas nuevas.
+**Procedimiento de reanudación (aplicar desde dashboard o API):**
+1. Dashboard: pestaña "Acciones sensibles" → botón **"▶ Reanudar"** → confirmar.
+2. API: `DELETE /control/pause-new-entries` (elimina solo la pausa) o `POST /control/resume-all` (limpia pausa + capital_routing_guard + operator_alerts + inicia orchestrator si estaba detenido).
+3. Verificar en logs: el mensaje `[execute_once] pause_new_entries=True (operator request)` debe desaparecer y el ciclo debe generar señales autónomas.
+4. Si el CapBridge no transfiere capital a spot tras la reanudación (spot < $50 y futures > $1000 en SPOT_BULL), verificar que `futures_capital_bridge_enabled=True` y que el fix s119 está desplegado.
+**Causa raíz del problema histórico (s119):** cuando `futures_arbiter_active=True` y el régimen es SPOT_BULL/RANGE_SCALP, el `smart_rebalance_capital` entraba en Case 1b (elif) que matcheaba el régimen pero no necesitaba transferir spot→futures — y al ser elif, nunca evaluaba Case 2 (futures→spot para spot). Fix: Case 1b ahora cae through a evaluar si spot necesita capital cuando futures no necesita más.
+**Checklist completo de reinicio tras detener:**
+- [ ] `pause_new_entries` limpio (via botón Reanudar o `DELETE /control/pause-new-entries`)
+- [ ] `capital_routing_guard` inactivo (se limpia con `/control/resume-all`)
+- [ ] No hay `operator_alerts` activas bloqueantes
+- [ ] Health status = ok (no `critical`)
+- [ ] CapBridge transfiere capital si spot < needed (visible en logs como `[CapBridge] ... → transfer $X futures→spot`)
+
 **"Régimen oscila o cambia inesperadamente"**
 → Anti-whipsaw: necesita 2 ciclos consecutivos para confirmar cambio. Ver `_cache['pending_mode']` y `_cache['pending_count']` en `market_regime.py`. Con `regime.confirmed=False`, los parámetros se aplican pero el sizing puede reducirse.
 
