@@ -6080,6 +6080,76 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
         """)
         sr_thesis_blocked_count = int((sr_thesis_rows[0] or {}).get("n") or 0) if sr_thesis_rows else 0
 
+        sr_attempt_rows = _query("sr_attempt_sequence", """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (
+                    WHERE input_features->>'sr_support_attempts' IS NOT NULL
+                       OR input_features->>'sr_resistance_attempts' IS NOT NULL
+                ) AS observed,
+                COUNT(*) FILTER (
+                    WHERE COALESCE((NULLIF(input_features->>'sr_support_failed_attempts', ''))::int, 0) > 0
+                       OR COALESCE((NULLIF(input_features->>'sr_resistance_failed_attempts', ''))::int, 0) > 0
+                ) AS failed_observed
+            FROM ready_candidate_checks
+            WHERE created_at >= NOW() - INTERVAL '7 days'
+        """)
+        sr_attempt_data = sr_attempt_rows[0] if sr_attempt_rows else {}
+        sr_attempt_total = int(sr_attempt_data.get("total") or 0)
+        sr_attempt_observed = int(sr_attempt_data.get("observed") or 0)
+        sr_attempt_failed_observed = int(sr_attempt_data.get("failed_observed") or 0)
+        sr_attempt_gates = [
+            _shadow_readiness_gate("decision_coverage", sr_attempt_observed, sr_attempt_total or 1, sr_attempt_total > 0 and sr_attempt_observed == sr_attempt_total, "Persistir métricas de intentos SR en todos los re-checks staged."),
+            _shadow_readiness_gate("observation_sample", sr_attempt_observed, 200, sr_attempt_observed >= 200, "Recolectar al menos 200 checks con secuencia SR antes de activar gates duros."),
+        ]
+
+        rerank_rows = _query("realtime_open_rerank", """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE signal_meta->'selection_shadow'->'realtime_open' IS NOT NULL) AS rerank_observed,
+                COUNT(*) FILTER (WHERE signal_meta->'selection_shadow'->'anti_monopoly' IS NOT NULL) AS anti_monopoly_observed,
+                AVG((NULLIF(signal_meta->'selection_shadow'->'anti_monopoly'->>'blocked_streak', ''))::float)
+                    FILTER (WHERE signal_meta->'selection_shadow'->'anti_monopoly' IS NOT NULL) AS avg_blocked_streak
+            FROM ready_candidates
+            WHERE regime_mode = 'RANGE_SCALP'
+              AND created_at >= NOW() - INTERVAL '7 days'
+        """)
+        rerank_data = rerank_rows[0] if rerank_rows else {}
+        rerank_total = int(rerank_data.get("total") or 0)
+        rerank_observed = int(rerank_data.get("rerank_observed") or 0)
+        anti_monopoly_observed = int(rerank_data.get("anti_monopoly_observed") or 0)
+        avg_blocked_streak = float(rerank_data.get("avg_blocked_streak") or 0.0)
+        rerank_gates = [
+            _shadow_readiness_gate("persistence", rerank_observed, rerank_total or 1, rerank_total > 0 and rerank_observed == rerank_total, "Propagar selection_shadow.realtime_open al snapshot de candidatas."),
+            _shadow_readiness_gate("observation_sample", rerank_observed, 50, rerank_observed >= 50, "Recolectar al menos 50 candidatos rerankeados para comparar contra baseline EV."),
+        ]
+        anti_monopoly_gates = [
+            _shadow_readiness_gate("persistence", anti_monopoly_observed, rerank_total or 1, rerank_total > 0 and anti_monopoly_observed == rerank_total, "Persistir selección anti-monopoly por candidata en cada ciclo."),
+            _shadow_readiness_gate("observation_sample", anti_monopoly_observed, 50, anti_monopoly_observed >= 50, "Recolectar muestra suficiente para medir diversidad y fill-rate con decay."),
+        ]
+
+        sr_pool_attempt_rows = _query("sr_pool_attempt_memory", """
+            SELECT
+                COUNT(*) FILTER (WHERE event LIKE 'sr_pool%') AS total,
+                COUNT(*) FILTER (
+                    WHERE event LIKE 'sr_pool%'
+                      AND (
+                        detail::text LIKE '%attempt_reliability%'
+                        OR detail::text LIKE '%sr_resistance_failed_attempts%'
+                        OR detail::text LIKE '%sr_support_failed_attempts%'
+                      )
+                ) AS observed
+            FROM trades_audit
+            WHERE ts >= NOW() - INTERVAL '30 days'
+        """)
+        sr_pool_attempt_data = sr_pool_attempt_rows[0] if sr_pool_attempt_rows else {}
+        sr_pool_attempt_total = int(sr_pool_attempt_data.get("total") or 0)
+        sr_pool_attempt_observed = int(sr_pool_attempt_data.get("observed") or 0)
+        sr_pool_attempt_gates = [
+            _shadow_readiness_gate("trace_coverage", sr_pool_attempt_observed, sr_pool_attempt_total or 1, sr_pool_attempt_total > 0 and sr_pool_attempt_observed == sr_pool_attempt_total, "Incluir memoria de intentos SR en cada trigger/evento del pool."),
+            _shadow_readiness_gate("trigger_sample", sr_pool_attempt_total, 30, sr_pool_attempt_total >= 30, "Recolectar al menos 30 triggers SR pool para evaluar mejora real."),
+        ]
+
         sr_invalidation_metrics = get_sr_invalidation_shadow_metrics()
 
         entries = [
@@ -6197,6 +6267,38 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
                 "state": "ACTIVE" if _cfg_param(live_settings, "range_scalp_sr_thesis_gate_enabled", True) else "DISABLED",
                 "summary": f"Candidatos bloqueados por tesis S/R inconsistente (snapshot actual): {sr_thesis_blocked_count}. Umbral: {_cfg_param(live_settings, 'range_scalp_sr_thesis_max_dist_pct', 5.0)}%.",
                 "gates": [],
+            },
+            {
+                "id": "sr_attempt_sequence",
+                "name": "Secuencia de intentos/fallos S/R",
+                "mode": _cfg_param(live_settings, "sr_attempt_sequence_mode", "shadow"),
+                "state": _shadow_readiness_state(_cfg_param(live_settings, "sr_attempt_sequence_mode", "shadow"), sr_attempt_gates),
+                "summary": f"Checks con secuencia SR: {sr_attempt_observed}/{sr_attempt_total}; checks con fallos detectados: {sr_attempt_failed_observed}.",
+                "gates": sr_attempt_gates,
+            },
+            {
+                "id": "realtime_open_rerank",
+                "name": "Priorización en tiempo real al abrir",
+                "mode": _cfg_param(live_settings, "realtime_open_rerank_mode", "shadow"),
+                "state": _shadow_readiness_state(_cfg_param(live_settings, "realtime_open_rerank_mode", "shadow"), rerank_gates),
+                "summary": f"Candidatas con score open-now persistido: {rerank_observed}/{rerank_total}.",
+                "gates": rerank_gates,
+            },
+            {
+                "id": "anti_monopoly_decay",
+                "name": "Decay anti-monopolio de slots",
+                "mode": _cfg_param(live_settings, "anti_monopoly_decay_mode", "shadow"),
+                "state": _shadow_readiness_state(_cfg_param(live_settings, "anti_monopoly_decay_mode", "shadow"), anti_monopoly_gates),
+                "summary": f"Persistencia decay: {anti_monopoly_observed}/{rerank_total}; blocked streak medio: {round(avg_blocked_streak, 2)}.",
+                "gates": anti_monopoly_gates,
+            },
+            {
+                "id": "sr_pool_attempt_memory",
+                "name": "Memoria de intentos en SR Pool",
+                "mode": _cfg_param(live_settings, "sr_pool_attempt_memory_mode", "shadow"),
+                "state": _shadow_readiness_state(_cfg_param(live_settings, "sr_pool_attempt_memory_mode", "shadow"), sr_pool_attempt_gates),
+                "summary": f"Triggers SR pool con memoria de intentos: {sr_pool_attempt_observed}/{sr_pool_attempt_total}.",
+                "gates": sr_pool_attempt_gates,
             },
             {
                 "id": "sr_structure_invalidation_exit",
@@ -8928,6 +9030,12 @@ _KELLY_EDITABLE_FIELDS = {
     "range_scalp_short_min_probability",
     "range_scalp_short_resistance_threshold",
     "range_scalp_sr_thesis_gate_enabled", "range_scalp_sr_thesis_max_dist_pct",
+    "sr_attempt_sequence_mode",
+    "realtime_open_rerank_mode",
+    "anti_monopoly_decay_mode",
+    "sr_pool_attempt_memory_mode",
+    "realtime_open_score_half_life_min",
+    "realtime_open_score_sr_max_dist_pct",
     # s116: position telemetry watcher
     "position_telemetry_watcher_enabled",
     "position_telemetry_watcher_interval_seconds",
@@ -8968,6 +9076,17 @@ _KELLY_EDITABLE_FIELDS = {
     "predictor_use_real_candles",
     "predictor_interval",
     "predictor_horizon_minutes",
+    # s120: anti-strangulation + drawdown intelligence
+    "trailing_stop_distance_pct",
+    "trailing_stop_activation_pct",
+    "peak_protection_spot_bull_pct",
+    "peak_protection_spot_bull_profile_a_pct",
+    "profit_realization_spot_bull_min_partial_minutes",
+    "drawdown_intelligent_monitor_enabled",
+    "drawdown_monitor_threshold_usdt",
+    "drawdown_cut_velocity_threshold",
+    "drawdown_cut_min_data_points",
+    "drawdown_cut_min_consecutive",
 }
 
 _REGIME_MODES = {"SPOT_BULL", "RANGE_SCALP", "PRESERVATION", "FUTURES_SHORT"}
@@ -10682,6 +10801,9 @@ def _check_config_drift(settings) -> List[Dict]:
         'min_signal_strength', 'min_success_probability',
         'futures_min_prob', 'futures_entry_max_rsi_4h',
         'staged_entry_regime_config',
+        'sr_attempt_sequence_mode', 'realtime_open_rerank_mode',
+        'anti_monopoly_decay_mode', 'sr_pool_attempt_memory_mode',
+        'realtime_open_score_half_life_min', 'realtime_open_score_sr_max_dist_pct',
         # USD loss guard — hot-config controlled
         'max_loss_usd_per_trade', 'emergency_gap_loss_multiplier',
         'ug_fast_loss_cut_enabled', 'ug_peak_drawdown_cut_enabled', 'ug_soft_supervisor_loss_escalation_enabled',
