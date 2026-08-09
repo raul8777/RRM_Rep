@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+import threading
+from collections import deque
 
 from config_helpers import get_param
+from side_utils import normalize_side
 from profit_realization_supervisor import (
     ProfitRealizationContext,
     evaluate as evaluate_profit_realization,
@@ -13,6 +16,65 @@ from profit_realization_supervisor import (
 
 LOSS_STATE_KEY = "unified_governance_loss_state"
 LAST_DECISION_KEY = "unified_governance_last_decision"
+
+
+_breakout_follow_lock = threading.Lock()
+_breakout_follow_recent = deque(maxlen=50)
+_breakout_follow_metrics: Dict[str, Any] = {
+    "mode": "active",
+    "evaluated": 0,
+    "candidates": 0,
+    "would_defer": 0,
+    "active_deferred": 0,
+    "shadow_allowed": 0,
+    "regression_risk": 0,
+    "executed_closes": 0,
+    "by_reason": {},
+    "last_at": None,
+}
+
+
+def _record_breakout_follow_event(event: Dict[str, Any]) -> None:
+    """Collect runtime evidence for follow-vs-cut governance decisions."""
+    with _breakout_follow_lock:
+        _breakout_follow_metrics["evaluated"] += 1
+        mode = str(event.get("mode") or "active").lower()
+        _breakout_follow_metrics["mode"] = mode
+        if event.get("candidate"):
+            _breakout_follow_metrics["candidates"] += 1
+        reason = str(event.get("reason") or "unknown")
+        _breakout_follow_metrics["by_reason"][reason] = _breakout_follow_metrics["by_reason"].get(reason, 0) + 1
+        if event.get("would_defer"):
+            _breakout_follow_metrics["would_defer"] += 1
+            if mode == "active":
+                _breakout_follow_metrics["active_deferred"] += 1
+            else:
+                _breakout_follow_metrics["shadow_allowed"] += 1
+        if event.get("regression_risk"):
+            _breakout_follow_metrics["regression_risk"] += 1
+        if event.get("executed_close"):
+            _breakout_follow_metrics["executed_closes"] += 1
+        _breakout_follow_metrics["last_at"] = datetime.now(timezone.utc).isoformat()
+        _breakout_follow_recent.append(dict(event))
+
+
+def get_ug_breakout_follow_shadow_metrics() -> Dict[str, Any]:
+    """Expose metrics for shadow-readiness while mechanism runs in real mode."""
+    with _breakout_follow_lock:
+        return {
+            "name": "ug_breakout_follow",
+            "mode": _breakout_follow_metrics.get("mode", "active"),
+            "evaluated": int(_breakout_follow_metrics.get("evaluated", 0) or 0),
+            "candidates": int(_breakout_follow_metrics.get("candidates", 0) or 0),
+            "would_defer": int(_breakout_follow_metrics.get("would_defer", 0) or 0),
+            "active_deferred": int(_breakout_follow_metrics.get("active_deferred", 0) or 0),
+            "shadow_allowed": int(_breakout_follow_metrics.get("shadow_allowed", 0) or 0),
+            "regression_risk": int(_breakout_follow_metrics.get("regression_risk", 0) or 0),
+            "executed_closes": int(_breakout_follow_metrics.get("executed_closes", 0) or 0),
+            "by_reason": dict(_breakout_follow_metrics.get("by_reason", {})),
+            "last_at": _breakout_follow_metrics.get("last_at"),
+            "recent": list(_breakout_follow_recent),
+        }
 
 
 @dataclass
@@ -122,6 +184,30 @@ def _distance_guard(distance_to_sl_pct: Optional[float], threshold_pct: float) -
     if distance_to_sl_pct is None:
         return False
     return distance_to_sl_pct <= threshold_pct
+
+
+def _signal_favors_position(side: str, signal_direction: Optional[str]) -> bool:
+    if not signal_direction:
+        return False
+    sig = str(signal_direction).strip().upper()
+    side_up = normalize_side(side)
+    if side_up == "LONG":
+        return sig == "BUY"
+    if side_up == "SHORT":
+        return sig == "SELL"
+    return False
+
+
+def _signal_against_position(side: str, signal_direction: Optional[str]) -> bool:
+    if not signal_direction:
+        return False
+    sig = str(signal_direction).strip().upper()
+    side_up = normalize_side(side)
+    if side_up == "LONG":
+        return sig == "SELL"
+    if side_up == "SHORT":
+        return sig == "BUY"
+    return False
 
 
 def _loss_regime_scale(regime_mode: Optional[str], trade_type: Optional[str]) -> tuple:
@@ -242,7 +328,28 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
         elif _sso_confirms_partial and _prs_close:
             # W1: SSO partial + PRS also wants to close
             _allow_escalation = bool(getattr(settings, 'ug_allow_partial_to_full_escalation', False))
-            if _allow_escalation:
+            _partial_cap_pct = float(get_param(settings, "ug_partial_to_full_cap_pct", 0.75))
+            _partial_cap_pct = min(0.95, max(0.05, _partial_cap_pct))
+            _prs_partial_like = min(float(_prs_close_pct), _partial_cap_pct)
+            _max_partial_pct = max(float(context.sso_advisory_close_pct), _prs_partial_like)
+            _max_partial_pct = min(_max_partial_pct, _partial_cap_pct)
+
+            _escalation_min_signal = float(get_param(settings, "ug_partial_to_full_escalation_min_signal_strength", 0.58))
+            _escalation_min_vel_pct_h = float(get_param(settings, "ug_partial_to_full_escalation_min_velocity_pct_h", 0.08)) / 100.0
+            _escalation_cut_signal = float(get_param(settings, "ug_partial_to_full_escalation_cut_signal_strength", 0.62))
+            _escalation_cut_vel_pct_h = float(get_param(settings, "ug_partial_to_full_escalation_cut_velocity_pct_h", 0.12)) / 100.0
+            _escalation_signal = float(context.current_signal_strength or 0.0)
+            _escalation_vel = float(context.pnl_velocity_1h or 0.0)
+            _follow_alive = (
+                _signal_favors_position(context.side, context.current_signal_direction)
+                and _escalation_signal >= _escalation_min_signal
+                and _escalation_vel >= _escalation_min_vel_pct_h
+            )
+            _regression_risk = (
+                (_signal_against_position(context.side, context.current_signal_direction) and _escalation_signal >= _escalation_cut_signal)
+                or (_escalation_vel <= -_escalation_cut_vel_pct_h)
+            )
+            if _allow_escalation and not (_follow_alive and not _regression_risk):
                 # escalate to full exit
                 _should_close = True
                 _close_pct = 1.0
@@ -254,14 +361,20 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
                 _priority = 88
             else:
                 # keep the largest requested partial close, never kill a winner
-                _max_partial_pct = max(float(context.sso_advisory_close_pct), float(_prs_close_pct))
                 _should_close = True
                 _close_pct = _max_partial_pct
                 _reason = context.sso_advisory_reason or _prs_reason
-                _detail = (
-                    f"SSO {context.sso_advisory_trigger} partial({context.sso_advisory_close_pct*100:.0f}%) "
-                    f"+ PRS capped at {_max_partial_pct*100:.0f}% (no escalation) | F&G={_fng:.0f}"
-                )
+                if _allow_escalation and _follow_alive and not _regression_risk:
+                    _detail = (
+                        f"SSO {context.sso_advisory_trigger} partial({context.sso_advisory_close_pct*100:.0f}%) "
+                        f"+ PRS capped at {_max_partial_pct*100:.0f}% (follow-through guard) "
+                        f"vel={_escalation_vel*100:.3f}%/h signal={_escalation_signal:.2f} | F&G={_fng:.0f}"
+                    )
+                else:
+                    _detail = (
+                        f"SSO {context.sso_advisory_trigger} partial({context.sso_advisory_close_pct*100:.0f}%) "
+                        f"+ PRS capped at {_max_partial_pct*100:.0f}% (no escalation) | F&G={_fng:.0f}"
+                    )
                 _priority = 80
         elif _sso_confirms_partial:
             # W1: SSO partial alone → execute the partial close as-is
@@ -378,6 +491,80 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
         _held_min = _held_minutes(now, context.opened_at)
         _default_profit_hold = 15.0 if str(context.trade_type or "").lower() == "futures" else 20.0
         _profit_hold_minutes = float(get_param(settings, "unified_governance_min_profit_hold_minutes", _default_profit_hold))
+
+        # Active follow-vs-cut intelligence: defer selected early full closes when
+        # the position is still growing, but keep close when regression risk is high.
+        _bf_enabled = bool(get_param(settings, "ug_breakout_follow_enabled", True))
+        _bf_mode = str(get_param(settings, "ug_breakout_follow_mode", "active") or "active").strip().lower()
+        if _bf_mode not in ("active", "shadow", "disabled"):
+            _bf_mode = "active"
+        _close_reason = str(_reason or "")
+        _candidate = _should_close and _close_pct >= 1.0 and _close_reason.startswith((
+            "sso_target_contribution",
+            "sso_capital_rotation",
+            "sso_slow_crawl",
+            "profit_realization_supervisor_full",
+        ))
+        _approx_notional = abs(context.pnl_usdt / context.pnl_pct) if abs(context.pnl_pct or 0.0) > 1e-9 else 0.0
+        _bf_min_hold = float(get_param(settings, "ug_breakout_follow_min_hold_minutes", 45.0))
+        _bf_max_hold = float(get_param(settings, "ug_breakout_follow_max_hold_minutes", 240.0))
+        _bf_min_notional = float(get_param(settings, "ug_breakout_follow_min_notional_usdt", 700.0))
+        _bf_min_pnl = float(get_param(settings, "ug_breakout_follow_min_pnl_usdt", 2.0))
+        _bf_max_pnl_pct = float(get_param(settings, "ug_breakout_follow_max_pnl_pct", 0.80)) / 100.0
+        _bf_min_signal = float(get_param(settings, "ug_breakout_follow_min_signal_strength", 0.58))
+        _bf_min_velocity = float(get_param(settings, "ug_breakout_follow_min_velocity_pct_h", 0.08)) / 100.0
+        _bf_cut_signal = float(get_param(settings, "ug_breakout_follow_cut_signal_strength", 0.62))
+        _bf_cut_velocity = float(get_param(settings, "ug_breakout_follow_cut_velocity_pct_h", 0.12)) / 100.0
+
+        _sig_strength = float(context.current_signal_strength or 0.0)
+        _vel = float(context.pnl_velocity_1h or 0.0)
+        _favors = _signal_favors_position(context.side, context.current_signal_direction)
+        _against = _signal_against_position(context.side, context.current_signal_direction)
+        _breakout_alive = _favors and _sig_strength >= _bf_min_signal and _vel >= _bf_min_velocity
+        _regression_risk = (_against and _sig_strength >= _bf_cut_signal) or (_vel <= -_bf_cut_velocity)
+        _eligible = (
+            _bf_enabled
+            and _bf_mode != "disabled"
+            and _candidate
+            and _approx_notional >= _bf_min_notional
+            and context.pnl_usdt >= _bf_min_pnl
+            and context.pnl_pct <= _bf_max_pnl_pct
+            and _bf_min_hold <= _held_min <= _bf_max_hold
+        )
+        _would_defer = _eligible and _breakout_alive and not _regression_risk
+        if _bf_enabled and _candidate:
+            _record_breakout_follow_event({
+                "ts": now.isoformat(),
+                "mode": _bf_mode,
+                "symbol": context.symbol,
+                "trade_type": context.trade_type,
+                "regime": context.regime_mode,
+                "profile": context.profile_label,
+                "reason": _close_reason,
+                "candidate": _candidate,
+                "eligible": _eligible,
+                "would_defer": _would_defer,
+                "breakout_alive": _breakout_alive,
+                "regression_risk": _regression_risk,
+                "executed_close": not (_would_defer and _bf_mode == "active"),
+                "held_min": _held_min,
+                "pnl_usdt": round(float(context.pnl_usdt or 0.0), 4),
+                "pnl_pct": round(float(context.pnl_pct or 0.0) * 100.0, 4),
+                "notional_est_usdt": round(_approx_notional, 2),
+                "signal_strength": round(_sig_strength, 4),
+                "signal_direction": context.current_signal_direction,
+                "velocity_pct_h": round(_vel * 100.0, 4),
+            })
+        if _would_defer and _bf_mode == "active":
+            _should_close = False
+            _close_pct = 0.0
+            _reason = "unified_governance_breakout_follow_hold"
+            _detail = (
+                f"Breakout follow active: deferred {_close_reason}; "
+                f"vel={_vel*100:.3f}%/h signal={context.current_signal_direction or 'n/a'}({ _sig_strength:.2f})"
+            )
+            _priority = min(_priority, 60)
+
         if _should_close and _held_min < _profit_hold_minutes and _close_pct >= 1.0:
             _close_pct = 0.5
             _detail = (
@@ -393,6 +580,7 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
             f"prs_advisory(close={context.prs_advisory_should_close}); "
             f"prs_eval(close={pr_decision.should_close},pct={pr_decision.close_pct:.2f}); "
             f"fng={_fng:.0f}(mod={_fng_exit_modifier:.2f}); "
+            f"bf_mode={_bf_mode}; bf_eligible={_eligible}; bf_defer={_would_defer}; bf_regression={_regression_risk}; "
             f"profit_hold={_held_min}m/{_profit_hold_minutes:.0f}m; "
             f"{pr_decision.diagnostics}"
         )
@@ -402,6 +590,9 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
             state_patch[LAST_DECISION_KEY] = {
                 "action": "close",
                 "reason": _reason,
+                "close_source": "lifecycle",
+                "close_state": "partial_closed" if _close_pct < 1.0 else "closed",
+                "close_intent": _reason,
                 "trade_state": "profit",
                 "profile": str(context.profile_label or "B").upper(),
                 "regime": str(context.regime_mode or ""),
@@ -431,6 +622,7 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
                 LAST_DECISION_KEY: {
                     "action": "hold",
                     "reason": "unified_governance_profit_hold",
+                    "close_source": "lifecycle",
                     "trade_state": "profit",
                     "profile": str(context.profile_label or "B").upper(),
                     "regime": str(context.regime_mode or ""),
@@ -534,8 +726,9 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
     _signal_against = False
     if context.current_signal_direction:
         sig = str(context.current_signal_direction).strip().upper()
-        against_short = context.side.upper() == "SHORT" and sig == "BUY"
-        against_long = context.side.upper() in ("LONG", "BUY") and sig == "SELL"
+        _norm_side = normalize_side(context.side)
+        against_short = _norm_side == "SHORT" and sig == "BUY"
+        against_long = _norm_side == "LONG" and sig == "SELL"
         _signal_against = (against_short or against_long) and (context.current_signal_strength or 0.0) >= min_signal_strength
 
     if _signal_against:
@@ -655,6 +848,9 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
         LAST_DECISION_KEY: {
             "action": action,
             "reason": reason,
+            "close_source": "lifecycle",
+            "close_state": "closed" if should_close else "watchdog",
+            "close_intent": reason,
             "trade_state": "loss",
             "profile": str(context.profile_label or "B").upper(),
             "regime": str(context.regime_mode or ""),

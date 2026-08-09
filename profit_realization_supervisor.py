@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from config_helpers import get_param
+from side_utils import normalize_side
 
 
 PROFIT_START_KEY = "profit_realization_started_at"
@@ -191,31 +192,54 @@ def _sr_resistance_acceleration(
     metadata = context.metadata if isinstance(context.metadata, dict) else {}
     enabled = bool(get_param(settings, "profit_realization_sr_accel_enabled", True))
     regime = str(context.regime_mode or "").strip().upper()
-    side = str(context.side or "").strip().upper()
-    if not enabled or regime != "RANGE_SCALP" or side not in {"BUY", "LONG"}:
+    side = normalize_side(context.side)
+    if not enabled or regime != "RANGE_SCALP" or side not in ("LONG", "SHORT"):
         return {"active": False, "score": 0, "zone": 0.0}
 
     zone_min = float(get_param(settings, "profit_realization_sr_resistance_zone_min", 0.68))
-    zone = float(metadata.get("sr_zone_position", 0.0) or 0.0)
-    near_resistance = zone >= zone_min
-    rejection = bool(
-        metadata.get("resistance_rejection")
-        or metadata.get("resistance_rejection_sell")
-        or metadata.get("sr_resistance_rejection")
-    )
-    predexit_sr = bool(
-        metadata.get("profit_predexit_sr_resistance")
-        or metadata.get("sr_exit_triggered")
-        or metadata.get("peak_capture_sr_signal")
-    )
-    score = int(near_resistance) + int(rejection) + int(predexit_sr)
+    support_zone_max = float(get_param(settings, "profit_realization_sr_support_zone_max", 1.0 - zone_min))
+    zone_raw = metadata.get("sr_zone_position")
+    if zone_raw is None:
+        return {"active": False, "score": 0, "zone": 0.0}
+    zone = float(zone_raw)
+    if side == "LONG":
+        near_edge = zone >= zone_min
+        sr_reaction = bool(
+            metadata.get("resistance_rejection")
+            or metadata.get("resistance_rejection_sell")
+            or metadata.get("sr_resistance_rejection")
+        )
+        predexit_sr = bool(
+            metadata.get("profit_predexit_sr_resistance")
+            or metadata.get("sr_exit_triggered")
+            or metadata.get("peak_capture_sr_signal")
+        )
+        edge_name = "resistance"
+    else:
+        near_edge = zone <= support_zone_max
+        sr_reaction = bool(
+            metadata.get("support_hold")
+            or metadata.get("support_hold_buy")
+            or metadata.get("sr_support_hold")
+        )
+        predexit_sr = bool(
+            metadata.get("profit_predexit_sr_support")
+            or metadata.get("sr_exit_triggered")
+            or metadata.get("peak_capture_sr_signal")
+        )
+        edge_name = "support"
+
+    score = int(near_edge) + int(sr_reaction) + int(predexit_sr)
     return {
         "active": score > 0,
         "score": score,
         "zone": zone,
+        "side": side,
+        "edge": edge_name,
         "zone_min": zone_min,
-        "near_resistance": near_resistance,
-        "rejection": rejection,
+        "support_zone_max": support_zone_max,
+        "near_edge": near_edge,
+        "sr_reaction": sr_reaction,
         "predexit_sr": predexit_sr,
     }
 
@@ -229,6 +253,7 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
     if trade_type == "futures":
         enabled = enabled and bool(get_param(settings, "profit_realization_futures_enabled", True))
         min_profit_pct = float(get_param(settings, "profit_realization_futures_min_profit_pct", defaults["min_profit_pct"]))
+        partial_min_profit_mult = float(get_param(settings, "profit_realization_futures_partial_min_profit_multiplier", 2.5))
         partial_minutes = float(get_param(settings, "profit_realization_futures_partial_minutes", defaults["partial_minutes"]))
         full_minutes = float(get_param(settings, "profit_realization_futures_full_minutes", defaults["full_minutes"]))
         drawback_pct = float(get_param(settings, "profit_realization_futures_drawback_pct", defaults["drawback_pct"]))
@@ -237,6 +262,7 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
     else:
         enabled = enabled and bool(get_param(settings, "profit_realization_spot_enabled", True))
         min_profit_pct = float(get_param(settings, "profit_realization_spot_min_profit_pct", defaults["min_profit_pct"]))
+        partial_min_profit_mult = float(get_param(settings, "profit_realization_spot_partial_min_profit_multiplier", 2.5))
         partial_minutes = float(get_param(settings, "profit_realization_spot_partial_minutes", defaults["partial_minutes"]))
         full_minutes = float(get_param(settings, "profit_realization_spot_full_minutes", defaults["full_minutes"]))
         # C2: regime-specific base override — applied before scale so profile×fng still work on top
@@ -257,6 +283,9 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
         _loss_branch = True
     elif context.pnl_pct < min_profit_pct:
         return ProfitRealizationDecision()
+
+    partial_min_profit_mult = max(1.0, partial_min_profit_mult)
+    partial_min_pnl_pct = max(min_profit_pct, min_profit_pct * partial_min_profit_mult)
 
     if not context.regime_mode:
         print(f"[PRS] {context.symbol}: regime_mode=None — using neutral scale (trade_type={trade_type}, profile={context.profile_label})")
@@ -369,6 +398,9 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
             LAST_DECISION_KEY: {
                 "action": "close",
                 "reason": "prs_peak_protection",
+                "close_source": "lifecycle",
+                "close_state": "closed",
+                "close_intent": "prs_peak_protection",
                 "close_pct": 1.0,
                 "detail": _pp_detail,
                 "diagnostics": _pp_diagnostics,
@@ -411,6 +443,9 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
                 LAST_DECISION_KEY: {
                     "action": "close",
                     "reason": "prs_loss_momentum_exit",
+                    "close_source": "lifecycle",
+                    "close_state": "closed",
+                    "close_intent": "prs_loss_momentum_exit",
                     "close_pct": 1.0,
                     "detail": _loss_detail,
                     "diagnostics": _loss_diag,
@@ -477,6 +512,35 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
     if not should_partial and not should_full:
         return ProfitRealizationDecision()
 
+    # Low-edge partial deferral: avoid trimming winners too early when profit is
+    # still near the minimum threshold and there is no strong protective signal.
+    if should_partial and not should_full:
+        protective_signal = bool(
+            momentum_low
+            or sr_partial_trigger
+            or extension_cap_hit
+            or giveback_pct >= drawback_pct
+        )
+        if float(context.pnl_pct or 0.0) < partial_min_pnl_pct and not protective_signal:
+            _defer_detail = (
+                f"{trade_type.upper()} partial deferred: pnl={context.pnl_pct*100:.2f}% "
+                f"< min_partial={partial_min_pnl_pct*100:.2f}% without protective signal"
+            )
+            _defer_diag = (
+                f"partial_defer_low_pnl: pnl_pct={context.pnl_pct*100:.2f}%; "
+                f"min_partial_pct={partial_min_pnl_pct*100:.2f}%; "
+                f"momentum_low={momentum_low}; sr_partial_trigger={sr_partial_trigger}; "
+                f"extension_cap_hit={extension_cap_hit}; giveback_pct={giveback_pct*100:.2f}%; "
+                f"drawback_pct={drawback_pct*100:.2f}%"
+            )
+            return ProfitRealizationDecision(
+                should_close=False,
+                action="hold",
+                reason="profit_realization_partial_deferred_low_pnl",
+                detail=_defer_detail,
+                diagnostics=_defer_diag,
+            )
+
     close_pct = 1.0 if should_full else max(0.10, min(1.0, partial_close_pct))
     diagnostics = (
         f"held_min={held_min}; partial_min={partial_minutes:.1f}; full_min={full_minutes:.1f}; "
@@ -491,6 +555,9 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
         LAST_DECISION_KEY: {
             "action": "close",
             "reason": reason,
+            "close_source": "lifecycle",
+            "close_state": "partial_closed" if close_pct < 1.0 else "closed",
+            "close_intent": reason,
             "close_pct": round(close_pct, 4),
             "detail": detail,
             "diagnostics": diagnostics,

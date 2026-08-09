@@ -3,7 +3,7 @@ title: "Calibración de Datos — Inventario, Calidad, Linaje y Contratos Analí
 type: canonical-memory
 tags: ["data", "data-quality", "lineage", "historical", "mimic", "peaks", "backtest", "research", "range-scalp"]
 created_at: 2026-07-23
-updated_at: 2026-07-24
+updated_at: 2026-08-08
 status: active
 ---
 
@@ -16,6 +16,20 @@ Este documento es la referencia única de datos para análisis, calibración, en
 - La arquitectura y responsabilidades del pipeline de calibración de entrada viven en la apertura de `canonical/calibracion_entradas-a20ab8-v3.md`.
 - Este documento (`calibrar_datos.md`) no redefine flujo de módulos; solo define autoridad de datos, contratos de features, linaje y criterios de promoción.
 - Si hay conflicto entre flujo operativo y evidencia de datos, se conserva la separación: `calibracion_entradas` decide operación, `calibrar_datos` decide validez analítica.
+
+## 0.1 Actualización s129 — contrato de forensia de ganancia ahorcada
+
+- Artefacto operativo: `tmp_early_close_strangle_analysis_today.json`.
+- El artefacto debe incluir, además de `items`, dos agregados compactos obligatorios:
+	- `by_quadrant`: resumen por `trade_type:side` normalizado (`spot|futures` × `LONG|SHORT`).
+	- `by_reason_compact`: resumen por `close_reason`.
+- Métricas mínimas por agregado:
+	- `n`, `strangled`, `realized`, `missed60`, `adverse60`, `missed_to_realized`.
+- Uso permitido:
+	- comparar impacto de cambios de lifecycle (PRS/SSO/UG) por cuadrante y razón;
+	- gate de promoción/reversión de ajustes anti-estrangulación.
+- Prohibición:
+	- no usar `extra60` como sustituto de PnL real de producción; es señal de oportunidad post-cierre, no outcome ejecutado.
 
 ## 1. Principios no negociables
 

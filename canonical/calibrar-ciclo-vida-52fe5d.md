@@ -3,7 +3,7 @@ title: "Calibración del ciclo de vida de una operación"
 type: canonical-memory
 tags: ["lifecycle", "exit_pipeline", "SSO", "PRS", "UG", "peak_capture", "trailing", "breakeven", "spot", "futures", "profit_preservation", "loss_control", "drawdown_monitor", "erosion_detection"]
 created_at: 2026-07-23
-updated_at: 2026-08-03 (s120b)
+updated_at: 2026-08-08 (s129)
 source_file: "C:\\Users\\raul8\\.windsurf\\plans\\calibrar-ciclo-vida-52fe5d.md"
 ---
 
@@ -16,6 +16,101 @@ Documento vivo que consolida el diseño actual del ciclo de vida de una posició
 **Fase:** calibración del ciclo de vida de posiciones abiertas.
 **Objetivo:** documentar el pipeline actual de salida, diagnosticar por qué las últimas 48h generaron pérdidas grandes / ganancias mínimas, y proponer ajustes canónicos a los módulos de exit (SSO, PRS, UG, PredExit, trailing, breakeven, hard SL/TP) sin romper la arquitectura existente.
 **Alcance:** SPOT y FUTURES, con paridad de criterios salvo que la mecánica de mercado justifique una diferencia documentada.
+
+## Actualización s129 — mitigación bidireccional de ahorcamiento de ganadores (2026-08-08)
+
+### Objetivo
+
+Reducir cierres prematuros de ganancia sin perder control de regresión, manteniendo simetría LONG/SHORT para SPOT y FUTURES.
+
+### Cambios aplicados
+
+- `profit_realization_supervisor.py::_sr_resistance_acceleration`
+  - Pasa de sesgo LONG-only a lógica bidireccional LONG/SHORT en `RANGE_SCALP`.
+  - SHORT usa zona de soporte + señales de hold/continuidad de soporte como espejo de LONG en resistencia.
+  - Si falta `sr_zone_position`, el acelerador no se activa (evita falsos positivos).
+- `unified_governance_supervisor.py` (arbitraje `SSO partial + PRS close`)
+  - Nuevo guard de follow-through: bloquea escalación a full cuando señal y velocidad todavía favorecen la posición.
+  - Nuevo cap configurable para cierre parcial combinado: `ug_partial_to_full_cap_pct`.
+  - Conserva escalación a full cuando hay riesgo de regresión (señal opuesta fuerte o velocidad adversa).
+- Forensia operativa
+  - `tmp_early_close_strangle_analysis_today.py` ahora publica agregados `by_quadrant` y `by_reason_compact` en el JSON para comparar eficacia por lado/mercado y por motivo.
+
+### Validación
+
+- Tests verdes:
+  - `tests/test_profit_realization_supervisor.py` (nuevo caso SHORT simétrico incluido).
+  - `tests/test_unified_governance_profit_arbitration.py` (nuevo).
+- Resultado: `8 passed` en suite focalizada.
+
+### Rollback inmediato
+
+```json
+PATCH /config/kelly {
+  "ug_allow_partial_to_full_escalation": false,
+  "ug_partial_to_full_cap_pct": 1.0
+}
+```
+
+Rollback de código: revertir los cambios de `profit_realization_supervisor.py` y `unified_governance_supervisor.py` introducidos en s129.
+
+### Evidencia mínima para promoción sostenida
+
+- Ventana 24h/96h con `strangled_count` decreciente.
+- `by_quadrant[*].missed_to_realized` no debe subir en el cuadrante dominante de ejecución.
+- No degradar `realized` total ni aumentar `adverse60` agregado frente al baseline previo.
+
+## Actualización s121 — Follow inteligente UG activo en todos los modos + evidencia shadow-readiness (2026-08-06)
+
+### Objetivo
+
+Eliminar cierres tempranos de ganancia en los casos donde el rompimiento sigue vivo, sin abrir la puerta a regresiones grandes cuando el impulso se gira en contra.
+
+### Cambios aplicados
+
+- `unified_governance_supervisor.py` incorpora un filtro centralizado (all-modes) que intercepta cierres full de ganancia candidatos (`sso_target_contribution`, `sso_capital_rotation`, `sso_slow_crawl`, `profit_realization_supervisor_full`) y decide entre:
+  - **deferir cierre** cuando la señal favorece la posición y la velocidad PnL 1h sigue positiva;
+  - **mantener cierre** cuando hay riesgo de regresión (señal opuesta fuerte o velocidad adversa).
+- El mecanismo corre en **ejecución real** (`ug_breakout_follow_mode=active`), no solo en shadow.
+- Se conservan evidencias para calibración en `/metrics/shadow-readiness` con una tarjeta dedicada (`ug_breakout_follow`) para comparar defer vs close ejecutado y cuantificar riesgo de regresión.
+- `sso_target_range_scalp_guard_mode` pasa a `active` por defecto para mantener consistencia con la instrucción de ejecución real.
+
+### Parámetros nuevos (hot-config)
+
+```
+ug_breakout_follow_enabled: true
+ug_breakout_follow_mode: active          # active|shadow|disabled
+ug_breakout_follow_min_hold_minutes: 45
+ug_breakout_follow_max_hold_minutes: 240
+ug_breakout_follow_min_notional_usdt: 700
+ug_breakout_follow_min_pnl_usdt: 2.0
+ug_breakout_follow_max_pnl_pct: 0.80
+ug_breakout_follow_min_signal_strength: 0.58
+ug_breakout_follow_min_velocity_pct_h: 0.08
+ug_breakout_follow_cut_signal_strength: 0.62
+ug_breakout_follow_cut_velocity_pct_h: 0.12
+```
+
+### Rollback inmediato
+
+```json
+PATCH /config/kelly {
+  "ug_breakout_follow_mode": "shadow"
+}
+```
+
+Rollback duro:
+
+```json
+PATCH /config/kelly {
+  "ug_breakout_follow_enabled": false
+}
+```
+
+### Evidencia operativa mínima esperada
+
+- `evaluated >= 20` y `would_defer >= 5` antes de recalibrar umbrales.
+- Revisar split por `reason` y `regression_risk` para evitar sobre-extender en mercados de reversión rápida.
 
 ## Actualización s120/s120b — Intelligent Drawdown Monitor + Profit Erosion + Anti-estrangulación PRS (2026-08-03)
 
@@ -33,6 +128,10 @@ Análisis cuantitativo de los últimos 14-30 días de producción reveló:
 
 Nuevo subsistema dentro de `position_telemetry_watcher.py` que monitorea TODAS las posiciones a 1s usando el mismo ciclo de telemetry existente (zero API extra).
 
+**Aclaración de responsabilidad:** esta capa no es "loss-only". Es una capa de vida activa y protección de capital que debe ver tanto pérdidas como ganancias. Su función es detectar pérdida acelerada para cortar/tighten y detectar ganancia que se erosiona para protegerla, pero nunca abrir nuevas posiciones ni arbitrar toda la cadena de exits por encima de SSO/PRS/UG.
+
+**Coexistencia con SSO/PRS/UG:** la misma capa de 1s también debe alimentar y evaluar, sobre snapshots vivos, las señales de `smart_scale_out`, `profit_realization_supervisor` y `unified_governance_supervisor` para que parciales, timing de toma de ganancia y arbitraje final reaccionen sin esperar al siguiente ciclo de 5m. La diferencia con el ciclo principal no es qué observa, sino quién tiene la última palabra: el 1s observa y propone; SSO/PRS/UG siguen consolidando la decisión final.
+
 **Arquitectura:**
 ```
 1s tick → update buffer circular (60 entries) → analyze trend → decide action
@@ -49,9 +148,15 @@ Nuevo subsistema dentro de `position_telemetry_watcher.py` que monitorea TODAS l
 
 **Case A — Posición en pérdida (unrealized < threshold_usdt):**
 - Trend analysis: velocity ($/s), acceleration, recovery signal, support proximity
-- Decision: `CUT` (3 confirmaciones consecutivas requeridas) → emergency SL a 0.1% del precio
-- Decision: `TIGHTEN_SL` → 5% tighter por segundo (gradual, no abrupto)
+- Decision: `CUT` solo cuando falla la ventana de rescate o cuando hay shock adverso claro (ruta rápida)
+- Decision: `TIGHTEN_SL` gradual (default 5%; en fase recoverable se usa tighten más suave)
 - Decision: `HOLD` → recovery detectada o near support, no actúa
+
+**Ventana de rescate loss-side (implementada):**
+- Al cruzar umbral de drawdown (`-5`/`-10` según trayectoria), el 1s no degolla por marcador: abre estado `monitoring` y evalúa si hay rebote real.
+- Si aparece recuperación (recovery signal / recent velocity positiva) y mejora suficiente, pasa a `recoverable` y difiere el `CUT`.
+- Si ese rebote se revierte con deterioro acelerado y giveback suficiente, pasa a `failed_recovery` y habilita de nuevo el corte duro.
+- Si detecta shock adverso (recent velocity muy negativa + aceleración negativa, sin señal de recovery), puede saltar directo al camino de corte rápido.
 
 **Case B — Posición en profit pero erosionándose (s120b):**
 - Solo se activa si peak fue >= $5 (filtra ruido)
@@ -59,6 +164,10 @@ Nuevo subsistema dentro de `position_telemetry_watcher.py` que monitorea TODAS l
 - `PROTECT_PROFIT`: lock 30% del peak (cuando velocidad negativa + acelerando)
 - `PROTECT_PROFIT_GENTLE`: lock 15% del peak (cuando velocidad negativa pero decelerando)
 - `HOLD`: si hay recovery, near resistance/support, o velocity neutral
+
+**Caso de ganancia:** esta capa sí debe monitorizar ganancias en tiempo real para capturar el mejor tramo posible, pero lo hace de forma conservadora: protege fracción del peak con SL más ajustado, no fuerza una salida total salvo que la pérdida estructural ya esté confirmada por la rama de drawdown.
+
+**SSO/PRS/UG en 1s:** sobre el mismo snapshot, el 1s debe poder recalcular candidatos de SSO/PRS/UG para adelantar parciales, proteger profit y preparar la decisión de arbitraje. Eso no significa que cierre por sí mismo la posición final en todos los casos; significa que la capa de 1s no es ajena a la lógica de salida ganadora.
 
 **Garantías anti-estrangulación (Case B):**
 1. **NUNCA cierra** — solo mueve SL para proteger una fracción del peak
@@ -136,6 +245,8 @@ PATCH /config/kelly {
 
 - El monitor evalúa TODAS las posiciones (profit y loss) porque los datos muestran que el mayor daño viene de posiciones que **estaban en profit y se revirtieron** ($493 de 21 trades con avg peak +$18), no de posiciones que entraron directamente en pérdida.
 - La evaluación de erosión NUNCA cierra — solo protege una fracción del peak. Esto evita el "estrangulamiento" que fue el problema original (system cutting winners too early).
+- La capa de 1s debe ser profit-aware: su trabajo es capturar y preservar ganancias tempranamente, no dejar que el runner regrese al stop por falta de monitoreo. La restricción es sobre la forma de actuar, no sobre el tipo de posición que observa.
+- SSO/PRS/UG conviven con esta telemetría 1s: la capa observa, pre-computa y protege; el trade cycle 5m sigue siendo el punto donde se consolida la acción final cuando hay conflicto entre advisories.
 - Se usa un buffer circular de 60s en vez de un modelo ML porque: (a) zero latencia adicional, (b) interpretable, (c) rollback trivial vía config, (d) no requiere training data.
 - El threshold de CUT requiere 3 decisiones consecutivas (3 segundos) — evita flip-flopping por un solo tick adverso.
 - Peak protection relajada con momentum porque los datos muestran correlación directa: posiciones cortadas por `prs_peak_protection` con momentum > 70 tenían avg peak $71 pero realized only $7.89 — el peak no era el techo real.
@@ -327,6 +438,32 @@ El objeto de posición de Binance (`/fapi/v2/positionRisk`) no tiene campos `sto
 - Medir en 7-14 días si el patrón `RECONCILE_` + cierre en <10s desaparece por completo.
 
 ---
+
+## AIC-20260807-01 — telemetría FUTURES y cap USD real
+
+Esta sección es la rama B, **Proteger después de abrir**, de la primera ejecución del protocolo canónico **AIC — Análisis Inteligente de Cierres**. La rama A está documentada en `calibracion_entradas-a20ab8-v3.md`.
+
+### Incidente y causas raíz
+
+- Nueve cierres auditados cruzaron -$10 y seis cruzaron -$18, pero 0/9 tenían snapshots FUTURES en `position_telemetry`.
+- `position_telemetry_watcher.py` buscaba un campo de cantidad incompatible con el snapshot FUTURES real (`qty`), por lo que el hilo seguía vivo mientras omitía silenciosamente esas posiciones.
+- El PnL FUTURES calculado por telemetry volvía a multiplicarse por leverage, aunque `qty` ya expresa exposición contractual.
+- La velocidad se medía en unidades crudas de precio, haciendo que el mismo umbral significara cosas distintas por símbolo.
+- El loop independiente de 2s comprobaba SL/TP de FUTURES, pero no aplicaba el cap nominal `max_loss_usd_per_trade`.
+
+### Correcciones
+
+- Telemetry lee `qty`, usa fallback estable `SYMBOL_SIDE`, calcula PnL contractual sin multiplicar leverage y normaliza velocidad por precio.
+- `hard_risk_monitor.py` cierra FUTURES al alcanzar `max_loss_usd_per_trade` con `close_reason=max_loss_usd_stop`.
+- La capa de 1s decide rebote/drawdown; la capa independiente de 2s es el backstop duro en USD.
+
+### Validación y límites
+
+- Regresiones focales en `tests/test_position_telemetry_profit_guard.py` y `tests/test_futures_hard_sl.py`: 17 passed.
+- Replay no-lookahead: `Dev/benchmarks/incident_preopen_1h_replay_20260807.json`.
+- No se adopta un corte ciego a -$10: HOMEUSDT cruzó ese nivel y terminó +$7.81. El cap duro permanece en -$18 mientras el watcher decide antes cuando hay deterioro confirmado.
+- Desplegado el 2026-08-07: `system_state=RUNNING`, hard-risk y telemetry sin errores, y 21 snapshots recientes para 3 posiciones FUTURES después del restart.
+- Pendiente fuera de muestra: observar ejecuciones reales de `max_loss_usd_stop` y comparar excursión adversa/cierre durante 5-7 días.
 
 ## Actualización s107 — Hard SL/TP (Binance) vs System SL/TP (software): el margen de seguridad colapsaba en el primer trailing, y no había monitoreo rápido para futuros (2026-08-01)
 

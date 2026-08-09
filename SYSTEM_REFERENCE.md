@@ -1,7 +1,50 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: ago 1 2026 | s109: AVAXUSDT — precio obsoleto en validación, dirección ciega en `ready`, capital todo-o-nada
+> Última actualización: ago 8 2026 | s129: mitigación bidireccional de ahorcamiento de ganadores (PRS/UG) + forensia por cuadrante
+
+---
+
+## 🟢 Estado del Sistema — ago 8 2026 — s129: mitigación bidireccional de ganancia ahorcada (PRS/UG) + observabilidad por cuadrante
+
+### Problema
+
+El análisis de cierres ganadores mostró episodios de truncamiento temprano de profit en el branch de salidas (principalmente en combinaciones PRS partial + arbitraje UG), con riesgo de escalar a cierre total cuando el follow-through aún favorecía la posición. Además, faltaba un resumen operativo compacto por cuadrante (`spot/futures` × `long/short`) para comparar la salud del cambio en cada corrida.
+
+### Causa
+
+1. `profit_realization_supervisor.py::_sr_resistance_acceleration` aceleraba explícitamente para `LONG` en `RANGE_SCALP` y no tenía espejo equivalente para `SHORT`.
+2. `unified_governance_supervisor.py` podía escalar `SSO partial + PRS close` de forma agresiva cuando el switch de escalación estaba activo, sin guard central de continuidad (señal/velocidad) para proteger runners.
+3. La salida del forense diario no emitía agregados compactos por cuadrante y razón para seguimiento rápido de rollout.
+
+### Fix
+
+- `profit_realization_supervisor.py`:
+  - SR acceleration ahora es bidireccional (`LONG`/`SHORT`) en `RANGE_SCALP`.
+  - Nuevo control de ausencia de `sr_zone_position` para evitar activaciones espurias.
+- `unified_governance_supervisor.py`:
+  - En `SSO partial + PRS close`, se añadió guard de follow-through (señal a favor + velocidad) para bloquear escalación a full cuando aún hay continuidad.
+  - Se añadió cap configurable para cierres parciales combinados (`ug_partial_to_full_cap_pct`).
+- `tmp_early_close_strangle_analysis_today.py`:
+  - Nuevas secciones `by_quadrant` y `by_reason_compact` en el JSON de salida, con `missed_to_realized` y conteos de `strangled`.
+
+### Validación
+
+- Tests focalizados: `8 passed`.
+  - `tests/test_profit_realization_supervisor.py` (incluye caso SHORT simétrico).
+  - `tests/test_unified_governance_profit_arbitration.py` (nuevo, arbitraje partial/full con guard de follow-through).
+- Diagnósticos estáticos: sin errores en archivos modificados.
+
+### Rollback
+
+- PRS simétrico: revertir cambios en `_sr_resistance_acceleration`.
+- UG guard/cap:
+  - `ug_allow_partial_to_full_escalation=false` (desactiva escalación).
+  - `ug_partial_to_full_cap_pct=1.0` (sin cap efectivo).
+
+### Nota operativa
+
+Monitorear 24h/96h con `tmp_early_close_strangle_analysis_today.json` y comparar `by_quadrant` y `by_reason_compact` para confirmar reducción de `strangled_count` sin degradar `realized` ni aumentar `adverse60`.
 
 ---
 
