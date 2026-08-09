@@ -19,6 +19,55 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Any
+import threading
+from collections import deque
+
+
+_rs_sso4_shadow_lock = threading.Lock()
+_rs_sso4_shadow_recent = deque(maxlen=30)
+_rs_sso4_shadow_metrics: Dict[str, Any] = {
+    "mode": "shadow",
+    "evaluated": 0,
+    "would_hold": 0,
+    "active_holds": 0,
+    "shadow_allowed": 0,
+    "executed_closes": 0,
+    "last_at": None,
+}
+
+
+def _record_range_scalp_sso4_shadow_event(event: Dict[str, Any]) -> None:
+    """Track RANGE_SCALP SSO-4 guard behavior for dashboard shadow-readiness."""
+    with _rs_sso4_shadow_lock:
+        _rs_sso4_shadow_metrics["evaluated"] += 1
+        mode = str(event.get("mode") or "shadow").lower()
+        _rs_sso4_shadow_metrics["mode"] = mode
+        if event.get("would_hold"):
+            _rs_sso4_shadow_metrics["would_hold"] += 1
+            if mode == "active":
+                _rs_sso4_shadow_metrics["active_holds"] += 1
+            else:
+                _rs_sso4_shadow_metrics["shadow_allowed"] += 1
+        if event.get("executed_close"):
+            _rs_sso4_shadow_metrics["executed_closes"] += 1
+        _rs_sso4_shadow_metrics["last_at"] = datetime.now(timezone.utc).isoformat()
+        _rs_sso4_shadow_recent.append(dict(event))
+
+
+def get_range_scalp_sso4_shadow_metrics() -> Dict[str, Any]:
+    """Expose RANGE_SCALP SSO-4 guard metrics for observability endpoints."""
+    with _rs_sso4_shadow_lock:
+        return {
+            "name": "range_scalp_sso4_target_guard",
+            "mode": _rs_sso4_shadow_metrics.get("mode", "shadow"),
+            "evaluated": int(_rs_sso4_shadow_metrics.get("evaluated", 0) or 0),
+            "would_hold": int(_rs_sso4_shadow_metrics.get("would_hold", 0) or 0),
+            "active_holds": int(_rs_sso4_shadow_metrics.get("active_holds", 0) or 0),
+            "shadow_allowed": int(_rs_sso4_shadow_metrics.get("shadow_allowed", 0) or 0),
+            "executed_closes": int(_rs_sso4_shadow_metrics.get("executed_closes", 0) or 0),
+            "last_at": _rs_sso4_shadow_metrics.get("last_at"),
+            "recent": list(_rs_sso4_shadow_recent),
+        }
 
 
 @dataclass
@@ -887,6 +936,7 @@ class SmartScaleOut:
         _target_contribution_pct *= self._profile_scale(pos, aggressive=1.10, balanced=1.0, defensive=0.90)
         _target_min_hours *= self._profile_scale(pos, aggressive=1.10, balanced=1.0, defensive=0.90)
         min_contribution = target * _target_contribution_pct
+        _shadow_note = ""
 
         if pos.pnl_usdt < min_contribution:
             return None
@@ -936,11 +986,67 @@ class SmartScaleOut:
             if pos.pnl_usdt < min_contribution * 1.5:
                 return None
 
+        # s121: RANGE_SCALP anti-truncation guard for high-notional winners.
+        # In shadow mode this does not block closes, only reports evidence.
+        if _regime == 'RANGE_SCALP':
+            _guard_mode = str(self._cfg('sso_target_range_scalp_guard_mode', 'shadow') or 'shadow').strip().lower()
+            if _guard_mode not in ('shadow', 'active', 'disabled'):
+                _guard_mode = 'shadow'
+            _notional_min = float(self._cfg('sso_target_range_scalp_guard_notional_min_usdt', 700.0) or 700.0)
+            _min_pnl_pct = float(self._cfg('sso_target_range_scalp_guard_min_pnl_pct', 1.40) or 1.40) / 100.0
+            _min_velocity = float(self._cfg('sso_target_range_scalp_guard_min_velocity_pct_h', 0.08) or 0.08) / 100.0
+            _min_vol_spike = float(self._cfg('sso_target_range_scalp_guard_min_vol_spike', 1.40) or 1.40)
+            _min_abs_gain = float(self._cfg('sso_target_range_scalp_guard_min_abs_gain_usdt', 9.0) or 9.0)
+
+            _notional = float(pos.position_size_usdt or 0.0)
+            _pnl_pct = float(pos.pnl_pct or 0.0)
+            _pnl_usdt = float(pos.pnl_usdt or 0.0)
+            _vel = float(pos.pnl_velocity_1h or 0.0)
+            _vol = float(pos.vol_spike or 0.0)
+            _trend = str(pos.trend_4h or '').strip().upper()
+            _momentum_alive = (_vel >= _min_velocity) or (_vol >= _min_vol_spike) or (_trend in ('UP', 'BULLISH'))
+            _would_hold = (
+                _notional >= _notional_min
+                and _momentum_alive
+                and (_pnl_pct < _min_pnl_pct or _pnl_usdt < _min_abs_gain)
+            )
+
+            _record_range_scalp_sso4_shadow_event({
+                'ts': datetime.now(timezone.utc).isoformat(),
+                'mode': _guard_mode,
+                'symbol': pos.symbol,
+                'profile': _profile,
+                'reason': 'sso_target_contribution',
+                'would_hold': _would_hold,
+                'executed_close': (not _would_hold) or (_guard_mode == 'shadow'),
+                'position_size_usdt': round(_notional, 2),
+                'pnl_usdt': round(_pnl_usdt, 4),
+                'pnl_pct': round(_pnl_pct * 100.0, 4),
+                'velocity_pct_h': round(_vel * 100.0, 4),
+                'vol_spike': round(_vol, 4),
+                'trend_4h': _trend,
+                'thresholds': {
+                    'notional_min_usdt': _notional_min,
+                    'min_pnl_pct': round(_min_pnl_pct * 100.0, 4),
+                    'min_abs_gain_usdt': _min_abs_gain,
+                    'min_velocity_pct_h': round(_min_velocity * 100.0, 4),
+                    'min_vol_spike': _min_vol_spike,
+                },
+            })
+
+            if _would_hold and _guard_mode == 'active':
+                return None
+            if _would_hold and _guard_mode == 'shadow':
+                _shadow_note = (
+                    f" [shadow_hold candidate: notional=${_notional:.0f}, pnl={_pnl_pct*100:.2f}%/${_pnl_usdt:.2f}, "
+                    f"vel={_vel*100:.3f}%/h, vol={_vol:.2f}x]"
+                )
+
         return SSOAction(
             should_close=True,
             close_pct=1.0,
             reason="sso_target_contribution",
-            detail=f"${pos.pnl_usdt:.2f} toward target (today=${pos.today_realized_pnl:.2f}/${target:.0f})",
+            detail=f"${pos.pnl_usdt:.2f} toward target (today=${pos.today_realized_pnl:.2f}/${target:.0f}){_shadow_note}",
             trigger="SSO-4",
             priority=4,
         )

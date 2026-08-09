@@ -196,6 +196,21 @@ class TestPositionManager:
         assert len(all_positions) == 2
         assert "BTCUSDT" in all_positions
         assert "ETHUSDT" in all_positions
+
+    def test_set_sl_by_usd_loss_handles_multiple_entries(self):
+        """Test setting a stop loss from a maximum USD loss for a multi-entry position."""
+        pm = PositionManager()
+        pm.add_position(Position("KAITOUSDT", "BUY", 10.0, 1.00, "2024-01-01T00:00:00Z"))
+        pm.add_position(Position("KAITOUSDT", "BUY", 5.0, 1.20, "2024-01-01T00:00:00Z"))
+
+        result = pm.set_stop_loss_by_usd_loss("KAITOUSDT", 5.0)
+
+        assert result["ok"] is True
+        assert result["target_loss_usd"] == 5.0
+        assert result["stop_loss_price"] == pytest.approx(0.7333333333)
+        entries = pm.get_position("KAITOUSDT")
+        assert len(entries) == 2
+        assert all(entry.stop_loss == pytest.approx(0.7333333333) for entry in entries)
     
     def test_get_position_summary(self):
         """Test getting position summary."""

@@ -63,11 +63,11 @@ class Settings(BaseSettings):
     # Kelly dynamic position sizing
     kelly_enabled: bool = Field(default=True)
     kelly_base_usdt: float = Field(default=150.0)  # concentrated: base digna para capital $5,100
-    kelly_max_usdt: float = Field(default=2500.0)   # aggressive calibration: use available capital per position
+    kelly_max_usdt: float = Field(default=1000.0)   # SR winner (2026-08-07): cap estable con mejor PnL en ventana objetivo
     kelly_max_pct_cap: float = Field(default=0.30)       # concentrated: ~$1,530/posición con $5,100
     kelly_max_pct_liquid: float = Field(default=0.90)  # aggressive calibration: up to 90% of liquid in extreme conviction
     kelly_min_usdt: float = Field(default=0.0)  # min absolute ticket per trade; 0 disables floor
-    kelly_dynamic_base_pct: float = Field(default=0.22)  # aggressive calibration: base grows faster with available capital
+    kelly_dynamic_base_pct: float = Field(default=0.18)  # SR winner (2026-08-07): base conservadora con mejor balance PnL/riesgo
     # Bear market mode
     bear_market_mode_enabled: bool = Field(default=True)
     bear_market_btc_7d_threshold: float = Field(default=-10.0)  # % change
@@ -234,6 +234,12 @@ class Settings(BaseSettings):
     sso_multilevel_l3_close_pct: float = Field(default=0.25)
     sso_target_contribution_enabled: bool = Field(default=True)
     sso_target_contribution_pct: float = Field(default=0.15)
+    sso_target_range_scalp_guard_mode: str = Field(default="active")  # shadow|active|disabled
+    sso_target_range_scalp_guard_notional_min_usdt: float = Field(default=700.0)
+    sso_target_range_scalp_guard_min_pnl_pct: float = Field(default=1.40)
+    sso_target_range_scalp_guard_min_abs_gain_usdt: float = Field(default=9.0)
+    sso_target_range_scalp_guard_min_velocity_pct_h: float = Field(default=0.08)
+    sso_target_range_scalp_guard_min_vol_spike: float = Field(default=1.40)
     sso_target_daily_usd: float = Field(default=40.0)
     sso_target_min_hours: float = Field(default=1.0)
     sso_reentry_min_strength_diff: float = Field(default=0.3)
@@ -276,6 +282,7 @@ class Settings(BaseSettings):
     profit_realization_spot_drawback_pct: float = Field(default=0.0080)  # jul07: 0.004→0.008 (wolf-hunter: micro-rebote no cierra)
     profit_realization_spot_partial_close_pct: float = Field(default=0.60)
     profit_realization_spot_max_extensions: int = Field(default=2)
+    profit_realization_spot_partial_min_profit_multiplier: float = Field(default=2.5)
     profit_realization_futures_enabled: bool = Field(default=True)
     profit_realization_futures_min_profit_pct: float = Field(default=0.0030)
     profit_realization_futures_partial_minutes: float = Field(default=30.0)  # concentrated: menos estrangulamiento
@@ -283,6 +290,7 @@ class Settings(BaseSettings):
     profit_realization_futures_drawback_pct: float = Field(default=0.0035)
     profit_realization_futures_partial_close_pct: float = Field(default=0.60)
     profit_realization_futures_max_extensions: int = Field(default=1)
+    profit_realization_futures_partial_min_profit_multiplier: float = Field(default=2.5)
     # SR resistance-aware exit acceleration (for long positions near resistance zones)
     profit_realization_sr_accel_enabled: bool = Field(default=True)
     profit_realization_sr_accel_partial_multiplier: float = Field(default=0.80)
@@ -292,6 +300,17 @@ class Settings(BaseSettings):
     # Unified governance supervisor (profit + loss)
     unified_governance_enabled: bool = Field(default=True)
     unified_governance_profit_enabled: bool = Field(default=True)
+    ug_breakout_follow_enabled: bool = Field(default=True)
+    ug_breakout_follow_mode: str = Field(default="active")  # active|shadow|disabled
+    ug_breakout_follow_min_hold_minutes: float = Field(default=45.0)
+    ug_breakout_follow_max_hold_minutes: float = Field(default=240.0)
+    ug_breakout_follow_min_notional_usdt: float = Field(default=700.0)
+    ug_breakout_follow_min_pnl_usdt: float = Field(default=2.0)
+    ug_breakout_follow_max_pnl_pct: float = Field(default=0.80)
+    ug_breakout_follow_min_signal_strength: float = Field(default=0.58)
+    ug_breakout_follow_min_velocity_pct_h: float = Field(default=0.08)
+    ug_breakout_follow_cut_signal_strength: float = Field(default=0.62)
+    ug_breakout_follow_cut_velocity_pct_h: float = Field(default=0.12)
     unified_governance_loss_enabled: bool = Field(default=True)
     unified_governance_loss_min_age_profile_a: float = Field(default=90.0)  # jul07: 30→90 (wolf-hunter: SL lógico primero)
     unified_governance_loss_min_age_profile_b: float = Field(default=120.0)  # jul07: 60→120
@@ -318,7 +337,8 @@ class Settings(BaseSettings):
     ug_fast_loss_cut_enabled: bool = Field(default=False)
     ug_peak_drawdown_cut_enabled: bool = Field(default=False)
     ug_soft_supervisor_loss_escalation_enabled: bool = Field(default=False)
-    ug_loss_policy_mode: str = Field(default="shadow")
+    ug_loss_policy_mode: str = Field(default="active_canary")  # shadow|active_canary|active|disabled
+    ug_loss_policy_canary_fraction: float = Field(default=0.25)
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True)
     wr_screener_consecutive_sl_block: int = Field(default=5)  # block after N consecutive SL
@@ -404,7 +424,7 @@ class Settings(BaseSettings):
     enable_prediction_based_closing: bool = Field(default=True)
 
     # Stop-Loss / Take-Profit configuration
-    stop_loss_pct: float = Field(default=3.36)       # jun29: 1.03â†’3.36 (run_0677)
+    stop_loss_pct: float = Field(default=2.5)       # SR winner (2026-08-07): mejor captura neta en simulaciones de referencia
     take_profit_pct: float = Field(default=4.14)   # jun29: 5.83â†’4.14 (run_0677)
     trailing_stop_enabled: bool = Field(default=True)
     trailing_stop_activation_pct: float = Field(default=2.0)  # activate trailing after +2%
@@ -437,7 +457,7 @@ class Settings(BaseSettings):
     rebalance_skip_if_bullish_signal: bool = Field(default=True)  # require technical negative signal before rebalancing
     rebalance_rsi_overbought: float = Field(default=60.0)  # RSI1h threshold â€” rebalance only if RSI > this OR EMA9 descending
     # Dynamic max positions by regime (replaces single MAX_POSITIONS when regime is known)
-    max_positions_spot_bull: int = Field(default=12)    # aggressive SR capture: more simultaneous entries
+    max_positions_spot_bull: int = Field(default=8)    # SR winner (2026-08-07): evita sobreapertura y mejora retorno neto
     max_positions_range_scalp: int = Field(default=8)     # aggressive SR capture: more range setups
     max_positions_preservation: int = Field(default=4)    # allow limited preservation entries when SR bounce appears
     max_positions_futures_short: int = Field(default=8)     # aggressive SR breakdown capture
@@ -540,8 +560,8 @@ class Settings(BaseSettings):
     cycle_futures_short: int = Field(default=4)     # H-FIX: 6â†’4 min (trailing mÃ¡s reactivo a movimientos rÃ¡pidos)
 
     # Signal quality filter
-    min_signal_strength: float = Field(default=0.40)  # aggressive calibration: hard floor 0.40
-    min_success_probability: float = Field(default=0.50)  # aggressive calibration: lower probability threshold
+    min_signal_strength: float = Field(default=0.45)  # SR winner (2026-08-07): filtro mínimo validado por sweep
+    min_success_probability: float = Field(default=0.45)  # SR winner (2026-08-07): umbral ganador en ventana objetivo
     # P1.3: Signal cache TTL dinÃ¡mico â€” reduce de 600s fijo a 1 ciclo por rÃ©gimen
     signal_cache_ttl_seconds: int = Field(default=240)  # default 4 min (1 ciclo FUTURES_SHORT)
 
@@ -728,6 +748,16 @@ class Settings(BaseSettings):
     # library/websockets incompatibility). Re-enabled by default.
     binance_event_stream_spot_enabled: bool = Field(default=True)
     directional_policy_mode: str = Field(default="shadow")
+    # Funding fee guard rollout (s126): promoted from shadow to active canary.
+    funding_fee_guard_mode: str = Field(default="active")  # shadow | active | enforced
+    funding_fee_guard_canary_fraction: float = Field(default=0.35)
+    funding_fee_guard_fail_closed: bool = Field(default=True)
+    funding_guard_warning_fee_usdt: float = Field(default=0.5)
+    funding_guard_block_fee_usdt: float = Field(default=1.25)
+    funding_guard_warning_rate_pct: float = Field(default=0.15)
+    funding_guard_block_rate_pct: float = Field(default=0.35)
+    direction_volume_gate_rollout: str = Field(default="active_canary")  # active_canary | respect_regime_config
+    direction_volume_gate_canary_fraction: float = Field(default=0.35)
     range_reversion_predictor_mode: str = Field(default="shadow")
     # s120 phase controls: keep shadow-first to avoid choking execution.
     sr_attempt_sequence_mode: str = Field(default="shadow")
@@ -751,6 +781,10 @@ class Settings(BaseSettings):
     range_scalp_short_resistance_threshold: float = Field(default=0.65)
     range_scalp_short_max_per_cycle: int = Field(default=2)
     range_scalp_short_execution_enabled: bool = Field(default=True)
+    opportunity_shadow_mode: str = Field(default="active_canary")  # shadow|active_canary|active|disabled
+    opportunity_shadow_canary_fraction: float = Field(default=0.20)
+    opportunity_shadow_max_promotions_per_side: int = Field(default=1)
+    opportunity_shadow_rank_slack: int = Field(default=2)
     range_scalp_short_min_expected_pnl: float = Field(default=0.0)
     range_scalp_short_min_probability: float = Field(default=0.50)
     range_scalp_short_usdt_per_trade: float = Field(default=1000.0)
@@ -772,6 +806,19 @@ class Settings(BaseSettings):
     # level its own thesis depends on. See run_trades.py::_staged_sr_thesis_check.
     range_scalp_sr_thesis_gate_enabled: bool = Field(default=True)
     range_scalp_sr_thesis_max_dist_pct: float = Field(default=5.0)
+    range_scalp_short_near_support_gate_enabled: bool = Field(default=True)
+    range_scalp_short_near_support_max_dist_pct: float = Field(default=0.5)
+    range_scalp_short_near_support_max_rsi: float = Field(default=50.0)
+    # s127: selective SHORT pre-entry guardrail (canary) for staged fast-path.
+    staged_short_risk_guard_enabled: bool = Field(default=True)
+    staged_short_risk_guard_canary_fraction: float = Field(default=0.35)
+    staged_short_risk_guard_max_resistance_dist_pct: float = Field(default=3.0)
+    staged_short_risk_guard_min_risk_flags: int = Field(default=2)
+    staged_short_risk_guard_volume_anomaly_multiplier: float = Field(default=3.0)
+    # s127: symbol-level adaptive cooldown after futures losses.
+    futures_sl_cooldown_window_hours: float = Field(default=24.0)
+    futures_sl_cooldown_extra_hours_per_loss: float = Field(default=1.0)
+    futures_sl_cooldown_max_hours: float = Field(default=8.0)
     staged_entry_regime_config: Dict[str, Any] = Field(default={
         "SPOT_BULL": {
             "enabled": True,
@@ -794,6 +841,12 @@ class Settings(BaseSettings):
             "direction_required_confirmations": 2,
             "direction_max_adverse_observations": 3,
             "direction_sr_invalidation_pct": 1.5,  # s105: hard SR-proximity-loss terminal threshold
+            "sr_side_guard_mode": "active_canary",
+            "sr_side_guard_canary_fraction": 0.35,
+            "sr_side_guard_max_dist_pct": 2.5,
+            "sr_side_guard_breakout_min_pressure": 0.65,
+            "sr_side_guard_breakout_buffer_pct": 0.15,
+            "sr_side_guard_breakout_max_away_pct": 1.20,
         },
         "RANGE_SCALP": {
             "enabled": True,
@@ -830,10 +883,16 @@ class Settings(BaseSettings):
             "direction_geometry_anchor_enabled": True,
             "direction_min_progress_stop_fraction": 0.05,
             "direction_max_adverse_stop_fraction": 0.6,
-            # s113: VSA-inspired volume corroboration — shadow only (recorded, not
-            # enforced) until validated against real outcomes. See _direction_transition.
-            "direction_volume_gate_enabled": False,
+            # s126: promoted to active in canary rollout (35% deterministic sample).
+            "direction_volume_gate_enabled": True,
+            "direction_volume_gate_canary_fraction": 0.35,
             "direction_volume_anomaly_multiplier": 3.0,
+            "sr_side_guard_mode": "enforced",
+            "sr_side_guard_canary_fraction": 1.0,
+            "sr_side_guard_max_dist_pct": 1.2,
+            "sr_side_guard_breakout_min_pressure": 0.60,
+            "sr_side_guard_breakout_buffer_pct": 0.10,
+            "sr_side_guard_breakout_max_away_pct": 0.90,
         },
         "FUTURES_SHORT": {
             "enabled": True,
@@ -865,6 +924,12 @@ class Settings(BaseSettings):
             "direction_required_confirmations": 2,
             "direction_max_adverse_observations": 2,
             "direction_sr_invalidation_pct": 1.5,  # s105: hard SR-proximity-loss terminal threshold
+            "sr_side_guard_mode": "enforced",
+            "sr_side_guard_canary_fraction": 1.0,
+            "sr_side_guard_max_dist_pct": 1.5,
+            "sr_side_guard_breakout_min_pressure": 0.60,
+            "sr_side_guard_breakout_buffer_pct": 0.10,
+            "sr_side_guard_breakout_max_away_pct": 1.00,
         },
         "PRESERVATION": {
             "enabled": True,
@@ -891,6 +956,12 @@ class Settings(BaseSettings):
             "direction_required_confirmations": 2,
             "direction_max_adverse_observations": 3,
             "direction_sr_invalidation_pct": 1.5,  # s105: hard SR-proximity-loss terminal threshold
+            "sr_side_guard_mode": "active_canary",
+            "sr_side_guard_canary_fraction": 0.35,
+            "sr_side_guard_max_dist_pct": 2.0,
+            "sr_side_guard_breakout_min_pressure": 0.65,
+            "sr_side_guard_breakout_buffer_pct": 0.15,
+            "sr_side_guard_breakout_max_away_pct": 1.10,
         },
     })
 

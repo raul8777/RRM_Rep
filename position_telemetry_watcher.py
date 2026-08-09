@@ -35,6 +35,25 @@ _shadow_metrics: Dict[str, Any] = {
     "evaluations": 0,
     "would_exit": 0,
     "by_symbol": {},
+    "profit_guard_actions": 0,
+    "profit_guard_hard": 0,
+    "profit_guard_soft": 0,
+    "drawdown_actions": 0,
+    "drawdown_cuts": 0,
+    "drawdown_tightens": 0,
+    "drawdown_recoverable_windows": 0,
+    "drawdown_failed_recovery_windows": 0,
+    "drawdown_shock_events": 0,
+    "drawdown_deferred_cuts": 0,
+    "profit_positions_evaluated": 0,
+    "loss_positions_evaluated": 0,
+    "profit_guard_candidates": 0,
+    "downstream_surfaces": [
+        "smart_scale_out",
+        "profit_realization_supervisor",
+        "unified_governance_supervisor",
+    ],
+    "last_summary": {},
     "last_at": None,
 }
 
@@ -47,8 +66,8 @@ def _compute_unrealized(entry: float, qty: float, price: float, side: str, lever
     if entry <= 0 or qty <= 0 or price <= 0:
         return 0.0
     if side.upper() == "LONG":
-        return (price - entry) / entry * qty * price * leverage
-    return (entry - price) / entry * qty * price * leverage
+        return (price - entry) * qty
+    return (entry - price) * qty
 
 
 def _compute_unrealized_pct(entry: float, price: float, side: str) -> float:
@@ -370,6 +389,13 @@ def _persist_futures_profit_guard(
 _drawdown_buffers: Dict[str, List[Dict[str, float]]] = {}  # position_id -> price history
 _drawdown_decisions: Dict[str, Dict[str, Any]] = {}  # position_id -> last decision
 _DRAWDOWN_BUFFER_SIZE = 60  # 60 seconds of data at 1s interval
+_drawdown_cycle_shadow: Dict[str, int] = {
+    "loss_positions": 0,
+    "recoverable_windows": 0,
+    "failed_recovery_windows": 0,
+    "shock_events": 0,
+    "deferred_cuts": 0,
+}
 
 
 def _update_drawdown_buffer(position_id: str, price: float, unrealized_usdt: float) -> List[Dict[str, float]]:
@@ -404,7 +430,8 @@ def _analyze_drawdown_trend(buf: List[Dict[str, float]], side: str) -> Dict[str,
     dt = full[-1]["ts"] - full[0]["ts"]
     if dt < 1.0:
         dt = 1.0
-    price_delta = full[-1]["price"] - full[0]["price"]
+    base_price = full[0]["price"]
+    price_delta = (full[-1]["price"] - base_price) / base_price if base_price > 0 else 0.0
     # For LONG: positive velocity = good, negative = bad
     # For SHORT: negative velocity = good, positive = bad
     if side.upper() == "SHORT":
@@ -418,8 +445,10 @@ def _analyze_drawdown_trend(buf: List[Dict[str, float]], side: str) -> Dict[str,
     if len(first_half) >= 2 and len(second_half) >= 2:
         dt1 = max(1.0, first_half[-1]["ts"] - first_half[0]["ts"])
         dt2 = max(1.0, second_half[-1]["ts"] - second_half[0]["ts"])
-        v1_delta = first_half[-1]["price"] - first_half[0]["price"]
-        v2_delta = second_half[-1]["price"] - second_half[0]["price"]
+        first_base = first_half[0]["price"]
+        second_base = second_half[0]["price"]
+        v1_delta = ((first_half[-1]["price"] - first_base) / first_base) if first_base > 0 else 0.0
+        v2_delta = ((second_half[-1]["price"] - second_base) / second_base) if second_base > 0 else 0.0
         if side.upper() == "SHORT":
             v1_delta, v2_delta = -v1_delta, -v2_delta
         v1 = v1_delta / dt1
@@ -430,7 +459,8 @@ def _analyze_drawdown_trend(buf: List[Dict[str, float]], side: str) -> Dict[str,
 
     # Recovery signal: price in last 10s moving back toward entry
     recent_dt = max(1.0, recent[-1]["ts"] - recent[0]["ts"])
-    recent_delta = recent[-1]["price"] - recent[0]["price"]
+    recent_base = recent[0]["price"]
+    recent_delta = ((recent[-1]["price"] - recent_base) / recent_base) if recent_base > 0 else 0.0
     if side.upper() == "SHORT":
         recent_delta = -recent_delta
     recovery_signal = recent_delta > 0 and len(recent) >= 5
@@ -498,6 +528,93 @@ def _evaluate_drawdown_intelligence(
         return {"action": "TIGHTEN_SL", "reason": "slow_bleed_no_recovery", "confidence": 0.5}
 
     return {"action": "HOLD", "reason": "no_clear_signal", "confidence": 0.4}
+
+
+def _assess_drawdown_recovery_window(
+    snapshot: Dict[str, Any],
+    trend: Dict[str, Any],
+    prior_state: Optional[Dict[str, Any]],
+    settings: Any,
+) -> Dict[str, Any]:
+    """Assess whether a loss-side position should defer a hard cut for recovery.
+
+    This creates a small state machine:
+      - monitoring: loss detected, waiting for meaningful rescue behavior
+      - recoverable: rescue signal seen, defer hard cut while structure improves
+      - failed_recovery: rescue failed, allow hard cut path to proceed
+    """
+    threshold_usdt = _to_float(get_param(settings, "drawdown_monitor_threshold_usdt", -10.0), -10.0)
+    rescue_score_min_usdt = _to_float(get_param(settings, "drawdown_recovery_score_min_usdt", 3.0), 3.0)
+    failed_recovery_giveback_usdt = _to_float(get_param(settings, "drawdown_failed_recovery_giveback_usdt", 4.0), 4.0)
+    shock_recent_velocity_threshold = _to_float(
+        get_param(settings, "drawdown_shock_recent_velocity_threshold", -0.0012),
+        -0.0012,
+    )
+
+    unrealized = _to_float(snapshot.get("unrealized_pnl_usdt"), 0.0)
+    state = dict(prior_state or {})
+
+    # Reset state if we are no longer in loss-side drawdown territory.
+    if unrealized >= threshold_usdt:
+        return {
+            "phase": "inactive",
+            "defer_cut": False,
+            "failed_recovery": False,
+            "shock": False,
+            "state": {},
+        }
+
+    threshold_cross_pnl = _to_float(state.get("threshold_cross_pnl"), unrealized)
+    rescue_best = max(_to_float(state.get("rescue_best_unrealized"), unrealized), unrealized)
+    rescue_observed = bool(state.get("rescue_observed", False))
+
+    recovery_candidate = bool(trend.get("recovery_signal")) or _to_float(trend.get("recent_velocity"), 0.0) > 0.0
+    rescue_score = rescue_best - threshold_cross_pnl
+    if recovery_candidate and rescue_score >= rescue_score_min_usdt:
+        rescue_observed = True
+
+    giveback_from_best = rescue_best - unrealized
+    failed_recovery = (
+        rescue_observed
+        and _to_float(trend.get("recent_velocity"), 0.0) < 0.0
+        and _to_float(trend.get("acceleration"), 0.0) < 0.0
+        and giveback_from_best >= failed_recovery_giveback_usdt
+    )
+
+    shock = (
+        _to_float(trend.get("recent_velocity"), 0.0) <= shock_recent_velocity_threshold
+        and _to_float(trend.get("acceleration"), 0.0) < 0.0
+        and not bool(trend.get("recovery_signal"))
+    )
+
+    defer_cut = bool((recovery_candidate or rescue_observed) and not failed_recovery and not shock)
+
+    if failed_recovery:
+        phase = "failed_recovery"
+    elif defer_cut:
+        phase = "recoverable"
+    else:
+        phase = "monitoring"
+
+    state.update({
+        "phase": phase,
+        "threshold_cross_pnl": round(threshold_cross_pnl, 6),
+        "rescue_best_unrealized": round(rescue_best, 6),
+        "rescue_observed": rescue_observed,
+        "recovery_candidate": recovery_candidate,
+        "rescue_score": round(rescue_score, 6),
+        "giveback_from_best": round(giveback_from_best, 6),
+        "failed_recovery": failed_recovery,
+        "shock": shock,
+    })
+
+    return {
+        "phase": phase,
+        "defer_cut": defer_cut,
+        "failed_recovery": failed_recovery,
+        "shock": shock,
+        "state": state,
+    }
 
 
 def _evaluate_profit_erosion(
@@ -593,6 +710,13 @@ def _run_drawdown_monitor_cycle(
         get_param(settings, "erosion_lock_fraction_gentle", 0.15), 0.15)
 
     actions: List[Dict[str, Any]] = []
+    cycle_shadow = {
+        "loss_positions": 0,
+        "recoverable_windows": 0,
+        "failed_recovery_windows": 0,
+        "shock_events": 0,
+        "deferred_cuts": 0,
+    }
     for snapshot in snapshots:
         unrealized = _to_float(snapshot.get("unrealized_pnl_usdt"), 0.0)
         pos_id = snapshot.get("position_id", "")
@@ -609,21 +733,45 @@ def _run_drawdown_monitor_cycle(
 
         # ── Case A: Position in loss territory ──
         if unrealized < threshold_usdt:
+            cycle_shadow["loss_positions"] += 1
             decision = _evaluate_drawdown_intelligence(snapshot, trend, settings)
 
-            # Merge with previous decision (avoid flip-flopping)
             prev = _drawdown_decisions.get(pos_id, {})
+            recovery_eval = _assess_drawdown_recovery_window(
+                snapshot,
+                trend,
+                prev.get("_recovery_state", {}),
+                settings,
+            )
+            decision["_recovery_state"] = recovery_eval.get("state", {})
+            decision["_recovery_phase"] = recovery_eval.get("phase", "monitoring")
+            if recovery_eval.get("phase") == "recoverable":
+                cycle_shadow["recoverable_windows"] += 1
+            if recovery_eval.get("failed_recovery", False):
+                cycle_shadow["failed_recovery_windows"] += 1
+            if recovery_eval.get("shock", False):
+                cycle_shadow["shock_events"] += 1
+
+            # Merge with previous decision (avoid flip-flopping)
             consecutive_cuts = prev.get("_consecutive_cuts", 0)
-            if decision["action"] == "CUT":
+            if decision["action"] == "CUT" and not recovery_eval.get("defer_cut", False):
                 consecutive_cuts += 1
             else:
                 consecutive_cuts = 0
+
+            if decision["action"] == "CUT" and recovery_eval.get("defer_cut", False):
+                cycle_shadow["deferred_cuts"] += 1
+                decision["action"] = "HOLD"
+                decision["reason"] = f"recovery_window_{decision.get('reason', 'defer_cut')}"
+
             decision["_consecutive_cuts"] = consecutive_cuts
             _drawdown_decisions[pos_id] = decision
 
             min_consecutive_for_cut = int(get_param(settings, "drawdown_cut_min_consecutive", 3) or 3)
+            shock_immediate_cut_enabled = bool(get_param(settings, "drawdown_shock_immediate_cut_enabled", True))
+            effective_min_for_cut = 1 if (shock_immediate_cut_enabled and recovery_eval.get("shock", False)) else min_consecutive_for_cut
 
-            if decision["action"] == "CUT" and consecutive_cuts >= min_consecutive_for_cut:
+            if decision["action"] == "CUT" and consecutive_cuts >= effective_min_for_cut:
                 entry_price = _to_float(snapshot.get("entry_price"), 0.0)
                 current_price = _to_float(snapshot.get("current_price"), 0.0)
                 if entry_price > 0 and current_price > 0:
@@ -638,18 +786,28 @@ def _run_drawdown_monitor_cycle(
                         "trade_type": snapshot.get("trade_type"),
                         "side": side,
                         "emergency_sl": round(emergency_sl, 8),
+                            "current_price": round(current_price, 8),
                         "unrealized_usdt": round(unrealized, 2),
                         "trend": trend,
                         "decision": decision,
+                        "recovery_phase": recovery_eval.get("phase"),
+                        "shock": recovery_eval.get("shock", False),
                     })
 
             elif decision["action"] == "TIGHTEN_SL":
                 current_sl = _to_float(snapshot.get("stop_loss"), 0.0)
                 current_price = _to_float(snapshot.get("current_price"), 0.0)
+                tighten_fraction = _to_float(
+                    get_param(settings, "drawdown_recovery_tighten_fraction", 0.02),
+                    0.02,
+                ) if recovery_eval.get("phase") == "recoverable" else _to_float(
+                    get_param(settings, "drawdown_default_tighten_fraction", 0.05),
+                    0.05,
+                )
                 if current_sl > 0 and current_price > 0:
                     if side == "LONG":
                         gap = current_price - current_sl
-                        tighter_sl = current_sl + gap * 0.05
+                        tighter_sl = current_sl + gap * tighten_fraction
                         if tighter_sl > current_sl and tighter_sl < current_price * 0.998:
                             actions.append({
                                 "action": "TIGHTEN_SL",
@@ -658,13 +816,15 @@ def _run_drawdown_monitor_cycle(
                                 "trade_type": snapshot.get("trade_type"),
                                 "side": side,
                                 "target_sl": round(tighter_sl, 8),
+                                "current_price": round(current_price, 8),
                                 "unrealized_usdt": round(unrealized, 2),
                                 "trend": trend,
                                 "decision": decision,
+                                "recovery_phase": recovery_eval.get("phase"),
                             })
                     elif side == "SHORT":
                         gap = current_sl - current_price
-                        tighter_sl = current_sl - gap * 0.05
+                        tighter_sl = current_sl - gap * tighten_fraction
                         if tighter_sl < current_sl and tighter_sl > current_price * 1.002:
                             actions.append({
                                 "action": "TIGHTEN_SL",
@@ -673,9 +833,11 @@ def _run_drawdown_monitor_cycle(
                                 "trade_type": snapshot.get("trade_type"),
                                 "side": side,
                                 "target_sl": round(tighter_sl, 8),
+                                "current_price": round(current_price, 8),
                                 "unrealized_usdt": round(unrealized, 2),
                                 "trend": trend,
                                 "decision": decision,
+                                "recovery_phase": recovery_eval.get("phase"),
                             })
 
         # ── Case B: Position in profit but eroding ──
@@ -743,6 +905,8 @@ def _run_drawdown_monitor_cycle(
                             "decision": erosion_decision,
                         })
 
+    with _lock:
+        _drawdown_cycle_shadow.update(cycle_shadow)
     return actions
 
 
@@ -777,7 +941,7 @@ def _apply_drawdown_actions(
                 snapshot_for_guard = {"symbol": act.get("symbol"), "side": act.get("side"), "current_price": 0.0}
                 ok = futures_client.update_sl_tp(
                     act.get("symbol"), act.get("side"),
-                    new_sl=float(target_sl), current_price=float(act.get("target_sl", 0)),
+                    new_sl=float(target_sl), current_price=float(act.get("current_price", 0)),
                 )
                 if ok:
                     applied += 1
@@ -832,10 +996,12 @@ def _run_profit_guard_cycle(components: Any, snapshots: List[Dict[str, Any]], se
             futures_client = None
 
     actions: List[Dict[str, Any]] = []
+    candidates = 0
     for snapshot in snapshots:
         guard = _compute_profit_guard_target(snapshot, settings)
         if not guard:
             continue
+        candidates += 1
 
         trade_type = str(snapshot.get("trade_type") or "").lower()
         applied = False
@@ -854,6 +1020,8 @@ def _run_profit_guard_cycle(components: Any, snapshots: List[Dict[str, Any]], se
                 "giveback_pct": guard.get("giveback_pct"),
                 "allowed_giveback_pct": guard.get("allowed_giveback_pct"),
             })
+    with _lock:
+        _shadow_metrics["profit_guard_candidates"] += candidates
     return actions
 
 
@@ -916,9 +1084,9 @@ def _snapshot_spot_position(symbol: str, pos: Any, price: float) -> Dict[str, An
 
 def _snapshot_futures_position(pos: Any, price: float, futures_client: Any) -> Dict[str, Any]:
     entry = float(pos.entry_price or 0.0)
-    qty = abs(float(pos.quantity or 0.0))
+    qty = abs(float(getattr(pos, "qty", getattr(pos, "quantity", 0.0)) or 0.0))
     side = str(pos.side).upper()
-    leverage = float(getattr(pos, "leverage", 10) or 10)
+    leverage = float(getattr(pos, "leverage", getattr(futures_client, "_active_leverage", 1)) or 1)
     unrealized_pct = _compute_unrealized_pct(entry, price, side)
     unrealized_usdt = _compute_unrealized(entry, qty, price, side, leverage=leverage)
     sltp = _extract_sl_tp(getattr(pos, "_smart_meta", None) or {}, pos.sl_price or 0.0, pos.tp_price or 0.0)
@@ -928,7 +1096,7 @@ def _snapshot_futures_position(pos: Any, price: float, futures_client: Any) -> D
         "trade_type": "futures",
         "symbol": pos.symbol,
         "side": side,
-        "position_id": str(getattr(pos, "position_id", "") or ""),
+        "position_id": str(getattr(pos, "position_id", "") or f"{pos.symbol}_{side}"),
         "entry_price": entry,
         "quantity": qty,
         "leverage": leverage,
@@ -1098,6 +1266,8 @@ def run_telemetry_cycle(components: Any) -> List[Dict[str, Any]]:
         "avg_unrealized_pnl_pct": round(
             sum(float(s.get("unrealized_pnl_pct", 0.0) or 0.0) for s in snapshots) / len(snapshots), 4
         ) if snapshots else 0.0,
+        "profit_positions_evaluated": sum(1 for s in snapshots if _to_float(s.get("unrealized_pnl_usdt"), 0.0) > 0),
+        "loss_positions_evaluated": sum(1 for s in snapshots if _to_float(s.get("unrealized_pnl_usdt"), 0.0) < 0),
         "ts": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1108,6 +1278,7 @@ def run_telemetry_cycle(components: Any) -> List[Dict[str, Any]]:
         summary["profit_guard_hard"] = sum(1 for a in guard_actions if a.get("lock_mode") == "hard")
         summary["profit_guard_soft"] = sum(1 for a in guard_actions if a.get("lock_mode") == "soft")
         summary["profit_guard_symbols"] = sorted({str(a.get("symbol") or "") for a in guard_actions if a.get("symbol")})
+    summary["profit_guard_candidates"] = _shadow_metrics.get("profit_guard_candidates", 0)
 
     # s120: Intelligent drawdown monitor — analyze trend for positions in loss
     dd_actions = _run_drawdown_monitor_cycle(components, snapshots, settings)
@@ -1118,9 +1289,30 @@ def run_telemetry_cycle(components: Any) -> List[Dict[str, Any]]:
         summary["drawdown_monitor_cuts"] = sum(1 for a in dd_actions if a.get("action") == "CUT")
         summary["drawdown_monitor_tightens"] = sum(1 for a in dd_actions if a.get("action") == "TIGHTEN_SL")
 
+    with _lock:
+        summary["drawdown_recoverable_windows"] = int(_drawdown_cycle_shadow.get("recoverable_windows", 0))
+        summary["drawdown_failed_recovery_windows"] = int(_drawdown_cycle_shadow.get("failed_recovery_windows", 0))
+        summary["drawdown_shock_events"] = int(_drawdown_cycle_shadow.get("shock_events", 0))
+        summary["drawdown_deferred_cuts"] = int(_drawdown_cycle_shadow.get("deferred_cuts", 0))
+
     # Cleanup stale buffers (positions that closed)
     active_ids = {s.get("position_id") for s in snapshots if s.get("position_id")}
     cleanup_drawdown_buffers(active_ids)
+
+    with _lock:
+        _shadow_metrics["profit_positions_evaluated"] += summary.get("profit_positions_evaluated", 0)
+        _shadow_metrics["loss_positions_evaluated"] += summary.get("loss_positions_evaluated", 0)
+        _shadow_metrics["profit_guard_actions"] += len(guard_actions)
+        _shadow_metrics["profit_guard_hard"] += summary.get("profit_guard_hard", 0)
+        _shadow_metrics["profit_guard_soft"] += summary.get("profit_guard_soft", 0)
+        _shadow_metrics["drawdown_actions"] += len(dd_actions)
+        _shadow_metrics["drawdown_cuts"] += summary.get("drawdown_monitor_cuts", 0)
+        _shadow_metrics["drawdown_tightens"] += summary.get("drawdown_monitor_tightens", 0)
+        _shadow_metrics["drawdown_recoverable_windows"] += summary.get("drawdown_recoverable_windows", 0)
+        _shadow_metrics["drawdown_failed_recovery_windows"] += summary.get("drawdown_failed_recovery_windows", 0)
+        _shadow_metrics["drawdown_shock_events"] += summary.get("drawdown_shock_events", 0)
+        _shadow_metrics["drawdown_deferred_cuts"] += summary.get("drawdown_deferred_cuts", 0)
+        _shadow_metrics["last_summary"] = dict(summary)
 
     _audit_summary(db_client, summary, throttle)
 
@@ -1164,6 +1356,21 @@ def get_sr_invalidation_shadow_metrics() -> Dict[str, Any]:
             "evaluations": _shadow_metrics["evaluations"],
             "would_exit_total": _shadow_metrics["would_exit"],
             "would_exit_per_symbol": dict(_shadow_metrics["by_symbol"]),
+            "profit_guard_actions": _shadow_metrics["profit_guard_actions"],
+            "profit_guard_candidates": _shadow_metrics["profit_guard_candidates"],
+            "profit_guard_hard": _shadow_metrics["profit_guard_hard"],
+            "profit_guard_soft": _shadow_metrics["profit_guard_soft"],
+            "profit_positions_evaluated": _shadow_metrics["profit_positions_evaluated"],
+            "loss_positions_evaluated": _shadow_metrics["loss_positions_evaluated"],
+            "drawdown_actions": _shadow_metrics["drawdown_actions"],
+            "drawdown_cuts": _shadow_metrics["drawdown_cuts"],
+            "drawdown_tightens": _shadow_metrics["drawdown_tightens"],
+            "drawdown_recoverable_windows": _shadow_metrics["drawdown_recoverable_windows"],
+            "drawdown_failed_recovery_windows": _shadow_metrics["drawdown_failed_recovery_windows"],
+            "drawdown_shock_events": _shadow_metrics["drawdown_shock_events"],
+            "drawdown_deferred_cuts": _shadow_metrics["drawdown_deferred_cuts"],
+            "downstream_surfaces": list(_shadow_metrics["downstream_surfaces"]),
+            "last_summary": dict(_shadow_metrics["last_summary"]),
             "last_decisions": list(_shadow_decisions)[-20:],
             "last_at": _shadow_metrics["last_at"],
         }

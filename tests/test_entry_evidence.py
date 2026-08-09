@@ -113,6 +113,18 @@ def test_shadow_readiness_endpoint_reports_component_states(monkeypatch):
     db = ShadowDb([], [], [])
     monkeypatch.setattr(app_module, "db_client", db)
     monkeypatch.setattr(app_module, "get_components", lambda: types.SimpleNamespace(settings=settings))
+    monkeypatch.setattr(app_module, "get_hard_risk_shadow_metrics", lambda: {
+        "name": "hard_risk_backstop",
+        "mode": "shadow",
+        "enabled": True,
+        "spot_cycles": 12,
+        "spot_positions": 18,
+        "futures_cycles": 4,
+        "futures_positions": 6,
+        "breakeven_updates": 2,
+        "stop_closes": 1,
+        "last_at": "2026-08-06T00:00:00+00:00",
+    })
     app_module.app.dependency_overrides[app_module._require_api_key] = lambda: None
 
     response = TestClient(app_module.app).get("/metrics/shadow-readiness")
@@ -125,6 +137,8 @@ def test_shadow_readiness_endpoint_reports_component_states(monkeypatch):
     assert states["ug_loss_v2"] == "COLLECTING"
     assert states["lifecycle_structure"] == "ACTIVE"
     assert states["range_reversion"] == "COLLECTING"
+    assert states["position_telemetry_watcher"] == "ACTIVE"
+    assert states["hard_risk_backstop"] == "ACTIVE"
 
 
 def test_evidence_does_not_promote_legacy_or_missing_snapshot():

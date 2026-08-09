@@ -6,9 +6,12 @@ Este directorio contiene los **documentos canónicos** del sistema crypto-agent.
 
 | Archivo | Tipo | Dominio | Estado |
 |---------|------|---------|--------|
-| `calibracion_entradas-a20ab8-v3.md` | planning | Entradas, capital por modo, datos externos, maduración | active (s115) |
+| `calibracion_entradas-a20ab8-v3.md` | planning | Entradas, capital por modo, datos externos, maduración | active (s121) |
 | `calibrar-ciclo-vida-52fe5d.md` | canonical-memory | Lifecycle de posiciones (apertura → monitoreo → cierre); incluye event stream, reconciliación Binance, drawdown monitor y profit erosion detection | active (s120b) |
 | `calibrar_datos.md` | canonical-memory | Datos: inventario, calidad, linaje, contratos analíticos | active (s120b) |
+| `analisis_inteligente_cierres.md` | canonical-protocol | AIC recurrente: prevención de entrada, protección lifecycle, configuración, contrafactual y verificación live | active (AIC-20260807-01) |
+| `analisis_suficiencia_datos_2026-08-05.md` | canonical-memory | Evaluación de suficiencia de datos para aperturas/lifecycle y brechas priorizadas | proposal |
+| `modelo_retencion_datos_2026-08-05.md` | canonical-memory | Retención/purga por capas para operación, calibración e investigación histórica | proposal |
 | `hard_risk_breakeven_s99d.md` | canonical-memory | Breakeven en hard-risk monitor — protección de ganancias cada 2s | active |
 
 ---
@@ -38,6 +41,12 @@ Este directorio contiene los **documentos canónicos** del sistema crypto-agent.
 **Rollback:** `PATCH /config/kelly {"range_scalp_short_first_enabled": false, "hard_risk_monitor_enabled": false}`
 
 **Actualización reciente (s115, ago 3 2026, revalidación de tesis S/R + regla de visibilidad shadow):** encontrada la causa raíz de `币安人生USDT`/`SYNUSDT` y 4 casos más en 48h — `_staged_range_scalp_decision` ejecutaba SHORT/LONG sin volver a revisar si el precio estaba realmente cerca del S/R de su propia tesis. Simulado contra 85 operaciones reales de 48h antes de implementar: con umbral 5%, el PnL neto habría sido +$31.28 en vez de -$180.92 (sacrificando 11 ganancias reales de +$122.18 para evitar 16 pérdidas de -$334.38). Implementado activo (no shadow) y simétrico para SHORT/LONG. Nueva regla dura: todo mecanismo shadow debe tener visibilidad en `/metrics/shadow-readiness` — aplicada retroactivamente a los mecanismos shadow de s113. 571/574 tests pasan. Ver "Estado del sistema — ago 3 2026 — s115".
+
+**Actualización reciente (s116, ago 5 2026, evidencia shadow de linaje/costos):** se añadió en `app.py` un nuevo componente en `/metrics/shadow-readiness` (`entry_close_lineage_instrumentation`) para medir cobertura operativa de `decision_features_v1` en checks y de linaje/costos en cierres (`ready_candidate_id`, `staged_direction`, `profile_at_entry`, `regime_at_entry`, `commission_bps_total` y hints `spread/slippage/funding`). Esto convierte la brecha de suficiencia de datos en una señal continua de readiness visible en dashboard, con gates explícitos de cobertura y tamaño de muestra.
+
+**Actualización reciente (s121, ago 7 2026, calibración SR aplicada en caliente):** se promovió la configuración ganadora de simulaciones SR a runtime y defaults (`min_signal_strength=0.45`, `min_success_probability=0.45`, `stop_loss_pct=2.5`, `kelly_max_usdt=1000.0`, `kelly_dynamic_base_pct=0.18`, `max_positions_spot_bull=8`), con snapshot pre-restart `20260807_145135_059092`, reinicio de `crypto-agent-app` y validación post-boot en `/config/kelly` y `/metrics/shadow-readiness`.
+
+**AIC-20260807-01 (ago 7 2026):** primera ejecución del **Análisis Inteligente de Cierres**. Se analizaron 203 tesis FUTURES SHORT, se activó el gate de agotamiento sobre soporte con mejora contrafactual de +$173.42 y se reparó la protección lifecycle FUTURES. El protocolo repetible y su cadencia están en `analisis_inteligente_cierres.md`.
 
 **Actualización reciente (s113, ago 3 2026, plan completo de ciclo de entradas):** implementado el plan completo derivado del análisis de rompimientos favorables: (1) lock de concurrencia nuevo en `position_manager.py` (SPOT) — mismo patrón que `_close_lock` de futuros (s105h), nunca aplicado a SPOT antes; (2) escalonamiento sin descarte terminal (`allow_scale_in_ready_id`); (3) anclaje ATR al SL real en SPOT y FUTUROS (nunca aprieta, solo ensancha, el guardarrail USD sigue como techo); (4) corroboración de volumen tipo VSA/Wyckoff en la confirmación de dirección (modo shadow); (5) `intra_mode="watcher"` extendido a `FUTURES_SHORT`/`PRESERVATION` (mismo fix de s106 que ya se validó en `RANGE_SCALP`); (6) entrada inmediata escalonada ("pierna 1" en el toque de S/R, apagada por defecto). 563/566 tests pasan (3 fallas preexistentes no relacionadas). Ver "Estado del sistema — ago 3 2026 — s113" en el documento completo.
 
@@ -69,6 +78,7 @@ Este directorio contiene los **documentos canónicos** del sistema crypto-agent.
 **Estructura (15+ secciones):**
 
 - **Actualización s120/s120b (ago 3 2026):** Intelligent Drawdown Monitor + Profit Erosion Detection. Monitorea TODAS las posiciones a 1s: (Case A) posiciones en pérdida > $10 → análisis de tendencia → CUT/TIGHTEN_SL/HOLD; (Case B) posiciones en profit pero erosionándose → PROTECT_PROFIT (lock 30% peak) / PROTECT_PROFIT_GENTLE (15%) / HOLD. Anti-estrangulación PRS: peak_protection momentum-aware (relaja a 50% giveback cuando momentum >= 70). Hot-config de trailing ampliado (1.4% distance, 2.5% activation). Erosion NUNCA cierra, solo tightens SL. Zero API extra.
+- **Actualización ago 7 2026:** reparación de telemetry FUTURES (`qty`, PnL contractual, velocidad normalizada) y aplicación real del cap USD en el monitor de 2s (`max_loss_usd_stop`). La entrada añade un filtro SHORT sobre soporte (`<=0.5%`, RSI `<50`, salvo breakdown), validado en 203 tesis con mejora contrafactual in-sample de +$173.42.
 - **Actualizaciones s93–s118:** Fixes RANGE_SCALP, integración SR en salida, modelo universal, perfil por operación, event stream Binance, circuit-breaker de portafolio inteligente.
 - **Pipeline de salida (precedencia canónica):**
   1. Hard SL/TP (órdenes algo en Binance)

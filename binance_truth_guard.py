@@ -640,7 +640,12 @@ def auto_reconcile_futures(
                     sl_price=_sl, tp_price=_tp,
                     order_id=f"RECONCILE_{_now}",
                     sl_order_id=_sl_order_id, tp_order_id=_tp_order_id,
-                    _smart_meta={"source": "truth_reconcile_import", "synthetic": True, "learning_eligible": False},
+                    _smart_meta={
+                        "source": "truth_reconcile_import",
+                        "synthetic": True,
+                        "learning_eligible": False,
+                        "reconciliation_state": "synthetic_imported",
+                    },
                 )
                 futures_client._open_positions[key] = _new_pos
                 if hasattr(futures_client, "_save_futures_open"):

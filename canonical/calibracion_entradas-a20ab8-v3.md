@@ -9,6 +9,60 @@ supersedes: Calibracion_Entradas-a20ab8-v2.md
 
 ## Arquitectura canónica de calibración de entrada
 
+### Regla permanente: Kelly agresivo no-regresivo
+
+- La recalibración del sistema está permitida y es deseable, pero **no** puede degradar Kelly por debajo del baseline agresivo canónico.
+- Pisos mínimos obligatorios (SPOT/FUTURES):
+  - `kelly_base_usdt >= 150`
+  - `kelly_max_usdt >= 1000`
+  - `kelly_max_pct_liquid >= 0.90`
+  - `kelly_dynamic_base_pct >= 0.18`
+  - `kelly_conviction_max_pct >= 0.22`
+  - `futures_kelly_base_usdt >= 200`
+  - `futures_kelly_max_usdt >= 2500`
+  - `futures_kelly_cap_pct >= 0.90`
+  - `futures_kelly_max_pct_liquid >= 0.90`
+- Cualquier endpoint de aplicación de configuración, carga de overrides desde DB o activación de perfiles debe respetar estos pisos.
+- El objetivo de la recalibración es optimizar selección, timing y calidad de entrada/salida, no reducir la capacidad de capitalización por sizing conservador.
+
+### Actualización operativa (s121, 2026-08-07) - calibración SR ganadora aplicada
+
+Se aplicó en runtime y en defaults de código la configuración ganadora de la última ronda de simulaciones SR, con snapshot y restart controlado.
+
+- Configuración aplicada (spot, señal y riesgo):
+  - `min_signal_strength = 0.45`
+  - `min_success_probability = 0.45`
+  - `stop_loss_pct = 2.5`
+  - `kelly_max_usdt = 1000.0`
+  - `kelly_dynamic_base_pct = 0.18`
+  - `max_positions_spot_bull = 8`
+- Trazabilidad de cambio:
+  - Snapshot pre-restart: `20260807_145135_059092`
+  - Apply runtime: `POST /mimic/apply-recommendation` (`ok=true`, sin rechazados)
+  - Restart operativo: contenedor `crypto-agent-app` reiniciado y validado post-boot.
+- Verificación post-restart:
+  - `/config/kelly` reporta los valores anteriores en `db_overrides`.
+  - `/metrics/shadow-readiness` operativo tras restart.
+
+### Actualización operativa (s128, 2026-08-08) - recertificación bidireccional SR pre-open + IDs visibles
+
+Se implementó una recertificación final, justo antes de autorizar apertura (`risk queue`), para evitar desalineaciones tardías entre tesis SR y precio observado.
+
+- Cobertura bidireccional en todos los modos (`SPOT_BULL`, `RANGE_SCALP`, `FUTURES_SHORT`, `PRESERVATION`):
+  - `LONG` debe permanecer cerca de soporte.
+  - `SHORT` debe permanecer cerca de resistencia.
+- Excepciones inteligentes para no cortar aperturas legítimas:
+  - Se permite bypass por breakout/breakdown confirmado con presión SR suficiente.
+  - Se limita distancia máxima del breakout para evitar entrar cuando el movimiento ya está demasiado extendido.
+- Anti-overblocking por diseño:
+  - Modo por régimen (`sr_side_guard_mode`) con `active_canary` o `enforced`.
+  - Si falta metadata SR (nivel/precio), el guard funciona en fail-open para no frenar todo el flujo.
+  - Un bloqueo por SR-side no descarta el candidato: lo mantiene `validated` en monitoreo (`SR_SIDE_GUARD_WAIT`).
+- Observabilidad:
+  - Persistencia de `sr_side_guard_last` y check de lifecycle `SR_SIDE_GUARD_BLOCKED` cuando aplica bloqueo real.
+- Dashboard:
+  - Se expone ID visible y corto por fila (`position_display_id`) en abiertas y cerradas para rastreo rápido.
+
 ```mermaid
 flowchart TD
   A[market_regime.py\nDetecta modo activo] --> B[run_trades.py\nOrquestación de ciclo]
@@ -74,7 +128,64 @@ flowchart LR
 
 > **Merge note:** `Calibracion_Entradas-a20ab8-v2.md` fue fusionado en este documento. Se conservan las decisiones de dirección del usuario, el análisis por modo y las reglas duras de v2; v3 añade la asignación de capital por modo, la evaluación de datos de terceros y el cronograma de maduración.
 
+## AIC-20260807-01 — SHORT agotado sobre soporte
+
+Esta sección es la rama A, **No abrir**, de la primera ejecución del protocolo canónico **AIC — Análisis Inteligente de Cierres**. La rama B está documentada en `calibrar-ciclo-vida-52fe5d.md`; el procedimiento completo vive en `analisis_inteligente_cierres.md`.
+
+### Evidencia
+
+- Baseline de 4 días: 255 cierres FUTURES SHORT, consolidados en 203 tesis por `(symbol, entry_time)`, 60.1% WR y **-$474.83**.
+- El pre-open replay de nueve incidentes mostró dos familias: SHORT tardío cerca del mínimo de 1h y SHORT contra impulso alcista. Las reglas genéricas de una hora bloquearon 0/9, por lo que no se promovieron.
+- El filtro persistido `support_dist<=0.5% AND RSI<50` afectó 30/203 tesis: evitó **-$239.65**, sacrificó **+$66.23** y habría mejorado el neto en **+$173.42**.
+- Precisión de pérdidas: solo 40%. Se adopta como filtro de severidad de cola, no como clasificador de alta precisión. Benchmark: `Dev/benchmarks/futures_short_near_support_gate_20260807.json`.
+- Bajo volumen fue descartado como gate: la variante probada sacrificaba +$310.20 de ganancias.
+
+### Cambio
+
+- `_staged_sr_thesis_check` bloquea con `SHORT_NEAR_SUPPORT_EXHAUSTION` cuando un SHORT está a `<=0.5%` del soporte y RSI `<50`.
+- Excepción: `support_breakdown_sell` o `sr_breakdown` confirma continuación y permite la entrada.
+- El check falla abierto si falta RSI o distancia a soporte; el gate S/R original sigue gobernando la distancia a resistencia.
+- Hot config: `range_scalp_short_near_support_gate_enabled`, `range_scalp_short_near_support_max_dist_pct`, `range_scalp_short_near_support_max_rsi`.
+
+### Limitaciones
+
+- Replay observacional e in-sample de cuatro días; requiere validación fuera de muestra.
+- Las representaciones S/R persistidas pueden contradecirse. El runtime consume los campos del candidato staged y conserva la excepción explícita de breakdown.
+- El contrafactual no modela operaciones sustitutas ni reutilización de capital.
+
 ## Estado del sistema — ago 3 2026 — s115: `STAGED_SHORT_DIRECTION` abría sin revalidar la tesis S/R real + regla de visibilidad shadow obligatoria
+
+## Estado del sistema — ago 5 2026 — s116: evidencia shadow de instrumentación entrada→cierre (linaje y costos)
+
+### Origen
+
+Tras completar la instrumentación en código (persistencia de `decision_features_v1` en checks staged y campos de linaje/costos en cierres SPOT/FUTURES), faltaba una exigencia operativa: exponer evidencia visible y accionable en dashboard, alineada con la regla dura de visibilidad shadow.
+
+### Cambios implementados
+
+1. **`app.py::get_shadow_readiness`**: nuevo componente `entry_close_lineage_instrumentation` en `/metrics/shadow-readiness`.
+2. Nuevas métricas de cobertura en ventana de 14 días:
+  - `decision_features_v1` en `ready_candidate_checks.input_features`.
+  - `ready_candidate_id` en `trades_closed.metadata`.
+  - contexto de entrada en cierre (`staged_direction`, `profile_at_entry`, `regime_at_entry`).
+  - costos netos en cierre (`commission_bps_total`) y hints de costo (`spread_bps_estimate`, `slippage_bps_estimate`, `funding_bps`).
+3. Gates de readiness añadidos al inventario shadow:
+  - `decision_features_v1_coverage` (objetivo 95%).
+  - `close_linkage_coverage` (objetivo 90%).
+  - `close_entry_context_coverage` (objetivo 90%).
+  - `close_commission_bps_coverage` (objetivo 90%).
+  - `observation_sample` (mínimo 30 cierres).
+
+### Valor operativo
+
+- Hace visible, en el dashboard y sin SQL manual, si realmente podemos atribuir outcomes a decisiones de entrada.
+- Evita calibrar a ciegas sobre PnL bruto: obliga a observar costo neto por trade.
+- Reduce riesgo de promoción prematura: si la cobertura cae, el estado se mantiene en `COLLECTING` y no pasa a implementación.
+
+### Pendiente explícito
+
+- Medir cobertura post-despliegue en producción durante 24-72h y ajustar umbrales de gate solo con evidencia real.
+- Extender la misma vista de cobertura por `trade_type` y por régimen para detectar sesgos de instrumentación entre SPOT/FUTURES.
 
 ### Origen
 

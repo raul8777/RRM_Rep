@@ -21,6 +21,7 @@ Every screening result is persisted to `screener_decisions` for full auditabilit
 """
 
 import json
+import hashlib
 import math
 import time
 import urllib.request
@@ -34,6 +35,71 @@ def _cfg_param(settings, name: str, default: Any = None) -> Any:
         return default
     from config_helpers import get_param
     return get_param(settings, name, default)
+
+
+def _rollout_applies(mode: str, key: str, canary_fraction: float) -> bool:
+    mode_norm = str(mode or "shadow").strip().lower()
+    if mode_norm == "active":
+        return True
+    if mode_norm != "active_canary":
+        return False
+    frac = max(0.0, min(1.0, float(canary_fraction or 0.0)))
+    if frac <= 0.0:
+        return False
+    if frac >= 1.0:
+        return True
+    digest = hashlib.md5(str(key or "").encode("utf-8")).hexdigest()
+    bucket = int(digest[:8], 16) / 0xFFFFFFFF
+    return bucket < frac
+
+
+def _apply_opportunity_promotions(
+    base_ranked: List[Dict[str, Any]],
+    selected_symbols: List[str],
+    side: str,
+    regime_mode: str,
+    settings: Any,
+) -> tuple[List[str], set[str], str]:
+    mode = str(_cfg_param(settings, "opportunity_shadow_mode", "shadow") or "shadow").strip().lower()
+    if mode in {"shadow", "disabled"}:
+        return list(selected_symbols), set(), mode
+
+    canary_fraction = float(_cfg_param(settings, "opportunity_shadow_canary_fraction", 0.20) or 0.20)
+    max_promotions = max(0, int(_cfg_param(settings, "opportunity_shadow_max_promotions_per_side", 1) or 1))
+    rank_slack = max(0, int(_cfg_param(settings, "opportunity_shadow_rank_slack", 2) or 2))
+    selected = list(selected_symbols)
+    if not selected or max_promotions <= 0:
+        return selected, set(), mode
+
+    rank_limit = min(len(base_ranked), len(selected) + rank_slack)
+    by_symbol = {c.get("symbol"): c for c in base_ranked[:rank_limit] if c.get("symbol")}
+    replacement_pool = [
+        c for c in sorted(by_symbol.values(), key=lambda row: float(row.get("opportunity_score", 0.0)), reverse=True)
+        if c.get("symbol") not in selected
+    ]
+
+    promoted: set[str] = set()
+    replace_idx = len(selected) - 1
+    for cand in replacement_pool:
+        if len(promoted) >= max_promotions or replace_idx < 0:
+            break
+        symbol = str(cand.get("symbol") or "")
+        if not symbol:
+            continue
+        if not _rollout_applies(mode, f"{regime_mode}|{side}|{symbol}", canary_fraction):
+            continue
+        selected[replace_idx] = symbol
+        promoted.add(symbol)
+        replace_idx -= 1
+
+    # Keep order stable and unique in case of collisions.
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for sym in selected:
+        if sym and sym not in seen:
+            deduped.append(sym)
+            seen.add(sym)
+    return deduped, promoted, mode
 
 
 # ── Module-level cache ────────────────────────────────────────────────────────
@@ -114,6 +180,7 @@ def _score_for_regime(c: dict, regime_mode: str, cached_indicators: dict = None)
     futures_chg = c.get("futures_chg_pct", chg)
     futures_short = _futures_short_score(c, cached_indicators=cached_indicators)
 
+    spot_ranked: List[Dict[str, Any]] = []
     if regime_mode in ("PRESERVATION", "FUTURES_SHORT"):
         spot_score = 0.0
         range_score = 0.0
@@ -510,32 +577,48 @@ def get_screened_pairs(
         narrative_tokens = _get_narrative_tokens(settings) if settings else []
         # Keep only narrative tokens that passed the volume filter and sort by bullish score
         narrative_candidates = [c for c in candidates if c["symbol"] in narrative_tokens]
-        narrative_candidates.sort(key=lambda x: x["score"], reverse=True)
-        spot_pairs = [c["symbol"] for c in narrative_candidates[:max_spot]]
+        spot_ranked = sorted(narrative_candidates, key=lambda x: x["score"], reverse=True)
+        spot_pairs = [c["symbol"] for c in spot_ranked[:max_spot]]
     elif regime_mode == "RANGE_SCALP":
-        candidates.sort(key=lambda x: x["range_score"], reverse=True)
-        spot_pairs = [c["symbol"] for c in candidates[:max_spot]]
+        spot_ranked = sorted(candidates, key=lambda x: x["range_score"], reverse=True)
+        spot_pairs = [c["symbol"] for c in spot_ranked[:max_spot]]
     else:  # SPOT_BULL or unknown
-        candidates.sort(key=lambda x: x["score"], reverse=True)
-        spot_pairs = [c["symbol"] for c in candidates[:max_spot]]
+        spot_ranked = sorted(candidates, key=lambda x: x["score"], reverse=True)
+        spot_pairs = [c["symbol"] for c in spot_ranked[:max_spot]]
 
     # Futures ranking depends on regime: FUTURES_SHORT prioritizes short-bounce candidates
     if regime_mode == "FUTURES_SHORT":
-        futures_candidates = sorted(
+        futures_ranked = sorted(
             [c for c in candidates if c["futures_vol_usdt"] >= futures_min_vol],
             key=lambda x: x["futures_short_score"], reverse=True
         )
     elif regime_mode == "RANGE_SCALP":
-        futures_candidates = sorted(
+        futures_ranked = sorted(
             [c for c in candidates if c["futures_vol_usdt"] >= futures_min_vol],
             key=lambda x: x["futures_short_score"], reverse=True
         )
     else:  # SPOT_BULL or unknown — futures long candidates by momentum
-        futures_candidates = sorted(
+        futures_ranked = sorted(
             [c for c in candidates if c["futures_vol_usdt"] >= futures_min_vol],
             key=lambda x: x["futures_score"], reverse=True
         )
-    futures_pairs = [c["symbol"] for c in futures_candidates[:max_futures]]
+    futures_pairs = [c["symbol"] for c in futures_ranked[:max_futures]]
+
+    spot_pairs, promoted_spot, opportunity_mode = _apply_opportunity_promotions(
+        spot_ranked,
+        spot_pairs,
+        side="spot",
+        regime_mode=regime_mode,
+        settings=settings,
+    )
+    futures_pairs, promoted_futures, _ = _apply_opportunity_promotions(
+        futures_ranked,
+        futures_pairs,
+        side="futures",
+        regime_mode=regime_mode,
+        settings=settings,
+    )
+    promoted_symbols = promoted_spot | promoted_futures
 
     top_bearish = sorted(
         [c for c in candidates if c["futures_vol_usdt"] >= futures_min_vol],
@@ -548,6 +631,8 @@ def get_screened_pairs(
         key=lambda candidate: candidate["opportunity_score"],
         reverse=True,
     )[:80]
+    for candidate in opportunity_shadow:
+        candidate["execution_enabled"] = candidate.get("symbol") in promoted_symbols
     fetched_at = datetime.now(timezone.utc).isoformat()
     result = {
         "spot": spot_pairs,
@@ -571,9 +656,11 @@ def get_screened_pairs(
                 "liquid_eligible": len(candidates),
                 "futures_volume_eligible": sum(1 for candidate in candidates if candidate["futures_vol_usdt"] >= futures_min_vol),
                 "shadow_ranked": len(opportunity_shadow),
-                "execution_enabled": 0,
+                "execution_enabled": len(promoted_symbols),
             },
-            "opportunity_shadow_status": "shadow_only_no_order_routing",
+            "opportunity_shadow_status": "active_candidate_promotion" if promoted_symbols else "shadow_only_no_order_routing",
+            "opportunity_shadow_mode": opportunity_mode,
+            "opportunity_shadow_promoted": sorted(promoted_symbols),
             "top_bearish": [
                 {"symbol": c["symbol"], "chg_pct": c["chg_pct"], "score": c["futures_short_score"]}
                 for c in top_bearish

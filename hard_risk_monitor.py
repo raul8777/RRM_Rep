@@ -23,6 +23,17 @@ from position_intelligence import (
 _lock = threading.Lock()
 _symbols_in_progress: set[str] = set()
 
+_shadow_metrics_lock = threading.Lock()
+_shadow_metrics: Dict[str, Any] = {
+    "spot_cycles": 0,
+    "spot_positions": 0,
+    "futures_cycles": 0,
+    "futures_positions": 0,
+    "breakeven_updates": 0,
+    "stop_closes": 0,
+    "last_at": None,
+}
+
 # s107: separate lock/in-progress set for the futures safety-net check, so a
 # slow spot cycle never blocks futures (or vice versa).
 _futures_lock = threading.Lock()
@@ -181,6 +192,10 @@ def monitor_spot_hard_stops_once(components: Any) -> List[Dict[str, Any]]:
         for symbol, pos_list in list(positions.items()):
             if not pos_list or symbol in _symbols_in_progress:
                 continue
+            with _shadow_metrics_lock:
+                _shadow_metrics["spot_cycles"] += 1
+                _shadow_metrics["spot_positions"] += len(pos_list)
+                _shadow_metrics["last_at"] = datetime.now(timezone.utc).isoformat()
             try:
                 price = float(client.get_symbol_price(symbol, use_cache=False))
             except TypeError:
@@ -192,7 +207,9 @@ def monitor_spot_hard_stops_once(components: Any) -> List[Dict[str, Any]]:
                 if entry <= 0 or qty <= 0:
                     continue
                 # Activate breakeven before SL breach check so gains are protected
-                _try_breakeven(manager, settings, db_client, symbol, pos, price, commission_rate)
+                if _try_breakeven(manager, settings, db_client, symbol, pos, price, commission_rate):
+                    with _shadow_metrics_lock:
+                        _shadow_metrics["breakeven_updates"] += 1
                 saved_sl = float(pos.stop_loss or 0.0)
                 usd_sl = entry - (max_loss / qty) if max_loss > 0 else 0.0
                 effective_sl = max(saved_sl, usd_sl)
@@ -221,6 +238,8 @@ def monitor_spot_hard_stops_once(components: Any) -> List[Dict[str, Any]]:
                 fill = client.verify_and_fetch_fills(order, f"HARD_RISK SELL {symbol}")
                 if not fill:
                     raise RuntimeError("fill_not_confirmed")
+                with _shadow_metrics_lock:
+                    _shadow_metrics["stop_closes"] += len(breached)
                 sold_qty = float(fill.get("qty", qty))
                 fill_price = float(fill.get("avg_price", price))
                 manager.close_all_positions_for_symbol(
@@ -229,6 +248,9 @@ def monitor_spot_hard_stops_once(components: Any) -> List[Dict[str, Any]]:
                     "hard_risk_stop",
                     commission_rate,
                     exit_context={
+                        "close_source": "lifecycle",
+                        "close_intent": "hard_risk_stop",
+                        "reconciliation_state": "exchange_confirmed",
                         "exit_order_id": str(fill.get("order_id", "")),
                         "exit_filled_qty": sold_qty,
                         "exit_avg_price": fill_price,
@@ -257,6 +279,16 @@ def monitor_spot_hard_stops_once(components: Any) -> List[Dict[str, Any]]:
     finally:
         _lock.release()
     return closed
+
+
+def get_hard_risk_shadow_metrics() -> Dict[str, Any]:
+    with _shadow_metrics_lock:
+        return {
+            "name": "hard_risk_backstop",
+            "mode": "shadow",
+            "enabled": True,
+            **_shadow_metrics,
+        }
 
 
 def _evaluate_pim_futures(futures_client, pos, price, settings, min_conf, emerg_conf, db_client):
@@ -418,8 +450,13 @@ def monitor_futures_hard_stops_once(components: Any) -> List[Dict[str, Any]]:
         pim_enabled = bool(get_param(settings, "position_intelligence_enabled", True))
         pim_min_conf = float(get_param(settings, "position_intelligence_min_confidence", 0.3) or 0.3)
         pim_emerg_conf = float(get_param(settings, "position_intelligence_emergency_confidence", 0.7) or 0.7)
+        max_loss_usd = float(get_param(settings, "max_loss_usd_per_trade", 18.0) or 0.0)
         db_client = getattr(components, "db_client", None)
         positions = list(futures_client._open_positions.items())
+        with _shadow_metrics_lock:
+            _shadow_metrics["futures_cycles"] += 1
+            _shadow_metrics["futures_positions"] += len(positions)
+            _shadow_metrics["last_at"] = datetime.now(timezone.utc).isoformat()
         for key, pos in positions:
             if pos.closed or key in _futures_keys_in_progress:
                 continue
@@ -428,11 +465,18 @@ def monitor_futures_hard_stops_once(components: Any) -> List[Dict[str, Any]]:
             except Exception:
                 continue
             hit_sl = pos.is_sl_hit(price)
+            unrealized_pnl = pos.unrealized_pnl(price)
+            hit_usd_cap = max_loss_usd > 0 and unrealized_pnl <= -max_loss_usd
             hit_tp = False if hit_sl else pos.is_tp_hit(price)
-            if hit_sl or hit_tp:
+            if hit_sl or hit_usd_cap or hit_tp:
                 _futures_keys_in_progress.add(key)
                 try:
-                    reason = "stop_loss" if hit_sl else "take_profit"
+                    reason = "max_loss_usd_stop" if hit_usd_cap and not hit_sl else "stop_loss" if hit_sl else "take_profit"
+                    if not isinstance(getattr(pos, "_smart_meta", None), dict):
+                        pos._smart_meta = {}
+                    pos._smart_meta["close_source"] = "lifecycle"
+                    pos._smart_meta["close_intent"] = reason
+                    pos._smart_meta["reconciliation_state"] = "exchange_confirmed"
                     result = (
                         futures_client.close_short(pos.symbol, reason=reason)
                         if pos.side == "SHORT"
@@ -444,7 +488,11 @@ def monitor_futures_hard_stops_once(components: Any) -> List[Dict[str, Any]]:
                             "side": pos.side,
                             "reason": reason,
                             "pnl": result.get("pnl") if isinstance(result, dict) else None,
+                            "unrealized_pnl": unrealized_pnl,
+                            "max_loss_usd": max_loss_usd,
                         })
+                        with _shadow_metrics_lock:
+                            _shadow_metrics["stop_closes"] += 1
                         print(f"[HardRisk/Futures] {pos.symbol} {pos.side}: closed via fast safety-net ({reason})")
                 except Exception as _close_err:
                     print(f"[HardRisk/Futures] {pos.symbol} {pos.side}: close attempt failed: {_close_err}")

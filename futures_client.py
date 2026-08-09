@@ -44,7 +44,11 @@ from unified_governance_supervisor import (
     UnifiedGovernanceContext,
     evaluate as _evaluate_unified_governance,
 )
-from ug_loss_policy import evaluate_shadow as _evaluate_ug_loss_shadow
+from ug_loss_policy import (
+    evaluate_shadow as _evaluate_ug_loss_shadow,
+    rollout_applies as _ug_loss_rollout_applies,
+    apply_shadow_result_to_decision as _apply_ug_loss_shadow_result,
+)
 from market_structure import build_snapshot as _build_lifecycle_structure_snapshot, evaluate as _evaluate_lifecycle_structure
 from binance_truth_guard import (
     evaluate_futures_parity,
@@ -52,6 +56,7 @@ from binance_truth_guard import (
     persist_truth_status,
     audit_truth_mismatches,
 )
+from close_contract import apply_close_contract
 
 
 def _parse_utc_datetime(value):
@@ -450,7 +455,26 @@ class FuturesClient:
                 'es_escalonamiento': total_esc > 1,
                 'bounce_entry': bool(pos._smart_meta.get('bounce_entry', False)),  # FIX-4: root for easy lookup
                 'btc_at_entry': pos._smart_meta.get('btc_price_at_entry'),
+                'ready_candidate_id': pos._smart_meta.get('ready_candidate_id'),
+                'staged_direction': pos._smart_meta.get('staged_direction') or {},
+                'profile_at_entry': pos._smart_meta.get('profile_at_entry') or pos._smart_meta.get('peak_quality_profile'),
+                'regime_at_entry': pos._smart_meta.get('regime_at_entry') or pos._smart_meta.get('entry_regime') or pos._smart_meta.get('regime_mode'),
+                'commission_bps_total': round((_total_comm / max(1e-12, pos.qty * pos.entry_price)) * 10000.0, 6),
+                'spread_bps_estimate': pos._smart_meta.get('spread_bps_estimate'),
+                'slippage_bps_estimate': pos._smart_meta.get('slippage_bps_estimate'),
+                'funding_bps': pos._smart_meta.get('funding_bps', 0.0),
             }
+            meta_payload = apply_close_contract(
+                meta_payload,
+                trade_type='futures',
+                position_side=pos.side,
+                close_reason=reason,
+                exchange_confirmed=bool(pos._smart_meta.get('pnl_accounting_mode') == 'binance_user_trade_verified'),
+                synthetic=bool(pos._smart_meta.get('synthetic')),
+                learning_eligible=pos._smart_meta.get('learning_eligible'),
+                partial=partial_close,
+                close_group_id=_cgid,
+            )
             if partial_close:
                 meta_payload['partial_close'] = True
                 meta_payload['partial_qty_closed'] = pos.qty
@@ -1728,6 +1752,16 @@ class FuturesClient:
                                 _meta = dict(_meta)
                                 _meta['ghost_reconciled'] = True
                                 _meta['ghost_reconcile_source'] = _recon.get('pnl_accounting_mode', 'binance_user_trade_verified')
+                                _meta = apply_close_contract(
+                                    _meta,
+                                    trade_type='futures',
+                                    position_side=_fdr_side,
+                                    close_reason=_recon.get('reason') or 'ghost_reconciled_binance',
+                                    close_source='reconciliation',
+                                    exchange_confirmed=True,
+                                    synthetic=True,
+                                    learning_eligible=False,
+                                )
                                 _exit_time = datetime.now(timezone.utc)
                                 self.db_client.execute_update(
                                     """
@@ -2502,6 +2536,11 @@ class FuturesClient:
         "directional_arbitration_reason",
         "sr_zone_position_at_entry",
         "range_reversion_valid_at_entry",
+        "ready_candidate_id",
+        "staged_direction",
+        "spread_bps_estimate",
+        "slippage_bps_estimate",
+        "funding_bps",
     )
 
     @classmethod
@@ -4429,11 +4468,29 @@ class FuturesClient:
                     )
                     _ug_decision = _evaluate_unified_governance(_ug_ctx, settings)
                     _ug_shadow = _evaluate_ug_loss_shadow(_ug_ctx, _ug_decision)
+                    _ug_mode = str(get_param(settings, "ug_loss_policy_mode", "shadow") or "shadow").lower()
+                    _ug_canary_fraction = float(get_param(settings, "ug_loss_policy_canary_fraction", 0.25) or 0.25)
+                    _ug_apply = _ug_loss_rollout_applies(
+                        _ug_mode,
+                        f"futures|{symbol}|{pos.side}|{getattr(settings, 'current_regime_mode', '')}|{_pos_profile}",
+                        _ug_canary_fraction,
+                    )
+                    _ug_applied_patch = _apply_ug_loss_shadow_result(_ug_decision, _ug_shadow)
+                    if _ug_apply and _ug_applied_patch.get("applied"):
+                        _ug_decision.should_close = bool(_ug_applied_patch.get("should_close", _ug_decision.should_close))
+                        _ug_decision.close_pct = float(_ug_applied_patch.get("close_pct", _ug_decision.close_pct) or 0.0)
+                        _ug_decision.action = str(_ug_applied_patch.get("action") or _ug_decision.action)
+                        _ug_decision.reason = str(_ug_applied_patch.get("reason") or _ug_decision.reason)
+                        _ug_decision.detail = str(_ug_applied_patch.get("detail") or _ug_decision.detail)
                     _ug_meta['unified_governance_shadow_last'] = _ug_shadow
                     self._audit(symbol, 'unified_governance_shadow_decision', {
                         'side': pos.side,
                         'trade_type': 'futures',
                         **_ug_shadow,
+                        'rollout_mode': _ug_mode,
+                        'rollout_canary_fraction': _ug_canary_fraction,
+                        'rollout_applies': bool(_ug_apply),
+                        'active_applied': bool(_ug_apply and _ug_applied_patch.get('applied')),
                     })
                     if _ug_decision.state_patch:
                         pos._smart_meta.update(_ug_decision.state_patch)

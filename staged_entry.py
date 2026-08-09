@@ -77,6 +77,15 @@ def _seconds_since(iso_value: Optional[str]) -> Optional[float]:
         return None
 
 
+def _stable_rollout_value(*parts: Any) -> float:
+    """Deterministic [0,1) rollout bucket based on stable string hashing."""
+    text = "|".join(str(p or "") for p in parts)
+    acc = 0
+    for ch in text:
+        acc = (acc * 33 + ord(ch)) % 10000
+    return acc / 10000.0
+
+
 def _stage_payload(
     previous_data: Dict[str, Any],
     *,
@@ -661,7 +670,13 @@ def _direction_transition(
     )
     _vol_anomaly_mult = max(1.0, float(cfg.get("direction_volume_anomaly_multiplier", 3.0) or 3.0))
     volume_anomaly = bool(vol_spike_at_signal is not None and vol_spike_at_signal >= _vol_anomaly_mult)
-    if bool(cfg.get("direction_volume_gate_enabled", False)) and volume_anomaly:
+    _volume_gate_enabled = bool(cfg.get("direction_volume_gate_enabled", False))
+    _volume_gate_fraction = max(0.0, min(1.0, float(cfg.get("direction_volume_gate_canary_fraction", 1.0) or 0.0)))
+    _volume_gate_roll = _stable_rollout_value(row.get("symbol"), row.get("regime_mode"), "direction_volume_gate")
+    _volume_gate_applies = bool(
+        _volume_gate_enabled and volume_anomaly and _volume_gate_fraction > 0.0 and _volume_gate_roll < _volume_gate_fraction
+    )
+    if _volume_gate_applies:
         required += 1
     support_level = _number(data.get("support_level")) if isinstance(data, dict) else None
     resistance_level = _number(data.get("resistance_level")) if isinstance(data, dict) else None
@@ -679,6 +694,10 @@ def _direction_transition(
         "stop_price": stop_price,
         "vol_spike_at_signal": vol_spike_at_signal,
         "volume_anomaly": volume_anomaly,
+        "volume_gate_enabled": _volume_gate_enabled,
+        "volume_gate_canary_fraction": _volume_gate_fraction,
+        "volume_gate_roll": round(_volume_gate_roll, 4),
+        "volume_gate_applied": _volume_gate_applies,
         "directional_confirmations": confirmations,
         "adverse_observations": adverse_observations,
         "required_confirmations": required,
@@ -917,6 +936,18 @@ def _input_features_for_check(
         "support_breakdown_sell": meta.get("support_breakdown_sell") or meta.get("sr_breakdown"),
         "support_strength": meta.get("support_strength"),
         "support_volume_ratio": meta.get("support_volume_ratio"),
+        "sr_support_attempts": meta.get("sr_support_attempts"),
+        "sr_support_failed_attempts": meta.get("sr_support_failed_attempts"),
+        "sr_support_accept_rate": meta.get("sr_support_accept_rate"),
+        "sr_support_attempt_volume_ratio": meta.get("sr_support_attempt_volume_ratio"),
+        "sr_support_attempt_penetration_atr": meta.get("sr_support_attempt_penetration_atr"),
+        "sr_resistance_attempts": meta.get("sr_resistance_attempts"),
+        "sr_resistance_failed_attempts": meta.get("sr_resistance_failed_attempts"),
+        "sr_resistance_accept_rate": meta.get("sr_resistance_accept_rate"),
+        "sr_resistance_attempt_volume_ratio": meta.get("sr_resistance_attempt_volume_ratio"),
+        "sr_resistance_attempt_penetration_atr": meta.get("sr_resistance_attempt_penetration_atr"),
+        "sr_break_pressure_long": meta.get("sr_break_pressure_long"),
+        "sr_break_pressure_short": meta.get("sr_break_pressure_short"),
         "current_price": current_price,
         "signal_price": signal_price,
     }
@@ -925,6 +956,295 @@ def _input_features_for_check(
     if _cp is not None and _sp is not None and _sp > 0:
         features["price_delta_pct"] = (_cp - _sp) / _sp * 100.0
     return {k: v for k, v in features.items() if v is not None}
+
+
+def _decision_features_v1(
+    meta: Dict[str, Any],
+    current_price: Optional[float],
+    signal_price: Optional[float],
+) -> Dict[str, Any]:
+    """Canonical decision feature payload persisted per staged check.
+
+    Keep stable key names for downstream analytics and allow nulls so missing
+    values are measured as coverage gaps instead of silently dropped.
+    """
+    _raw_expected = meta.get("expected_pnl_percentage")
+    if _raw_expected is None:
+        _raw_expected = meta.get("expected_pnl_pct")
+
+    _support_dist = meta.get("nearest_support_dist_pct")
+    if _support_dist is None:
+        _support_dist = meta.get("sr_support_dist_pct")
+    _resistance_dist = meta.get("nearest_resistance_dist_pct")
+    if _resistance_dist is None:
+        _resistance_dist = meta.get("sr_resistance_dist_pct")
+
+    _cp = float(current_price) if current_price is not None else None
+    _sp = float(signal_price) if signal_price is not None else None
+    _price_delta_pct = None
+    if _cp is not None and _sp is not None and _sp > 0:
+        _price_delta_pct = (_cp - _sp) / _sp * 100.0
+
+    return {
+        "schema_version": "decision_features_v1",
+        "expected_pnl": meta.get("expected_pnl"),
+        "expected_pnl_pct": _raw_expected,
+        "success_probability": meta.get("success_probability"),
+        "peak_quality": meta.get("peak_quality"),
+        "composite_score": meta.get("composite_score"),
+        "confluence": meta.get("confluence"),
+        "short_term_score": meta.get("short_term_score"),
+        "range_score": meta.get("range_score"),
+        "vol_score": meta.get("vol_score"),
+        "rsi_score": meta.get("rsi_score"),
+        "symbol_quality_score": meta.get("symbol_quality_score"),
+        "rsi_4h": meta.get("rsi_4h"),
+        "vol_spike": meta.get("vol_spike"),
+        "range_position": meta.get("range_position"),
+        "trend_4h": meta.get("trend_4h"),
+        "atr": meta.get("atr"),
+        "signal_strength": meta.get("signal_strength") or meta.get("strength"),
+        "ticker_price_change_pct": meta.get("ticker_price_change_pct"),
+        "category": meta.get("category"),
+        "sr_zone_position": meta.get("sr_zone_position"),
+        "sr_support_dist_pct": _support_dist,
+        "sr_resistance_dist_pct": _resistance_dist,
+        "support_bounce_buy": meta.get("support_bounce_buy") or meta.get("sr_bounce"),
+        "support_breakout_buy": meta.get("support_breakout_buy") or meta.get("sr_breakout"),
+        "support_breakdown_sell": meta.get("support_breakdown_sell") or meta.get("sr_breakdown"),
+        "support_strength": meta.get("support_strength"),
+        "support_volume_ratio": meta.get("support_volume_ratio"),
+        "sr_support_attempts": meta.get("sr_support_attempts"),
+        "sr_support_failed_attempts": meta.get("sr_support_failed_attempts"),
+        "sr_support_accept_rate": meta.get("sr_support_accept_rate"),
+        "sr_support_attempt_volume_ratio": meta.get("sr_support_attempt_volume_ratio"),
+        "sr_support_attempt_penetration_atr": meta.get("sr_support_attempt_penetration_atr"),
+        "sr_resistance_attempts": meta.get("sr_resistance_attempts"),
+        "sr_resistance_failed_attempts": meta.get("sr_resistance_failed_attempts"),
+        "sr_resistance_accept_rate": meta.get("sr_resistance_accept_rate"),
+        "sr_resistance_attempt_volume_ratio": meta.get("sr_resistance_attempt_volume_ratio"),
+        "sr_resistance_attempt_penetration_atr": meta.get("sr_resistance_attempt_penetration_atr"),
+        "sr_break_pressure_long": meta.get("sr_break_pressure_long"),
+        "sr_break_pressure_short": meta.get("sr_break_pressure_short"),
+        "current_price": _cp,
+        "signal_price": _sp,
+        "price_delta_pct": _price_delta_pct,
+    }
+
+
+def _feature_mode_enabled(settings: Any, field_name: str, default_mode: str = "shadow") -> Tuple[bool, str]:
+    raw = get_param(settings, field_name, default_mode)
+    mode = str(raw or default_mode).strip().lower()
+    return mode in {"active", "enabled", "on", "true", "1"}, mode
+
+
+def _safe_ratio(value: Optional[float], default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(f):
+        return default
+    return f
+
+
+def _sr_distance_pct(price: Optional[float], level: Optional[float]) -> Optional[float]:
+    p = _number(price)
+    lv = _number(level)
+    if p is None or lv is None or lv <= 0:
+        return None
+    return abs((p - lv) / lv) * 100.0
+
+
+def _evaluate_sr_side_guard(
+    row: Dict[str, Any],
+    cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Evaluate final S/R side recertification before opening.
+
+    LONG is expected near support, SHORT near resistance.
+    Breakout/breakdown exceptions are allowed so momentum entries are not overblocked.
+    """
+    data = (row.get("data") or {}) if isinstance(row, dict) else {}
+    signal_meta = row.get("signal_meta") if isinstance(row.get("signal_meta"), dict) else {}
+    direction = data.get("direction") if isinstance(data.get("direction"), dict) else {}
+
+    side = str(direction.get("side") or signal_meta.get("expected_side") or "LONG").strip().upper()
+    price = _number(
+        direction.get("last_observed_price")
+        or signal_meta.get("current_price")
+        or row.get("signal_price")
+    )
+    support_level = _number(data.get("support_level") if data.get("support_level") is not None else signal_meta.get("support_level"))
+    resistance_level = _number(data.get("resistance_level") if data.get("resistance_level") is not None else signal_meta.get("resistance_level"))
+
+    mode = str(cfg.get("sr_side_guard_mode", "active_canary") or "active_canary").strip().lower()
+    canary_fraction = max(0.0, min(1.0, float(cfg.get("sr_side_guard_canary_fraction", 0.35) or 0.0)))
+    max_dist_pct = max(0.05, float(cfg.get("sr_side_guard_max_dist_pct", 2.0) or 2.0))
+    breakout_min_pressure = max(0.0, min(1.0, float(cfg.get("sr_side_guard_breakout_min_pressure", 0.65) or 0.65)))
+    breakout_buffer_pct = max(0.0, float(cfg.get("sr_side_guard_breakout_buffer_pct", 0.15) or 0.15))
+    breakout_max_away_pct = max(0.0, float(cfg.get("sr_side_guard_breakout_max_away_pct", 1.20) or 1.20))
+
+    rollout_bucket = _stable_rollout_value(
+        row.get("symbol"),
+        row.get("regime_mode"),
+        row.get("id"),
+        "sr_side_guard",
+    )
+
+    apply_guard = False
+    if mode in {"enforced", "active", "enabled", "on", "true", "1"}:
+        apply_guard = True
+    elif mode == "active_canary":
+        apply_guard = rollout_bucket < canary_fraction
+    elif mode in {"shadow", "disabled", "off", "false", "0"}:
+        apply_guard = False
+
+    result: Dict[str, Any] = {
+        "side": side,
+        "price": price,
+        "support_level": support_level,
+        "resistance_level": resistance_level,
+        "max_dist_pct": max_dist_pct,
+        "mode": mode,
+        "canary_fraction": canary_fraction,
+        "rollout_bucket": round(rollout_bucket, 4),
+        "apply_guard": apply_guard,
+    }
+
+    if price is None or price <= 0:
+        result.update({"passed": True, "reason": "SR_SIDE_GUARD_BYPASS_PRICE_MISSING"})
+        return result
+
+    expected_level = resistance_level if side == "SHORT" else support_level
+    expected_dist_pct = _sr_distance_pct(price, expected_level)
+    result["expected_level"] = expected_level
+    result["expected_dist_pct"] = expected_dist_pct
+
+    if expected_level is None or expected_dist_pct is None:
+        # Fail-open when structural S/R metadata is missing.
+        result.update({"passed": True, "reason": "SR_SIDE_GUARD_BYPASS_LEVEL_MISSING"})
+        return result
+
+    near_expected_level = expected_dist_pct <= max_dist_pct
+
+    if side == "SHORT":
+        breakout_flag = bool(data.get("support_breakdown_sell") or data.get("sr_breakdown") or signal_meta.get("support_breakdown_sell") or signal_meta.get("sr_breakdown"))
+        pressure = _number(data.get("sr_break_pressure_short") if data.get("sr_break_pressure_short") is not None else signal_meta.get("sr_break_pressure_short"))
+        breakdown_confirmed = bool(
+            support_level is not None
+            and price <= support_level * (1.0 - breakout_buffer_pct / 100.0)
+            and pressure is not None
+            and pressure >= breakout_min_pressure
+        )
+        anchor_level = support_level
+    else:
+        breakout_flag = bool(data.get("support_breakout_buy") or data.get("sr_breakout") or signal_meta.get("support_breakout_buy") or signal_meta.get("sr_breakout"))
+        pressure = _number(data.get("sr_break_pressure_long") if data.get("sr_break_pressure_long") is not None else signal_meta.get("sr_break_pressure_long"))
+        breakdown_confirmed = bool(
+            resistance_level is not None
+            and price >= resistance_level * (1.0 + breakout_buffer_pct / 100.0)
+            and pressure is not None
+            and pressure >= breakout_min_pressure
+        )
+        anchor_level = resistance_level
+
+    breakout_anchor_dist_pct = _sr_distance_pct(price, anchor_level)
+    breakout_exception = bool(
+        (breakout_flag or breakdown_confirmed)
+        and (breakout_anchor_dist_pct is None or breakout_anchor_dist_pct <= breakout_max_away_pct)
+    )
+    result.update({
+        "near_expected_level": near_expected_level,
+        "breakout_flag": breakout_flag,
+        "breakout_pressure": pressure,
+        "breakout_confirmed": breakdown_confirmed,
+        "breakout_anchor_dist_pct": breakout_anchor_dist_pct,
+        "breakout_exception": breakout_exception,
+    })
+
+    passed = bool(near_expected_level or breakout_exception)
+    if passed:
+        reason = "SR_SIDE_GUARD_BREAKOUT_EXCEPTION" if breakout_exception and not near_expected_level else "SR_SIDE_GUARD_PASS"
+        result.update({"passed": True, "reason": reason})
+        return result
+
+    if apply_guard:
+        result.update({"passed": False, "reason": "SR_SIDE_GUARD_BLOCKED"})
+    else:
+        result.update({"passed": False, "reason": "SR_SIDE_GUARD_SHADOW_BLOCKED"})
+    return result
+
+
+def _compute_realtime_open_score(
+    row: Dict[str, Any],
+    settings: Any,
+    now_ts: datetime,
+) -> Tuple[float, Dict[str, Any]]:
+    """Compute a lightweight "open-now" score for slot prioritization.
+
+    The score updates at selection time so a fresh high-edge setup can outrank
+    an older stale candidate without adding new heavy predictor calls.
+    """
+    data = (row.get("data") or {}) if isinstance(row, dict) else {}
+    policy = (data.get("policy") or {}) if isinstance(data, dict) else {}
+    signal_meta = row.get("signal_meta") if isinstance(row.get("signal_meta"), dict) else {}
+    direction = data.get("direction") if isinstance(data.get("direction"), dict) else {}
+
+    expected_pnl = _safe_ratio(_number(policy.get("expected_pnl")), 0.0)
+    quality = _safe_ratio(_number(policy.get("quality_score")), 0.0)
+    prob = _safe_ratio(_number(policy.get("success_probability")), 0.0)
+    age_base = row.get("last_checked_at") or row.get("validated_at") or row.get("ready_at")
+    age_min = _minutes_since(age_base)
+    age_min = age_min if age_min is not None else 0.0
+
+    # Freshness decays smoothly so old candidates are not hard-blocked.
+    freshness_half_life_min = max(5.0, float(get_param(settings, "realtime_open_score_half_life_min", 45.0) or 45.0))
+    freshness = 1.0 / (1.0 + (age_min / freshness_half_life_min))
+
+    side = str(direction.get("side") or signal_meta.get("expected_side") or "LONG").upper()
+    if side == "SHORT":
+        pressure = _safe_ratio(_number(signal_meta.get("sr_break_pressure_short")), 0.5)
+        accept_rate = _safe_ratio(_number(signal_meta.get("sr_resistance_accept_rate")), 0.0)
+        failed_attempts = _safe_ratio(_number(signal_meta.get("sr_resistance_failed_attempts")), 0.0)
+        attempts = max(1.0, _safe_ratio(_number(signal_meta.get("sr_resistance_attempts")), 0.0))
+        dist_pct = _number(signal_meta.get("nearest_resistance_dist_pct"))
+    else:
+        pressure = _safe_ratio(_number(signal_meta.get("sr_break_pressure_long")), 0.5)
+        accept_rate = _safe_ratio(_number(signal_meta.get("sr_support_accept_rate")), 0.0)
+        failed_attempts = _safe_ratio(_number(signal_meta.get("sr_support_failed_attempts")), 0.0)
+        attempts = max(1.0, _safe_ratio(_number(signal_meta.get("sr_support_attempts")), 0.0))
+        dist_pct = _number(signal_meta.get("nearest_support_dist_pct"))
+
+    fail_ratio = max(0.0, min(1.0, failed_attempts / attempts))
+    dist_penalty = 1.0
+    if dist_pct is not None:
+        max_dist = max(0.1, float(get_param(settings, "realtime_open_score_sr_max_dist_pct", 5.0) or 5.0))
+        dist_penalty = max(0.2, 1.0 - min(1.0, float(dist_pct) / max_dist))
+
+    # Slot-value objective: edge now + execution confidence now.
+    edge_now = max(0.0, expected_pnl) * (0.45 + 0.55 * max(0.0, min(1.0, prob)))
+    structure_now = (0.45 + 0.55 * max(0.0, min(1.0, pressure))) * (1.0 - 0.35 * fail_ratio)
+    quality_now = max(0.0, quality)
+    score_now = (edge_now * 0.55 + quality_now * 0.30 + structure_now * 0.15)
+    score_now *= freshness * dist_penalty
+    score_now *= (0.75 + 0.25 * max(0.0, min(1.0, accept_rate + 0.1)))
+
+    detail = {
+        "score_now": round(float(score_now), 6),
+        "edge_now": round(float(edge_now), 6),
+        "quality_now": round(float(quality_now), 6),
+        "structure_now": round(float(structure_now), 6),
+        "freshness": round(float(freshness), 6),
+        "dist_penalty": round(float(dist_penalty), 6),
+        "fail_ratio": round(float(fail_ratio), 6),
+        "attempt_accept_rate": round(float(accept_rate), 6),
+        "side": side,
+        "mode": "shadow",
+    }
+    return float(score_now), detail
 
 
 def load_ready_candidates(
@@ -1364,9 +1684,15 @@ def stage_ready_candidates(
             db_client, ready_id, cycle_id, 0, "inter", signal_price, cand_cfg.get("price_source"),
             meta.get("peak_quality_profile"), float(meta.get("peak_quality_score", 0.0) or 0.0),
             (meta.get("entry_profile_gate_info") or {}).get("thresholds"),
-            fear_greed, {**_input_features_for_check(meta, signal_price, signal_price), "policy": policy_data,
-                         "direction": {"state_before": "setup", "state_after": "awaiting_confirmation"},
-                         "stage_kind": "setup_detected", "stage_reason": "SETUP_CAPTURED"},
+            fear_greed,
+            {
+                **_input_features_for_check(meta, signal_price, signal_price),
+                "decision_features_v1": _decision_features_v1(meta, signal_price, signal_price),
+                "policy": policy_data,
+                "direction": {"state_before": "setup", "state_after": "awaiting_confirmation"},
+                "stage_kind": "setup_detected",
+                "stage_reason": "SETUP_CAPTURED",
+            },
             _initial_positive, "setup_detected", policy_reason, 0,
         )
         staged.append({"id": ready_id, "symbol": symbol, "status": "ready", "new": True})
@@ -1447,6 +1773,7 @@ def evaluate_inter_cycle(
         )
         signal_price = row.get("signal_price")
         input_features = _input_features_for_check(meta, current_price, signal_price)
+        input_features["decision_features_v1"] = _decision_features_v1(meta, current_price, signal_price)
         execution_ms = int((time.monotonic() - start) * 1000)
 
         cycle_cfg = _adapt_cfg_for_sr_signal(cfg, meta)
@@ -2137,9 +2464,53 @@ def get_openable_candidates(
                 # Keep the candidate validated and let the watcher keep monitoring it.
                 # Do NOT requeue to ready, which resets the clock and can cause MAX_AGE_EXPIRED.
                 continue
+            sr_side_guard = _evaluate_sr_side_guard(row, cfg)
+            row.setdefault("_selection_shadow", {})["sr_side_guard"] = sr_side_guard
+            if not bool(sr_side_guard.get("passed")) and bool(sr_side_guard.get("apply_guard")):
+                _row_revision = int((row.get("data") or {}).get("candidate_revision", 0) or 0)
+                _hold_stage = _stage_payload(
+                    row.get("data") or {},
+                    stage_kind="trigger_monitoring",
+                    stage_reason="SR_SIDE_GUARD_WAIT",
+                    max_age_min=int(row.get("max_age_min") or cfg.get("max_age_min") or 0),
+                )
+                _update_ready_status(
+                    db_client,
+                    row["id"],
+                    data_update={
+                        "sr_side_guard_last": sr_side_guard,
+                        "last_rejection": {"reason": "SR_SIDE_GUARD_BLOCKED", "details": sr_side_guard},
+                        **_hold_stage,
+                    },
+                    guard_status="validated",
+                    expected_revision=_row_revision,
+                )
+                _record_check(
+                    db_client,
+                    row["id"],
+                    None,
+                    _next_check_sequence(db_client, row["id"]),
+                    "lifecycle",
+                    _number(sr_side_guard.get("price")),
+                    cfg.get("price_source"),
+                    None,
+                    0.0,
+                    {},
+                    None,
+                    {"sr_side_guard": sr_side_guard},
+                    False,
+                    "risk_queue_blocked",
+                    "SR_SIDE_GUARD_BLOCKED",
+                    0,
+                    writer="risk_selector",
+                )
+                continue
             active_rows.append(row)
 
-        def priority(row: Dict[str, Any]) -> Tuple[float, float, float, float, float]:
+        _realtime_enabled, _realtime_mode = _feature_mode_enabled(settings, "realtime_open_rerank_mode", "shadow")
+        _anti_mono_enabled, _anti_mono_mode = _feature_mode_enabled(settings, "anti_monopoly_decay_mode", "shadow")
+
+        def priority(row: Dict[str, Any]) -> Tuple[float, float, float, float, float, float]:
             policy = ((row.get("data") or {}).get("policy") or {})
             expected_pnl = policy.get("expected_pnl")
             quality_score = policy.get("quality_score")
@@ -2170,7 +2541,27 @@ def get_openable_candidates(
             # stronger evidence of non-viability than the (often stale/optimistic) EV model.
             _last_gate = (row.get("data") or {}).get("last_execution_gate") or {}
             _execution_viable = 0.0 if _last_gate.get("passed") is False else 1.0
-            return (_execution_viable, expected_pnl, quality_score, probability, -ready_timestamp)
+            _score_now, _score_detail = _compute_realtime_open_score(row, settings, _now())
+            _score_detail["mode"] = _realtime_mode
+            row.setdefault("_selection_shadow", {})["realtime_open"] = _score_detail
+
+            # s-phase4: anti-monopoly soft decay by repeated blocked attempts.
+            blocked_streak = int(((row.get("data") or {}).get("execution_block_streak") or 0))
+            decay = 1.0 / (1.0 + max(0, blocked_streak) * 0.20)
+            row.setdefault("_selection_shadow", {})["anti_monopoly"] = {
+                "mode": _anti_mono_mode,
+                "blocked_streak": blocked_streak,
+                "decay": round(decay, 6),
+            }
+            if _anti_mono_enabled:
+                _score_now *= decay
+
+            _effective_score = _score_now if _realtime_enabled else expected_pnl
+            row.setdefault("_selection_shadow", {})["effective_score"] = {
+                "mode": _realtime_mode,
+                "value": round(float(_effective_score), 6),
+            }
+            return (_execution_viable, _effective_score, expected_pnl, quality_score, probability, -ready_timestamp)
 
         active_rows = sorted(active_rows, key=priority, reverse=True)
         selected = active_rows[:max(1, int(cfg.get("max_open_per_cycle", 1)))]
@@ -2188,7 +2579,8 @@ def get_openable_candidates(
                 data_update={
                     "global_validated_rank": rank,
                     "global_validated_universe_size": len(active_rows),
-                    "selection_criterion": "EV_NET_DESC_QUALITY_PROBABILITY_READY_AT",
+                    "selection_criterion": "REALTIME_OPEN_SCORE_DESC_EV_QUALITY_PROBABILITY_READY_AT",
+                    "selection_shadow": row.get("_selection_shadow") or {},
                     **_risk_stage,
                 },
                 guard_status="validated",

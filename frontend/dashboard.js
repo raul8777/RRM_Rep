@@ -30,6 +30,7 @@ let _cachedFuturesPositions = [];  // Updated by renderFuturesPositions each cyc
 let _cachedFuturesClosed = [];     // Updated by renderFuturesClosed each cycle
 const CACHE_TTL_MS = 5000;    // 5 s frontend cache for fresher mode/profile
 const POLL_INTERVAL_MS = 30000; // 30 s poll: /dashboard/summary is heavy (~25-40s)
+const OPEN_POSITIONS_POLL_MS = 15000; // 15 s for open positions priority panel
 const BACKTEST_PROGRESS_POLL_MS = 5000;
 const FETCH_TIMEOUT_MS = 60000; // allow the heavy summary endpoint enough time
 let _fetchInProgress = false;
@@ -81,6 +82,76 @@ async function fetchDashboardData() {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmt(n, dec = 2) { return parseFloat(n || 0).toFixed(dec); }
 function pnlClass(v) { return parseFloat(v || 0) >= 0 ? 'positive' : 'negative'; }
+
+function _escHtml(s) {
+    return String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function _compactPositionIdLabel(raw) {
+    const txt = String(raw || '').trim();
+    if (txt.length <= 16) return txt;
+    return `${txt.slice(0, 6)}...${txt.slice(-6)}`;
+}
+
+async function _copyToClipboard(text) {
+    const value = String(text || '');
+    if (!value) return false;
+    try {
+        if (navigator?.clipboard?.writeText) {
+            await navigator.clipboard.writeText(value);
+            return true;
+        }
+    } catch (_) {
+        // Fallback below.
+    }
+    try {
+        const area = document.createElement('textarea');
+        area.value = value;
+        area.setAttribute('readonly', 'readonly');
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        area.style.pointerEvents = 'none';
+        document.body.appendChild(area);
+        area.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(area);
+        return !!ok;
+    } catch (_) {
+        return false;
+    }
+}
+
+async function copyPositionIdFromEvent(event) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    const btn = event?.currentTarget;
+    const raw = String(btn?.dataset?.copyId || '').trim();
+    if (!raw) return;
+    const copied = await _copyToClipboard(raw);
+    if (!btn) return;
+    const original = btn.getAttribute('data-copy-label') || btn.textContent || 'ID';
+    btn.textContent = copied ? 'Copiado' : 'Error';
+    btn.classList.add(copied ? 'copied' : 'copy-error');
+    setTimeout(() => {
+        btn.textContent = original;
+        btn.classList.remove('copied', 'copy-error');
+    }, 900);
+}
+
+function fmtPositionId(position) {
+    const displayRaw = String(position?.position_display_id || position?.position_id || '').trim();
+    if (!displayRaw) return '<span class="position-id">—</span>';
+    const copyRaw = String(position?.position_id || displayRaw).trim();
+    const label = _compactPositionIdLabel(displayRaw);
+    const safeRaw = _escHtml(copyRaw);
+    const safeLabel = _escHtml(label);
+    return `<button type="button" class="position-id position-id-copy" data-copy-id="${safeRaw}" data-copy-label="${safeLabel}" title="Click para copiar ID completo: ${safeRaw}" onclick="copyPositionIdFromEvent(event)">${safeLabel}</button>`;
+}
 
 function fmtPrediction(pred, showDetails = false) {
     if (!pred) return '<span class="no-pred">Sin predicción</span>';
@@ -246,6 +317,17 @@ function fmtCloseReason(r) {
     const entry = _CLOSE_REASON_MAP[r];
     if (entry) return `<span class="close-reason ${entry[1]}">${entry[0]}</span>`;
     return `<span class="close-reason reason-neutral">${r}</span>`;
+}
+
+function fmtCloseContractBadge(p) {
+    const meta = (p && typeof p.metadata === 'object' && p.metadata) ? p.metadata : {};
+    const contract = meta.close_contract || {};
+    const source = meta.close_source || contract.close_source || '';
+    const state = meta.reconciliation_state || contract.reconciliation_state || '';
+    if (!source && !state) return '<span class="sl-badge none">—</span>';
+    const label = [source, state].filter(Boolean).join(' · ');
+    const title = `Fuente: ${source || '—'} | Reconciliación: ${state || '—'}`;
+    return `<span class="sl-badge recon" title="${title}">🔗${label}</span>`;
 }
 
 function fmtProfileBadge(p) {
@@ -1512,6 +1594,7 @@ function renderOpenPositions(d) {
         rows.push(`
         <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'open')" style="cursor:pointer" data-symbol="${p.symbol}">
             <td><strong>${p.symbol}</strong>${contextBadge}${overflowBadge}${escBadge}${partialBadge}${bounceBadge}${earlyPeakBadge}<br><div class="ops-row-actions"><button class="ops-action-btn" onclick="event.stopPropagation();openSelectionSymbolChart('${p.symbol}', '${p.trade_type || 'spot'}', '${p.side || 'LONG'}')">Ver gráfico</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'tradingview', '${p.trade_type || 'spot'}')">TV</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'binance', '${p.trade_type || 'spot'}')">BIN</button></div></td>
+            <td>${fmtPositionId(p)}</td>
             <td class="direction-cell">${tradeDirectionBadge}</td>
             <td class="profile-cell">${profileBadge}</td>
             <td class="mode-cell">${modeBadge}</td>
@@ -1540,6 +1623,7 @@ function renderOpenPositions(d) {
                 <span style="color:#888;font-weight:600">Esc${_idx}</span>
                 <small style="color:#555;font-style:italic">&nbsp;(entrada anterior — no disponible tras reinicio)</small>
             </td>
+            <td></td>
             <td colspan="12" style="color:#555;font-size:11px;font-style:italic">Datos no recuperables: posición promediada por Binance al sincronizar</td>
         </tr>`);
                 }
@@ -1560,6 +1644,7 @@ function renderOpenPositions(d) {
                 <small style="color:#666">(~$${fmt(escCost)})</small>
             </td>
             <td></td>
+            <td></td>
             <td><small class="entry-time">${escEntryFmt}</small></td>
             <td></td>
             <td></td>
@@ -1576,7 +1661,7 @@ function renderOpenPositions(d) {
         }
         } catch (err) {
             console.error(`Open-position render error for ${p?.symbol || 'unknown'}:`, err);
-            rows.push(`<tr><td colspan="13" class="empty">No se pudo renderizar ${p?.symbol || 'una posición'}.</td></tr>`);
+            rows.push(`<tr><td colspan="14" class="empty">No se pudo renderizar ${p?.symbol || 'una posición'}.</td></tr>`);
         }
     }
 
@@ -1594,6 +1679,7 @@ function renderOpenPositions(d) {
             <thead>
                 <tr>
                     <th>Símbolo</th>
+                    <th>ID</th>
                     <th class="direction-col">Operación</th>
                     <th class="profile-col">Perfil</th>
                     <th class="mode-col">Modo</th>
@@ -1769,11 +1855,13 @@ function renderClosedPositions(d) {
                         const _clBrTip = `Bounce Rescue${_clBlockCount > 0 ? ' — Gate bloqueó ' + _clBlockCount + 'x' : ''}${_clHeldMin > 0 ? ', mantuvo ' + _clHeldMin + ' min' : ''}`;
                         lifecycleBadges += `<span class="sl-badge bounce" title="${_clBrTip}">🔄BR${_clBlockCount > 0 ? '(' + _clBlockCount + ')' : ''}</span>`;
                     }
+                    lifecycleBadges += fmtCloseContractBadge(p);
                     if (!lifecycleBadges) lifecycleBadges = '<span class="sl-badge none">—</span>';
 
                     return `
                     <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'closed')" style="cursor:pointer">
                         <td>${catIcon(p.category || 'MIDCAP_ALT')} <strong>${p.symbol}</strong>${contextBadge}<br><div class="ops-row-actions"><button class="ops-action-btn" onclick="event.stopPropagation();openSelectionSymbolChart('${p.symbol}', '${p.trade_type || 'spot'}', '${p.side || 'LONG'}')">Ver gráfico</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'tradingview', '${p.trade_type || 'spot'}')">TV</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'binance', '${p.trade_type || 'spot'}')">BIN</button></div></td>
+                        <td>${fmtPositionId(p)}</td>
                         <td class="direction-cell">${tradeDirectionBadge}</td>
                         <td class="profile-cell">${profileBadge}</td>
                         <td class="mode-cell">${modeBadge}</td>
@@ -1854,6 +1942,7 @@ function renderExpectativaVsRealidad(data) {
                         <th>Diff</th>
                     </tr>
                 </thead>
+                        <th>ID</th>
                 <tbody>
                     ${allPositions.map(p => {
                         const expected = parseFloat(p.entry_expected_pnl || 0);
@@ -1891,6 +1980,8 @@ function renderExpectativaVsRealidad(data) {
 function renderShadowReadiness(data) {
     if (!data?.ok) return '<div class="shadow-readiness-error">Inventario shadow no disponible.</div>';
     const summary = data.summary || {};
+    const components = data.components || [];
+    const strategyGroups = data.strategy_groups || [];
     const sourceErrors = (data.source_errors || []).map(item => `<li><b>${item.source || 'fuente'}</b>: ${item.error || 'sin detalle'}</li>`).join('');
     const labels = {
         READY_TO_IMPLEMENT: 'LISTO PARA IMPLEMENTAR',
@@ -1899,7 +1990,7 @@ function renderShadowReadiness(data) {
         DISABLED: 'DESACTIVADO',
         RETIRED: 'RETIRADO',
     };
-    const rows = (data.components || []).map(component => {
+    const renderComponent = (component) => {
         const state = String(component.state || 'COLLECTING').toUpperCase();
         const gates = (component.gates || []).map(gate => {
             const actual = gate.actual == null ? '—' : gate.actual;
@@ -1915,11 +2006,31 @@ function renderShadowReadiness(data) {
             <p>${component.summary || 'Sin telemetría adicional.'}</p>
             ${gates ? `<ul>${gates}</ul>` : '<p class="shadow-no-gates">Sin gates: componente retirado o informativo.</p>'}
         </details>`;
-    }).join('') || '<p class="loading">Sin componentes shadow reportados.</p>';
+    };
+
+    const groupedChildIds = new Set();
+    const groupedRows = strategyGroups.map(group => {
+        const children = (group.children || [])
+            .map(id => components.find(c => c.id === id))
+            .filter(Boolean);
+        if (!children.length) return '';
+        children.forEach(c => groupedChildIds.add(c.id));
+        return `<section class="shadow-strategy-group">
+            <div class="shadow-strategy-head"><strong>${group.name || group.id}</strong><small>${children.length} subtareas</small></div>
+            <div class="shadow-components">${children.map(renderComponent).join('')}</div>
+        </section>`;
+    }).join('');
+
+    const ungroupedRows = components
+        .filter(component => !groupedChildIds.has(component.id))
+        .map(renderComponent)
+        .join('');
+
+    const rows = (groupedRows + ungroupedRows) || '<p class="loading">Sin componentes shadow reportados.</p>';
     return `<section class="shadow-readiness">
         <div class="shadow-readiness-head"><strong>Evidencia Shadow</strong><small>Listos: ${summary.ready_to_implement || 0} · Recolectando: ${summary.collecting || 0} · Activos: ${summary.active || 0} · Desactivados: ${summary.disabled || 0}</small></div>
         ${sourceErrors ? `<div class="shadow-source-errors"><b>Datos parciales</b><ul>${sourceErrors}</ul></div>` : ''}
-        <div class="shadow-components">${rows}</div>
+        <div class="shadow-components-root">${rows}</div>
     </section>`;
 }
 
@@ -2154,6 +2265,28 @@ function renderSelectionObservability(data) {
         return `${(n / 3600).toFixed(1)}h`;
     };
 
+    const fmtSrSideGuardBadge = (c, compact = false) => {
+        const reason = String(c.stage_reason || '').toUpperCase();
+        if (reason !== 'SR_SIDE_GUARD_WAIT') return '';
+        const guard = c.sr_side_guard_last || {};
+        const side = String(guard.side || c.expected_side || c.side || '—').toUpperCase();
+        const dist = Number(guard.sr_dist_pct);
+        const maxDist = Number(guard.max_dist_pct);
+        const pressure = Number(guard.pressure);
+        const minPressure = Number(guard.breakout_min_pressure);
+        const breakout = guard.breakout_like === true ? 'yes' : 'no';
+        const parts = [
+            `side=${side}`,
+            Number.isFinite(dist) ? `dist=${dist.toFixed(3)}%` : null,
+            Number.isFinite(maxDist) ? `max=${maxDist.toFixed(3)}%` : null,
+            Number.isFinite(pressure) ? `pressure=${pressure.toFixed(3)}` : null,
+            Number.isFinite(minPressure) ? `min_pressure=${minPressure.toFixed(3)}` : null,
+            `breakout_like=${breakout}`,
+        ].filter(Boolean);
+        const cls = compact ? 'selection-guard-badge compact' : 'selection-guard-badge';
+        return `<span class="${cls}" title="SR guard hold: ${parts.join(' | ')}">SR_SIDE_GUARD_WAIT</span>`;
+    };
+
     const discardStepFromReason = reason => {
         const r = String(reason || '').trim().toUpperCase();
         if (!r) return null;
@@ -2261,6 +2394,7 @@ function renderSelectionObservability(data) {
             quality_score: c.quality_score,
             direction: c.direction,
             time_in_stage_sec: c.time_in_stage_sec,
+            sr_side_guard_last: c.sr_side_guard_last,
             under_review: c.under_review,
             reviewed: c.reviewed,
             priority: c.priority,
@@ -2357,6 +2491,8 @@ function renderSelectionObservability(data) {
                         const conf = Number(d.directional_confirmations || 0);
                         const req = Number(d.required_confirmations || 0) || Number((c.config_snapshot || {}).direction_required_confirmations || 0) || 1;
                         const r = routeMeta(c);
+                        const guardBadge = fmtSrSideGuardBadge(c, true);
+                        const reasonText = c.display_reason || c.reason || c.stage_reason || '—';
                         return `<div class="sr-mini-row">
                             <span><b>${c.symbol || '—'}</b></span>
                             <span><span class="selection-col-status ${r.cls}">${r.step ? `Paso ${r.step}` : 'Terminal'}</span></span>
@@ -2366,7 +2502,7 @@ function renderSelectionObservability(data) {
                             <span>${fmtMoney(d.stop_price)}</span>
                             <span>${conf}/${req}</span>
                             <span>${fmtSec(c.time_in_stage_sec)}</span>
-                            <span title="${c.display_reason || c.reason || c.stage_reason || ''}">${c.display_reason || c.reason || c.stage_reason || '—'}</span>
+                            <span title="${reasonText}">${guardBadge}${guardBadge ? ' ' : ''}${reasonText}</span>
                         </div>`;
                     }).join('')}
                 </div>
@@ -2445,6 +2581,9 @@ function renderSelectionObservability(data) {
         const r = routeMeta(c);
         const discardStep = discardStepFromReason(c.stage_reason || c.display_reason || c.reason || c.discard_reason);
         const discardNote = discardStep ? `<br><small class="sr-route-note">Descartada en paso ${discardStep}</small>` : '';
+        const guardBadge = fmtSrSideGuardBadge(c, false);
+        const decisionReason = c.display_reason || c.reason || '';
+        const decisionTooltip = [decisionReason, guardBadge ? 'SR guard hold activo' : ''].filter(Boolean).join(' | ');
         return `
             <div class="selection-col-symbol"><strong>${c.symbol || '—'}</strong>${buildCandidateTimeline(c)}</div>
             <div class="selection-col-direction">${fmtTradeDirectionBadge({
@@ -2459,7 +2598,7 @@ function renderSelectionObservability(data) {
             <div class="selection-col-price-init">${fmtPrice(c.signal_price)}</div>
             <div class="selection-col-price-live">${fmtPrice(c.status === 'discarded' || c.status === 'expired' ? c.reject_price : c.live_price)}</div>
             <div class="selection-col-status ${statusClass[c.display_status] || 'status-neutral'}">${c.display_label || c.status}<br><small class="sr-route-note">${r.step ? `Paso ${r.step} · ${r.label}` : r.label}</small></div>
-            <div class="selection-col-decision" title="${c.display_reason || c.reason || ''}">${c.decision || '—'}<br><small>${c.display_reason || c.reason || ''}</small>${discardNote}<br><small>stage=${c.stage_kind || '—'} · reason=${c.stage_reason || '—'}</small></div>
+            <div class="selection-col-decision" title="${decisionTooltip}">${c.decision || '—'}${guardBadge ? `<br>${guardBadge}` : ''}<br><small>${decisionReason}</small>${discardNote}<br><small>stage=${c.stage_kind || '—'} · reason=${c.stage_reason || '—'}</small></div>
             <div class="selection-col-time">${formatTime(c.last_review_at)}</div>
             <div class="selection-col-actions">
                 <button class="selection-action-btn" onclick="openSelectionSymbolChart('${c.symbol || ''}', '${c.trade_type || 'spot'}', '${c.expected_side || c.side || 'LONG'}')">Ver gráfico</button>
@@ -5218,6 +5357,7 @@ function showFuturesClosedDetailModal(symbol, side, idx) {
                             <div><label>Stop Loss Final:</label><span class="negative">${slInfo}</span></div>
                             <div><label>Take Profit Final:</label><span class="positive">${tpInfo}</span></div>
                             <div><label>Razón de Cierre:</label><span>${fmtCloseReason(pos.close_reason)}</span></div>
+                            <div><label>Reconciliación:</label><span>${fmtCloseContractBadge(pos)}</span></div>
                         </div>
                     </div>
                     
@@ -7375,6 +7515,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     pollBacktestResults();
     updateBacktestProgressWidget();
     setInterval(updateDashboard, POLL_INTERVAL_MS);
+    setInterval(() => {
+        if (_cachedData) {
+            renderOpenPositions(_cachedData.open_positions);
+        }
+    }, OPEN_POSITIONS_POLL_MS);
     setInterval(updateReconciliation, 60000);
     setInterval(updateHealthAndErrors, 60000);  // Health & errors refresh every 60s
     setInterval(updateSRPoolPanel, 30000);        // SR-pool panel every 30s

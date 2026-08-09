@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 
 import error_collector as ec
 from config_helpers import get_param
+from close_contract import apply_close_contract
+from side_utils import is_long_side
 
 
 def _parse_exit_time(t) -> datetime:
@@ -743,7 +745,7 @@ class PositionManager:
                     # FIX-T3: REGLA DE ORO — SL nunca empeora
                     _old_sl = float(pos.stop_loss or 0)
                     if _old_sl > 0:
-                        _is_buy = pos.side.upper() in ("BUY", "LONG")
+                        _is_buy = is_long_side(pos.side)
                         if _is_buy and new_sl_price < _old_sl:
                             logger.info(f"[Guard] SL WORSEN blocked {pos.symbol}: {_old_sl:.6f} → {new_sl_price:.6f}")
                             return
@@ -811,7 +813,7 @@ class PositionManager:
         if entry_comm <= 0 and qty > 0:
             from binance_commission import entry_commission
             entry_comm = entry_commission(qty, entry_p, 'spot')
-        if position.side.upper() == "BUY":
+        if is_long_side(position.side):
             gross_pnl = (exit_price - entry_p) * qty
         else:
             gross_pnl = (entry_p - exit_price) * qty
@@ -932,6 +934,26 @@ class PositionManager:
             _meta['pnl_accounting_mode'] = 'binance_fill_verified'
         else:
             _meta['pnl_accounting_mode'] = 'estimated'
+        # Canonical close attribution fields (required for entry->close lineage and net-cost analysis).
+        _meta.setdefault('ready_candidate_id', _meta.get('ready_candidate_id'))
+        _meta.setdefault('staged_direction', _meta.get('staged_direction') or {})
+        _meta.setdefault('profile_at_entry', _meta.get('profile_at_entry') or _meta.get('peak_quality_profile'))
+        _meta.setdefault('regime_at_entry', _meta.get('regime_at_entry') or _meta.get('entry_regime') or _meta.get('regime_mode'))
+        _meta['commission_bps_total'] = round(((_entry_comm_for_closed + (exit_comm or 0.0)) / max(1e-12, _closed_qty * entry_p)) * 10000.0, 6)
+        _meta.setdefault('spread_bps_estimate', _meta.get('spread_bps_estimate'))
+        _meta.setdefault('slippage_bps_estimate', _meta.get('slippage_bps_estimate'))
+        _meta.setdefault('funding_bps', 0.0)
+        _meta = apply_close_contract(
+            _meta,
+            trade_type=str(_meta.get('trade_type') or 'spot'),
+            position_side=target.side,
+            close_reason=close_reason,
+            exchange_confirmed=bool(exit_fill and exit_fill.get('binance_confirmed')),
+            synthetic=bool(_meta.get('synthetic')),
+            learning_eligible=_meta.get('learning_eligible'),
+            partial=_is_partial,
+            close_group_id=_meta.get('close_group_id'),
+        )
         if _is_partial:
             _meta['partial_close'] = True
             _meta['partial_qty_closed'] = _closed_qty
@@ -1114,6 +1136,17 @@ class PositionManager:
                     _meta['bounce_entry'] = True
             if is_partial:
                 _meta['partial_close'] = True
+            _meta = apply_close_contract(
+                _meta,
+                trade_type=str(_meta.get('trade_type') or 'spot'),
+                position_side=closed_position.side,
+                close_reason=closed_position.close_reason,
+                exchange_confirmed=bool(_meta.get('binance_confirmed')),
+                synthetic=bool(_meta.get('synthetic')),
+                learning_eligible=_meta.get('learning_eligible'),
+                partial=is_partial,
+                close_group_id=_meta.get('close_group_id'),
+            )
         _meta_json = json.dumps(_meta) if isinstance(_meta, dict) else _to_json(_meta)
 
         insert_query = """
@@ -1265,7 +1298,7 @@ class PositionManager:
     
     def get_closed_positions(self, limit: int = 20) -> List[ClosedPosition]:
         """
-        Get the last N closed positions, querying DB directly when limit > in-memory cache.
+        Get the last N closed positions.
         
         Args:
             limit: Maximum number of closed positions to return
@@ -1273,8 +1306,10 @@ class PositionManager:
         Returns:
             List of ClosedPosition objects, most recent first
         """
-        # If DB available and caller wants more than we have cached, hit DB directly
-        if self.db_client and limit > len(self._closed_positions):
+        # Always query DB when available to avoid stale cache for low limits.
+        # Futures reconciliation writes directly to trades_closed, so relying on
+        # in-memory cache can hide recent reconciled closures from API consumers.
+        if self.db_client:
             try:
                 query = """
                     SELECT symbol, side, quantity, entry_price, exit_price,

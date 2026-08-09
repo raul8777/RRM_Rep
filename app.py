@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from config import get_settings
-from config_helpers import get_param as _cfg_param, dump_active_config, _PARAM_DEFAULTS
+from config_helpers import get_param as _cfg_param, dump_active_config, _PARAM_DEFAULTS, enforce_aggressive_kelly_floor
 import config_helpers
 from signal_store import add_signal, get_signals, get_recent_signals, set_db_client
 from strategy import parse_signal
@@ -29,7 +29,10 @@ from param_optimizer import get_optimizer
 from orchestrator import SystemState
 from init_components import get_components
 from audit_tools import check_signal_audit_consistency
+from hard_risk_monitor import get_hard_risk_shadow_metrics
 from position_telemetry_watcher import get_sr_invalidation_shadow_metrics
+from smart_scale_out import get_range_scalp_sso4_shadow_metrics
+from unified_governance_supervisor import get_ug_breakout_follow_shadow_metrics
 import error_collector as ec
 from super_mimic.api import router as super_mimic_router
 from binance_truth_guard import (
@@ -3509,7 +3512,9 @@ async def _compute_dashboard_summary(days: int) -> Dict:
         # Build daily_breakdown for the last 30 days (for chart)
         def _daily_breakdown(positions, since_days=30):
             from collections import defaultdict
-            cutoff = to_mexico_time(datetime.utcnow()) - timedelta(days=since_days)
+            mx_now = to_mexico_time(datetime.utcnow())
+            mx_today_start = mx_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            cutoff = mx_today_start - timedelta(days=max(0, since_days - 1))
             daily = defaultdict(float)
             for p in positions:
                 if not p.exit_time:
@@ -3528,8 +3533,8 @@ async def _compute_dashboard_summary(days: int) -> Dict:
                     pass
             # Fill all days in range (even zero-trade days)
             result_days = []
-            for i in range(since_days, 0, -1):
-                d = (to_mexico_time(datetime.utcnow()) - timedelta(days=i)).strftime('%Y-%m-%d')
+            for i in range(max(0, since_days - 1), -1, -1):
+                d = (mx_today_start - timedelta(days=i)).strftime('%Y-%m-%d')
                 result_days.append({"date": d, "pnl": round(daily.get(d, 0.0), 4)})
             return result_days
 
@@ -3546,7 +3551,10 @@ async def _compute_dashboard_summary(days: int) -> Dict:
                 if _fd:
                     try:
                         _fdt = datetime.fromisoformat(str(_fd).replace('Z', '+00:00'))
-                        _fday[_fdt.strftime('%Y-%m-%d')] += float(fp.get('pnl', 0))
+                        if _fdt.tzinfo is None:
+                            _fdt = _fdt.replace(tzinfo=timezone.utc)
+                        _fdt_mx = to_mexico_time(_fdt)
+                        _fday[_fdt_mx.strftime('%Y-%m-%d')] += float(fp.get('pnl', 0))
                     except Exception:
                         pass
             _fut_closed_pnl_by_day = dict(_fday)
@@ -3566,6 +3574,19 @@ async def _compute_dashboard_summary(days: int) -> Dict:
         }
     except Exception as e:
         result["pnl_history"] = {"error": str(e)}
+
+    def _short_position_id(raw_id: Any, symbol: Any, side: Any = None, trade_type: Any = None) -> str:
+        symbol_txt = str(symbol or "?").upper()
+        side_txt = str(side or "").strip().upper()
+        side_tag = "S" if side_txt in ("SHORT", "SELL") else "L"
+        venue_tag = "F" if str(trade_type or "").strip().lower() == "futures" else "S"
+        rid = str(raw_id or "").strip()
+        if not rid:
+            return f"{symbol_txt}-{venue_tag}{side_tag}"
+        compact = "".join(ch for ch in rid if ch.isalnum())
+        if len(compact) >= 8:
+            return f"{symbol_txt}-{venue_tag}{side_tag}-{compact[-8:]}"
+        return f"{symbol_txt}-{venue_tag}{side_tag}-{compact}" if compact else f"{symbol_txt}-{venue_tag}{side_tag}"
 
     # Open Positions (with pnl_prediction)
     try:
@@ -3718,6 +3739,7 @@ async def _compute_dashboard_summary(days: int) -> Dict:
             open_list.append({
                 "symbol": symbol,
                 "position_id": _sp_first.position_id,
+                "position_display_id": _short_position_id(_sp_first.position_id, symbol, _sp_first.side, "spot"),
                 "entry_number": 1,
                 "side": _sp_first.side,
                 "category": _sym_cat.get("market_behavior", "MIDCAP_ALT"),
@@ -3900,6 +3922,7 @@ async def _compute_dashboard_summary(days: int) -> Dict:
                 open_list.append({
                     "symbol": fp["symbol"],
                     "position_id": f"futures_{fp['symbol']}_{fp['side']}",
+                    "position_display_id": _short_position_id(f"futures_{fp['symbol']}_{fp['side']}", fp["symbol"], fp["side"], "futures"),
                     "entry_number": 1,
                     "side": fp["side"],
                     "category": "FUTURES",
@@ -3997,6 +4020,12 @@ async def _compute_dashboard_summary(days: int) -> Dict:
             _cl_flat.append({
                 "symbol": pos.symbol,
                 "position_id": f"{pos.symbol}:{pos.entry_time}:{pos.exit_time}:{_cl_meta.get('trade_type', 'spot')}",
+                "position_display_id": _short_position_id(
+                    f"{pos.symbol}:{pos.entry_time}:{pos.exit_time}:{_cl_meta.get('trade_type', 'spot')}",
+                    pos.symbol,
+                    pos.side,
+                    _cl_meta.get('trade_type', 'spot'),
+                ),
                 "side": pos.side,
                 "category": _cl_cat.get("market_behavior", "MIDCAP_ALT"),
                 "quantity": float(pos.quantity) if pos.quantity else 0.0,
@@ -5929,6 +5958,211 @@ def _shadow_readiness_gate(name: str, actual: Any, required: Any, passed: bool, 
     }
 
 
+SR_STRATEGY_COMPONENT_IDS = {
+    "lifecycle_structure",
+    "range_quality_model",
+    "range_reversion",
+    "entry_close_lineage_instrumentation",
+    "timing_15m",
+    "sr_entry_filter",
+    "sr_pool",
+    "staged_immediate_entry",
+    "sr_thesis_gate",
+    "sr_attempt_sequence",
+    "sr_pool_attempt_memory",
+    "sr_structure_invalidation_exit",
+    "realtime_open_rerank",
+    "anti_monopoly_decay",
+}
+
+
+def _annotate_shadow_strategy_groups(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Attach parent/child strategy metadata for dashboard grouping."""
+    grouped_entries: List[Dict[str, Any]] = []
+    sr_children: List[str] = []
+    for item in entries:
+        row = dict(item)
+        if str(row.get("id") or "") in SR_STRATEGY_COMPONENT_IDS:
+            row["strategy_parent_id"] = "sr_strategy"
+            row["strategy_parent_name"] = "Estrategia de SR"
+            sr_children.append(str(row.get("id") or ""))
+        grouped_entries.append(row)
+
+    return {
+        "entries": grouped_entries,
+        "groups": [
+            {
+                "id": "sr_strategy",
+                "name": "Estrategia de SR",
+                "children": sr_children,
+            }
+        ],
+    }
+
+
+def _next_funding_settlement_utc(now_utc: Optional[datetime] = None) -> datetime:
+    now_utc = now_utc or datetime.now(timezone.utc)
+    anchors = (0, 8, 16)
+    for hour in anchors:
+        candidate = now_utc.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if candidate > now_utc:
+            return candidate
+    next_day = now_utc + timedelta(days=1)
+    return next_day.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _build_funding_guard_shadow_snapshot(
+    live_settings: Any,
+    components: Any,
+    source_errors: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    source_errors = source_errors if source_errors is not None else []
+    db = getattr(components, "db_client", None)
+    if not db:
+        return {
+            "available": False,
+            "reason": "db_unavailable",
+            "positions": [],
+            "positions_analyzed": 0,
+            "positions_with_rate": 0,
+            "counts": {},
+            "next_settlement_utc": _next_funding_settlement_utc().isoformat(),
+            "hours_to_settlement": None,
+        }
+
+    futures_client = None
+    try:
+        from run_trades import _get_futures_client
+        futures_client = _get_futures_client(live_settings, db_client=db)
+    except Exception as exc:
+        source_errors.append({"source": "funding_guard_futures_client", "error": str(exc)})
+
+    try:
+        rows = db.execute_query(
+            """
+            SELECT symbol, side, quantity, price, metadata, entry_time
+            FROM trades_open
+            WHERE metadata->>'trade_type' = 'futures'
+            ORDER BY entry_time DESC
+            LIMIT 200
+            """
+        ) or []
+    except Exception as exc:
+        source_errors.append({"source": "funding_guard_open_positions", "error": str(exc)})
+        rows = []
+
+    warning_fee_usdt = float(_cfg_param(live_settings, "funding_guard_warning_fee_usdt", 0.5) or 0.5)
+    block_fee_usdt = float(_cfg_param(live_settings, "funding_guard_block_fee_usdt", 1.25) or 1.25)
+    warning_rate_pct = float(_cfg_param(live_settings, "funding_guard_warning_rate_pct", 0.15) or 0.15)
+    block_rate_pct = float(_cfg_param(live_settings, "funding_guard_block_rate_pct", 0.35) or 0.35)
+    credit_alert_rate_pct = float(_cfg_param(live_settings, "funding_guard_credit_alert_rate_pct", 0.2) or 0.2)
+
+    next_settlement = _next_funding_settlement_utc()
+    now_utc = datetime.now(timezone.utc)
+    hours_to_settlement = max(0.0, (next_settlement - now_utc).total_seconds() / 3600.0)
+
+    analyzed: List[Dict[str, Any]] = []
+    positions_with_rate = 0
+    counts: Counter = Counter()
+
+    for row in rows:
+        symbol = str(row.get("symbol") or "").upper()
+        side = str(row.get("side") or "").upper()
+        qty = abs(float(row.get("quantity") or 0.0))
+        entry_price = float(row.get("price") or 0.0)
+        current_price = entry_price
+        if futures_client and symbol:
+            try:
+                current_price = float(futures_client.get_price(symbol) or entry_price)
+            except Exception:
+                current_price = entry_price
+        notional = abs(qty * current_price)
+
+        funding_rate = None
+        if futures_client and symbol:
+            try:
+                funding_rate = float(futures_client.get_funding_rate(symbol))
+            except Exception as exc:
+                source_errors.append({"source": f"funding_guard_rate_{symbol}", "error": str(exc)})
+                funding_rate = None
+
+        is_long = side in ("LONG", "BUY")
+        is_short = side in ("SHORT", "SELL")
+        abs_rate = abs(float(funding_rate or 0.0))
+        abs_rate_pct = abs_rate * 100.0
+        pays = bool((is_long and (funding_rate or 0.0) > 0.0) or (is_short and (funding_rate or 0.0) < 0.0))
+        expected_fee_usdt = (notional * abs_rate) if pays else (-notional * abs_rate)
+
+        if funding_rate is None:
+            decision = "funding_unknown"
+            reason = "FUNDING_RATE_UNAVAILABLE"
+        elif pays and (expected_fee_usdt >= block_fee_usdt or abs_rate_pct >= block_rate_pct):
+            decision = "funding_block"
+            reason = "FUNDING_COST_EXTREME"
+        elif pays and (expected_fee_usdt >= warning_fee_usdt or abs_rate_pct >= warning_rate_pct):
+            decision = "funding_warning"
+            reason = "FUNDING_COST_ELEVATED"
+        elif (not pays) and abs_rate_pct >= credit_alert_rate_pct:
+            decision = "funding_credit"
+            reason = "FUNDING_CREDIT_OPPORTUNITY"
+        else:
+            decision = "funding_ok"
+            reason = "FUNDING_WITHIN_POLICY"
+
+        positions_with_rate += int(funding_rate is not None)
+        counts[decision] += 1
+        analyzed.append({
+            "symbol": symbol,
+            "side": side,
+            "quantity": qty,
+            "entry_price": entry_price,
+            "current_price": current_price,
+            "notional_usdt": round(notional, 6),
+            "funding_rate": funding_rate,
+            "funding_rate_pct": round(float(funding_rate or 0.0) * 100.0, 6) if funding_rate is not None else None,
+            "payer_side": pays,
+            "expected_fee_usdt": round(expected_fee_usdt, 8),
+            "decision": decision,
+            "reason": reason,
+            "hours_to_settlement": round(hours_to_settlement, 4),
+            "next_settlement_utc": next_settlement.isoformat(),
+        })
+
+    return {
+        "available": True,
+        "positions": analyzed,
+        "positions_analyzed": len(analyzed),
+        "positions_with_rate": positions_with_rate,
+        "counts": dict(counts),
+        "next_settlement_utc": next_settlement.isoformat(),
+        "hours_to_settlement": round(hours_to_settlement, 4),
+        "thresholds": {
+            "warning_fee_usdt": warning_fee_usdt,
+            "block_fee_usdt": block_fee_usdt,
+            "warning_rate_pct": warning_rate_pct,
+            "block_rate_pct": block_rate_pct,
+            "credit_alert_rate_pct": credit_alert_rate_pct,
+        },
+    }
+
+
+@app.get("/metrics/funding-guard")
+async def get_funding_guard_metrics(_auth=Depends(_require_api_key)) -> Dict:
+    source_errors: List[Dict[str, str]] = []
+    try:
+        components = get_components()
+        live_settings = getattr(components, "settings", None) or settings
+        snapshot = _build_funding_guard_shadow_snapshot(live_settings, components, source_errors)
+        return {
+            "ok": True,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            **snapshot,
+            "source_errors": source_errors,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "source_errors": source_errors}
+
+
 @app.get("/metrics/shadow-readiness")
 async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
     source_errors: List[Dict[str, str]] = []
@@ -5999,15 +6233,66 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
         pool_events = int(sr_data.get("pool_events") or 0)
         entry_rejections = int(sr_data.get("entry_rejections") or 0)
 
-        opportunity_rows = _query(
-            "screener_snapshot", "SELECT value, updated_at FROM trading_runtime_state WHERE key=%s", ("screener_snapshot",)
+        sr_entry_filter_rows = _query("sr_entry_filter_shadow", """
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE signal_meta->>'sr_zone_position' IS NOT NULL
+                       OR signal_meta->>'sr_support_dist_pct' IS NOT NULL
+                       OR signal_meta->>'sr_resistance_dist_pct' IS NOT NULL
+                ) AS sr_context_total,
+                COUNT(*) FILTER (WHERE signal_meta->>'sr_entry_shadow_rejected' = 'true') AS shadow_rejected
+            FROM ready_candidates
+            WHERE created_at >= NOW() - INTERVAL '30 days'
+        """)
+        sr_entry_filter_data = sr_entry_filter_rows[0] if sr_entry_filter_rows else {}
+        sr_entry_context_total = int(sr_entry_filter_data.get("sr_context_total") or 0)
+        sr_entry_shadow_rejected = int(sr_entry_filter_data.get("shadow_rejected") or 0)
+        sr_entry_filter_mode = str(_cfg_param(live_settings, "sr_entry_filter_mode", "shadow") or "shadow").lower()
+        sr_entry_filter_gates = [
+            _shadow_readiness_gate("context_sample", sr_entry_context_total, 200, sr_entry_context_total >= 200, "Aumentar muestra de candidatas con contexto SR para validar el filtro de entrada."),
+            _shadow_readiness_gate("shadow_reject_sample", sr_entry_shadow_rejected, 20, sr_entry_shadow_rejected >= 20, "Recolectar al menos 20 rechazos shadow para medir impacto antes de activar en bloqueo."),
+        ]
+
+        screener_snapshot_rows = _query(
+            "opportunity_shadow_snapshot",
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key = %s LIMIT 1",
+            ("screener_snapshot",),
         )
-        opportunity_snapshot = (opportunity_rows[0].get("value") if opportunity_rows else {}) or {}
-        if isinstance(opportunity_snapshot, str):
-            opportunity_snapshot = json.loads(opportunity_snapshot)
-        opportunity_count = len(opportunity_snapshot.get("opportunity_shadow") or [])
-        opportunity_updated = opportunity_rows[0].get("updated_at") if opportunity_rows else None
-        opportunity_updated_label = opportunity_updated.isoformat() if hasattr(opportunity_updated, "isoformat") else str(opportunity_updated or "sin snapshot")
+        opportunity_shadow_ranked = 0
+        opportunity_shadow_observe = 0
+        opportunity_shadow_liquid = 0
+        opportunity_shadow_updated_at = None
+        if screener_snapshot_rows:
+            _snapshot_val = screener_snapshot_rows[0].get("value") or {}
+            if isinstance(_snapshot_val, str):
+                try:
+                    _snapshot_val = json.loads(_snapshot_val)
+                except Exception:
+                    _snapshot_val = {}
+            _snapshot_meta = _snapshot_val.get("_meta") if isinstance(_snapshot_val, dict) else {}
+            _snapshot_meta = _snapshot_meta if isinstance(_snapshot_meta, dict) else {}
+            _funnel = _snapshot_meta.get("universe_funnel") if isinstance(_snapshot_meta, dict) else {}
+            _funnel = _funnel if isinstance(_funnel, dict) else {}
+            _shadow_list = _snapshot_val.get("opportunity_shadow") if isinstance(_snapshot_val, dict) else []
+            _shadow_list = _shadow_list if isinstance(_shadow_list, list) else []
+            opportunity_shadow_ranked = int(_funnel.get("shadow_ranked") or len(_shadow_list) or 0)
+            opportunity_shadow_observe = int(_funnel.get("observe") or 0)
+            opportunity_shadow_liquid = int(_funnel.get("liquid_eligible") or 0)
+            opportunity_shadow_updated_at = screener_snapshot_rows[0].get("updated_at")
+        _snapshot_max_age = int(_cfg_param(live_settings, "screener_snapshot_max_age_minutes", 120) or 120)
+        _snapshot_fresh = False
+        _snapshot_age_minutes = None
+        if opportunity_shadow_updated_at:
+            try:
+                _snapshot_age_minutes = max(0.0, (datetime.now(timezone.utc) - opportunity_shadow_updated_at).total_seconds() / 60.0)
+                _snapshot_fresh = _snapshot_age_minutes <= _snapshot_max_age
+            except Exception:
+                _snapshot_age_minutes = None
+                _snapshot_fresh = False
+        opportunity_shadow_gates = [
+            _shadow_readiness_gate("snapshot_fresh", round(_snapshot_age_minutes, 2) if _snapshot_age_minutes is not None else None, _snapshot_max_age, _snapshot_fresh, "Asegurar refresco de screener_snapshot dentro del SLA de edad máxima."),
+            _shadow_readiness_gate("ranked_sample", opportunity_shadow_ranked, 20, opportunity_shadow_ranked >= 20, "Mantener al menos 20 oportunidades rankeadas para validar cobertura del discovery."),
+        ]
 
         directional_rows = _query("directional_v2_shadow", """
             SELECT
@@ -6080,6 +6365,34 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
         """)
         sr_thesis_blocked_count = int((sr_thesis_rows[0] or {}).get("n") or 0) if sr_thesis_rows else 0
 
+        short_guard_rows = _query("staged_short_guard_snapshot", """
+            SELECT
+                COUNT(*) FILTER (WHERE data->'last_execution_gate'->>'reason' = 'SHORT_RISK_GUARD_BLOCKED') AS blocked,
+                COUNT(*) FILTER (
+                    WHERE data->'last_execution_gate'->>'path' = 'fast_path'
+                      AND regime_mode = 'RANGE_SCALP'
+                ) AS fast_path_checks
+            FROM ready_candidates
+            WHERE created_at >= NOW() - INTERVAL '7 days'
+        """)
+        short_guard_data = short_guard_rows[0] if short_guard_rows else {}
+        short_guard_blocked = int(short_guard_data.get("blocked") or 0)
+        short_guard_fast_path_checks = int(short_guard_data.get("fast_path_checks") or 0)
+
+        short_cd_rows = _query("short_loss_cooldown_snapshot", """
+            SELECT
+                COUNT(*) AS events,
+                AVG((NULLIF(detail->>'applied_hours', ''))::float) AS avg_applied_hours,
+                MAX((NULLIF(detail->>'applied_hours', ''))::float) AS max_applied_hours
+            FROM trades_audit
+            WHERE event = 'short_loss_cooldown_applied'
+              AND ts >= NOW() - INTERVAL '7 days'
+        """)
+        short_cd_data = short_cd_rows[0] if short_cd_rows else {}
+        short_cd_events = int(short_cd_data.get("events") or 0)
+        short_cd_avg_h = float(short_cd_data.get("avg_applied_hours") or 0.0)
+        short_cd_max_h = float(short_cd_data.get("max_applied_hours") or 0.0)
+
         sr_attempt_rows = _query("sr_attempt_sequence", """
             SELECT
                 COUNT(*) AS total,
@@ -6130,13 +6443,13 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
 
         sr_pool_attempt_rows = _query("sr_pool_attempt_memory", """
             SELECT
-                COUNT(*) FILTER (WHERE event LIKE 'sr_pool%') AS total,
+                                COUNT(*) FILTER (WHERE event LIKE 'sr_pool%%') AS total,
                 COUNT(*) FILTER (
-                    WHERE event LIKE 'sr_pool%'
+                                        WHERE event LIKE 'sr_pool%%'
                       AND (
-                        detail::text LIKE '%attempt_reliability%'
-                        OR detail::text LIKE '%sr_resistance_failed_attempts%'
-                        OR detail::text LIKE '%sr_support_failed_attempts%'
+                                                detail::text LIKE '%%attempt_reliability%%'
+                                                OR detail::text LIKE '%%sr_resistance_failed_attempts%%'
+                                                OR detail::text LIKE '%%sr_support_failed_attempts%%'
                       )
                 ) AS observed
             FROM trades_audit
@@ -6150,7 +6463,98 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
             _shadow_readiness_gate("trigger_sample", sr_pool_attempt_total, 30, sr_pool_attempt_total >= 30, "Recolectar al menos 30 triggers SR pool para evaluar mejora real."),
         ]
 
+        instrument_rows = _query("decision_features_v1_shadow", """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE input_features->'decision_features_v1' IS NOT NULL) AS with_decision_features
+            FROM ready_candidate_checks
+            WHERE created_at >= NOW() - INTERVAL '14 days'
+        """)
+        instrument_data = instrument_rows[0] if instrument_rows else {}
+        decision_checks_total = int(instrument_data.get("total") or 0)
+        decision_checks_with_v1 = int(instrument_data.get("with_decision_features") or 0)
+
+        close_lineage_rows = _query("close_lineage_shadow", """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE metadata->>'ready_candidate_id' IS NOT NULL AND metadata->>'ready_candidate_id' <> '') AS linked,
+                COUNT(*) FILTER (WHERE metadata->'staged_direction' IS NOT NULL) AS with_direction,
+                COUNT(*) FILTER (WHERE metadata->>'profile_at_entry' IS NOT NULL AND metadata->>'profile_at_entry' <> '') AS with_profile,
+                COUNT(*) FILTER (WHERE metadata->>'regime_at_entry' IS NOT NULL AND metadata->>'regime_at_entry' <> '') AS with_regime,
+                COUNT(*) FILTER (WHERE metadata->>'commission_bps_total' IS NOT NULL AND metadata->>'commission_bps_total' <> '') AS with_commission_bps,
+                COUNT(*) FILTER (
+                    WHERE metadata->>'spread_bps_estimate' IS NOT NULL
+                       OR metadata->>'slippage_bps_estimate' IS NOT NULL
+                       OR metadata->>'funding_bps' IS NOT NULL
+                ) AS with_cost_hints
+            FROM trades_closed
+            WHERE exit_time >= NOW() - INTERVAL '14 days'
+              AND COALESCE(is_corrupted, FALSE) = FALSE
+        """)
+        close_lineage_data = close_lineage_rows[0] if close_lineage_rows else {}
+        close_total = int(close_lineage_data.get("total") or 0)
+        close_linked = int(close_lineage_data.get("linked") or 0)
+        close_with_direction = int(close_lineage_data.get("with_direction") or 0)
+        close_with_profile = int(close_lineage_data.get("with_profile") or 0)
+        close_with_regime = int(close_lineage_data.get("with_regime") or 0)
+        close_with_commission_bps = int(close_lineage_data.get("with_commission_bps") or 0)
+        close_with_cost_hints = int(close_lineage_data.get("with_cost_hints") or 0)
+
+        def _pct(num: int, den: int) -> float:
+            return round((float(num) / float(den)) * 100.0, 2) if den > 0 else 0.0
+
+        close_entry_context_min = min(close_with_direction, close_with_profile, close_with_regime)
+        instrument_gates = [
+            _shadow_readiness_gate("decision_features_v1_coverage", _pct(decision_checks_with_v1, decision_checks_total), 95.0, decision_checks_total > 0 and decision_checks_with_v1 == decision_checks_total, "Persistir decision_features_v1 en todos los checks staged para cobertura completa."),
+            _shadow_readiness_gate("close_linkage_coverage", _pct(close_linked, close_total), 90.0, close_total == 0 or _pct(close_linked, close_total) >= 90.0, "Asegurar ready_candidate_id en metadata de cierres para linaje entrada->cierre."),
+            _shadow_readiness_gate("close_entry_context_coverage", _pct(close_entry_context_min, close_total), 90.0, close_total == 0 or _pct(close_entry_context_min, close_total) >= 90.0, "Propagar staged_direction/profile_at_entry/regime_at_entry en todas las rutas de cierre."),
+            _shadow_readiness_gate("close_commission_bps_coverage", _pct(close_with_commission_bps, close_total), 90.0, close_total == 0 or _pct(close_with_commission_bps, close_total) >= 90.0, "Persistir commission_bps_total para medir edge neto y no solo bruto."),
+            _shadow_readiness_gate("observation_sample", close_total, 30, close_total >= 30, "Recolectar al menos 30 cierres recientes para validar estabilidad de la instrumentación."),
+        ]
+
         sr_invalidation_metrics = get_sr_invalidation_shadow_metrics()
+        sso_target_guard_metrics = get_range_scalp_sso4_shadow_metrics()
+        ug_breakout_follow_metrics = get_ug_breakout_follow_shadow_metrics()
+        hard_risk_metrics = get_hard_risk_shadow_metrics()
+        funding_snapshot = _build_funding_guard_shadow_snapshot(live_settings, components, source_errors)
+        funding_mode = str(_cfg_param(live_settings, "funding_fee_guard_mode", "shadow") or "shadow").lower()
+        staged_cfg = getattr(live_settings, "staged_entry_regime_config", {})
+        range_scalp_cfg = staged_cfg.get("RANGE_SCALP", {}) if isinstance(staged_cfg, dict) else {}
+        direction_volume_rollout = str(_cfg_param(live_settings, "direction_volume_gate_rollout", "active_canary") or "active_canary").lower()
+        direction_volume_enabled = bool(range_scalp_cfg.get("direction_volume_gate_enabled", _cfg_param(live_settings, "direction_volume_gate_enabled", False)))
+        if direction_volume_rollout == "active_canary":
+            direction_volume_enabled = True
+        direction_volume_fraction = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    _cfg_param(
+                        live_settings,
+                        "direction_volume_gate_canary_fraction",
+                        range_scalp_cfg.get("direction_volume_gate_canary_fraction", 1.0 if direction_volume_enabled else 0.0),
+                    )
+                    or 0.0
+                ),
+            ),
+        )
+        direction_volume_mode = "active" if direction_volume_enabled else "shadow"
+        funding_gates = [
+            _shadow_readiness_gate(
+                "futures_sample",
+                funding_snapshot.get("positions_analyzed", 0),
+                3,
+                funding_snapshot.get("positions_analyzed", 0) >= 3,
+                "Recolectar al menos 3 posiciones futures evaluadas para calibrar policy pre-funding.",
+            ),
+            _shadow_readiness_gate(
+                "rate_coverage",
+                funding_snapshot.get("positions_with_rate", 0),
+                funding_snapshot.get("positions_analyzed", 1),
+                (funding_snapshot.get("positions_analyzed", 0) == 0) or (funding_snapshot.get("positions_with_rate", 0) == funding_snapshot.get("positions_analyzed", 0)),
+                "Garantizar que toda posición futures tenga funding_rate disponible para decisión autónoma.",
+            ),
+        ]
 
         entries = [
             {
@@ -6204,6 +6608,20 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
                 ],
             },
             {
+                "id": "entry_close_lineage_instrumentation",
+                "name": "Instrumentación entrada->cierre (linaje y costos)",
+                "mode": "shadow",
+                "state": _shadow_readiness_state("shadow", instrument_gates),
+                "summary": (
+                    f"Checks decision_features_v1: {decision_checks_with_v1}/{decision_checks_total}; "
+                    f"cierres linked: {close_linked}/{close_total}; "
+                    f"contexto entrada completo: {close_entry_context_min}/{close_total}; "
+                    f"commission_bps_total: {close_with_commission_bps}/{close_total}; "
+                    f"cost hints (spread/slippage/funding): {close_with_cost_hints}/{close_total}."
+                ),
+                "gates": instrument_gates,
+            },
+            {
                 "id": "timing_15m",
                 "name": "Timing 15m RANGE_SCALP",
                 "mode": "shadow",
@@ -6218,6 +6636,14 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
                 ],
             },
             {
+                "id": "sr_entry_filter",
+                "name": "Filtro de entrada S/R",
+                "mode": sr_entry_filter_mode,
+                "state": _shadow_readiness_state(sr_entry_filter_mode, sr_entry_filter_gates),
+                "summary": f"Rechazos shadow detectados: {sr_entry_shadow_rejected}; candidatas con contexto SR: {sr_entry_context_total}.",
+                "gates": sr_entry_filter_gates,
+            },
+            {
                 "id": "sr_pool",
                 "name": "SR Pool 1m/5m",
                 "mode": "disabled" if not _cfg_param(live_settings, "sr_pool_enabled", False) else ("active" if _cfg_param(live_settings, "sr_pool_trade_enabled", False) else "shadow"),
@@ -6229,24 +6655,37 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
             },
             {
                 "id": "opportunity_shadow",
-                "name": "Universo de oportunidad 2h/4h",
-                "mode": "shadow",
-                "state": "COLLECTING",
-                "summary": f"{opportunity_count} activos OBSERVE; actualización: {opportunity_updated_label}.",
-                "gates": [
-                    _shadow_readiness_gate("universe_snapshot", opportunity_count, 1, opportunity_count > 0, "Esperar snapshot del screener."),
-                    _shadow_readiness_gate("executable_model", "absent", "validated", False, "Entrenar/validar retorno neto 2h/4h antes de routing."),
-                ],
+                "name": "Discovery de oportunidades (screener)",
+                "mode": _cfg_param(live_settings, "opportunity_shadow_mode", "shadow"),
+                "state": _shadow_readiness_state(_cfg_param(live_settings, "opportunity_shadow_mode", "shadow"), opportunity_shadow_gates),
+                "summary": f"Oportunidades rankeadas: {opportunity_shadow_ranked}; observadas: {opportunity_shadow_observe}; líquidas: {opportunity_shadow_liquid}.",
+                "gates": opportunity_shadow_gates,
+            },
+            {
+                "id": "funding_fee_guard",
+                "name": "Guard de funding pre-settlement (autónomo)",
+                "mode": funding_mode,
+                "state": _shadow_readiness_state(funding_mode, funding_gates),
+                "summary": (
+                    f"Futures evaluadas: {funding_snapshot.get('positions_analyzed', 0)}; "
+                    f"block={funding_snapshot.get('counts', {}).get('funding_block', 0)}, "
+                    f"warning={funding_snapshot.get('counts', {}).get('funding_warning', 0)}, "
+                    f"credit={funding_snapshot.get('counts', {}).get('funding_credit', 0)}."
+                ),
+                "gates": funding_gates,
             },
             {
                 "id": "direction_volume_gate",
                 "name": "Corroboración de volumen (VSA/Wyckoff)",
-                "mode": "active" if _cfg_param(live_settings, "direction_volume_gate_enabled", False) else "shadow",
+                "mode": direction_volume_mode,
                 "state": _shadow_readiness_state(
-                    "active" if _cfg_param(live_settings, "direction_volume_gate_enabled", False) else "shadow",
+                    direction_volume_mode,
                     volume_gate_gates,
                 ),
-                "summary": f"Checks con dirección evaluados: {volume_gate_total}; anomalías de volumen detectadas: {volume_gate_anomalies}.",
+                "summary": (
+                    f"Checks con dirección evaluados: {volume_gate_total}; anomalías de volumen detectadas: {volume_gate_anomalies}; "
+                    f"canary={direction_volume_fraction:.0%}."
+                ),
                 "gates": volume_gate_gates,
             },
             {
@@ -6267,6 +6706,28 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
                 "state": "ACTIVE" if _cfg_param(live_settings, "range_scalp_sr_thesis_gate_enabled", True) else "DISABLED",
                 "summary": f"Candidatos bloqueados por tesis S/R inconsistente (snapshot actual): {sr_thesis_blocked_count}. Umbral: {_cfg_param(live_settings, 'range_scalp_sr_thesis_max_dist_pct', 5.0)}%.",
                 "gates": [],
+            },
+            {
+                "id": "short_loss_cluster_guardrails",
+                "name": "Guardrails SHORT anti-cluster (fases 1-2)",
+                "mode": "active",
+                "state": _shadow_readiness_state(
+                    "active",
+                    [
+                        _shadow_readiness_gate("fast_path_sample", short_guard_fast_path_checks, 50, short_guard_fast_path_checks >= 50, "Recolectar base suficiente de decisiones fast-path para medir bloqueo selectivo."),
+                        _shadow_readiness_gate("cooldown_events_sample", short_cd_events, 5, short_cd_events >= 5, "Recolectar al menos 5 eventos de cooldown adaptativo para validar anti-churn por símbolo."),
+                    ],
+                ),
+                "summary": (
+                    f"Bloqueos SHORT por guardrail: {short_guard_blocked}; "
+                    f"checks fast-path observados: {short_guard_fast_path_checks}; "
+                    f"cooldowns adaptativos: {short_cd_events} "
+                    f"(avg={short_cd_avg_h:.2f}h, max={short_cd_max_h:.2f}h)."
+                ),
+                "gates": [
+                    _shadow_readiness_gate("fast_path_sample", short_guard_fast_path_checks, 50, short_guard_fast_path_checks >= 50, "Recolectar base suficiente de decisiones fast-path para medir bloqueo selectivo."),
+                    _shadow_readiness_gate("cooldown_events_sample", short_cd_events, 5, short_cd_events >= 5, "Recolectar al menos 5 eventos de cooldown adaptativo para validar anti-churn por símbolo."),
+                ],
             },
             {
                 "id": "sr_attempt_sequence",
@@ -6316,6 +6777,109 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
                 ],
             },
             {
+                "id": "position_telemetry_watcher",
+                "name": "Ciclo 1s compartido de lifecycle",
+                "mode": "active" if _cfg_param(live_settings, "position_telemetry_watcher_enabled", True) else "disabled",
+                "state": _shadow_readiness_state(
+                    "active" if _cfg_param(live_settings, "position_telemetry_watcher_enabled", True) else "disabled",
+                    [
+                        _shadow_readiness_gate("shadow_decisions", sr_invalidation_metrics.get("would_exit_total", 0), 10, sr_invalidation_metrics.get("would_exit_total", 0) >= 10, "Recolectar salidas shadow suficientes para validar cobertura del watcher."),
+                        _shadow_readiness_gate("evaluation_sample", sr_invalidation_metrics.get("evaluations", 0), 100, sr_invalidation_metrics.get("evaluations", 0) >= 100, "Mantener el watcher 1s activo y acumular evidencia de evaluaciones."),
+                        _shadow_readiness_gate("loss_recovery_evidence", sr_invalidation_metrics.get("drawdown_recoverable_windows", 0) + sr_invalidation_metrics.get("drawdown_failed_recovery_windows", 0), 5, (sr_invalidation_metrics.get("drawdown_recoverable_windows", 0) + sr_invalidation_metrics.get("drawdown_failed_recovery_windows", 0)) >= 5, "Recolectar evidencia de rescate/fallo para calibrar stops inteligentes sin degollar por marcador."),
+                        _shadow_readiness_gate("profit_guard_coverage", sr_invalidation_metrics.get("profit_guard_candidates", 0), 5, sr_invalidation_metrics.get("profit_guard_candidates", 0) >= 5, "Acumular casos en profit evaluados por guard para calibrar expansión de ganancia."),
+                    ],
+                ),
+                "summary": (
+                    f"Evaluaciones SR: {sr_invalidation_metrics.get('evaluations', 0)}; "
+                    f"salidas shadow sugeridas: {sr_invalidation_metrics.get('would_exit_total', 0)}; "
+                    f"profit_guard: {sr_invalidation_metrics.get('profit_guard_actions', 0)} "
+                    f"(hard={sr_invalidation_metrics.get('profit_guard_hard', 0)}, soft={sr_invalidation_metrics.get('profit_guard_soft', 0)}); "
+                    f"profit eval: {sr_invalidation_metrics.get('profit_positions_evaluated', 0)} "
+                    f"(candidates={sr_invalidation_metrics.get('profit_guard_candidates', 0)}); "
+                    f"drawdown: {sr_invalidation_metrics.get('drawdown_actions', 0)} "
+                    f"(cuts={sr_invalidation_metrics.get('drawdown_cuts', 0)}, tighten={sr_invalidation_metrics.get('drawdown_tightens', 0)}); "
+                    f"loss eval: {sr_invalidation_metrics.get('loss_positions_evaluated', 0)} "
+                    f"(recoverable={sr_invalidation_metrics.get('drawdown_recoverable_windows', 0)}, "
+                    f"failed={sr_invalidation_metrics.get('drawdown_failed_recovery_windows', 0)}, "
+                    f"shock={sr_invalidation_metrics.get('drawdown_shock_events', 0)}, "
+                    f"deferred={sr_invalidation_metrics.get('drawdown_deferred_cuts', 0)}); "
+                    f"downstream: {', '.join(sr_invalidation_metrics.get('downstream_surfaces', []) or [])}; "
+                    f"última corrida: {sr_invalidation_metrics.get('last_at') or 'n/a'}.",
+                ),
+                "gates": [
+                    _shadow_readiness_gate("shadow_decisions", sr_invalidation_metrics.get("would_exit_total", 0), 10, sr_invalidation_metrics.get("would_exit_total", 0) >= 10, "Recolectar salidas shadow suficientes para validar cobertura del watcher."),
+                    _shadow_readiness_gate("evaluation_sample", sr_invalidation_metrics.get("evaluations", 0), 100, sr_invalidation_metrics.get("evaluations", 0) >= 100, "Mantener el watcher 1s activo y acumular evidencia de evaluaciones."),
+                    _shadow_readiness_gate("loss_recovery_evidence", sr_invalidation_metrics.get("drawdown_recoverable_windows", 0) + sr_invalidation_metrics.get("drawdown_failed_recovery_windows", 0), 5, (sr_invalidation_metrics.get("drawdown_recoverable_windows", 0) + sr_invalidation_metrics.get("drawdown_failed_recovery_windows", 0)) >= 5, "Recolectar evidencia de rescate/fallo para calibrar stops inteligentes sin degollar por marcador."),
+                    _shadow_readiness_gate("profit_guard_coverage", sr_invalidation_metrics.get("profit_guard_candidates", 0), 5, sr_invalidation_metrics.get("profit_guard_candidates", 0) >= 5, "Acumular casos en profit evaluados por guard para calibrar expansión de ganancia."),
+                ],
+            },
+            {
+                "id": "range_scalp_sso_target_guard",
+                "name": "Guard SSO-4 anti-recorte temprano (RANGE_SCALP)",
+                "mode": sso_target_guard_metrics.get("mode", "shadow"),
+                "state": _shadow_readiness_state(
+                    sso_target_guard_metrics.get("mode", "shadow"),
+                    [
+                        _shadow_readiness_gate("evaluation_sample", sso_target_guard_metrics.get("evaluated", 0), 10, sso_target_guard_metrics.get("evaluated", 0) >= 10, "Acumular al menos 10 evaluaciones del guard de target en RANGE_SCALP."),
+                        _shadow_readiness_gate("would_hold_sample", sso_target_guard_metrics.get("would_hold", 0), 3, sso_target_guard_metrics.get("would_hold", 0) >= 3, "Recolectar casos donde el guard detecta posible recorte prematuro de ganancia."),
+                    ],
+                ),
+                "summary": (
+                    f"Evaluaciones: {sso_target_guard_metrics.get('evaluated', 0)}; "
+                    f"would-hold: {sso_target_guard_metrics.get('would_hold', 0)}; "
+                    f"active-holds: {sso_target_guard_metrics.get('active_holds', 0)}; "
+                    f"shadow-allowed: {sso_target_guard_metrics.get('shadow_allowed', 0)}; "
+                    f"closes ejecutados: {sso_target_guard_metrics.get('executed_closes', 0)}; "
+                    f"última muestra: {sso_target_guard_metrics.get('last_at') or 'n/a'}."
+                ),
+                "gates": [
+                    _shadow_readiness_gate("evaluation_sample", sso_target_guard_metrics.get("evaluated", 0), 10, sso_target_guard_metrics.get("evaluated", 0) >= 10, "Acumular al menos 10 evaluaciones del guard de target en RANGE_SCALP."),
+                    _shadow_readiness_gate("would_hold_sample", sso_target_guard_metrics.get("would_hold", 0), 3, sso_target_guard_metrics.get("would_hold", 0) >= 3, "Recolectar casos donde el guard detecta posible recorte prematuro de ganancia."),
+                ],
+            },
+            {
+                "id": "ug_breakout_follow",
+                "name": "UG follow de rompimiento con corte de regresión",
+                "mode": ug_breakout_follow_metrics.get("mode", "active"),
+                "state": _shadow_readiness_state(
+                    ug_breakout_follow_metrics.get("mode", "active"),
+                    [
+                        _shadow_readiness_gate("evaluation_sample", ug_breakout_follow_metrics.get("evaluated", 0), 20, ug_breakout_follow_metrics.get("evaluated", 0) >= 20, "Acumular al menos 20 evaluaciones UG follow para calibración multi-modo."),
+                        _shadow_readiness_gate("defer_sample", ug_breakout_follow_metrics.get("would_defer", 0), 5, ug_breakout_follow_metrics.get("would_defer", 0) >= 5, "Reunir casos suficientes de defer para comparar follow vs close inmediato."),
+                    ],
+                ),
+                "summary": (
+                    f"Evaluaciones: {ug_breakout_follow_metrics.get('evaluated', 0)}; "
+                    f"candidatas: {ug_breakout_follow_metrics.get('candidates', 0)}; "
+                    f"would-defer: {ug_breakout_follow_metrics.get('would_defer', 0)}; "
+                    f"active-deferred: {ug_breakout_follow_metrics.get('active_deferred', 0)}; "
+                    f"regression-risk: {ug_breakout_follow_metrics.get('regression_risk', 0)}; "
+                    f"closes ejecutados: {ug_breakout_follow_metrics.get('executed_closes', 0)}; "
+                    f"última muestra: {ug_breakout_follow_metrics.get('last_at') or 'n/a'}."
+                ),
+                "gates": [
+                    _shadow_readiness_gate("evaluation_sample", ug_breakout_follow_metrics.get("evaluated", 0), 20, ug_breakout_follow_metrics.get("evaluated", 0) >= 20, "Acumular al menos 20 evaluaciones UG follow para calibración multi-modo."),
+                    _shadow_readiness_gate("defer_sample", ug_breakout_follow_metrics.get("would_defer", 0), 5, ug_breakout_follow_metrics.get("would_defer", 0) >= 5, "Reunir casos suficientes de defer para comparar follow vs close inmediato."),
+                ],
+            },
+            {
+                "id": "hard_risk_backstop",
+                "name": "Backstop hard-risk de 2s",
+                "mode": "active" if _cfg_param(live_settings, "hard_risk_monitor_enabled", True) else "disabled",
+                "state": _shadow_readiness_state(
+                    "active" if _cfg_param(live_settings, "hard_risk_monitor_enabled", True) else "disabled",
+                    [
+                        _shadow_readiness_gate("audit_sample", hard_risk_metrics.get("stop_closes", 0) + hard_risk_metrics.get("breakeven_updates", 0), 1, (hard_risk_metrics.get("stop_closes", 0) + hard_risk_metrics.get("breakeven_updates", 0)) >= 1, "Reunir al menos una acción hard-risk o breakeven para evidenciar el backstop."),
+                        _shadow_readiness_gate("cycle_sample", hard_risk_metrics.get("spot_cycles", 0) + hard_risk_metrics.get("futures_cycles", 0), 10, (hard_risk_metrics.get("spot_cycles", 0) + hard_risk_metrics.get("futures_cycles", 0)) >= 10, "Mantener el backstop 2s corriendo y acumular ciclos observados."),
+                    ],
+                ),
+                "summary": f"Spot ciclos: {hard_risk_metrics.get('spot_cycles', 0)}; futures ciclos: {hard_risk_metrics.get('futures_cycles', 0)}; breakevens: {hard_risk_metrics.get('breakeven_updates', 0)}; cierres: {hard_risk_metrics.get('stop_closes', 0)}; última corrida: {hard_risk_metrics.get('last_at') or 'n/a'}.",
+                "gates": [
+                    _shadow_readiness_gate("audit_sample", hard_risk_metrics.get("stop_closes", 0) + hard_risk_metrics.get("breakeven_updates", 0), 1, (hard_risk_metrics.get("stop_closes", 0) + hard_risk_metrics.get("breakeven_updates", 0)) >= 1, "Reunir al menos una acción hard-risk o breakeven para evidenciar el backstop."),
+                    _shadow_readiness_gate("cycle_sample", hard_risk_metrics.get("spot_cycles", 0) + hard_risk_metrics.get("futures_cycles", 0), 10, (hard_risk_metrics.get("spot_cycles", 0) + hard_risk_metrics.get("futures_cycles", 0)) >= 10, "Mantener el backstop 2s corriendo y acumular ciclos observados."),
+                ],
+            },
+            {
                 "id": "retired_gates",
                 "name": "Gates supersedidos",
                 "mode": "retired",
@@ -6324,18 +6888,21 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
                 "gates": [],
             },
         ]
+        grouped = _annotate_shadow_strategy_groups(entries)
+        grouped_entries = grouped["entries"]
         return {
             "ok": True,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "regime": "RANGE_SCALP",
-            "components": entries,
+            "components": grouped_entries,
+            "strategy_groups": grouped["groups"],
             "source_errors": source_errors,
             "summary": {
-                "ready_to_implement": sum(item["state"] == "READY_TO_IMPLEMENT" for item in entries),
-                "collecting": sum(item["state"] == "COLLECTING" for item in entries),
-                "active": sum(item["state"] == "ACTIVE" for item in entries),
-                "retired": sum(item["state"] == "RETIRED" for item in entries),
-                "disabled": sum(item["state"] == "DISABLED" for item in entries),
+                "ready_to_implement": sum(item["state"] == "READY_TO_IMPLEMENT" for item in grouped_entries),
+                "collecting": sum(item["state"] == "COLLECTING" for item in grouped_entries),
+                "active": sum(item["state"] == "ACTIVE" for item in grouped_entries),
+                "retired": sum(item["state"] == "RETIRED" for item in grouped_entries),
+                "disabled": sum(item["state"] == "DISABLED" for item in grouped_entries),
             },
         }
     except Exception as exc:
@@ -9030,6 +9597,9 @@ _KELLY_EDITABLE_FIELDS = {
     "range_scalp_short_min_probability",
     "range_scalp_short_resistance_threshold",
     "range_scalp_sr_thesis_gate_enabled", "range_scalp_sr_thesis_max_dist_pct",
+    "range_scalp_short_near_support_gate_enabled",
+    "range_scalp_short_near_support_max_dist_pct",
+    "range_scalp_short_near_support_max_rsi",
     "sr_attempt_sequence_mode",
     "realtime_open_rerank_mode",
     "anti_monopoly_decay_mode",
@@ -9058,6 +9628,11 @@ _KELLY_EDITABLE_FIELDS = {
     "profit_realization_sr_resistance_zone_min",
     "directional_policy_mode",
     "ug_loss_policy_mode",
+    "ug_loss_policy_canary_fraction",
+    "opportunity_shadow_mode",
+    "opportunity_shadow_canary_fraction",
+    "opportunity_shadow_max_promotions_per_side",
+    "opportunity_shadow_rank_slack",
     # USD loss guard — dynamic SL cap per trade without reducing Kelly sizing
     "max_loss_usd_per_trade",
     "emergency_gap_loss_multiplier",
@@ -9681,14 +10256,15 @@ def _apply_kelly_config_patch(body: Dict[str, Any]) -> Dict[str, Any]:
             rejected[field] = "not in whitelist"
             continue
         try:
+            _value_effective = enforce_aggressive_kelly_floor(field, value)
             _current = getattr(_s, field, None)
-            setattr(_s, field, type(_current)(value) if _current is not None else value)
-            applied[field] = {"old": _current, "new": value}
+            setattr(_s, field, type(_current)(_value_effective) if _current is not None else _value_effective)
+            applied[field] = {"old": _current, "new": _value_effective}
             # Keep the module-level settings singleton in sync with components.settings.
             _app_settings = globals().get('settings')
             if _app_settings is not None and _app_settings is not _s:
                 try:
-                    setattr(_app_settings, field, type(_current)(value) if _current is not None else value)
+                    setattr(_app_settings, field, type(_current)(_value_effective) if _current is not None else _value_effective)
                 except Exception:
                     pass
         except Exception as _fe:
@@ -9932,6 +10508,8 @@ def _selection_display_state(
         return {"display_status": "duplicate_position", "display_label": "Duplicada · posición abierta", "actionable": False, "display_reason": "El símbolo ya tiene una posición abierta", "stage_kind": stage_kind, "stage_reason": stage_reason}
     if status == "ready":
         return {"display_status": "validating", "display_label": "En validación", "actionable": False, "display_reason": stage_summary, "stage_kind": stage_kind or "trigger_monitoring", "stage_reason": stage_reason or "TRIGGER_RECHECK"}
+    if status == "validated" and stage_reason.upper() == "SR_SIDE_GUARD_WAIT":
+        return {"display_status": "direction_pending", "display_label": "Espera SR-side", "actionable": False, "display_reason": stage_summary, "stage_kind": stage_kind or "trigger_monitoring", "stage_reason": stage_reason}
     execution_gate = candidate.get("execution_gate") or (candidate.get("data") or {}).get("last_execution_gate") or {}
     direction = candidate.get("direction") or (candidate.get("data") or {}).get("direction") or {}
     if status == "validated" and execution_gate.get("passed") is False:
@@ -10104,6 +10682,7 @@ def _build_selection_observability(db, limit: int = 100, active_regime: Optional
             "stage_ttl_min": _row_data.get("stage_ttl_min"),
             "time_in_stage_sec": _row_data.get("time_in_stage_sec"),
             "stage_updated_at": _row_data.get("stage_updated_at"),
+            "sr_side_guard_last": _row_data.get("sr_side_guard_last") or {},
             "expected_pnl": ((row.get("data") or {}).get("policy") or {}).get("expected_pnl"),
             "range_reversion_shadow": ((row.get("data") or {}).get("policy") or {}).get("range_reversion_shadow"),
             "execution_gate": ((row.get("data") or {}).get("last_execution_gate") or {}),
@@ -10223,10 +10802,13 @@ async def get_screener_opportunity_shadow(
         meta = snapshot.get("_meta") or {}
         return {
             "ok": True,
-            "mode": "shadow_only_no_order_routing",
+            "mode": meta.get("opportunity_shadow_mode") or "shadow",
+            "status": meta.get("opportunity_shadow_status") or "shadow_only_no_order_routing",
             "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
             "regime_mode": meta.get("regime_mode"),
             "profile_label": meta.get("profile_label"),
+            "execution_enabled": int((meta.get("universe_funnel") or {}).get("execution_enabled") or 0),
+            "promoted_symbols": meta.get("opportunity_shadow_promoted") or [],
             "universe_funnel": meta.get("universe_funnel") or {},
             "candidates": (snapshot.get("opportunity_shadow") or [])[:limit],
         }
@@ -10442,10 +11024,14 @@ async def get_backtest_best(_auth=Depends(_require_api_key)) -> Dict:
         # Mapping: backtest param name -> Settings field name + scale factor + safety rules
         # min/max are in BACKTEST raw scale (decimal), not Settings scale
         _PARAM_MAP = {
-            "kelly_base_usdt":        {"field": "kelly_base_usdt",        "scale": 1.0,   "min": 50.0,   "max": 300.0},
-            "kelly_max_usdt":         {"field": "kelly_max_usdt",         "scale": 1.0,   "min": 200.0,  "max": 1200.0},
-            "kelly_max_pct_liquid":   {"field": "kelly_max_pct_liquid",   "scale": 1.0,   "min": 0.20,   "max": 0.90},
-            "futures_kelly_max_usdt": {"field": "futures_kelly_max_usdt", "scale": 1.0,   "min": 300.0,  "max": 2000.0},
+            "kelly_base_usdt":        {"field": "kelly_base_usdt",        "scale": 1.0,   "min": 150.0,  "max": 1200.0},
+            "kelly_max_usdt":         {"field": "kelly_max_usdt",         "scale": 1.0,   "min": 2500.0, "max": 5000.0},
+            "kelly_max_pct_liquid":   {"field": "kelly_max_pct_liquid",   "scale": 1.0,   "min": 0.90,   "max": 0.95},
+            "kelly_dynamic_base_pct": {"field": "kelly_dynamic_base_pct", "scale": 1.0,   "min": 0.22,   "max": 0.40},
+            "kelly_conviction_max_pct":{"field": "kelly_conviction_max_pct","scale": 1.0,  "min": 0.22,   "max": 0.40},
+            "futures_kelly_base_usdt": {"field": "futures_kelly_base_usdt","scale": 1.0,   "min": 200.0,  "max": 2000.0},
+            "futures_kelly_max_usdt": {"field": "futures_kelly_max_usdt", "scale": 1.0,   "min": 2500.0, "max": 5000.0},
+            "futures_kelly_cap_pct":  {"field": "futures_kelly_cap_pct",  "scale": 1.0,   "min": 0.90,   "max": 0.95},
             "futures_sl_pct":         {"field": "futures_sl_pct",         "scale": 100.0, "min": 0.010,  "max": 0.050},
             "futures_tp_pct":         {"field": "futures_tp_pct",         "scale": 100.0, "min": 0.020,  "max": 0.100},
             "spot_sl_pct":            {"field": "stop_loss_pct",          "scale": 100.0, "min": 0.010,  "max": 0.040},
@@ -11732,10 +12318,14 @@ async def post_backtest_apply(body: Dict, _auth=Depends(_require_api_key)) -> Di
         # Scalar mapping from backtest param -> Settings field + scale
         # min/max are in BACKTEST raw scale (decimal), not Settings scale
         _PARAM_MAP = {
-            "kelly_base_usdt":        {"field": "kelly_base_usdt",        "scale": 1.0,   "min": 50.0,   "max": 300.0},
-            "kelly_max_usdt":         {"field": "kelly_max_usdt",         "scale": 1.0,   "min": 200.0,  "max": 1200.0},
-            "kelly_max_pct_liquid":   {"field": "kelly_max_pct_liquid",   "scale": 1.0,   "min": 0.20,   "max": 0.90},
-            "futures_kelly_max_usdt": {"field": "futures_kelly_max_usdt", "scale": 1.0,   "min": 300.0,  "max": 2000.0},
+            "kelly_base_usdt":        {"field": "kelly_base_usdt",        "scale": 1.0,   "min": 150.0,  "max": 1200.0},
+            "kelly_max_usdt":         {"field": "kelly_max_usdt",         "scale": 1.0,   "min": 2500.0, "max": 5000.0},
+            "kelly_max_pct_liquid":   {"field": "kelly_max_pct_liquid",   "scale": 1.0,   "min": 0.90,   "max": 0.95},
+            "kelly_dynamic_base_pct": {"field": "kelly_dynamic_base_pct", "scale": 1.0,   "min": 0.22,   "max": 0.40},
+            "kelly_conviction_max_pct":{"field": "kelly_conviction_max_pct","scale": 1.0,  "min": 0.22,   "max": 0.40},
+            "futures_kelly_base_usdt": {"field": "futures_kelly_base_usdt","scale": 1.0,   "min": 200.0,  "max": 2000.0},
+            "futures_kelly_max_usdt": {"field": "futures_kelly_max_usdt", "scale": 1.0,   "min": 2500.0, "max": 5000.0},
+            "futures_kelly_cap_pct":  {"field": "futures_kelly_cap_pct",  "scale": 1.0,   "min": 0.90,   "max": 0.95},
             "futures_sl_pct":         {"field": "futures_sl_pct",         "scale": 100.0, "min": 0.010,  "max": 0.050},
             "futures_tp_pct":         {"field": "futures_tp_pct",         "scale": 100.0, "min": 0.020,  "max": 0.100},
             "spot_sl_pct":            {"field": "stop_loss_pct",          "scale": 100.0, "min": 0.010,  "max": 0.040},
@@ -12290,7 +12880,7 @@ async def post_config_apply(body: Dict, _auth=Depends(_require_api_key)) -> Dict
                 continue
             try:
                 _old = getattr(_s, key)
-                _new = new_value
+                _new = enforce_aggressive_kelly_floor(key, new_value)
                 # Preserve type when possible
                 if _old is not None:
                     _type = type(_old)

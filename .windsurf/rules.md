@@ -24,6 +24,8 @@ Si una propuesta no responde estos 6 puntos, no está lista para rollout.
 
 **🔴 Regla dura — visibilidad de shadow evidence:** todo mecanismo que se despliegue "en observación"/shadow (no activo en producción real) debe ser visible en `/metrics/shadow-readiness` — agregar una entrada en `app.py::get_shadow_readiness` con `id`, `name`, `mode` (leído de la config real, no hardcodeado), `state`, `summary` con métricas reales, y `gates` con los umbrales de graduación a activo. No es aceptable dejar un flag `*_enabled=False`/modo shadow en el código sin su contraparte visible en el dashboard — la falta de visibilidad fue precisamente lo que permitió que el bug de `range_reversion_shadow`/`invalid_reversion_payoff` (ver s108/s115) pasara desapercibido durante semanas. Al implementar un mecanismo nuevo en shadow, agregar su entrada al dashboard es parte de la misma tarea, no un paso separado opcional.
 
+**🔴 Regla dura — ejecución real con evidencia obligatoria:** cuando una calibración se despliega en `active` (ejecución real), también debe dejar evidencia en `/metrics/shadow-readiness` como control de calidad de rollout. En este caso la tarjeta debe mostrar explícitamente decisiones ejecutadas vs decisiones que se habrían diferido/cortado, con gates de muestra mínima para recalibrar umbrales. No se acepta un mecanismo activo sin telemetría de evidencia comparable.
+
 **�🟡 Guía — limpieza de candidatos activos tras un fix de evaluación/priorización:** todo cambio que altere cómo se evalúan, confirman o priorizan candidatos (`staged_entry.py::_direction_transition`, `get_openable_candidates`, gates de ejecución en `run_trades.py`) debe cerrar con una revisión de `ready_candidates` en estado `ready`/`validated`: consultar `data.last_execution_gate`, `data.direction`, y el conteo de `risk_queue_selected`/`execution_attempt_blocked` en `ready_candidate_checks` por candidato, para detectar y descartar (`_discard_ready`) cualquiera que haya quedado en un estado inconsistente con la lógica nueva o arrastrando el patrón que motivó el fix (ver s110/s111, HEIUSDT/RIFUSDT monopolizando la cola). No dar el fix por cerrado sin este chequeo, aunque el resultado sea "nada que limpiar".
 
 ## s115 — revalidación de tesis S/R al ejecutar (activo, 5%) + visibilidad shadow obligatoria (ago 3 2026)
@@ -116,8 +118,9 @@ _buy_top_symbols():
   _kelly_position_size()      → sizing: base × regime_mult × profile_mult × conviction × concentration × F&G
     ↓
 BinanceClient / FuturesClient → ejecuta orden → _verify_entry_filled() → persiste en DB (+ gate_warnings)
-    ↓
+  ↓
 [cada ciclo, sobre posiciones abiertas]
+1s telemetry layer            → snapshots vivos que alimentan SSO/PRS/UG/PredExit y protegen profit/drawdown sin crear riesgo nuevo
 smart_scale_out.py            → SSO-1..7: partial/full exit por 7 triggers adaptativos
 profit_realization_supervisor.py → PRS: timing de exit escalado por régimen y perfil
 peak_capture_engine.py        → PredExit: advisory de captura de peak (solo en ganancia)
@@ -201,10 +204,11 @@ unified_governance_supervisor.py → UG: árbitro final — consolida advisories
 
 **Vida activa (cada ciclo sobre posiciones abiertas):**
 - `run_trades.py` itera `position_manager.get_open_positions()`
-- Pipeline de exit en orden de precedencia: Hard SL/TP (Binance) → BreakEven → Trailing → SSO → PRS → UG → PredExit
+- Pipeline de exit en orden de precedencia: Hard SL/TP (Binance) → BreakEven → Trailing → 1s telemetry snapshot → SSO → PRS → UG → PredExit
 - Hard SL/TP son órdenes algo activas en Binance — se ejecutan sin pasar por el bucle Python
-- SSO/PRS/PredExit devuelven advisories; UG consolida en la acción final (nunca múltiples closes en el mismo ciclo)
+- SSO/PRS/PredExit devuelven advisories; el 1s telemetry layer también los recalcula sobre snapshots vivos, mientras UG consolida en la acción final (nunca múltiples closes en el mismo ciclo)
 - La escalación automática de parcial a cierre total está desactivada por defecto: un advisory SSO partial + PRS full no colapsa a 100% sin confirmación explícita de UG
+- Regla de stop inteligente 1s: no cortar por umbral fijo aislado. Al cruzar drawdown se abre ventana de rescate (`monitoring`/`recoverable`), y el corte duro se habilita cuando hay `failed_recovery` o `shock` adverso confirmado.
 
 **Salida:**
 - Parcial: INSERT `trades_closed` (PnL neto proporcional, comisiones, motivo, trigger, `metadata.partial_close=True`) + UPDATE `trades_open` (reduce qty, persiste `_smart_meta` actualizado)

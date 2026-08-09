@@ -27,8 +27,22 @@
 
 - La ruta canónica de entradas SR es: `setup_detected` -> `ready` -> re-check inter/intra ciclo -> `direction_confirmed` -> `validated` -> preflight -> orden -> `fill` confirmado -> `opened`.
 - Un candidato SR en `ready` permanece en espera activa hasta confirmar rompimiento/progreso direccional; no se permite apertura directa por score, QUBO o predictor sin confirmación de dirección.
+- Un SHORT no puede abrir a `<=0.5%` del soporte con RSI `<50` salvo que `support_breakdown_sell`/`sr_breakdown` confirme continuación. El gate usa `range_scalp_short_near_support_*`, es hot-configurable y falla abierto si faltan ambas features.
 - Todo bloqueo en preflight o ejecución debe persistirse con razón canónica en `ready_candidates.data` y evento de auditoría correspondiente.
 - No existe apertura válida sin confirmación de fill en exchange.
+
+### Contrato de riesgo FUTURES
+
+- El PnL contractual de FUTURES es `(mark-entry)*qty` para LONG y `(entry-mark)*qty` para SHORT; nunca se vuelve a multiplicar por leverage.
+- `position_telemetry_watcher` debe leer `qty`, crear un snapshot estable por `symbol_side` y normalizar velocidad por precio antes de evaluar drawdown.
+- `hard_risk_monitor` aplica `max_loss_usd_per_trade` también a FUTURES en su loop de 2s; el motivo canónico es `max_loss_usd_stop`.
+
+### Protocolo recurrente AIC
+
+- Toda revisión periódica de pérdidas usa **AIC — Análisis Inteligente de Cierres** (`canonical/analisis_inteligente_cierres.md`) y un ID `AIC-YYYYMMDD-NN`.
+- Debe separar A) no abrir, B) proteger después de abrir y C) reparar/calibrar configuración existente antes de agregar lógica paralela.
+- La unidad de comparación es la tesis `(symbol, entry_time)`, no cada cierre parcial.
+- Ningún gate se promueve sin reportar pérdidas evitadas, ganancias sacrificadas, mejora neta, tamaño de muestra y limitaciones.
 
 ## 1. Staged entry lifecycle
 

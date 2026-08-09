@@ -87,3 +87,84 @@ def test_flat_stagnation_timeout_disabled(sso):
     pos = _make_pos(pnl_pct=0.001, pnl_usdt=0.15, age_hours=3.5)
     action = sso_disabled.evaluate(pos)
     assert action.should_close is False
+
+
+def test_range_scalp_sso4_guard_shadow_keeps_close_but_marks_detail():
+    class _Settings:
+        sso_target_contribution_enabled = True
+        sso_target_contribution_pct = 0.15
+        sso_target_contribution_pct_range_scalp = 0.10
+        sso_target_daily_usd = 40.0
+        sso_target_min_hours = 1.0
+        sso_target_range_scalp_guard_mode = "shadow"
+        sso_target_range_scalp_guard_notional_min_usdt = 700.0
+        sso_target_range_scalp_guard_min_pnl_pct = 1.40
+        sso_target_range_scalp_guard_min_abs_gain_usdt = 9.0
+        sso_target_range_scalp_guard_min_velocity_pct_h = 0.08
+        sso_target_range_scalp_guard_min_vol_spike = 1.40
+
+    sso = SmartScaleOut(settings=_Settings())
+    pos = SSOPositionData(
+        symbol="SOLUSDT",
+        side="BUY",
+        pnl_pct=0.009,
+        pnl_usdt=6.5,
+        position_size_usdt=1200.0,
+        entry_price=100.0,
+        current_price=100.9,
+        opened_at=datetime.now(timezone.utc) - timedelta(hours=1.4),
+        peak_pnl_pct=0.009,
+        pnl_velocity_1h=0.0012,
+        vol_spike=1.6,
+        trend_4h="UP",
+        daily_target=40.0,
+        today_realized_pnl=2.0,
+        trade_type="futures",
+        regime_mode="RANGE_SCALP",
+        profile_label="B",
+    )
+
+    action = sso._check_sso4_target_contribution(pos)
+    assert action is not None
+    assert action.should_close is True
+    assert action.reason == "sso_target_contribution"
+    assert "shadow_hold candidate" in action.detail
+
+
+def test_range_scalp_sso4_guard_active_blocks_early_close():
+    class _Settings:
+        sso_target_contribution_enabled = True
+        sso_target_contribution_pct = 0.15
+        sso_target_contribution_pct_range_scalp = 0.10
+        sso_target_daily_usd = 40.0
+        sso_target_min_hours = 1.0
+        sso_target_range_scalp_guard_mode = "active"
+        sso_target_range_scalp_guard_notional_min_usdt = 700.0
+        sso_target_range_scalp_guard_min_pnl_pct = 1.40
+        sso_target_range_scalp_guard_min_abs_gain_usdt = 9.0
+        sso_target_range_scalp_guard_min_velocity_pct_h = 0.08
+        sso_target_range_scalp_guard_min_vol_spike = 1.40
+
+    sso = SmartScaleOut(settings=_Settings())
+    pos = SSOPositionData(
+        symbol="SOLUSDT",
+        side="BUY",
+        pnl_pct=0.009,
+        pnl_usdt=6.5,
+        position_size_usdt=1200.0,
+        entry_price=100.0,
+        current_price=100.9,
+        opened_at=datetime.now(timezone.utc) - timedelta(hours=1.4),
+        peak_pnl_pct=0.009,
+        pnl_velocity_1h=0.0012,
+        vol_spike=1.6,
+        trend_4h="UP",
+        daily_target=40.0,
+        today_realized_pnl=2.0,
+        trade_type="futures",
+        regime_mode="RANGE_SCALP",
+        profile_label="B",
+    )
+
+    action = sso._check_sso4_target_contribution(pos)
+    assert action is None

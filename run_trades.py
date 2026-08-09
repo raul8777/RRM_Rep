@@ -43,7 +43,11 @@ from unified_governance_supervisor import (
     UnifiedGovernanceContext,
     evaluate as _evaluate_unified_governance,
 )
-from ug_loss_policy import evaluate_shadow as _evaluate_ug_loss_shadow
+from ug_loss_policy import (
+    evaluate_shadow as _evaluate_ug_loss_shadow,
+    rollout_applies as _ug_loss_rollout_applies,
+    apply_shadow_result_to_decision as _apply_ug_loss_shadow_result,
+)
 from binance_truth_guard import (
     evaluate_futures_parity,
     evaluate_spot_parity,
@@ -994,6 +998,7 @@ def _execute_validated_fast_path(
                     _staged_direction,
                     settings,
                     _fast_screened_pairs,
+                    short_guard_ctx={"btc_blocked": _btc_blocked, "btc_block_reason": _btc_block_reason},
                 )
             except Exception as exc:
                 print(f"[FastPath/DirectionArbiter] {symbol}: fail-closed ({exc})")
@@ -1207,6 +1212,14 @@ def _execute_validated_fast_path(
         bucket_liquid = futures_liquid if trade_bucket == "futures" else usdt_liquid
 
         # Cap to the routed bucket and reserve it before order construction.
+        if trade_bucket == "spot":
+            _spot_min_ticket = float(_get_param(settings, "kelly_min_usdt") or 0.0)
+            if _spot_min_ticket <= 0.0:
+                _spot_min_ticket = float(_get_param(settings, "kelly_base_usdt") or 150.0)
+            if 0.0 < trade_allocation < _spot_min_ticket <= bucket_liquid:
+                print(f"[FastPath] {symbol}: spot floor uplift ${trade_allocation:.2f}→${_spot_min_ticket:.2f}")
+                trade_allocation = _spot_min_ticket
+
         trade_allocation = min(trade_allocation, bucket_liquid * 0.95)
         if trade_allocation < 10.0:
             print(f"[FastPath] {symbol}: BLOCKED allocation too small (${trade_allocation:.2f})")
@@ -1479,6 +1492,21 @@ def _update_fast_path_gate(
     try:
         _ts = datetime.utcnow().isoformat()
         _authorized = bool(passed)
+        _prev_streak = 0
+        try:
+            _existing_rows = db_client.execute_query(
+                "SELECT data FROM ready_candidates WHERE id=%s LIMIT 1",
+                (ready_id,),
+            ) or []
+            if _existing_rows:
+                _existing_data = _existing_rows[0].get("data")
+                if isinstance(_existing_data, str):
+                    _existing_data = json.loads(_existing_data)
+                if isinstance(_existing_data, dict):
+                    _prev_streak = int(_existing_data.get("execution_block_streak") or 0)
+        except Exception:
+            _prev_streak = 0
+        _new_streak = 0 if _authorized else max(0, _prev_streak) + 1
         gate_data = {
             "last_execution_gate": {
                 "passed": passed,
@@ -1498,6 +1526,9 @@ def _update_fast_path_gate(
             "stage_kind": "risk_authorized" if _authorized else "execution_attempted",
             "stage_reason": "RISK_AUTHORIZED" if _authorized else _canonical_stage_reason(reason),
             "stage_updated_at": _ts,
+            "execution_block_streak": _new_streak,
+            "execution_last_blocked_reason": None if _authorized else reason,
+            "execution_last_blocked_at": None if _authorized else _ts,
         }
         staged_entry._update_ready_status(db_client, ready_id, data_update=gate_data)
     except Exception:
@@ -1998,6 +2029,13 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
             'futures_adverse_exit_loss_pct': 'futures_adverse_exit_loss_pct',
             'futures_adverse_exit_min_hours': 'futures_adverse_exit_min_hours',
             'futures_adverse_exit_min_strength': 'futures_adverse_exit_min_strength',
+            'sr_invalidation_exit_enabled': 'sr_invalidation_exit_enabled',
+            'sr_invalidation_shadow_mode': 'sr_invalidation_shadow_mode',
+            'sr_invalidation_loss_pct': 'sr_invalidation_loss_pct',
+            'sr_invalidation_confirmation_bars': 'sr_invalidation_confirmation_bars',
+            'sr_invalidation_min_strength': 'sr_invalidation_min_strength',
+            'sr_invalidation_only_with_loss': 'sr_invalidation_only_with_loss',
+            'sr_invalidation_lookback_minutes': 'sr_invalidation_lookback_minutes',
             'futures_smart_tp_max_pnl_pct': 'futures_smart_tp_max_pnl_pct',
             'futures_smart_tp_max_extensions': 'futures_smart_tp_max_extensions',
             'futures_smart_tp_extend_score_threshold': 'futures_smart_tp_extend_score_threshold',
@@ -2159,14 +2197,17 @@ def _apply_regime_params(settings, regime: str, db_client=None) -> Dict:
         # Global scalars governed via docker-compose env (aggressive calibration)
         # must not be overwritten by per-regime profile snapshots.
         _ENV_PROTECTED_SCALARS = {
+            'kelly_base_usdt',
             'kelly_max_usdt',
             'kelly_max_pct_liquid',
             'kelly_dynamic_base_pct',
             'kelly_conviction_max_pct',
+            'kelly_min_usdt',
             'futures_kelly_max_usdt',
             'futures_kelly_max_pct_liquid',
             'futures_kelly_cap_pct',
             'futures_kelly_base_usdt',
+            'futures_kelly_min_usdt',
             'futures_min_prob',
             'futures_max_new_per_cycle',
             'min_signal_strength',
@@ -3507,6 +3548,88 @@ def _get_funding_rate(symbol: str, settings) -> float:
         return None
 
 
+def _stable_rollout_value(*parts: Any) -> float:
+    """Deterministic [0,1) rollout bucket based on stable string hashing."""
+    text = "|".join(str(p or "") for p in parts)
+    acc = 0
+    for ch in text:
+        acc = (acc * 33 + ord(ch)) % 10000
+    return acc / 10000.0
+
+
+def _evaluate_funding_guard_for_entry(
+    symbol: str,
+    side: str,
+    margin_usdt: float,
+    settings: Any,
+    leverage: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Funding guard rollout: canary enforcement for futures entries.
+
+    - mode=shadow: observe only, never block.
+    - mode=active: block only extreme funding cost (`funding_block`) on canary sample.
+    - mode=enforced: block both warning and block on canary sample.
+    """
+    mode = str(_get_param(settings, "funding_fee_guard_mode") or "shadow").strip().lower()
+    canary_fraction = max(0.0, min(1.0, float(_get_param(settings, "funding_fee_guard_canary_fraction") or 0.0)))
+    fail_closed = bool(_get_param(settings, "funding_fee_guard_fail_closed"))
+    lev = int(leverage or _get_param(settings, "futures_leverage") or 10)
+    notional_usdt = max(0.0, float(margin_usdt or 0.0) * max(1, lev))
+    side_u = str(side or "").upper()
+
+    rollout_value = _stable_rollout_value(symbol, side_u, "funding_guard")
+    sampled = canary_fraction > 0.0 and rollout_value < canary_fraction
+    enforce = mode in {"active", "enforced"} and sampled
+
+    funding_rate = _get_funding_rate(symbol, settings)
+    warning_fee_usdt = float(_get_param(settings, "funding_guard_warning_fee_usdt") or 0.5)
+    block_fee_usdt = float(_get_param(settings, "funding_guard_block_fee_usdt") or 1.25)
+    warning_rate_pct = float(_get_param(settings, "funding_guard_warning_rate_pct") or 0.15)
+    block_rate_pct = float(_get_param(settings, "funding_guard_block_rate_pct") or 0.35)
+
+    result: Dict[str, Any] = {
+        "mode": mode,
+        "sampled": sampled,
+        "enforce": enforce,
+        "rollout_value": round(rollout_value, 4),
+        "funding_rate": funding_rate,
+        "decision": "funding_ok",
+        "reason": "FUNDING_WITHIN_POLICY",
+        "expected_fee_usdt": 0.0,
+        "notional_usdt": round(notional_usdt, 6),
+        "block": False,
+    }
+
+    if funding_rate is None:
+        result["decision"] = "funding_unknown"
+        result["reason"] = "FUNDING_RATE_UNAVAILABLE"
+        result["block"] = bool(enforce and fail_closed)
+        return result
+
+    abs_rate = abs(float(funding_rate or 0.0))
+    abs_rate_pct = abs_rate * 100.0
+    pays = bool((side_u == "LONG" and funding_rate > 0.0) or (side_u == "SHORT" and funding_rate < 0.0))
+    expected_fee_usdt = (notional_usdt * abs_rate) if pays else (-notional_usdt * abs_rate)
+    result["expected_fee_usdt"] = round(expected_fee_usdt, 8)
+
+    if pays and (expected_fee_usdt >= block_fee_usdt or abs_rate_pct >= block_rate_pct):
+        result["decision"] = "funding_block"
+        result["reason"] = "FUNDING_COST_EXTREME"
+        result["block"] = bool(enforce)
+        return result
+
+    if pays and (expected_fee_usdt >= warning_fee_usdt or abs_rate_pct >= warning_rate_pct):
+        result["decision"] = "funding_warning"
+        result["reason"] = "FUNDING_COST_ELEVATED"
+        result["block"] = bool(enforce and mode == "enforced")
+        return result
+
+    result["decision"] = "funding_credit" if not pays else "funding_ok"
+    result["reason"] = "FUNDING_CREDIT_OPPORTUNITY" if not pays else "FUNDING_WITHIN_POLICY"
+    result["block"] = False
+    return result
+
+
 def _check_liquidity_and_slippage(symbol: str, vol_24h_usdt: float,
                                    price: float, tp_pct: float, settings,
                                    regime_mode: Optional[str] = None) -> tuple:
@@ -3617,6 +3740,34 @@ def _mass_sl_rolling_window_count(db_client: Any, window_minutes: float) -> int:
         }):
             count += 1
     return count
+
+
+def _symbol_recent_losing_closes_count(db_client: Any, symbol: str, window_hours: float) -> int:
+    """Count recent losing futures closes for one symbol in a rolling window."""
+    if not db_client or not symbol:
+        return 0
+    try:
+        rows = db_client.execute_query(
+            """SELECT pnl, pnl_percentage, close_reason
+               FROM trades_closed
+               WHERE symbol = %s
+                 AND (metadata->>'trade_type' = 'futures' OR metadata IS NULL)
+                 AND exit_time > NOW() - (%s || ' hours')::interval
+                 AND COALESCE(is_corrupted, FALSE) = FALSE""",
+            (symbol, float(window_hours)),
+        ) or []
+    except Exception as exc:
+        print(f"[Futures/SL-CD] recent losing count failed for {symbol}: {exc}")
+        return 0
+    losing = 0
+    for row in rows:
+        if _is_losing_close_dict({
+            'reason': row.get('close_reason'),
+            'pnl': row.get('pnl'),
+            'pnl_percentage': row.get('pnl_percentage'),
+        }):
+            losing += 1
+    return int(losing)
 
 
 def _consecutive_sl_count(symbol: str, position_manager, n: int = 3) -> bool:
@@ -6002,12 +6153,30 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         )
                         _ug_decision = _evaluate_unified_governance(_ug_ctx, settings)
                         _ug_shadow = _evaluate_ug_loss_shadow(_ug_ctx, _ug_decision)
+                        _ug_mode = str(_get_param(settings, "ug_loss_policy_mode", "shadow") or "shadow").lower()
+                        _ug_canary_fraction = float(_get_param(settings, "ug_loss_policy_canary_fraction", 0.25) or 0.25)
+                        _ug_apply = _ug_loss_rollout_applies(
+                            _ug_mode,
+                            f"spot|{symbol}|{getattr(pos, 'position_id', '')}|{regime}|{_pos_profile}",
+                            _ug_canary_fraction,
+                        )
+                        _ug_applied_patch = _apply_ug_loss_shadow_result(_ug_decision, _ug_shadow)
+                        if _ug_apply and _ug_applied_patch.get("applied"):
+                            _ug_decision.should_close = bool(_ug_applied_patch.get("should_close", _ug_decision.should_close))
+                            _ug_decision.close_pct = float(_ug_applied_patch.get("close_pct", _ug_decision.close_pct) or 0.0)
+                            _ug_decision.action = str(_ug_applied_patch.get("action") or _ug_decision.action)
+                            _ug_decision.reason = str(_ug_applied_patch.get("reason") or _ug_decision.reason)
+                            _ug_decision.detail = str(_ug_applied_patch.get("detail") or _ug_decision.detail)
                         metadata["unified_governance_shadow_last"] = _ug_shadow
                         try:
                             position_manager._audit(symbol, 'unified_governance_shadow_decision', {
                                 'side': 'BUY',
                                 'trade_type': 'spot',
                                 **_ug_shadow,
+                                'rollout_mode': _ug_mode,
+                                'rollout_canary_fraction': _ug_canary_fraction,
+                                'rollout_applies': bool(_ug_apply),
+                                'active_applied': bool(_ug_apply and _ug_applied_patch.get('applied')),
                             })
                         except Exception:
                             pass
@@ -7590,6 +7759,76 @@ def _staged_sr_thesis_check(metadata: Dict[str, Any], side: str, settings: Any) 
     return True, ""
 
 
+def _staged_short_risk_guard(
+    symbol: str,
+    metadata: Dict[str, Any],
+    settings: Any,
+    short_guard_ctx: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """Selective short-side guardrail for staged fast-path entries.
+
+    Blocks only canary-sampled candidates where multiple risk flags co-occur,
+    reducing clustered loss tails without globally suppressing short execution.
+    """
+    enabled = bool(getattr(settings, "staged_short_risk_guard_enabled", True))
+    canary_fraction = max(0.0, min(1.0, float(getattr(settings, "staged_short_risk_guard_canary_fraction", 0.35) or 0.0)))
+    rollout = _stable_rollout_value(symbol, "SHORT", "staged_short_risk_guard")
+    sampled = canary_fraction > 0.0 and rollout < canary_fraction
+    max_dist_pct = float(getattr(settings, "staged_short_risk_guard_max_resistance_dist_pct", 3.0) or 3.0)
+    min_flags = max(1, int(getattr(settings, "staged_short_risk_guard_min_risk_flags", 2) or 2))
+
+    dist = metadata.get("nearest_resistance_dist_pct")
+    if dist is None:
+        dist = metadata.get("sr_resistance_dist_pct")
+    try:
+        dist_f = float(dist) if dist not in (None, "") else None
+    except (TypeError, ValueError):
+        dist_f = None
+
+    vol_anomaly_mult = max(1.0, float(getattr(settings, "staged_short_risk_guard_volume_anomaly_multiplier", 3.0) or 3.0))
+    vol_spike = metadata.get("vol_spike")
+    if vol_spike is None:
+        vol_spike = metadata.get("vol_spike_at_signal")
+    try:
+        vol_spike_f = float(vol_spike) if vol_spike not in (None, "") else None
+    except (TypeError, ValueError):
+        vol_spike_f = None
+    volume_anomaly = bool(metadata.get("volume_anomaly"))
+    if not volume_anomaly and vol_spike_f is not None and vol_spike_f >= vol_anomaly_mult:
+        volume_anomaly = True
+
+    btc_blocked = bool((short_guard_ctx or {}).get("btc_blocked", False))
+    risk_flags = {
+        "far_from_resistance": dist_f is None or dist_f > max_dist_pct,
+        "volume_anomaly": volume_anomaly,
+        "btc_adverse_for_shorts": btc_blocked,
+    }
+    risk_score = sum(1 for _v in risk_flags.values() if _v)
+
+    snapshot = {
+        "enabled": enabled,
+        "sampled": sampled,
+        "rollout": round(rollout, 4),
+        "canary_fraction": round(canary_fraction, 4),
+        "max_resistance_dist_pct": max_dist_pct,
+        "distance_pct": dist_f,
+        "volume_anomaly": volume_anomaly,
+        "vol_spike": vol_spike_f,
+        "btc_adverse_for_shorts": btc_blocked,
+        "risk_flags": risk_flags,
+        "risk_score": risk_score,
+        "min_risk_flags": min_flags,
+    }
+
+    if not enabled:
+        return True, "", snapshot
+    if not sampled:
+        return True, "", snapshot
+    if risk_score >= min_flags:
+        return False, "SHORT_RISK_GUARD_BLOCKED", snapshot
+    return True, "", snapshot
+
+
 def _staged_range_scalp_decision(
     symbol: str,
     metadata: Dict[str, Any],
@@ -7597,6 +7836,7 @@ def _staged_range_scalp_decision(
     direction: Dict[str, Any],
     settings: Any,
     screened_pairs_cache: Optional[Dict[str, Any]],
+    short_guard_ctx: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Use the staged direction/policy for a validated RANGE_SCALP candidate.
 
@@ -7678,6 +7918,16 @@ def _staged_range_scalp_decision(
         _sr_ok, _sr_reason = _staged_sr_thesis_check(metadata, "SHORT", settings)
         if not _sr_ok:
             decision["reason"] = _sr_reason
+            return decision
+        _risk_ok, _risk_reason, _risk_snapshot = _staged_short_risk_guard(
+            symbol,
+            metadata,
+            settings,
+            short_guard_ctx=short_guard_ctx,
+        )
+        decision["short_risk_guard"] = _risk_snapshot
+        if not _risk_ok:
+            decision["reason"] = _risk_reason
             return decision
         decision["selected_mode"] = "FUTURES_SHORT"
         decision["reason"] = "STAGED_SHORT_DIRECTION"
@@ -7879,6 +8129,11 @@ def _build_entry_context(
         "directional_arbitration_reason": decision.get("reason"),
         "sr_zone_position_at_entry": metadata.get("sr_zone_position"),
         "range_reversion_valid_at_entry": _reversion_valid,
+        "ready_candidate_id": metadata.get("ready_candidate_id"),
+        "staged_direction": metadata.get("staged_direction") or {},
+        "spread_bps_estimate": metadata.get("spread_bps_estimate"),
+        "slippage_bps_estimate": metadata.get("slippage_bps_estimate") or metadata.get("slippage_bps"),
+        "funding_bps": metadata.get("funding_bps", 0.0),
     }
     if isinstance(candidate_data, dict):
         direction = candidate_data.get("direction") or {}
@@ -8085,6 +8340,20 @@ def _open_arbitrated_range_scalp_short(
     if amount < 10.0:
         print(f"[Futures/SHORT] {symbol}: final amount ${amount:.2f} < $10 after funding — skip")
         return None
+    _funding_guard = _evaluate_funding_guard_for_entry(
+        symbol,
+        "SHORT",
+        amount,
+        settings,
+        leverage=int(getattr(settings, "futures_leverage", 10)),
+    )
+    print(
+        f"[FundingGuard/SHORT] {symbol}: mode={_funding_guard.get('mode')} sampled={_funding_guard.get('sampled')} "
+        f"decision={_funding_guard.get('decision')} fee={_funding_guard.get('expected_fee_usdt')}"
+    )
+    if _funding_guard.get("block"):
+        print(f"[Futures/SHORT] {symbol}: BLOCKED by funding guard ({_funding_guard.get('reason')})")
+        return None
     _short_sl_pct = _atr_anchor_sl_pct(
         float(getattr(settings, "range_scalp_short_sl_pct", 2.0)), metadata, settings,
         "range_scalp_short_atr_sl_multiplier", "range_scalp_short_atr_sl_anchor_enabled",
@@ -8215,6 +8484,20 @@ def _open_arbitrated_range_scalp_long(
 
     if amount < 10.0:
         print(f"[Futures/LONG] {symbol}: final amount ${amount:.2f} < $10 after funding attempt — skip")
+        return None
+    _funding_guard = _evaluate_funding_guard_for_entry(
+        symbol,
+        "LONG",
+        amount,
+        settings,
+        leverage=int(getattr(settings, "futures_leverage", 10)),
+    )
+    print(
+        f"[FundingGuard/LONG] {symbol}: mode={_funding_guard.get('mode')} sampled={_funding_guard.get('sampled')} "
+        f"decision={_funding_guard.get('decision')} fee={_funding_guard.get('expected_fee_usdt')}"
+    )
+    if _funding_guard.get("block"):
+        print(f"[Futures/LONG] {symbol}: BLOCKED by funding guard ({_funding_guard.get('reason')})")
         return None
     _long_sl_pct = float(getattr(settings, "futures_long_sl_pct", 2.5))
     # s110: same delay-conditioned gate as the SHORT path above.
@@ -8361,12 +8644,24 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         if _spot_exposure_block:
             print(f"[Exposure] Portfolio {_exposure_pct:.1%} >= cap {_max_exposure:.0%} — skipping new spot buys this cycle")
             return orders
-        allocation = min(settings.max_per_trade_usdt, usdt_liquid / max(len(top_symbols), 1))
+        # Equal split is only a predictor hint; do not let it drag SPOT below
+        # aggressive Kelly base when liquidity is available.
+        _spot_base_floor = float(_get_param(settings, 'kelly_base_usdt') or 150.0)
+        _raw_allocation = usdt_liquid / max(len(top_symbols), 1)
+        allocation = min(
+            settings.max_per_trade_usdt,
+            max(_raw_allocation, min(_spot_base_floor, usdt_liquid)),
+        )
     else:
         if usdt <= 0:
             print("No USDT available for buys")
             return orders
-        allocation = min(settings.max_per_trade_usdt, usdt / len(top_symbols))
+        _spot_base_floor = float(_get_param(settings, 'kelly_base_usdt') or 150.0)
+        _raw_allocation = usdt / max(len(top_symbols), 1)
+        allocation = min(
+            settings.max_per_trade_usdt,
+            max(_raw_allocation, min(_spot_base_floor, usdt)),
+        )
         print(f"USDT available: {usdt}, allocation per symbol: {allocation}")
 
     # ── Bear mode derived from market_regime (single source of truth) ──────────
@@ -12045,9 +12340,29 @@ def execute_once(monitor_only: bool = False, components=None):
                         # loss is just as real a signal to cool down re-entry on this symbol.
                         if _is_losing_close_dict(_cc):
                             _sl_count_this_cycle += 1
-                            _sl_cd_hours = getattr(settings, 'futures_sl_cooldown_hours', 4.0)
+                            _sl_cd_hours_base = float(getattr(settings, 'futures_sl_cooldown_hours', 4.0) or 4.0)
+                            _sl_cd_window_h = float(getattr(settings, 'futures_sl_cooldown_window_hours', 24.0) or 24.0)
+                            _sl_cd_extra_per_loss_h = float(getattr(settings, 'futures_sl_cooldown_extra_hours_per_loss', 1.0) or 1.0)
+                            _sl_cd_max_h = float(getattr(settings, 'futures_sl_cooldown_max_hours', 8.0) or 8.0)
+                            _recent_loss_count = _symbol_recent_losing_closes_count(_db_client_ref, _cc_sym, _sl_cd_window_h) + 1
+                            _sl_cd_hours = min(_sl_cd_max_h, _sl_cd_hours_base + max(0.0, (_recent_loss_count - 1) * _sl_cd_extra_per_loss_h))
                             _FUTURES_SL_COOLDOWN[_cc_sym] = datetime.now(timezone.utc)
-                            _set_cooldown(_cc_sym, 'futures_sl', _sl_cd_hours, {'reason': 'sl_hit'})
+                            _cd_meta = {
+                                'reason': 'sl_hit',
+                                'base_hours': _sl_cd_hours_base,
+                                'applied_hours': _sl_cd_hours,
+                                'window_hours': _sl_cd_window_h,
+                                'recent_losing_closes': _recent_loss_count,
+                            }
+                            _set_cooldown(_cc_sym, 'futures_sl', _sl_cd_hours, _cd_meta)
+                            if _db_client_ref:
+                                try:
+                                    _db_client_ref.execute_update(
+                                        "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+                                        (_cc_sym, 'futures', 'short_loss_cooldown_applied', json.dumps(_cd_meta), False),
+                                    )
+                                except Exception as _cd_audit_err:
+                                    print(f"[Futures/SL-CD] audit persist failed for {_cc_sym}: {_cd_audit_err}")
                             print(f'[Futures/SL-CD] {_cc_sym}: cooldown {_sl_cd_hours}h — no re-entry until next window')
                 # PB2: Mass SL circuit breaker — global pause if too many positions stopped together.
                 # s116: the per-cycle counter (`_sl_count_this_cycle`, reset every ~3-5min iteration)

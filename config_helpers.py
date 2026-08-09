@@ -27,7 +27,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     # SPOT Kelly
     'kelly_enabled': True,
     'kelly_base_usdt': 150.0,
-    'kelly_max_usdt': 1500.0,
+    'kelly_max_usdt': 2500.0,
     'kelly_max_pct_liquid': 0.90,  # aggressive calibration: up to 90% of liquid
     'kelly_max_pct_cap': 0.30,
     'kelly_min_usdt': 0.0,
@@ -35,10 +35,10 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'max_per_trade_usdt': 1500.0,
 
     # FUTURES Kelly
-    'futures_kelly_base_usdt': 150.0,
-    'futures_kelly_max_usdt': 1500.0,
+    'futures_kelly_base_usdt': 200.0,
+    'futures_kelly_max_usdt': 2500.0,
     'futures_kelly_max_pct_liquid': 0.90,  # aggressive calibration: consistent with SPOT
-    'futures_kelly_cap_pct': 0.30,
+    'futures_kelly_cap_pct': 0.90,
     'futures_kelly_min_usdt': 0.0,
 
     # FUTURES trading
@@ -72,13 +72,13 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'spot_reconcile_auto_fix_enabled': True,
     'spot_reconcile_min_value_usdt': 5.0,
 
-    # Kelly position sizing (Wolf Hunter s63)
+    # Kelly position sizing (aggressive canonical baseline)
     'kelly_base_usdt': 150.0,          # concentrated: base digna para $5,100
-    'kelly_max_usdt': 1500.0,          # concentrated: cap por posición elevado
-    'kelly_dynamic_base_pct': 0.20,    # concentrated: base crece con capital disponible
+    'kelly_max_usdt': 2500.0,          # aggressive calibration: cap por posición elevado
+    'kelly_dynamic_base_pct': 0.22,    # aggressive calibration: base crece con capital disponible
     'kelly_conviction_vol2x': 1.8,     # jul07: 1.5→1.8 (wolf-hunter s63)
     'kelly_conviction_vol3x': 2.5,     # jul07: 2.0→2.5 (wolf-hunter s63)
-    'kelly_conviction_max_pct': 0.25,  # concentrated: vol >3x permite 25% de portafolio
+    'kelly_conviction_max_pct': 0.22,  # aggressive canonical cap
 
     # Signal filters
     'min_signal_strength': 0.60,       # concentrated: solo señales fuertes
@@ -98,6 +98,12 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'entry_quality_rsi_max_spot_bull': 68.0,
     'entry_quality_vol_spike_min_range_scalp': 0.35,  # s72: lateral = low vol structural; lower floor
     'sso_target_contribution_pct_range_scalp': 0.10,  # s110: raised 0.05->0.10, min_contribution was too small vs $18-27 SL guardrail (RR~0.38)
+    'sso_target_range_scalp_guard_mode': 'active',
+    'sso_target_range_scalp_guard_notional_min_usdt': 700.0,
+    'sso_target_range_scalp_guard_min_pnl_pct': 1.40,
+    'sso_target_range_scalp_guard_min_abs_gain_usdt': 9.0,
+    'sso_target_range_scalp_guard_min_velocity_pct_h': 0.08,
+    'sso_target_range_scalp_guard_min_vol_spike': 1.40,
 
     # Bayesian evidence gate (superseded by entry_profile_gate; kept disabled)
     'evidence_gate_enabled': False,
@@ -409,6 +415,15 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
         'SLOT',
     ],
     'directional_policy_mode': 'shadow',
+    'funding_fee_guard_mode': 'active',
+    'funding_fee_guard_canary_fraction': 0.35,
+    'funding_fee_guard_fail_closed': True,
+    'funding_guard_warning_fee_usdt': 0.5,
+    'funding_guard_block_fee_usdt': 1.25,
+    'funding_guard_warning_rate_pct': 0.15,
+    'funding_guard_block_rate_pct': 0.35,
+    'direction_volume_gate_rollout': 'active_canary',
+    'direction_volume_gate_canary_fraction': 0.35,
     'range_reversion_predictor_mode': 'shadow',
     'sr_attempt_sequence_mode': 'shadow',
     'realtime_open_rerank_mode': 'shadow',
@@ -421,6 +436,10 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'range_scalp_short_resistance_threshold': 0.65,
     'range_scalp_short_max_per_cycle': 2,
     'range_scalp_short_execution_enabled': True,
+    'opportunity_shadow_mode': 'active_canary',
+    'opportunity_shadow_canary_fraction': 0.20,
+    'opportunity_shadow_max_promotions_per_side': 1,
+    'opportunity_shadow_rank_slack': 2,
     'range_scalp_short_min_expected_pnl': 0.0,
     'range_scalp_short_min_probability': 0.40,
     'range_scalp_short_usdt_per_trade': 1000.0,
@@ -434,6 +453,14 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'staged_immediate_entry_fraction': 0.3,
     'range_scalp_sr_thesis_gate_enabled': True,
     'range_scalp_sr_thesis_max_dist_pct': 5.0,
+    'staged_short_risk_guard_enabled': True,
+    'staged_short_risk_guard_canary_fraction': 0.35,
+    'staged_short_risk_guard_max_resistance_dist_pct': 3.0,
+    'staged_short_risk_guard_min_risk_flags': 2,
+    'staged_short_risk_guard_volume_anomaly_multiplier': 3.0,
+    'futures_sl_cooldown_window_hours': 24.0,
+    'futures_sl_cooldown_extra_hours_per_loss': 1.0,
+    'futures_sl_cooldown_max_hours': 8.0,
     # s106 NOTE: config.py::Settings.staged_entry_regime_config is the REAL,
     # LIVE-EFFECTIVE source for these values in production — this dict is only
     # the fallback used if _sync_canonical_defaults_from_settings() (below)
@@ -463,6 +490,12 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'direction_required_confirmations': 2,
             'direction_max_adverse_observations': 3,
             'direction_sr_invalidation_pct': 1.5,
+            'sr_side_guard_mode': 'active_canary',
+            'sr_side_guard_canary_fraction': 0.35,
+            'sr_side_guard_max_dist_pct': 2.5,
+            'sr_side_guard_breakout_min_pressure': 0.65,
+            'sr_side_guard_breakout_buffer_pct': 0.15,
+            'sr_side_guard_breakout_max_away_pct': 1.20,
         },
         'RANGE_SCALP': {
             'enabled': True,
@@ -488,8 +521,15 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'direction_geometry_anchor_enabled': True,
             'direction_min_progress_stop_fraction': 0.05,
             'direction_max_adverse_stop_fraction': 0.6,
-            'direction_volume_gate_enabled': False,
+            'direction_volume_gate_enabled': True,
+            'direction_volume_gate_canary_fraction': 0.35,
             'direction_volume_anomaly_multiplier': 3.0,
+            'sr_side_guard_mode': 'enforced',
+            'sr_side_guard_canary_fraction': 1.0,
+            'sr_side_guard_max_dist_pct': 1.2,
+            'sr_side_guard_breakout_min_pressure': 0.60,
+            'sr_side_guard_breakout_buffer_pct': 0.10,
+            'sr_side_guard_breakout_max_away_pct': 0.90,
         },
         'FUTURES_SHORT': {
             'enabled': True,
@@ -513,6 +553,12 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'direction_required_confirmations': 2,
             'direction_max_adverse_observations': 2,
             'direction_sr_invalidation_pct': 1.5,
+            'sr_side_guard_mode': 'enforced',
+            'sr_side_guard_canary_fraction': 1.0,
+            'sr_side_guard_max_dist_pct': 1.5,
+            'sr_side_guard_breakout_min_pressure': 0.60,
+            'sr_side_guard_breakout_buffer_pct': 0.10,
+            'sr_side_guard_breakout_max_away_pct': 1.00,
         },
         'PRESERVATION': {
             'enabled': True,
@@ -536,6 +582,12 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'direction_required_confirmations': 2,
             'direction_max_adverse_observations': 3,
             'direction_sr_invalidation_pct': 1.5,
+            'sr_side_guard_mode': 'active_canary',
+            'sr_side_guard_canary_fraction': 0.35,
+            'sr_side_guard_max_dist_pct': 2.0,
+            'sr_side_guard_breakout_min_pressure': 0.65,
+            'sr_side_guard_breakout_buffer_pct': 0.15,
+            'sr_side_guard_breakout_max_away_pct': 1.10,
         },
     },
 
@@ -697,6 +749,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'profit_realization_spot_drawback_pct': 0.0080,    # jul07: 0.004→0.008 (wolf-hunter)
     'profit_realization_spot_partial_close_pct': 0.60,
     'profit_realization_spot_max_extensions': 2,
+    'profit_realization_spot_partial_min_profit_multiplier': 2.5,
     'profit_realization_spot_bull_min_partial_minutes': 90.0,  # jul07: 45→90 (wolf-hunter)
     'profit_realization_spot_partial_minutes_range_scalp': 22.0,  # s71 BUG-6: 35→22 (bounces peak at 15-25min)
     'profit_realization_spot_full_minutes_range_scalp': 45.0,    # s71 BUG-6: 70→45 (full exit within bounce window)
@@ -707,6 +760,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'profit_realization_futures_drawback_pct': 0.0035,
     'profit_realization_futures_partial_close_pct': 0.60,
     'profit_realization_futures_max_extensions': 1,
+    'profit_realization_futures_partial_min_profit_multiplier': 2.5,
     'profit_realization_sr_accel_enabled': True,
     'profit_realization_sr_accel_partial_multiplier': 0.80,
     'profit_realization_sr_accel_full_multiplier': 0.85,
@@ -714,6 +768,17 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'profit_realization_sr_resistance_zone_min': 0.68,
     'unified_governance_enabled': True,
     'unified_governance_profit_enabled': True,
+    'ug_breakout_follow_enabled': True,
+    'ug_breakout_follow_mode': 'active',
+    'ug_breakout_follow_min_hold_minutes': 45.0,
+    'ug_breakout_follow_max_hold_minutes': 240.0,
+    'ug_breakout_follow_min_notional_usdt': 700.0,
+    'ug_breakout_follow_min_pnl_usdt': 2.0,
+    'ug_breakout_follow_max_pnl_pct': 0.80,
+    'ug_breakout_follow_min_signal_strength': 0.58,
+    'ug_breakout_follow_min_velocity_pct_h': 0.08,
+    'ug_breakout_follow_cut_signal_strength': 0.62,
+    'ug_breakout_follow_cut_velocity_pct_h': 0.12,
     'unified_governance_min_profit_hold_minutes': 15.0,
     'lifecycle_structure_mode': 'active',
     'lifecycle_structure_partial_close_pct': 0.35,
@@ -746,7 +811,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'ug_fast_loss_cut_enabled': False,
     'ug_peak_drawdown_cut_enabled': False,
     'ug_soft_supervisor_loss_escalation_enabled': False,
-    'ug_loss_policy_mode': 'shadow',
+    'ug_loss_policy_mode': 'active_canary',
+    'ug_loss_policy_canary_fraction': 0.25,
     'futures_binance_verify_interval_cycles': 3,
 
     # Futures capital bridge
@@ -818,6 +884,33 @@ _TRADE_TYPE_PARAM_MAP: Dict[str, Dict[str, str]] = {
         'kelly_max_pct_liquid': 'futures_kelly_max_pct_liquid',
     },
 }
+
+
+# Canonical guardrail: recalibration may tune many knobs, but Kelly must not
+# fall below the aggressive baseline.
+_AGGRESSIVE_KELLY_FLOORS: Dict[str, float] = {
+    'kelly_base_usdt': 150.0,
+    'kelly_max_usdt': 2500.0,
+    'kelly_max_pct_liquid': 0.90,
+    'kelly_dynamic_base_pct': 0.22,
+    'kelly_conviction_max_pct': 0.22,
+    'futures_kelly_base_usdt': 200.0,
+    'futures_kelly_max_usdt': 2500.0,
+    'futures_kelly_max_pct_liquid': 0.90,
+    'futures_kelly_cap_pct': 0.90,
+}
+
+
+def enforce_aggressive_kelly_floor(name: str, value: Any) -> Any:
+    """Clamp Kelly scalars so runtime overrides cannot downgrade aggressiveness."""
+    floor = _AGGRESSIVE_KELLY_FLOORS.get(name)
+    if floor is None:
+        return value
+    try:
+        numeric = float(value)
+    except Exception:
+        return value
+    return max(numeric, floor)
 
 
 def _sync_canonical_defaults_from_settings() -> None:
@@ -906,6 +999,14 @@ def get_staged_entry_regime_config(settings, regime: str) -> Dict[str, Any]:
         merged['direction_confirmation_mode'] = 'enforced'
         merged['direction_required_confirmations'] = min(max(1, int(merged.get('direction_required_confirmations', 1) or 1)), 1)
         merged['direction_min_progress_bps'] = min(float(merged.get('direction_min_progress_bps', 1.0) or 1.0), 1.0)
+    if regime == "RANGE_SCALP" and settings is not None:
+        rollout_mode = str(getattr(settings, "direction_volume_gate_rollout", "active_canary") or "active_canary").strip().lower()
+        if rollout_mode == "active_canary":
+            merged['direction_volume_gate_enabled'] = True
+            merged['direction_volume_gate_canary_fraction'] = max(
+                0.0,
+                min(1.0, float(getattr(settings, "direction_volume_gate_canary_fraction", 0.35) or 0.0)),
+            )
     return merged
 
 
@@ -1001,11 +1102,12 @@ def load_runtime_overrides_from_db(settings, db_client) -> Dict[str, Any]:
                     if new_value is None:
                         continue
                     try:
+                        _clamped = enforce_aggressive_kelly_floor(field, new_value)
                         cur = getattr(settings, field, None)
                         if cur is None:
-                            setattr(settings, field, new_value)
+                            setattr(settings, field, _clamped)
                         else:
-                            setattr(settings, field, type(cur)(new_value))
+                            setattr(settings, field, type(cur)(_clamped))
                         result["applied_scalars"] += 1
                     except Exception as e:
                         result["errors"].append(f"scalar {field}: {e}")

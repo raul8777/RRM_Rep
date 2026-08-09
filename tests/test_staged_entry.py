@@ -1047,6 +1047,106 @@ def test_get_openable_candidates_deprioritizes_recent_execution_failure(fake_db,
     assert selected[0]["symbol"] == "LOWEV_BUT_VIABLE"
 
 
+def test_get_openable_candidates_blocks_short_far_from_resistance_when_guard_enforced(fake_db, settings):
+    settings.staged_entry_regime_config["FUTURES_SHORT"]["required_positive_checks"] = 1
+    settings.staged_entry_regime_config["FUTURES_SHORT"]["sr_side_guard_mode"] = "enforced"
+    settings.staged_entry_regime_config["FUTURES_SHORT"]["sr_side_guard_max_dist_pct"] = 1.0
+
+    meta = {"BTCUSDT": _make_signal("BTCUSDT", side="SHORT")}
+    top = [meta["BTCUSDT"]]
+    staged_entry.stage_ready_candidates(top, {}, meta, "FUTURES_SHORT", fake_db, settings=settings)
+    staged_entry.evaluate_inter_cycle(
+        fake_db, None, settings, "FUTURES_SHORT", top, {}, meta, cycle_id="c2", news_client=None,
+    )
+
+    row = fake_db.ready[0]
+    row["status"] = "validated"
+    row["data"]["direction"].update({
+        "state": "confirmed",
+        "directional_confirmations": 2,
+        "side": "SHORT",
+        "last_observed_price": 100.0,
+    })
+    row["data"].update({
+        "support_level": 99.0,
+        "resistance_level": 110.0,
+        "support_breakdown_sell": False,
+        "sr_breakdown": False,
+    })
+
+    openable = staged_entry.get_openable_candidates(fake_db, "FUTURES_SHORT", settings=settings)
+
+    assert openable == []
+    assert any(c["reason"] == "SR_SIDE_GUARD_BLOCKED" for c in fake_db.checks)
+
+
+def test_get_openable_candidates_allows_short_breakdown_exception(fake_db, settings):
+    settings.staged_entry_regime_config["FUTURES_SHORT"]["required_positive_checks"] = 1
+    settings.staged_entry_regime_config["FUTURES_SHORT"]["sr_side_guard_mode"] = "enforced"
+    settings.staged_entry_regime_config["FUTURES_SHORT"]["sr_side_guard_max_dist_pct"] = 0.8
+    settings.staged_entry_regime_config["FUTURES_SHORT"]["sr_side_guard_breakout_max_away_pct"] = 3.0
+    settings.staged_entry_regime_config["FUTURES_SHORT"]["sr_side_guard_breakout_min_pressure"] = 0.60
+
+    meta = {"BTCUSDT": _make_signal("BTCUSDT", side="SHORT")}
+    top = [meta["BTCUSDT"]]
+    staged_entry.stage_ready_candidates(top, {}, meta, "FUTURES_SHORT", fake_db, settings=settings)
+    staged_entry.evaluate_inter_cycle(
+        fake_db, None, settings, "FUTURES_SHORT", top, {}, meta, cycle_id="c2", news_client=None,
+    )
+
+    row = fake_db.ready[0]
+    row["status"] = "validated"
+    row["data"]["direction"].update({
+        "state": "confirmed",
+        "directional_confirmations": 2,
+        "side": "SHORT",
+        "last_observed_price": 98.0,
+    })
+    row["data"].update({
+        "support_level": 100.0,
+        "resistance_level": 108.0,
+        "support_breakdown_sell": True,
+        "sr_breakdown": True,
+        "sr_break_pressure_short": 0.8,
+    })
+
+    openable = staged_entry.get_openable_candidates(fake_db, "FUTURES_SHORT", settings=settings)
+
+    assert len(openable) == 1
+    assert openable[0]["symbol"] == "BTCUSDT"
+
+
+def test_get_openable_candidates_blocks_long_far_from_support_when_guard_enforced(fake_db, settings):
+    settings.staged_entry_regime_config["SPOT_BULL"]["sr_side_guard_mode"] = "enforced"
+    settings.staged_entry_regime_config["SPOT_BULL"]["sr_side_guard_max_dist_pct"] = 1.0
+
+    meta = {"BTCUSDT": _make_signal("BTCUSDT", side="LONG")}
+    top = [meta["BTCUSDT"]]
+    staged_entry.stage_ready_candidates(top, {}, meta, "SPOT_BULL", fake_db, settings=settings)
+    staged_entry.evaluate_inter_cycle(
+        fake_db, None, settings, "SPOT_BULL", top, {}, meta, cycle_id="c2", news_client=None,
+    )
+
+    row = fake_db.ready[0]
+    row["status"] = "validated"
+    row["data"]["direction"].update({
+        "state": "confirmed",
+        "directional_confirmations": 2,
+        "side": "LONG",
+        "last_observed_price": 102.0,
+    })
+    row["data"].update({
+        "support_level": 98.0,
+        "resistance_level": 104.0,
+        "support_breakout_buy": False,
+        "sr_breakout": False,
+    })
+
+    openable = staged_entry.get_openable_candidates(fake_db, "SPOT_BULL", settings=settings)
+
+    assert openable == []
+
+
 def test_mark_opened_records_lifecycle_check(fake_db, settings):
     meta = {"BTCUSDT": _make_signal("BTCUSDT")}
     top = [meta["BTCUSDT"]]

@@ -46,6 +46,10 @@ def _manual_meta(source: str, extra: Optional[Dict] = None) -> Dict:
         "excluded_from_learning": True,
         "manual_close_source": source,
         "manual_close_time": datetime.now(timezone.utc).isoformat(),
+        "close_source": "manual",
+        "close_state": "closed",
+        "reconciliation_state": "manual_confirmed",
+        "close_intent": MANUAL_CLOSE_REASON,
     }
     if extra:
         m.update(extra)
