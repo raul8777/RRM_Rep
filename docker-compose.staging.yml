@@ -38,10 +38,16 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: crypto-agent-app_STG
-    env_file:
-      - .env
-      - .env.staging.example
+    # NOTE: deliberately NO `env_file:` directive here. Production's docker-compose.yml
+    # does not use env_file at all — it only sets the explicit `environment:` keys
+    # below. Both `.env` and `.env.staging.example` carry legacy/unused keys
+    # (BEAR_MARKET_*, TRAILING_STOP_*, SR_POOL_*, FUTURES_ENABLED, etc.) that would
+    # silently override config.py defaults and diverge staging from production if
+    # loaded. ${BINANCE_API_KEY:-}/${DASHBOARD_API_KEY:-}/etc. below are still
+    # resolved correctly: docker compose always auto-loads the `.env` file in the
+    # project directory for ${VAR} substitution, independent of env_file.
     environment:
+      # ── Staging infra (intentionally isolated from production) ─────────────
       APP_ENV: staging
       DOTENV_PATH: /app/.env.staging.example
       DB_URL: postgresql://${STAGING_DB_USER:-crypto_agent_stg}:${STAGING_DB_PASSWORD:-crypto_agent_stg_password}@postgres_stg:5432/${STAGING_DB_NAME:-crypto_agent_stg}
@@ -53,38 +59,168 @@ services:
       REDIS_PASSWORD: ${STAGING_REDIS_PASSWORD:-staging_redis_2026}
       BINANCE_API_KEY: ${BINANCE_API_KEY:-}
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
-      BINANCE_USE_TESTNET: "false"
-      DRY_RUN: "true"
-      ALLOW_REAL_TRADING: "false"
-      AGENT_MODE: "auto"
-      FUTURES_LEVERAGE: "2"
-      FUTURES_USDT_PER_TRADE: "150"
-      KELLY_BASE_USDT: "150"
-      KELLY_MAX_USDT: "2500"
-      KELLY_DYNAMIC_BASE_PCT: "0.22"
-      KELLY_MAX_PCT_LIQUID: "0.90"
-      FUTURES_KELLY_BASE_USDT: "200"
-      FUTURES_KELLY_MAX_USDT: "2500"
-      FUTURES_KELLY_MAX_PCT_LIQUID: "0.90"
-      FUTURES_KELLY_CAP_PCT: "0.90"
-      FUTURES_MAX_SHORTS: "4"
-      FUTURES_MAX_LONGS: "3"
-      DRY_RUN_SIMULATED_CAPITAL_USDT: "2324"
-      DRY_RUN_MAX_POSITION_NOTIONAL_USDT: "5000"
-      DRY_RUN_FUTURES_MARGIN_FRACTION: "1.0"
-      SSO_TARGET_CONTRIBUTION_ENABLED: "false"
-      SSO_MIN_WINNER_PROFIT_USDT: "5.5"
-      SSO_MULTILEVEL_ENABLED: "false"
-      SSO_MOMENTUM_MIN_PNL_PCT_FUTURES: "2.0"
-      PROFIT_REALIZATION_FUTURES_ENABLED: "false"
-      LIFECYCLE_STRUCTURE_MODE: "shadow"
-      SR_POOL_ENABLED: "true"
-      SR_POOL_TRADE_ENABLED: "true"
-      SR_POOL_INTRA_CYCLE_ENABLED: "true"
       DASHBOARD_API_KEY: ${DASHBOARD_API_KEY:-}
+      CRYPTOCOMPARE_API_KEY: ${CRYPTOCOMPARE_API_KEY:-}
       PORT: 8001
       APP_PORT: 8001
       STAGING_MODE: true
+
+      # ── ONLY execution-safety exceptions vs production ──────────────────────
+      DRY_RUN: "true"
+      ALLOW_REAL_TRADING: "false"
+      # DRY_RUN-only sizing simulation (no-op in production; required here so
+      # Kelly sizing has a capital baseline to size against without real orders)
+      DRY_RUN_SIMULATED_CAPITAL_USDT: "2611"
+      DRY_RUN_MAX_POSITION_NOTIONAL_USDT: "5000"
+      DRY_RUN_FUTURES_MARGIN_FRACTION: "1.0"
+      # config.py resolves .env.staging.example as a pydantic dotenv fallback
+      # whenever APP_ENV=staging (see config.py::_resolve_env_file). That file
+      # still contains SR_POOL_ENABLED=true from an earlier iteration of this
+      # stack; explicit OS env below always wins over the dotenv file, so these
+      # force parity with production's config.py defaults (False/False/False).
+      SR_POOL_ENABLED: "false"
+      SR_POOL_TRADE_ENABLED: "false"
+      SR_POOL_INTRA_CYCLE_ENABLED: "false"
+      # Same dotenv-fallback issue as SR_POOL_*: production resolves these from
+      # the shared .env file (not from docker-compose.yml's explicit env list),
+      # so they never showed up in a plain `docker exec printenv` diff. Found by
+      # diffing the full `Settings().model_dump()` instead. Verified 2026-08-16.
+      BTC_DOMINANCE_ALTCOIN_THRESHOLD: "64.0"
+      CYCLE_RANGE_SCALP: "5"
+      MAX_REBALANCE_PER_CYCLE: "1"
+      TRAILING_STOP_ACTIVATION_PCT: "2.5"
+      TRAILING_STOP_DISTANCE_PCT: "1.2"
+
+      # ── Everything below is an EXACT mirror of production's effective config
+      #    (docker-compose.yml + docker-compose.override.yml + .env, dumped
+      #    live from crypto-agent-app on 2026-08-16). Do not let this drift —
+      #    re-diff against `docker exec crypto-agent-app printenv` if in doubt.
+      BINANCE_USE_TESTNET: "false"
+      AGENT_MODE: "auto"
+      PORTFOLIO_ALLOCATION_PCT: "100.0"
+      MIN_PAIR_CONFIDENCE_SCORE: "50.0"
+      MAX_RISK_PER_PAIR_PCT: "10.0"
+      DIVERSIFICATION_FACTOR: "1.0"
+      ENABLE_POSITION_CLOSURE: "false"
+      MAX_PER_TRADE_USDT: "1500.0"
+      MAX_POSITIONS: "4"
+      MAX_POSITIONS_PER_SYMBOL: "1"
+      MAX_POSITIONS_SPOT_BULL: "8"
+      MAX_POSITIONS_RANGE_SCALP: "6"
+      MAX_POSITIONS_PRESERVATION: "6"
+      MAX_POSITIONS_FUTURES_SHORT: "5"
+      FUTURES_MAX_LONGS: "3"
+      OVERFLOW_MAX_EXTRA: "1"
+      ANALYSIS_SYMBOLS: '["DOGEUSDT","RENDERUSDT","BNBUSDT","SOLUSDT","TAOUSDT","FETUSDT","AVAXUSDT","ADAUSDT","XRPUSDT","DOTUSDT","SUIUSDT","PEPEUSDT","WIFUSDT","BTCUSDT","ETHUSDT","LINKUSDT","NEARUSDT","WLDUSDT","INJUSDT","AGIXUSDT","ONDOUSDT","JUPUSDT","OPUSDT","HBARUSDT","AAVEUSDT","ARBUSDT","MATICUSDT","ATOMUSDT","GRTUSDT","AIOZUSDT","SEIUSDT","SUSHIUSDT","SENTUSDT"]'
+      FUTURES_SYMBOLS: '["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ADAUSDT","NEARUSDT","SUIUSDT","DOGEUSDT","AVAXUSDT","LINKUSDT","TAOUSDT","UNIUSDT","DOTUSDT","BCHUSDT","AAVEUSDT","FILUSDT","INJUSDT","WLDUSDT","XLMUSDT"]'
+      FUTURES_SL_PCT: "2.0"
+      FUTURES_TP_PCT: "4.0"
+      FUTURES_MAX_SHORTS: "4"
+      FUTURES_MAX_LARGECAP_SHORTS: "3"
+      FUTURES_LARGECAP_SYMBOLS: '["BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","SOLUSDT"]'
+      FUTURES_OVERFLOW_MAX_EXTRA: "1"
+      FUTURES_OVERFLOW_MIN_STRENGTH: "0.65"
+      FUTURES_OVERFLOW_MIN_VOL_SPIKE: "2.0"
+      FUTURES_OVERFLOW_MIN_DROP_24H: "-3.0"
+      FUTURES_KELLY_CAP_PCT: "0.90"
+      FUTURES_CAPITAL_BRIDGE_ENABLED: "true"
+      FUTURES_CAPITAL_BRIDGE_MIN_TRANSFER: "10.0"
+      USE_UNIFIED_PORTFOLIO_MANAGER: "true"
+      FUTURES_KELLY_BASE_USDT: "200.0"
+      FUTURES_KELLY_MAX_USDT: "2500.0"
+      FUTURES_KELLY_MAX_PCT_LIQUID: "0.90"
+      FUTURES_LEVERAGE: "2"
+      KELLY_BASE_USDT: "150.0"
+      KELLY_MAX_USDT: "2500.0"
+      KELLY_MAX_PCT_LIQUID: "0.90"
+      KELLY_DYNAMIC_BASE_PCT: "0.22"
+      KELLY_CONVICTION_MAX_PCT: "0.22"
+      FUTURES_SL_COOLDOWN_HOURS: "4.0"
+      FUTURES_MAX_NEW_PER_CYCLE: "3"
+      FUTURES_MASS_SL_THRESHOLD: "3"
+      FUTURES_MASS_SL_COOLDOWN_HOURS: "4.0"
+      SPOT_MASS_SL_THRESHOLD: "3"
+      SPOT_MASS_SL_COOLDOWN_HOURS: "2.0"
+      SPOT_REQUIRE_CONFIRMED_REGIME: "true"
+      BTC_CORRELATION_FILTER_ENABLED: "true"
+      BTC_CORRELATION_DROP_THRESHOLD_PCT: "0.3"
+      BTC_CORRELATION_MAX_NEW_ENTRIES: "2"
+      FUTURES_CONFIRM_RED_CANDLE: "true"
+      FUTURES_NO_SHORT_BTC_3H_THRESHOLD: "1.0"
+      FUTURES_USDT_PER_TRADE: "150.0"
+      FUTURES_TRAILING_ACTIVATION_PCT: "2.5"
+      STOP_LOSS_PCT: "3.36"
+      TAKE_PROFIT_PCT: "4.14"
+      ATR_SL_MIN_PCT: "0.015"
+      SSO_STAGNANT_VELOCITY_WINDOW_MIN: "60"
+      SSO_DECAY_THRESHOLD_PCT: "0.008"
+      SSO_DECAY_MIN_PROFIT_USD: "2.0"
+      SSO_DECAY_MIN_HOURS: "2.0"
+      SSO_SLOW_VELOCITY_THRESHOLD: "0.001"
+      SSO_SLOW_MIN_PROFIT_USD: "1.0"
+      SSO_SLOW_MIN_HOURS: "2.0"
+      SSO_SLOW_TIER2_HOURS: "5.0"
+      SSO_SLOW_TIER3_HOURS: "7.0"
+      SSO_SLOW_TIER4_HOURS: "9.0"
+      FUTURES_BREAKEVEN_ACTIVATION_PCT: "1.0"
+      FUTURES_SMART_TP_EXTEND_SCORE_THRESHOLD: "2"
+      FUTURES_PROTECT_PROFIT_USDT: "-5.0"
+      MIN_CYCLES_BEFORE_CLOSE_SHORTS: "5"
+      CYCLE_FUTURES_SHORT: "4"
+      RANGE_SCALP_SHORT_MAX_PER_CYCLE: "2"
+      FUTURES_MIN_INJECT_STRENGTH: "0.50"
+      MIN_SIGNAL_STRENGTH: "0.40"
+      MIN_SUCCESS_PROBABILITY: "0.50"
+      VOL_SPIKE_MIN: "0.91"
+      FUTURES_MIN_PROB: "0.45"
+      FUTURES_VOL_SPIKE_MIN: "0.91"
+      SLIPPAGE_PCT: "0.00052"
+      BINANCE_COMMISSION_RATE: "0.001"
+      FUTURES_COMMISSION_RATE: "0.0004"
+      BNB_SPOT_COMMISSION_RATE: "0.0005"
+      BNB_FUTURES_COMMISSION_RATE: "0.0002"
+      USE_BNB_FOR_COMMISSION: "true"
+      AUTO_BNB_FOR_COMMISSION: "true"
+      BNB_BUFFER_DAYS: "7"
+      BNB_MIN_BALANCE_USD: "5.0"
+      BNB_EXTRA_BUFFER_USD: "10.0"
+      BNB_MAX_RESERVE_USD: "100.0"
+      FUTURES_MAX_ESCALAMIENTOS: "2"
+      MAX_LOSS_USD_PER_TRADE: "18.0"
+      EMERGENCY_GAP_LOSS_MULTIPLIER: "1.5"
+      UG_FAST_LOSS_CUT_ENABLED: "false"
+      UG_PEAK_DRAWDOWN_CUT_ENABLED: "false"
+      UG_SOFT_SUPERVISOR_LOSS_ESCALATION_ENABLED: "false"
+      FUTURES_SCALE_OUT_PCT: "1.5"
+      FUTURES_SCALE_OUT_FRACTION: "0.5"
+      FUTURES_MOMENTUM_REVERSAL_ENABLED: "true"
+      FUTURES_MOMENTUM_REVERSAL_MIN_PEAK: "2.0"
+      FUTURES_MOMENTUM_REVERSAL_DRAWBACK: "0.8"
+      SSO_ENABLED: "true"
+      SSO_STAGNANT_MIN_HOURS: "2.5"
+      SSO_STAGNANT_MIN_PROFIT_FLOOR: "3.0"
+      SSO_MOMENTUM_RSI_OVERBOUGHT: "70"
+      SSO_MULTILEVEL_ENABLED: "true"
+      SSO_MULTILEVEL_L1_ATR_MULT: "1.0"
+      SSO_MULTILEVEL_L2_ATR_MULT: "2.0"
+      SSO_MULTILEVEL_L3_ATR_MULT: "3.5"
+      SSO_TARGET_DAILY_USD: "0.0"
+      SSO_TARGET_CONTRIBUTION_PCT: "0.15"
+      FUTURES_BOUNCE_RESCUE_ENABLED: "true"
+      FUTURES_BOUNCE_RESCUE_TARGET_PNL: "-0.50"
+      SPOT_BOUNCE_RESCUE_ENABLED: "true"
+      FUTURES_BINANCE_VERIFY_INTERVAL_CYCLES: "3"
+      VOLSPIKE_OVERRIDE_ENABLED: "false"
+      SCREENER_MIN_VOL_USDT: "1000000"
+      SCREENER_FUTURES_MIN_VOL: "10000000"
+      SCREENER_MAX_PAIRS: "100"
+      SCREENER_MAX_FUTURES_PAIRS: "100"
+      RANGE_SCALP_SHORT_FIRST_ENABLED: "true"
+      RANGE_SCALP_SHORT_PRIORITY_BONUS: "0.05"
+      RANGE_SCALP_LONG_SUPERIORITY_DELTA: "0.10"
+      RANGE_SCALP_DIRECTION_MIN_PROBABILITY: "0.55"
+      HARD_RISK_MONITOR_ENABLED: "true"
+      HARD_RISK_MONITOR_INTERVAL_SECONDS: "2"
     ports:
       - "8001:8001"
     depends_on:
@@ -100,3 +236,5 @@ services:
 
 volumes:
   staging_postgres_data:
+    external: true
+    name: crypto-agent_staging_postgres_data
