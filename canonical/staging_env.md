@@ -36,6 +36,32 @@ docker compose restart app   # o rebuild si cambiaron dependencias
 
 **Importante:** producción y staging ahora son directorios de filesystem distintos. Editar archivos directamente en `S:\Tools\AI\crypto-agent` sigue afectando producción de inmediato al reiniciar ese contenedor — la disciplina de "todo cambio pasa primero por staging" depende de que el desarrollo ocurra en `S:\Tools\AI\crypto-agent-staging`, no en la carpeta de producción.
 
+## ACTUALIZACIÓN s130b (16 ago 2026) — paridad de configuración exacta con producción
+
+**Regla dura:** `docker exec <container> printenv` **NO es suficiente** para verificar paridad de config. `config.py::_resolve_env_file()` hace que pydantic-settings cargue `.env` (producción) o `.env.staging.example` (staging) como *dotenv fallback* directamente desde disco para cualquier campo que no esté seteado como variable de entorno explícita — esos valores nunca aparecen en `printenv` pero sí afectan el `Settings()` real. Se encontraron 8 divergencias reales (`sr_pool_enabled`, `sr_pool_trade_enabled`, `sr_pool_intra_cycle_enabled`, `btc_dominance_altcoin_threshold`, `cycle_range_scalp`, `max_rebalance_per_cycle`, `trailing_stop_activation_pct`, `trailing_stop_distance_pct`) que un diff de `printenv` no detectó.
+
+**Método correcto de verificación:**
+```bash
+docker exec crypto-agent-app python -c "
+from config import get_settings; import json
+s = get_settings(); d = s.model_dump()
+print(json.dumps({k: v for k, v in sorted(d.items())}, default=str))
+" > prod_settings.json
+
+docker exec crypto-agent-app_STG python -c "... misma línea ..." > stg_settings.json
+
+# diff programático (Python) de ambos JSON completos — no de env vars
+```
+
+**Fix aplicado en `docker-compose.staging.yml` (rama `staging`, commit `edef562`):**
+1. Eliminado `env_file: [.env, .env.staging.example]` — producción nunca usa `env_file`; cargarlo en staging filtraba claves legacy del `.env` compartido (`BEAR_MARKET_*`, `TRAILING_STOP_*`, `FUTURES_ENABLED`, etc.) sin equivalente real en producción.
+2. El bloque `environment:` de staging ahora declara ~130 variables explícitas, espejo exacto del `Settings()` efectivo de producción (dump en vivo del 16 ago 2026).
+3. Único conjunto de excepciones permitidas: `DRY_RUN=true`, `ALLOW_REAL_TRADING=false`, y los 3 parámetros de simulación de capital (`DRY_RUN_SIMULATED_CAPITAL_USDT`, `DRY_RUN_MAX_POSITION_NOTIONAL_USDT`, `DRY_RUN_FUTURES_MARGIN_FRACTION`) que son no-op en producción y solo dan una base de capital simulado a Kelly sizing en staging.
+
+**Verificación final (16 ago 2026):** diff completo de `Settings().model_dump()` entre `crypto-agent-app` y `crypto-agent-app_STG` → 0 campos faltantes, 0 campos extra, 3 mismatches (todos los DRY_RUN intencionales). ~490 campos de configuración idénticos.
+
+**Mantenimiento:** si se agrega un parámetro nuevo a `docker-compose.yml`/`docker-compose.override.yml` de producción, replicarlo también en el `environment:` de `S:\Tools\AI\crypto-agent-staging\docker-compose.staging.yml`, y re-correr el diff de `Settings()` completo — no confiar en `printenv`.
+
 ## Objetivo
 
 Garantizar que el sistema disponga de un entorno real de staging, separado del productivo, con su propia base de datos, su propio Redis y su propio puerto de dashboard para evaluar cambios de gobernanza, lifecycle y shadow-readiness sin mezclar datos ni trazas con producción.
