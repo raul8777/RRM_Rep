@@ -3,6 +3,39 @@
 **Estado:** activo  
 **Última actualización:** 2026-08-16
 
+## ACTUALIZACIÓN s130 (16 ago 2026) — aislamiento de código real
+
+**Hallazgo crítico:** hasta el 16 ago 2026, `docker-compose.staging.yml` vivía en el mismo directorio que producción (`S:\Tools\AI\crypto-agent`) y montaba `.:/app` — el mismo working tree que producción. Esto significaba que staging y producción ejecutaban **el mismo código** en todo momento; solo la base de datos/Redis/puerto estaban aislados. Cualquier cambio sin commit aplicado en el working tree quedaba activo en ambos entornos simultáneamente. Este fue el origen de que cambios "en prueba en staging" ya estuvieran corriendo en producción.
+
+**Fix aplicado:**
+1. Se consolidó el working tree de producción como commit base (`redesign-lifecycle-20260713` @ `2c3c67f`), incluyendo módulos que estaban sin trackear pero ya en uso real: `ug_loss_policy.py`, `sr_pool_scanner.py`, `support_resistance.py`, `technical_graph_analyst.py`, `side_utils.py`, `dashboard_truth.py`, `docker-compose.staging.yml`, migraciones `023`-`025`.
+2. Se creó la rama `staging` desde ese mismo commit.
+3. Se creó un **git worktree separado** en `S:\Tools\AI\crypto-agent-staging`, checked out en la rama `staging` — un directorio físicamente distinto con su propio `.git` (worktree), no una copia manual.
+4. `docker-compose.staging.yml` **real y autoritativo** ahora vive en `S:\Tools\AI\crypto-agent-staging\docker-compose.staging.yml` y monta el `.` de ese directorio.
+5. El archivo homónimo en `S:\Tools\AI\crypto-agent` (producción) quedó como stub de documentación — no debe usarse para levantar staging.
+6. El volumen de Postgres de staging (`crypto-agent_staging_postgres_data`) se preservó declarándolo `external: true` en el nuevo compose file, para no perder datos al mover el stack de directorio.
+
+**Flujo de promoción staging → producción:**
+```bash
+# 1. Desarrollar y probar en el worktree de staging
+cd S:\Tools\AI\crypto-agent-staging
+# editar código, correr tests, levantar el stack staging, validar
+
+git add -A && git commit -m "..."
+
+# 2. Revisar el diff antes de promover
+cd S:\Tools\AI\crypto-agent
+git diff redesign-lifecycle-20260713..staging
+
+# 3. Fusionar a producción
+git merge staging
+
+# 4. Reiniciar el contenedor de producción para aplicar el código fusionado
+docker compose restart app   # o rebuild si cambiaron dependencias
+```
+
+**Importante:** producción y staging ahora son directorios de filesystem distintos. Editar archivos directamente en `S:\Tools\AI\crypto-agent` sigue afectando producción de inmediato al reiniciar ese contenedor — la disciplina de "todo cambio pasa primero por staging" depende de que el desarrollo ocurra en `S:\Tools\AI\crypto-agent-staging`, no en la carpeta de producción.
+
 ## Objetivo
 
 Garantizar que el sistema disponga de un entorno real de staging, separado del productivo, con su propia base de datos, su propio Redis y su propio puerto de dashboard para evaluar cambios de gobernanza, lifecycle y shadow-readiness sin mezclar datos ni trazas con producción.
