@@ -80,6 +80,10 @@ class ClosedPosition:
     pnl: float
     pnl_percentage: float
     close_reason: str
+    position_id: Optional[str] = None
+    entry_order_id: Optional[str] = None
+    exit_order_id: Optional[str] = None
+    close_group_id: Optional[str] = None
     strategy_id: Optional[int] = None
     metadata: Optional[Dict] = None
     entry_commission: Optional[float] = None  # Commission paid on entry
@@ -668,6 +672,31 @@ class PositionManager:
                             get_param(settings, 'binance_commission_rate') if settings else 0.001,
                         )
                         continue
+
+                    # Material quantity drift (DB qty > Binance qty) should trim exactly the excess
+                    # so DB quantity matches the exchange balance in a single reconciliation pass.
+                    _qty_drift = db_qty - balance_qty
+                    if _qty_drift > 1e-8:
+                        try:
+                            exit_price = binance_client.get_symbol_price(symbol)
+                        except Exception:
+                            exit_price = float(pos_list[0].entry_price or 0)
+                        self._audit(symbol, 'reconcile_qty_drift', {
+                            'db_qty': db_qty,
+                            'exchange_qty': balance_qty,
+                            'drift_qty': round(_qty_drift, 8),
+                            'exit_price': exit_price,
+                            'reason': 'binance_balance_smaller_than_db',
+                        }, binance_confirmed=True)
+                        self.close_all_positions_for_symbol(
+                            symbol,
+                            exit_price,
+                            'reconcile_qty_drift',
+                            get_param(settings, 'binance_commission_rate') if settings else 0.001,
+                            qty_closed=min(_qty_drift, db_qty),
+                        )
+                        continue
+
                     for _pos in pos_list:
                         try:
                             _meta = dict(getattr(_pos, 'metadata', {}) or {})
@@ -934,11 +963,29 @@ class PositionManager:
             _meta['pnl_accounting_mode'] = 'binance_fill_verified'
         else:
             _meta['pnl_accounting_mode'] = 'estimated'
+        _position_mode = 'SPOT_LONG'
+        _position_id = str(
+            target.position_id
+            or _meta.get('position_id')
+            or f"{target.symbol}:{target.entry_time}:{datetime.now(timezone.utc).isoformat()}:{_position_mode}"
+        )
+        _entry_order_id = str(_meta.get('entry_order_id') or _meta.get('order_id') or '') or None
+        _exit_order_id = str(
+            _meta.get('exit_order_id')
+            or ((exit_fill or {}).get('order_id') if isinstance(exit_fill, dict) else '')
+            or ''
+        ) or None
+        _close_group_id = str(_meta.get('close_group_id') or '') or None
         # Canonical close attribution fields (required for entry->close lineage and net-cost analysis).
         _meta.setdefault('ready_candidate_id', _meta.get('ready_candidate_id'))
         _meta.setdefault('staged_direction', _meta.get('staged_direction') or {})
         _meta.setdefault('profile_at_entry', _meta.get('profile_at_entry') or _meta.get('peak_quality_profile'))
         _meta.setdefault('regime_at_entry', _meta.get('regime_at_entry') or _meta.get('entry_regime') or _meta.get('regime_mode'))
+        _meta['position_id'] = _position_id
+        if _entry_order_id:
+            _meta['entry_order_id'] = _entry_order_id
+        if _exit_order_id:
+            _meta['exit_order_id'] = _exit_order_id
         _meta['commission_bps_total'] = round(((_entry_comm_for_closed + (exit_comm or 0.0)) / max(1e-12, _closed_qty * entry_p)) * 10000.0, 6)
         _meta.setdefault('spread_bps_estimate', _meta.get('spread_bps_estimate'))
         _meta.setdefault('slippage_bps_estimate', _meta.get('slippage_bps_estimate'))
@@ -970,6 +1017,10 @@ class PositionManager:
             pnl=pnl,
             pnl_percentage=pnl_pct,
             close_reason=close_reason,
+            position_id=_position_id,
+            entry_order_id=_entry_order_id,
+            exit_order_id=_exit_order_id,
+            close_group_id=_close_group_id,
             strategy_id=target.strategy_id,
             metadata=_meta,
             entry_commission=_entry_comm_for_closed,
@@ -1152,9 +1203,10 @@ class PositionManager:
         insert_query = """
             INSERT INTO trades_closed 
             (symbol, side, quantity, entry_price, exit_price, strategy_id, entry_time, exit_time, 
-             pnl, pnl_percentage, close_reason, metadata, entry_commission, exit_commission, 
+             pnl, pnl_percentage, close_reason, position_id, entry_order_id, exit_order_id, close_group_id,
+             metadata, entry_commission, exit_commission, 
              pnl_prediction, indicators_at_entry, prediction_accuracy)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         insert_params = (
             closed_position.symbol,
@@ -1168,6 +1220,10 @@ class PositionManager:
             _safe_float(closed_position.pnl),
             _safe_float(closed_position.pnl_percentage),
             closed_position.close_reason,
+            closed_position.position_id,
+            closed_position.entry_order_id,
+            closed_position.exit_order_id,
+            closed_position.close_group_id,
             _meta_json,
             _safe_float(closed_position.entry_commission),
             _safe_float(closed_position.exit_commission),
@@ -1312,10 +1368,11 @@ class PositionManager:
         if self.db_client:
             try:
                 query = """
-                    SELECT symbol, side, quantity, entry_price, exit_price,
-                           entry_time, exit_time, pnl, pnl_percentage, close_reason,
-                           strategy_id, metadata, entry_commission, exit_commission,
-                           pnl_prediction, indicators_at_entry, prediction_accuracy
+                      SELECT symbol, side, quantity, entry_price, exit_price,
+                          entry_time, exit_time, pnl, pnl_percentage, close_reason,
+                          position_id, entry_order_id, exit_order_id, close_group_id,
+                          strategy_id, metadata, entry_commission, exit_commission,
+                          pnl_prediction, indicators_at_entry, prediction_accuracy
                     FROM trades_closed
                     WHERE COALESCE(is_corrupted, FALSE) = FALSE
                     ORDER BY exit_time DESC
@@ -1330,6 +1387,10 @@ class PositionManager:
                         exit_price=row['exit_price'], entry_time=row['entry_time'],
                         exit_time=row['exit_time'], pnl=row['pnl'],
                         pnl_percentage=row['pnl_percentage'], close_reason=row['close_reason'],
+                        position_id=row.get('position_id'),
+                        entry_order_id=row.get('entry_order_id'),
+                        exit_order_id=row.get('exit_order_id'),
+                        close_group_id=row.get('close_group_id'),
                         strategy_id=row.get('strategy_id'), metadata=row.get('metadata'),
                         entry_commission=row.get('entry_commission'),
                         exit_commission=row.get('exit_commission'),
@@ -1364,10 +1425,11 @@ class PositionManager:
         if self.db_client:
             try:
                 query = """
-                    SELECT symbol, side, quantity, entry_price, exit_price,
-                           entry_time, exit_time, pnl, pnl_percentage, close_reason,
-                           strategy_id, metadata, entry_commission, exit_commission,
-                           pnl_prediction, indicators_at_entry, prediction_accuracy
+                      SELECT symbol, side, quantity, entry_price, exit_price,
+                          entry_time, exit_time, pnl, pnl_percentage, close_reason,
+                          position_id, entry_order_id, exit_order_id, close_group_id,
+                          strategy_id, metadata, entry_commission, exit_commission,
+                          pnl_prediction, indicators_at_entry, prediction_accuracy
                     FROM trades_closed
                     WHERE exit_time >= %s
                       AND COALESCE(is_corrupted, FALSE) = FALSE
@@ -1383,6 +1445,10 @@ class PositionManager:
                         exit_price=row['exit_price'], entry_time=row['entry_time'],
                         exit_time=row['exit_time'], pnl=row['pnl'],
                         pnl_percentage=row['pnl_percentage'], close_reason=row['close_reason'],
+                        position_id=row.get('position_id'),
+                        entry_order_id=row.get('entry_order_id'),
+                        exit_order_id=row.get('exit_order_id'),
+                        close_group_id=row.get('close_group_id'),
                         strategy_id=row.get('strategy_id'), metadata=row.get('metadata'),
                         entry_commission=row.get('entry_commission'),
                         exit_commission=row.get('exit_commission'),

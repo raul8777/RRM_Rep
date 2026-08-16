@@ -22,10 +22,20 @@ def _load_secrets_file(path: str) -> None:
 
 
 def _resolve_env_file() -> str:
-    env_path = os.environ.get("DOTENV_PATH", ".env")
-    if env_path and os.path.exists(env_path):
-        return env_path
-    return ".env"
+    explicit = os.environ.get("DOTENV_PATH")
+    if explicit and os.path.exists(explicit):
+        return explicit
+
+    app_env = str(os.environ.get("APP_ENV", "production")).strip().lower()
+    if app_env == "staging":
+        staging_path = ".env.staging.example"
+        if os.path.exists(staging_path):
+            return staging_path
+
+    default_path = ".env"
+    if os.path.exists(default_path):
+        return default_path
+    return default_path
 
 
 def _load_optional_secrets() -> None:
@@ -54,6 +64,9 @@ class Settings(BaseSettings):
     max_positions_per_symbol: int = Field(default=3)
     dry_run: bool = Field(default=True)
     allow_real_trading: bool = Field(default=False)
+    dry_run_simulated_capital_usdt: float = Field(default=0.0)
+    dry_run_max_position_notional_usdt: float = Field(default=0.0)
+    dry_run_futures_margin_fraction: float = Field(default=0.30)
     trade_cycle_minutes: int = Field(default=5)
     trade_horizon_minutes: int = Field(default=240)  # realistic hold time for PnL prediction (4h)
     # PnL predictor micro-candle calibration (1m/5m real candles instead of ATR extrapolation)
@@ -225,6 +238,7 @@ class Settings(BaseSettings):
     sso_momentum_min_pnl_pct_futures: float = Field(default=1.0)
     sso_momentum_min_pnl_pct_spot: float = Field(default=1.5)
     sso_momentum_vol_dying_threshold: float = Field(default=0.5)
+    sso_min_winner_profit_usdt: float = Field(default=0.0)
     sso_multilevel_enabled: bool = Field(default=True)
     sso_multilevel_l1_atr_mult: float = Field(default=1.0)
     sso_multilevel_l2_atr_mult: float = Field(default=2.0)
@@ -232,15 +246,15 @@ class Settings(BaseSettings):
     sso_multilevel_l1_close_pct: float = Field(default=0.30)
     sso_multilevel_l2_close_pct: float = Field(default=0.30)
     sso_multilevel_l3_close_pct: float = Field(default=0.25)
-    sso_target_contribution_enabled: bool = Field(default=True)
-    sso_target_contribution_pct: float = Field(default=0.15)
+    sso_target_contribution_enabled: bool = Field(default=True)  # Re-enabled with a 150 USD daily target; closes only when contribution is meaningful.
+    sso_target_contribution_pct: float = Field(default=0.10)  # Recommendation: $150 target * 10% = $15 min contribution.
     sso_target_range_scalp_guard_mode: str = Field(default="active")  # shadow|active|disabled
     sso_target_range_scalp_guard_notional_min_usdt: float = Field(default=700.0)
     sso_target_range_scalp_guard_min_pnl_pct: float = Field(default=1.40)
     sso_target_range_scalp_guard_min_abs_gain_usdt: float = Field(default=9.0)
     sso_target_range_scalp_guard_min_velocity_pct_h: float = Field(default=0.08)
     sso_target_range_scalp_guard_min_vol_spike: float = Field(default=1.40)
-    sso_target_daily_usd: float = Field(default=40.0)
+    sso_target_daily_usd: float = Field(default=150.0)
     sso_target_min_hours: float = Field(default=1.0)
     sso_reentry_min_strength_diff: float = Field(default=0.3)
     sso_reentry_min_ev_multiplier: float = Field(default=1.5)
@@ -806,6 +820,8 @@ class Settings(BaseSettings):
     # level its own thesis depends on. See run_trades.py::_staged_sr_thesis_check.
     range_scalp_sr_thesis_gate_enabled: bool = Field(default=True)
     range_scalp_sr_thesis_max_dist_pct: float = Field(default=5.0)
+    sr_pool_interval: str = Field(default="5m")
+    sr_pool_kline_limit: int = Field(default=120)
     range_scalp_short_near_support_gate_enabled: bool = Field(default=True)
     range_scalp_short_near_support_max_dist_pct: float = Field(default=0.5)
     range_scalp_short_near_support_max_rsi: float = Field(default=50.0)
@@ -841,6 +857,13 @@ class Settings(BaseSettings):
             "direction_required_confirmations": 2,
             "direction_max_adverse_observations": 3,
             "direction_sr_invalidation_pct": 1.5,  # s105: hard SR-proximity-loss terminal threshold
+            "sr_lookback_bars": 96,
+            "sr_pivot_order": 3,
+            "sr_near_band_atr_mult": 0.25,
+            "sr_near_band_price_pct": 0.0025,
+            "sr_pool_zone_support_max": 0.20,
+            "sr_pool_zone_resistance_min": 0.80,
+            "sr_pool_min_strength": 0.0,
             "sr_side_guard_mode": "active_canary",
             "sr_side_guard_canary_fraction": 0.35,
             "sr_side_guard_max_dist_pct": 2.5,
@@ -876,6 +899,13 @@ class Settings(BaseSettings):
             "direction_required_confirmations": 1,
             "direction_max_adverse_observations": 4,
             "direction_sr_invalidation_pct": 1.5,  # s105: hard SR-proximity-loss terminal threshold
+            "sr_lookback_bars": 96,
+            "sr_pivot_order": 3,
+            "sr_near_band_atr_mult": 0.25,
+            "sr_near_band_price_pct": 0.0025,
+            "sr_pool_zone_support_max": 0.20,
+            "sr_pool_zone_resistance_min": 0.80,
+            "sr_pool_min_strength": 0.0,
             # s111: anchor min_progress/max_adverse to this candidate's own stop distance —
             # 1bps was smaller than routine bid/ask noise (no real false-breakout protection)
             # while 150bps was a normal excursion inside RANGE_SCALP's own range (measured
@@ -924,6 +954,13 @@ class Settings(BaseSettings):
             "direction_required_confirmations": 2,
             "direction_max_adverse_observations": 2,
             "direction_sr_invalidation_pct": 1.5,  # s105: hard SR-proximity-loss terminal threshold
+            "sr_lookback_bars": 96,
+            "sr_pivot_order": 3,
+            "sr_near_band_atr_mult": 0.25,
+            "sr_near_band_price_pct": 0.0025,
+            "sr_pool_zone_support_max": 0.20,
+            "sr_pool_zone_resistance_min": 0.80,
+            "sr_pool_min_strength": 0.0,
             "sr_side_guard_mode": "enforced",
             "sr_side_guard_canary_fraction": 1.0,
             "sr_side_guard_max_dist_pct": 1.5,
@@ -956,6 +993,13 @@ class Settings(BaseSettings):
             "direction_required_confirmations": 2,
             "direction_max_adverse_observations": 3,
             "direction_sr_invalidation_pct": 1.5,  # s105: hard SR-proximity-loss terminal threshold
+            "sr_lookback_bars": 96,
+            "sr_pivot_order": 3,
+            "sr_near_band_atr_mult": 0.25,
+            "sr_near_band_price_pct": 0.0025,
+            "sr_pool_zone_support_max": 0.20,
+            "sr_pool_zone_resistance_min": 0.80,
+            "sr_pool_min_strength": 0.0,
             "sr_side_guard_mode": "active_canary",
             "sr_side_guard_canary_fraction": 0.35,
             "sr_side_guard_max_dist_pct": 2.0,

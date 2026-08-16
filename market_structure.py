@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -17,13 +18,46 @@ class StructureDecision:
     reason: str
     confirmation_path: str
     snapshot: Dict[str, Any]
+    reason_code: str = ""
+    phase: str = "monitor"
+    evidence: Dict[str, Any] = field(default_factory=dict)
+    decision_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    def __post_init__(self) -> None:
+        if not self.reason_code:
+            object.__setattr__(self, "reason_code", str(self.reason or "unknown"))
+        if not self.phase:
+            object.__setattr__(self, "phase", self._derive_phase())
+        if not self.evidence:
+            object.__setattr__(self, "evidence", {
+                "state": self.state,
+                "action": self.action,
+                "confirmation_path": self.confirmation_path,
+                "snapshot_state": (self.snapshot or {}).get("state"),
+                "reason": self.reason,
+            })
+
+    def _derive_phase(self) -> str:
+        action = str(self.action or "").lower()
+        state = str(self.state or "").lower()
+        if state == "unavailable":
+            return "monitor"
+        if action in {"hold_loss", "partial_profit"}:
+            return "protect"
+        if action == "allow_exit" and state in {"neutral", "invalidated"}:
+            return "finalize"
+        return "monitor"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "state": self.state,
             "action": self.action,
             "reason": self.reason,
+            "reason_code": self.reason_code,
             "confirmation_path": self.confirmation_path,
+            "phase": self.phase,
+            "decision_id": self.decision_id,
+            "evidence": dict(self.evidence or {}),
             "snapshot": self.snapshot,
         }
 

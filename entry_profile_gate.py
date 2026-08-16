@@ -48,6 +48,7 @@ _model_cache: Dict[str, Optional[Dict[str, Any]]] = {}
 _model_load_attempted: Dict[str, bool] = {}
 _universal_model_cache: Optional[Dict[str, Any]] = None
 _universal_model_attempted: bool = False
+_universal_missing_warned: bool = False
 
 
 _UNIVERSAL_FEATURES = [
@@ -467,6 +468,24 @@ def _default_thresholds() -> Dict[str, Any]:
     }
 
 
+def _legacy_fallback_thresholds() -> Dict[str, Any]:
+    """Thresholds compatible with heuristic fallback score scale.
+
+    These values reflect the pre-universal operating envelope and are used
+    only as a safety fallback when universal thresholds are active but the
+    universal model artifact is unavailable.
+    """
+    return {
+        "SPOT_BULL": {"A": 1.0, "B": 0.35, "C": 0.15, "discard": float("-inf")},
+        # Temporary emergency profile while the universal model artifact is missing:
+        # keep A/B strict enough, but lower C so candidates are not fully blocked
+        # by score-scale mismatch after falling back to heuristic scoring.
+        "RANGE_SCALP": {"A": 1.0, "B": 0.35, "C": -1.0, "discard": float("-inf")},
+        "PRESERVATION": {"A": 1.0, "B": 0.35, "C": 0.05, "discard": float("-inf")},
+        "FUTURES_SHORT": {"A": 1.0, "B": 0.35, "C": 0.05, "discard": float("-inf")},
+    }
+
+
 def _expected_return_pct(signal_meta: Dict[str, Any]) -> Optional[float]:
     """Return expected return in percentage points, normalizing USDT if needed.
 
@@ -779,6 +798,8 @@ def classify(
         if adjustment != 0.0:
             thresholds["C"] = min(thresholds["B"] - 1e-6, thresholds["C"] + adjustment)
 
+    global _universal_missing_warned
+
     model_score: Optional[float] = None
     missing_features: List[str] = []
     model_version: Optional[str] = None
@@ -793,7 +814,17 @@ def classify(
             score = model_score
             score_source = "universal_model"
         else:
+            if not _universal_missing_warned:
+                logger.warning(
+                    "Universal thresholds are active but universal model is unavailable; "
+                    "switching to legacy fallback thresholds for this process to avoid "
+                    "score-scale mismatch rejections."
+                )
+                _universal_missing_warned = True
+            legacy = _legacy_fallback_thresholds()
+            thresholds = dict(legacy.get(regime, legacy["SPOT_BULL"]))
             score = compute_quality_score(signal_meta, regime, direction, symbol)
+            score_source = "fallback_universal_model_missing"
     else:
         model_score, missing_features, model_version = _model_quality_score(
             signal_meta, regime, range_scalp_model_path if regime == "RANGE_SCALP" else None,

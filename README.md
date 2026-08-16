@@ -53,7 +53,7 @@ Guarda este contenido en un archivo fuera del repositorio y define `SECRETS_FILE
 
 ## Ejecutar
 
-### Con Docker Compose (Recomendado)
+### Producción
 Inicia todos los servicios (PostgreSQL, Redis, App):
 
 ```bash
@@ -70,6 +70,31 @@ Verifica los logs:
 
 ```bash
 docker-compose logs app
+```
+
+### Staging real (entorno aislado)
+Se debe levantar un stack separado con su propia base de datos y puerto.
+
+```bash
+docker-compose --env-file .env.staging.example -f docker-compose.staging.yml up -d --build
+```
+
+URL esperada:
+
+```text
+http://localhost:8001/frontend/index.html
+```
+
+El backend responde con `environment=staging` y el dashboard lo marca visualmente como `STAGING`.
+
+```bash
+docker-compose -f docker-compose.staging.yml logs app_staging
+```
+
+Para parar la instancia de staging:
+
+```bash
+docker-compose -f docker-compose.staging.yml down
 ```
 
 ### Local (Sin Docker)

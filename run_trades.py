@@ -9050,6 +9050,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         _f_kelly_liquid = usdt_liquid
                 else:
                     _f_kelly_liquid = usdt_liquid
+                if _fc.dry_run and float(getattr(settings, 'dry_run_simulated_capital_usdt', 0.0) or 0.0) > 0:
+                    _f_kelly_liquid = _fc.get_simulated_available_usdt()
                 _f_conc_mult, _f_conc_diag = _compute_portfolio_concentration_multiplier(
                     settings,
                     regime='FUTURES_SHORT',
@@ -9083,7 +9085,15 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                         _f_usdt = _f_boosted
                 # F4: Dynamic cap — max(per_trade_floor, futures_margin × kelly_cap_pct)
                 _futures_kelly_cap = getattr(settings, 'futures_kelly_cap_pct', 0.90)
-                _futures_margin_avail = _fc.get_available_usdt() if not _fc.dry_run else _f_kelly_liquid * 0.3
+                _dry_run_margin_fraction = max(
+                    0.0,
+                    min(1.0, float(getattr(settings, 'dry_run_futures_margin_fraction', 0.30))),
+                )
+                _futures_margin_avail = (
+                    _fc.get_available_usdt()
+                    if not _fc.dry_run
+                    else _f_kelly_liquid * _dry_run_margin_fraction
+                )
                 _f_usdt_cap = max(
                     getattr(settings, 'futures_usdt_per_trade', 150.0),
                     _futures_margin_avail * _futures_kelly_cap
@@ -9120,7 +9130,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     pass
                 # FIX-F3: Hard cap to available futures margin to prevent 'Insufficient margin' loops.
                 # Keep a 2% reserve (min $2) so Binance doesn't reject with exact-balance orders.
-                _avail_for_cap = _fc.get_available_usdt() if not _fc.dry_run else usdt_liquid * 0.3
+                _avail_for_cap = (
+                    _fc.get_available_usdt()
+                    if not _fc.dry_run
+                    else _f_kelly_liquid * _dry_run_margin_fraction
+                )
                 _avail_reserve = max(2.0, round(_avail_for_cap * 0.02, 2))
                 _avail_net = _avail_for_cap - _avail_reserve
                 if _avail_net < 10.0:
@@ -9610,6 +9624,8 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                             _l_kelly_liq = usdt_liquid
                     else:
                         _l_kelly_liq = usdt_liquid
+                    if _fc_sb.dry_run and float(getattr(settings, 'dry_run_simulated_capital_usdt', 0.0) or 0.0) > 0:
+                        _l_kelly_liq = _fc_sb.get_simulated_available_usdt()
                     _l_open = len([
                         _lp for _lp in _fc_sb._open_positions.values()
                         if not _lp.closed and _lp.side == 'LONG'
@@ -11540,8 +11556,9 @@ def _maybe_open_sr_pool_shorts(
             continue
 
         profile = sig.get("sr_pool_profile", "B")
-        size_map = {"A": 1500.0, "B": 1000.0, "C": 500.0}
-        _usdt = min(size_map.get(profile, 1000.0), _avail * 0.95)
+        base_margin = float(getattr(settings, "futures_usdt_per_trade", 150.0))
+        size_map = {"A": base_margin, "B": base_margin * 0.75, "C": base_margin * 0.5}
+        _usdt = min(size_map.get(profile, base_margin), _avail * 0.95)
         _sl = float(getattr(settings, "futures_sl_pct", 2.0))
         _tp = float(getattr(settings, "futures_tp_pct", 4.0))
         _lev = int(getattr(settings, "futures_leverage", 10))
@@ -11787,7 +11804,7 @@ def execute_once(monitor_only: bool = False, components=None):
     except Exception as _fng_err:
         print(f"F&G/Trending check skipped: {_fng_err}")
 
-    if not settings.binance_use_testnet and not settings.allow_real_trading:
+    if not settings.binance_use_testnet and not settings.allow_real_trading and not settings.dry_run:
         print("Real trading is disabled. Skipping execute_once.")
         return {"top_symbols": [], "sell_orders": [], "buy_orders": []}
 

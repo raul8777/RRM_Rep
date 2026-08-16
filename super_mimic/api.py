@@ -37,6 +37,13 @@ class CreateExperimentRequest(BaseModel):
     strategy: str = Field(default="full")
     max_cycles: Optional[int] = Field(default=None)
     max_workers: int = Field(default=1)
+    profiles: Optional[List[str]] = Field(default=None)
+    param_grid: Optional[Dict[str, List[Any]]] = Field(default=None)
+    param_grid_file: Optional[str] = Field(default=None)
+    forced_regime: Optional[str] = Field(default=None)
+    lifecycle: bool = Field(default=False)
+    max_drawdown_stop_pct: Optional[float] = Field(default=15.0)
+    output_dir: Optional[str] = Field(default=None)
 
 
 class ExperimentResponse(BaseModel):
@@ -69,6 +76,13 @@ async def create_experiment(request: Request, req: CreateExperimentRequest) -> D
             strategy=req.strategy,
             max_cycles=req.max_cycles,
             max_workers=req.max_workers,
+            profiles=req.profiles,
+            param_grid=req.param_grid,
+            param_grid_file=req.param_grid_file,
+            forced_regime=req.forced_regime,
+            lifecycle=req.lifecycle,
+            max_drawdown_stop_pct=req.max_drawdown_stop_pct,
+            output_dir=req.output_dir,
         )
         experiment = _get_runner().create_experiment(design.to_dict())
         return {"ok": True, "experiment_id": experiment.experiment_id}

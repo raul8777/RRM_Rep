@@ -429,6 +429,12 @@ class FuturesClient:
             if pos._smart_meta.get('pnl_accounting_mode') == 'binance_user_trade_verified':
                 _exit_comm = round(float(pos._smart_meta.get('binance_close_commission', _exit_comm) or 0.0), 6)
             _total_comm = _entry_comm + _exit_comm
+            _position_id = str(
+                pos._smart_meta.get('position_id')
+                or f"{pos.symbol}:{pos.opened_at.isoformat()}:{(pos.closed_at or datetime.now(timezone.utc)).isoformat()}:FUTURES_{pos.side.upper()}"
+            )
+            _entry_order_id = str(pos._smart_meta.get('entry_order_id') or pos.order_id or '') or None
+            _exit_order_id = str(pos._smart_meta.get('exit_order_id') or pos._smart_meta.get('close_order_id') or '') or None
             if pnl_override is not None:
                 # Proportional PnL from multi-entry close — ensure net of commission
                 pnl = pnl_override - _total_comm
@@ -446,8 +452,11 @@ class FuturesClient:
             meta_payload = {
                 'trade_type': 'futures',
                 'order_id': pos.order_id,
+                'entry_order_id': _entry_order_id,
+                'exit_order_id': _exit_order_id,
                 'sl_order_id': pos.sl_order_id,
                 'tp_order_id': pos.tp_order_id,
+                'position_id': _position_id,
                 'smart_meta': pos._smart_meta,
                 'close_group_id': _cgid,
                 'escalonamiento_index': esc_index,
@@ -514,10 +523,11 @@ class FuturesClient:
             insert_query = """
                 INSERT INTO trades_closed
                     (symbol, side, quantity, entry_price, exit_price, pnl, pnl_percentage,
-                     close_reason, entry_time, exit_time, metadata, data_version,
+                     close_reason, entry_time, exit_time, position_id, entry_order_id, exit_order_id, close_group_id,
+                     metadata, data_version,
                      pnl_prediction, indicators_at_entry, prediction_accuracy, learning_eligible,
                      entry_commission, exit_commission)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             insert_params = (
                 pos.symbol,
@@ -530,6 +540,10 @@ class FuturesClient:
                 reason,
                 pos.opened_at.isoformat(),
                 (pos.closed_at or datetime.now(timezone.utc)).isoformat(),
+                _position_id,
+                _entry_order_id,
+                _exit_order_id,
+                _cgid,
                 meta,
                 'futures_v2',
                 _pnl_pred_json,
@@ -2099,6 +2113,22 @@ class FuturesClient:
             pass
         return 0.0
 
+    def get_simulated_available_usdt(self) -> float:
+        if not self.dry_run:
+            return self.get_available_usdt()
+
+        settings = self.settings or self._cached_settings
+        simulated_capital = float(getattr(settings, "dry_run_simulated_capital_usdt", 0.0) or 0.0)
+        if simulated_capital <= 0:
+            return self.get_available_usdt()
+
+        committed_margin = sum(
+            (position.qty * position.entry_price) / max(1, self._active_leverage)
+            for position in self._open_positions.values()
+            if not position.closed
+        )
+        return max(0.0, simulated_capital - committed_margin)
+
     def transfer_to_futures(self, amount: float, spot_api_key: str = None, spot_api_secret: str = None) -> bool:
         """
         Transfer USDT from Spot wallet to Futures wallet.
@@ -2482,6 +2512,22 @@ class FuturesClient:
 
     # ── Pre-entry safety checks ───────────────────────────────────────────────
 
+    def _cap_dry_run_margin(self, usdt_amount: float, leverage: int) -> float:
+        if not self.dry_run:
+            return usdt_amount
+
+        settings = self.settings or self._cached_settings
+        effective_leverage = max(1, min(int(leverage or self._active_leverage), self._active_leverage))
+        max_notional = float(getattr(settings, "dry_run_max_position_notional_usdt", 0.0) or 0.0)
+        if max_notional > 0:
+            usdt_amount = min(usdt_amount, max_notional / effective_leverage)
+
+        simulated_capital = float(getattr(settings, "dry_run_simulated_capital_usdt", 0.0) or 0.0)
+        if simulated_capital > 0:
+            usdt_amount = min(usdt_amount, self.get_simulated_available_usdt())
+
+        return max(0.0, usdt_amount)
+
     def _pre_entry_checks(self, symbol: str, usdt_amount: float, side: str = "SHORT") -> Tuple[bool, str]:
         """Run all safety checks before opening a position. Returns (ok, reason)."""
         side = side.upper()
@@ -2577,6 +2623,12 @@ class FuturesClient:
           SL 3% move → 6% loss on margin
           TP 7% move → 14% gain on margin
         """
+        leverage = leverage or self._active_leverage
+        usdt_amount = self._cap_dry_run_margin(usdt_amount, leverage)
+        if usdt_amount <= 0:
+            print(f"[Futures] SHORT {symbol} blocked: simulated portfolio capital exhausted")
+            return None
+
         ok, reason = self._pre_entry_checks(symbol, usdt_amount, side="SHORT")
         if not ok:
             print(f"[Futures] SHORT {symbol} blocked: {reason}")
@@ -2809,6 +2861,12 @@ class FuturesClient:
           SL 2.5% move down → 5% loss on margin
           TP 5.0% move up   → 10% gain on margin
         """
+        leverage = leverage or self._active_leverage
+        usdt_amount = self._cap_dry_run_margin(usdt_amount, leverage)
+        if usdt_amount <= 0:
+            print(f"[Futures] LONG {symbol} blocked: simulated portfolio capital exhausted")
+            return None
+
         if not self._hedge_mode:
             if not self.enable_hedge_mode():
                 print(f"[Futures] LONG {symbol} blocked: hedge mode not available")

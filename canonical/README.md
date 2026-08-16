@@ -6,9 +6,10 @@ Este directorio contiene los **documentos canónicos** del sistema crypto-agent.
 
 | Archivo | Tipo | Dominio | Estado |
 |---------|------|---------|--------|
-| `calibracion_entradas-a20ab8-v3.md` | planning | Entradas, capital por modo, datos externos, maduración | active (s121) |
+| `calibracion_entradas-a20ab8-v3.md` | planning | Entradas, capital por modo, datos externos, maduración | active (2026-08-16) |
 | `calibrar-ciclo-vida-52fe5d.md` | canonical-memory | Lifecycle de posiciones (apertura → monitoreo → cierre); incluye event stream, reconciliación Binance, drawdown monitor y profit erosion detection | active (s120b) |
 | `calibrar_datos.md` | canonical-memory | Datos: inventario, calidad, linaje, contratos analíticos | active (s120b) |
+| `staging_env.md` | operations | Infraestructura, seguridad y paridad Kelly/capital de staging | active (2026-08-16) |
 | `analisis_inteligente_cierres.md` | canonical-protocol | AIC recurrente: prevención de entrada, protección lifecycle, configuración, contrafactual y verificación live | active (AIC-20260807-01) |
 | `analisis_suficiencia_datos_2026-08-05.md` | canonical-memory | Evaluación de suficiencia de datos para aperturas/lifecycle y brechas priorizadas | proposal |
 | `modelo_retencion_datos_2026-08-05.md` | canonical-memory | Retención/purga por capas para operación, calibración e investigación histórica | proposal |
@@ -45,6 +46,8 @@ Este directorio contiene los **documentos canónicos** del sistema crypto-agent.
 **Actualización reciente (s116, ago 5 2026, evidencia shadow de linaje/costos):** se añadió en `app.py` un nuevo componente en `/metrics/shadow-readiness` (`entry_close_lineage_instrumentation`) para medir cobertura operativa de `decision_features_v1` en checks y de linaje/costos en cierres (`ready_candidate_id`, `staged_direction`, `profile_at_entry`, `regime_at_entry`, `commission_bps_total` y hints `spread/slippage/funding`). Esto convierte la brecha de suficiencia de datos en una señal continua de readiness visible en dashboard, con gates explícitos de cobertura y tamaño de muestra.
 
 **Actualización reciente (s121, ago 7 2026, calibración SR aplicada en caliente):** se promovió la configuración ganadora de simulaciones SR a runtime y defaults (`min_signal_strength=0.45`, `min_success_probability=0.45`, `stop_loss_pct=2.5`, `kelly_max_usdt=1000.0`, `kelly_dynamic_base_pct=0.18`, `max_positions_spot_bull=8`), con snapshot pre-restart `20260807_145135_059092`, reinicio de `crypto-agent-app` y validación post-boot en `/config/kelly` y `/metrics/shadow-readiness`.
+
+**Actualización reciente (ago 16 2026, paridad Kelly PROD/STG):** STG quedó alineado con la política Kelly FUTURES de PROD (`base=200`, `max=2500`, caps líquido/margen `0.90`) y con un snapshot de capital FUTURES PROD de `$2324`. Se eliminó el doble recorte dry-run de 30% mediante una base de margen configurable y se preservaron `DRY_RUN=true`/`ALLOW_REAL_TRADING=false`. La matriz completa, recertificación de capital y evidencia exigida están en `staging_env.md`.
 
 **AIC-20260807-01 (ago 7 2026):** primera ejecución del **Análisis Inteligente de Cierres**. Se analizaron 203 tesis FUTURES SHORT, se activó el gate de agotamiento sobre soporte con mejora contrafactual de +$173.42 y se reparó la protección lifecycle FUTURES. El protocolo repetible y su cadencia están en `analisis_inteligente_cierres.md`.
 

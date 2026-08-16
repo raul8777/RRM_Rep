@@ -795,10 +795,46 @@ def get_truth_status_futures(db_client) -> Dict[str, Any]:
 
 
 def is_truth_critical(db_client, max_age_seconds: int = 900) -> bool:
+    """Return True only for fresh, material drift that should trigger system pause.
+
+    The previous behavior treated any cached critical parity as enough to pause the
+    system, even when it was stale or caused by a single low-impact mismatch. This
+    was too aggressive for spot balance drift and ghost warnings. We now require:
+    - severity == 'critical', and
+    - mismatch_count >= 2, or
+    - there is at least one high-severity mismatch with a material notional impact.
+    """
     status = get_truth_status(db_client)
     sev = str(status.get("severity") or "unknown").lower()
     if sev != "critical":
         return False
+
+    mismatch_count = int(status.get("mismatch_count") or 0)
+    mismatches = status.get("mismatches") or []
+    material = False
+    for mm in mismatches:
+        if not isinstance(mm, dict):
+            continue
+        severity = str(mm.get("severity") or "").lower()
+        if severity in {"high", "critical"}:
+            if mm.get("drift_notional_usdt") is not None:
+                try:
+                    if float(mm.get("drift_notional_usdt")) >= 10.0:
+                        material = True
+                        break
+                except Exception:
+                    pass
+            if mm.get("notional_usdt") is not None:
+                try:
+                    if float(mm.get("notional_usdt")) >= 10.0:
+                        material = True
+                        break
+                except Exception:
+                    pass
+
+    if mismatch_count < 2 and not material:
+        return False
+
     uat = status.get("updated_at") or status.get("ts")
     if not uat:
         return True

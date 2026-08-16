@@ -492,12 +492,22 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
         and giveback_pct >= (drawback_pct * 0.65)
     )
 
-    if (held_min >= full_minutes and ((giveback_pct >= drawback_pct) or (not positive_velocity) or extension_cap_hit or signal_faded or momentum_low)) or sr_full_trigger:
+    full_close_evidence = [
+        (giveback_pct >= drawback_pct, "giveback"),
+        (not positive_velocity, "velocity"),
+        (extension_cap_hit, "extension_cap"),
+        (signal_faded, "signal"),
+        (momentum_low, "momentum"),
+        (sr_full_trigger, "sr_accel"),
+    ]
+    full_close_evidence_active = [name for triggered, name in full_close_evidence if triggered]
+
+    if held_min >= full_minutes and full_close_evidence_active:
         should_full = True
         reason = "profit_realization_supervisor_full_sr_accel" if sr_full_trigger else "profit_realization_supervisor_full"
         detail = (
             f"{trade_type.upper()} held {held_min}m in profit; pnl={context.pnl_pct*100:.2f}% peak={peak*100:.2f}% "
-            f"giveback={giveback_pct*100:.2f}% >= {drawback_pct*100:.2f}% | score={momentum_score:.0f}"
+            f"giveback={giveback_pct*100:.2f}% >= {drawback_pct*100:.2f}% | evidence={','.join(full_close_evidence_active)} | score={momentum_score:.0f}"
         )
         priority = 90
     elif (held_min >= partial_minutes and ((giveback_pct >= (drawback_pct * 0.5)) or (not positive_velocity) or extension_cap_hit or signal_faded or momentum_low)) or sr_partial_trigger:
@@ -510,7 +520,22 @@ def evaluate(context: ProfitRealizationContext, settings, now: Optional[datetime
         priority = 70
 
     if not should_partial and not should_full:
-        return ProfitRealizationDecision()
+        return ProfitRealizationDecision(
+            should_close=False,
+            action="hold",
+            reason="profit_realization_time_without_degradation_evidence",
+            detail=(
+                f"{trade_type.upper()} held {held_min}m but no degradation evidence; "
+                f"positive_velocity={positive_velocity}, signal_faded={signal_faded}, momentum_low={momentum_low}, "
+                f"giveback={giveback_pct*100:.2f}% / threshold={drawback_pct*100:.2f}%"
+            ),
+            diagnostics=(
+                f"held_min={held_min}; full_minutes={full_minutes}; partial_minutes={partial_minutes}; "
+                f"giveback_pct={giveback_pct*100:.2f}%; drawback_pct={drawback_pct*100:.2f}%; "
+                f"positive_velocity={positive_velocity}; signal_faded={signal_faded}; momentum_low={momentum_low}; "
+                f"sr_accel_active={bool(sr_accel.get('active'))}; momentum_score={momentum_score:.1f}"
+            ),
+        )
 
     # Low-edge partial deferral: avoid trimming winners too early when profit is
     # still near the minimum threshold and there is no strong protective signal.

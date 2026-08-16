@@ -383,3 +383,37 @@ def test_entry_profile_gate_dynamic_fg_adjustment(monkeypatch):
     assert info_fear["thresholds"]["A"] == base_a
     assert profile_greed is None
     assert info_greed["thresholds"]["C"] > base_c
+
+
+def test_universal_thresholds_without_model_use_legacy_fallback_thresholds(monkeypatch):
+    import entry_profile_gate
+
+    universal_like = {
+        "meta": {"version": "universal_20260723_v2"},
+        "RANGE_SCALP__MIDCAP_ALT": {"A": 0.60, "B": 0.55, "C": 0.48, "discard": float("-inf")},
+    }
+
+    monkeypatch.setattr(entry_profile_gate, "load_thresholds", lambda path=None: universal_like)
+    monkeypatch.setattr(entry_profile_gate, "_universal_model_cache", None)
+    monkeypatch.setattr(entry_profile_gate, "_universal_model_attempted", True)
+    monkeypatch.setattr(entry_profile_gate, "_universal_missing_warned", False)
+
+    meta = {
+        "signal": "BUY",
+        "vol_spike": 1.5,
+        "rsi": 48.0,
+        "bb_position": 0.35,
+        "higher_tf_trend": "UP",
+        "strength": 0.6,
+        "success_probability": 0.56,
+    }
+
+    profile, info = entry_profile_gate.classify(
+        meta,
+        "RANGE_SCALP",
+        symbol="TESTUSDT",
+    )
+
+    assert info["score_source"] == "fallback_universal_model_missing"
+    assert info["thresholds"]["C"] == -1.0
+    assert profile in {"A", "B", "C", None}

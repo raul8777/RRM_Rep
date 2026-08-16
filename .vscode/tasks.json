@@ -9,6 +9,30 @@
 				"Dev/focused_validation_runner.py"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "test-staging-portfolio-sizing",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"-m",
+				"pytest",
+				"tests/test_futures_usd_loss_guard.py",
+				"-q"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "test-staging-portfolio-sizing",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"-m",
+				"pytest",
+				"tests/test_futures_usd_loss_guard.py",
+				"-q"
+			],
+			"isBackground": false
 		}
 	]
 }

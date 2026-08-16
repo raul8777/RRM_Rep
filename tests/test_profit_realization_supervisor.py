@@ -192,3 +192,29 @@ def test_spot_uses_same_low_profit_partial_deferral_logic():
 
     assert decision.should_close is False
     assert decision.reason == "profit_realization_partial_deferred_low_pnl"
+
+
+def test_full_close_requires_degradation_evidence_not_just_time_elapsed():
+    now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    ctx = ProfitRealizationContext(
+        symbol="SOLUSDT",
+        trade_type="spot",
+        side="BUY",
+        pnl_pct=0.018,
+        pnl_usdt=18.0,
+        entry_price=100.0,
+        current_price=101.8,
+        opened_at=now - timedelta(minutes=100),
+        profit_started_at=now - timedelta(minutes=100),
+        peak_pnl_pct=0.019,
+        pnl_velocity_1h=0.004,
+        current_signal_strength=0.92,
+        regime_mode="SPOT_BULL",
+        profile_label="A",
+        metadata={},
+    )
+
+    decision = evaluate(ctx, _settings(), now=now)
+
+    assert decision.should_close is False
+    assert decision.action == "hold"

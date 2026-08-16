@@ -16,6 +16,9 @@
     <div class="header-left">
         <div class="app-logo">⚡</div>
         <div class="app-title">Crypto<span>Agent</span></div>
+        <div class="env-pill" id="envPill">
+            <span class="env-pill-text" id="envPillText">PRODUCTION</span>
+        </div>
         <div class="mode-pill" id="modePill">
             <span class="mode-pill-dot" id="modePillDot"></span>
             <span class="mode-pill-text" id="modePillText">...</span>
@@ -133,6 +136,9 @@
     </button>
     <button class="tab-btn"        data-tab="tab-system" onclick="switchTab('tab-system')">
         <span class="tab-icon">🔧</span> Sistema
+    </button>
+    <button class="tab-btn"        data-tab="tab-staging" onclick="switchTab('tab-staging')">
+        <span class="tab-icon">🧪</span> Staging
     </button>
     <button class="tab-btn"        data-tab="tab-control" onclick="switchTab('tab-control')">
         <span class="tab-icon">🧭</span> Acciones
@@ -559,7 +565,40 @@
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
-<!-- TAB 4 — ACCIONES / CONTROL                                                -->
+<!-- TAB 4 — STAGING                                                           -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-staging">
+    <div class="staging-layout">
+        <div class="card staging-card staging-hero">
+            <div class="card-header">
+                <h2>🧪 Staging: comparación viva vs producción</h2>
+                <span class="card-sub">Evidencia operativa, decisión shadow y diff por dominio</span>
+            </div>
+            <div id="stagingOverviewData"><p class="loading">Cargando estado de staging...</p></div>
+        </div>
+
+        <div class="card staging-card">
+            <div class="card-header"><h2>📊 Paridad de truth por régimen</h2></div>
+            <div id="stagingTruthData"><p class="loading">Cargando truth snapshot...</p></div>
+        </div>
+
+        <div class="card staging-card">
+            <div class="card-header"><h2>🚦 Gate de promoción</h2></div>
+            <div id="stagingPromotionData"><p class="loading">Cargando gate de promoción...</p></div>
+        </div>
+
+        <div class="card staging-card staging-hero">
+            <div class="card-header">
+                <h2>📉 Impacto de cambio vs producción</h2>
+                <span class="card-sub">Delta por decisión, dominio y rollback</span>
+            </div>
+            <div id="stagingComparisonData"><p class="loading">Cargando comparación de impacto...</p></div>
+        </div>
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- TAB 5 — ACCIONES / CONTROL                                                -->
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
 <div class="tab-content" id="tab-control">
     <div class="control-layout">
@@ -864,7 +903,7 @@
     </div>
 </div>
 
-<script src="/frontend/dashboard.js?v=121"></script>
+<script src="/frontend/dashboard.js?v=124"></script>
 <script src="/frontend/super_mimic.js?v=1"></script>
 </body>
 </html>

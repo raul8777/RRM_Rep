@@ -42,6 +42,21 @@ class BalanceClient:
         return 100.0
 
 
+class DriftBalanceClient:
+    def __init__(self, balance_qty):
+        self.balance_qty = balance_qty
+
+    def get_account_balance(self):
+        return {"BCH": self.balance_qty}
+
+    def get_symbol_price(self, symbol):
+        assert symbol == "BCHUSDT"
+        return 10.0
+
+    def get_my_trades(self, symbol, limit=5):
+        return []
+
+
 class TestPositionManager:
     """Test Position Manager functionality."""
     
@@ -303,6 +318,37 @@ class TestPositionManager:
         assert closed.entry_commission == pytest.approx(0.4, abs=0.001)
         residual = pm.get_position("ENAUSDT")
         assert residual[0].entry_commission == pytest.approx(0.6, abs=0.001)
+
+    def test_sync_with_exchange_balance_trims_qty_drift_to_exchange_balance(self):
+        """A DB spot position should be partially closed to match Binance balance when drift is material."""
+        pm = PositionManager()
+        pm.add_position(Position(
+            symbol="BCHUSDT",
+            side="BUY",
+            quantity=0.065,
+            entry_price=10.0,
+            entry_time="2024-01-01T00:00:00Z",
+            metadata={"trade_type": "spot"},
+        ))
+        settings = SimpleNamespace(
+            token_categories={},
+            category_thresholds={},
+            use_bnb_for_commission=False,
+            auto_bnb_for_commission=False,
+            binance_commission_rate=0.001,
+            spot_reconcile_missing_confirm_cycles=2,
+            spot_ghost_sell_confirmation_hours=24,
+        )
+
+        pm.sync_with_exchange_balance(DriftBalanceClient(0.001), settings, min_value_usdt=5.0)
+
+        remaining = pm.get_position("BCHUSDT")
+        assert remaining is not None
+        # DB should converge to the Binance balance in one pass.
+        assert remaining[0].quantity == pytest.approx(0.001)
+        closed = [c for c in pm.get_closed_positions(limit=10) if c.close_reason == "reconcile_qty_drift"]
+        assert closed
+        assert closed[0].quantity == pytest.approx(0.064)
 
 
 if __name__ == "__main__":

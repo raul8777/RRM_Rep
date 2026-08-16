@@ -1036,7 +1036,12 @@ def run_sweep(
                     "params": params,
                 })
 
-    _cache = _get_sweep_cache() if use_cache else None
+    _cache = None
+    if use_cache:
+        try:
+            _cache = _get_sweep_cache()
+        except Exception as cache_exc:
+            _logger.warning("Sweep cache disabled due to init error: %s", cache_exc)
     existing = _load_existing_results(paths.results_path)
     total = len(jobs)
     completed_initial = len(existing)
@@ -1380,6 +1385,7 @@ def main() -> int:
     parser.add_argument("--lifecycle", action="store_true", help="Use the lifecycle kernel instead of run_trades.execute_once")
     parser.add_argument("--peak-signal-mode", action="store_true", help="Use peak_signal_source to inject A/B/C signals into the lifecycle simulation")
     parser.add_argument("--max-dd-stop", type=float, default=15.0, help="Early-stop drawdown threshold %% (default 15.0, 0=disable)")
+    parser.add_argument("--forced-regime", type=str, default=None, help="Force a single regime mode for the whole simulation run")
     parser.add_argument("--clear-results", action="store_true", help="Ignore previous results.jsonl")
     parser.add_argument("--output-dir", type=str, default=None, help="Isolated output directory for this sweep")
     args = parser.parse_args()
@@ -1411,6 +1417,7 @@ def main() -> int:
         output_dir=args.output_dir,
         profiles=_profiles,
         peak_signal_mode=args.peak_signal_mode,
+        forced_regime=(args.forced_regime.upper() if args.forced_regime else None),
     )
     logger.info("Sweep complete. Report saved to %s", _DEFAULT_REPORT_PATH)
     print(json.dumps(report["summary"], indent=2, ensure_ascii=False))

@@ -453,6 +453,8 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'staged_immediate_entry_fraction': 0.3,
     'range_scalp_sr_thesis_gate_enabled': True,
     'range_scalp_sr_thesis_max_dist_pct': 5.0,
+    'sr_pool_interval': '5m',
+    'sr_pool_kline_limit': 120,
     'staged_short_risk_guard_enabled': True,
     'staged_short_risk_guard_canary_fraction': 0.35,
     'staged_short_risk_guard_max_resistance_dist_pct': 3.0,
@@ -490,6 +492,13 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'direction_required_confirmations': 2,
             'direction_max_adverse_observations': 3,
             'direction_sr_invalidation_pct': 1.5,
+            'sr_lookback_bars': 96,
+            'sr_pivot_order': 3,
+            'sr_near_band_atr_mult': 0.25,
+            'sr_near_band_price_pct': 0.0025,
+            'sr_pool_zone_support_max': 0.20,
+            'sr_pool_zone_resistance_min': 0.80,
+            'sr_pool_min_strength': 0.0,
             'sr_side_guard_mode': 'active_canary',
             'sr_side_guard_canary_fraction': 0.35,
             'sr_side_guard_max_dist_pct': 2.5,
@@ -518,6 +527,13 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'direction_required_confirmations': 1,
             'direction_max_adverse_observations': 4,
             'direction_sr_invalidation_pct': 1.5,
+            'sr_lookback_bars': 96,
+            'sr_pivot_order': 3,
+            'sr_near_band_atr_mult': 0.25,
+            'sr_near_band_price_pct': 0.0025,
+            'sr_pool_zone_support_max': 0.20,
+            'sr_pool_zone_resistance_min': 0.80,
+            'sr_pool_min_strength': 0.0,
             'direction_geometry_anchor_enabled': True,
             'direction_min_progress_stop_fraction': 0.05,
             'direction_max_adverse_stop_fraction': 0.6,
@@ -553,6 +569,13 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'direction_required_confirmations': 2,
             'direction_max_adverse_observations': 2,
             'direction_sr_invalidation_pct': 1.5,
+            'sr_lookback_bars': 96,
+            'sr_pivot_order': 3,
+            'sr_near_band_atr_mult': 0.25,
+            'sr_near_band_price_pct': 0.0025,
+            'sr_pool_zone_support_max': 0.20,
+            'sr_pool_zone_resistance_min': 0.80,
+            'sr_pool_min_strength': 0.0,
             'sr_side_guard_mode': 'enforced',
             'sr_side_guard_canary_fraction': 1.0,
             'sr_side_guard_max_dist_pct': 1.5,
@@ -582,6 +605,13 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'direction_required_confirmations': 2,
             'direction_max_adverse_observations': 3,
             'direction_sr_invalidation_pct': 1.5,
+            'sr_lookback_bars': 96,
+            'sr_pivot_order': 3,
+            'sr_near_band_atr_mult': 0.25,
+            'sr_near_band_price_pct': 0.0025,
+            'sr_pool_zone_support_max': 0.20,
+            'sr_pool_zone_resistance_min': 0.80,
+            'sr_pool_min_strength': 0.0,
             'sr_side_guard_mode': 'active_canary',
             'sr_side_guard_canary_fraction': 0.35,
             'sr_side_guard_max_dist_pct': 2.0,
@@ -629,12 +659,14 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
 
     # SSO
     'sso_enabled': True,
-    'sso_target_contribution_enabled': True,
-    'sso_target_daily_usd': 40.0,
+    'sso_target_contribution_enabled': True,   # re-enabled with a more conservative daily goal
+    'sso_target_contribution_pct': 0.10,       # recommendation: 150 * 0.10 = 15 USD minimum contribution
+    'sso_target_daily_usd': 150.0,
     'sso_stagnant_min_hours': 2.5,          # concentrated: ligeramente más agresivo en rotación
     'sso_stagnant_velocity_window_min': 60, # jul07: 30→60 (wolf-hunter: more stable window)
     'sso_decay_threshold_pct': 0.008,       # jul07: 0.004→0.008 (wolf-hunter)
     'sso_decay_min_hours': 2.0,             # concentrated: reacción más rápida a decay
+    'sso_min_winner_profit_usdt': 0.0,
     'sso_slow_tier2_hours': 5.0,            # jul07: 4→5h (wolf-hunter)
     'sso_slow_tier3_hours': 7.0,            # jul07: 6→7h (wolf-hunter)
     'sso_slow_tier4_hours': 9.0,            # jul07: 8→9h (wolf-hunter)

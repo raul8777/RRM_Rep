@@ -118,3 +118,47 @@ class TestFuturesUSDEmergencyGapStop:
             settings=_make_settings(max_loss_usd_per_trade=0.0, emergency_gap_loss_multiplier=1.5)
         )
         assert not any("emergency_gap_stop" in c.get("reason", "") for c in closed)
+
+
+class TestDryRunPortfolioSizing:
+    def test_caps_position_notional(self):
+        settings = _make_settings(
+            futures_leverage=2,
+            futures_max_shorts=4,
+            futures_max_largecap_shorts=3,
+            futures_largecap_symbols=[],
+            dry_run_simulated_capital_usdt=2635.0,
+            dry_run_max_position_notional_usdt=1500.0,
+        )
+        fc = FuturesClient("test", "test", dry_run=True, settings=settings)
+
+        assert fc._cap_dry_run_margin(1000.0, leverage=2) == 750.0
+
+    def test_caps_aggregate_simulated_margin(self):
+        settings = _make_settings(
+            futures_leverage=2,
+            futures_max_shorts=4,
+            futures_max_largecap_shorts=3,
+            futures_largecap_symbols=[],
+            dry_run_simulated_capital_usdt=1000.0,
+            dry_run_max_position_notional_usdt=1500.0,
+        )
+        fc = FuturesClient("test", "test", dry_run=True, settings=settings)
+        fc._open_positions["BTCUSDT_SHORT"] = _make_short(entry=1000.0, qty=1.8)
+
+        assert fc._cap_dry_run_margin(500.0, leverage=2) == 100.0
+
+    def test_simulated_available_excludes_committed_margin(self):
+        settings = _make_settings(
+            futures_leverage=2,
+            futures_max_shorts=4,
+            futures_max_largecap_shorts=3,
+            futures_largecap_symbols=[],
+            dry_run_simulated_capital_usdt=2324.0,
+            dry_run_max_position_notional_usdt=5000.0,
+        )
+        fc = FuturesClient("test", "test", dry_run=True, settings=settings)
+        fc._open_positions["BTCUSDT_SHORT"] = _make_short(entry=1000.0, qty=2.0)
+
+        assert fc.get_simulated_available_usdt() == 1324.0
+

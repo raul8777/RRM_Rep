@@ -1,0 +1,102 @@
+version: '3.8'
+
+services:
+  postgres_stg:
+    image: postgres:15-alpine
+    container_name: crypto-agent-db_STG
+    environment:
+      POSTGRES_USER: ${STAGING_DB_USER:-crypto_agent_stg}
+      POSTGRES_PASSWORD: ${STAGING_DB_PASSWORD:-crypto_agent_stg_password}
+      POSTGRES_DB: ${STAGING_DB_NAME:-crypto_agent_stg}
+    ports:
+      - "5433:5432"
+    volumes:
+      - staging_postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${STAGING_DB_USER:-crypto_agent_stg}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis_stg:
+    image: redis:7-alpine
+    container_name: crypto-agent-redis_STG
+    command: redis-server --requirepass ${STAGING_REDIS_PASSWORD:-staging_redis_2026}
+    ports:
+      - "6380:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${STAGING_REDIS_PASSWORD:-staging_redis_2026}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app_stg:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crypto-agent-app_STG
+    env_file:
+      - .env
+      - .env.staging.example
+    environment:
+      APP_ENV: staging
+      DOTENV_PATH: /app/.env.staging.example
+      DB_URL: postgresql://${STAGING_DB_USER:-crypto_agent_stg}:${STAGING_DB_PASSWORD:-crypto_agent_stg_password}@postgres_stg:5432/${STAGING_DB_NAME:-crypto_agent_stg}
+      DB_USER: ${STAGING_DB_USER:-crypto_agent_stg}
+      DB_PASSWORD: ${STAGING_DB_PASSWORD:-crypto_agent_stg_password}
+      DB_HOST: postgres_stg
+      DB_PORT: 5432
+      DB_NAME: ${STAGING_DB_NAME:-crypto_agent_stg}
+      REDIS_PASSWORD: ${STAGING_REDIS_PASSWORD:-staging_redis_2026}
+      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
+      BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
+      BINANCE_USE_TESTNET: "false"
+      DRY_RUN: "true"
+      ALLOW_REAL_TRADING: "false"
+      AGENT_MODE: "auto"
+      FUTURES_LEVERAGE: "2"
+      FUTURES_USDT_PER_TRADE: "150"
+      KELLY_BASE_USDT: "150"
+      KELLY_MAX_USDT: "2500"
+      KELLY_DYNAMIC_BASE_PCT: "0.22"
+      KELLY_MAX_PCT_LIQUID: "0.90"
+      FUTURES_KELLY_BASE_USDT: "200"
+      FUTURES_KELLY_MAX_USDT: "2500"
+      FUTURES_KELLY_MAX_PCT_LIQUID: "0.90"
+      FUTURES_KELLY_CAP_PCT: "0.90"
+      FUTURES_MAX_SHORTS: "4"
+      FUTURES_MAX_LONGS: "3"
+      DRY_RUN_SIMULATED_CAPITAL_USDT: "2324"
+      DRY_RUN_MAX_POSITION_NOTIONAL_USDT: "5000"
+      DRY_RUN_FUTURES_MARGIN_FRACTION: "1.0"
+      SSO_TARGET_CONTRIBUTION_ENABLED: "false"
+      SSO_MIN_WINNER_PROFIT_USDT: "5.5"
+      SSO_MULTILEVEL_ENABLED: "false"
+      SSO_MOMENTUM_MIN_PNL_PCT_FUTURES: "2.0"
+      PROFIT_REALIZATION_FUTURES_ENABLED: "false"
+      LIFECYCLE_STRUCTURE_MODE: "shadow"
+      SR_POOL_ENABLED: "true"
+      SR_POOL_TRADE_ENABLED: "true"
+      SR_POOL_INTRA_CYCLE_ENABLED: "true"
+      DASHBOARD_API_KEY: ${DASHBOARD_API_KEY:-}
+      PORT: 8001
+      APP_PORT: 8001
+      STAGING_MODE: true
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres_stg:
+        condition: service_healthy
+      redis_stg:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - ./frontend:/app/frontend
+    restart: unless-stopped
+    command: bash -lc "touch /tmp/empty.env && uvicorn app:app --host 0.0.0.0 --port 8001"
+
+volumes:
+  staging_postgres_data:

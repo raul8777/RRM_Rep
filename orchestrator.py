@@ -214,6 +214,16 @@ class Orchestrator:
         staying frozen for hours after Binance and the bot's own state have already
         reconciled.
         """
+        try:
+            from init_components import get_components
+            settings = getattr(get_components(), "settings", None)
+            if settings is not None and bool(getattr(settings, "dry_run", False)):
+                self.binance_truth_drift_cycles = 0
+                self.binance_truth_recovery_cycles = 0
+                return
+        except Exception:
+            pass
+
         if is_truth_critical(self.db_client, max_age_seconds=900):
             self.binance_truth_drift_cycles += 1
             self.binance_truth_recovery_cycles = 0

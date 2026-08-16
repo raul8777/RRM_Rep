@@ -131,6 +131,60 @@ def test_range_scalp_sso4_guard_shadow_keeps_close_but_marks_detail():
     assert "shadow_hold candidate" in action.detail
 
 
+def test_sso4_disabled_keeps_sso3_multilevel_active():
+    class _Settings:
+        sso_target_contribution_enabled = False
+        sso_multilevel_enabled = True
+
+    sso = SmartScaleOut(settings=_Settings())
+    pos = _make_pos(pnl_pct=0.012, pnl_usdt=6.5, age_hours=1.4)
+    pos.atr_4h_pct = 0.01
+    pos.daily_target = 40.0
+
+    assert sso._check_sso4_target_contribution(pos) is None
+
+    action = sso._check_sso3_multilevel(pos)
+    assert action is not None
+    assert action.should_close is True
+    assert action.reason == "sso_multilevel_l1"
+    assert action.close_pct == pytest.approx(0.255)
+
+
+def test_winner_floor_blocks_small_profit_but_not_loss_exit():
+    class _Settings:
+        sso_min_winner_profit_usdt = 5.0
+        sso_multilevel_enabled = False
+        futures_bounce_rescue_enabled = True
+        rescue_smart_gate_enabled = False
+        sso_flat_stagnation_timeout_enabled = False
+
+    sso = SmartScaleOut(settings=_Settings())
+    small_winner = _make_pos(
+        trade_type="futures",
+        pnl_pct=0.0009,
+        pnl_usdt=0.23,
+        age_hours=4.0,
+    )
+    small_winner.bounce_entry = True
+
+    action = sso.evaluate(small_winner)
+    assert action.should_close is False
+    assert "SSO-6:blocked_winner_floor($0.23<$5.00)" in action.diagnosis
+
+    losing_position = _make_pos(
+        trade_type="futures",
+        pnl_pct=-0.006,
+        pnl_usdt=-1.0,
+        age_hours=4.0,
+    )
+    losing_position.rescue_signal = "SELL"
+    losing_position.rescue_signal_strength = 0.80
+
+    action = sso.evaluate(losing_position)
+    assert action.should_close is True
+    assert action.reason == "sso_loss_cut"
+
+
 def test_range_scalp_sso4_guard_active_blocks_early_close():
     class _Settings:
         sso_target_contribution_enabled = True

@@ -239,6 +239,12 @@ class SmartScaleOut:
         for label, check_fn in checks:
             action = check_fn(pos)
             if action and action.should_close:
+                min_winner_profit = max(0.0, float(self._cfg('sso_min_winner_profit_usdt', 0.0)))
+                if 0 <= pos.pnl_usdt < min_winner_profit:
+                    _diag_parts.append(
+                        f"{label}:blocked_winner_floor(${pos.pnl_usdt:.2f}<${min_winner_profit:.2f})"
+                    )
+                    continue
                 action.diagnosis = " | ".join(_diag_parts + [f"{label}:FIRE({action.reason})"])
                 return action
             # Collect why it didn't fire

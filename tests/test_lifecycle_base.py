@@ -16,6 +16,7 @@ from lifecycle.base import (
     Action,
 )
 from lifecycle.regime import RegimeState, build_market_context
+from market_structure import evaluate
 
 
 class TestLifecycleConfig:
@@ -109,3 +110,21 @@ class TestRegimeState:
         assert ctx.regime == "RANGE_SCALP"
         assert ctx.fear_greed_index == 55
         assert ctx.btc_dominance == 58.0
+
+
+def test_structure_decision_contract_has_traceability_fields():
+    snapshot = {
+        "state": "neutral",
+        "reason": "no_zone_event",
+        "structure_1h": {"sr_zone_position": 0.10},
+        "confirmation_5m": {"sr_bounce": True},
+        "timing_1m": {"sr_bounce": True},
+    }
+    decision = evaluate(snapshot, "LONG")
+    payload = decision.to_dict()
+
+    assert payload["state"] in {"neutral", "structural_confirmed", "invalidated", "unavailable"}
+    assert payload["decision_id"]
+    assert payload["phase"] in {"monitor", "protect", "capture", "finalize", "close"}
+    assert payload["evidence"]
+    assert payload["reason_code"]

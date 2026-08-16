@@ -1,9 +1,8 @@
-// Force IPv4 (127.0.0.1) when hostname is 'localhost' to avoid wslrelay interception on Windows
-const _origin = window.location.hostname === 'localhost'
-    ? `${window.location.protocol}//127.0.0.1:${window.location.port}`
-    : window.location.origin;
-console.log('[dashboard.js] loaded, API_BASE:', _origin);
-const API_BASE = _origin;
+// Use the same origin as the loaded dashboard page.
+// For some environments (embedded browsers / port forwarding), forcing 127.0.0.1
+// can break connectivity even when localhost works.
+const API_BASE = window.location.origin;
+console.log('[dashboard.js] loaded, API_BASE:', API_BASE);
 
 // API key loaded dynamically from backend at startup — never hardcoded in source
 let _API_KEY = '';
@@ -48,34 +47,105 @@ function _fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
     return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
-async function fetchDashboardData() {
+async function hydrateEnvironmentBadge() {
+    const envPill = document.getElementById('envPill');
+    const envText = document.getElementById('envPillText');
+    if (!envPill || !envText) return;
+    try {
+        const statusRes = await fetch(`${API_BASE}/status`, { headers: _authHeaders() });
+        if (!statusRes.ok) throw new Error(`status failed: ${statusRes.status}`);
+        const status = await statusRes.json();
+        const env = String(status.environment || status.environment_label || (window.location.port === '8001' ? 'staging' : 'production')).toUpperCase();
+        const label = env === 'STAGING' ? 'STAGING' : 'PRODUCTION';
+        envText.textContent = label;
+        envPill.classList.toggle('env-pill-staging', label === 'STAGING');
+    } catch (_) {
+        const fallback = window.location.port === '8001' ? 'STAGING' : 'PRODUCTION';
+        envText.textContent = fallback;
+        envPill.classList.toggle('env-pill-staging', fallback === 'STAGING');
+    }
+}
+
+async function fetchDashboardData(force = false) {
     const now = Date.now();
     // Watchdog: if a previous fetch has been "in progress" longer than the timeout allows,
     // it's stuck (should not happen with _fetchWithTimeout, but never block polling forever).
-    if (_fetchInProgress && (now - _fetchStartedAt) < (FETCH_TIMEOUT_MS + 5000)) return _cachedData;
-    if (_cachedData && (now - _lastFetch) < CACHE_TTL_MS) return _cachedData;
+    if (!force && _fetchInProgress && (now - _fetchStartedAt) < (FETCH_TIMEOUT_MS + 5000)) return _cachedData;
+    if (!force && _cachedData && (now - _lastFetch) < CACHE_TTL_MS) return _cachedData;
+    if (_fetchInProgress && (now - _fetchStartedAt) >= (FETCH_TIMEOUT_MS + 5000)) {
+        console.warn('[dashboard] previous fetch exceeded watchdog; forcing a new cycle');
+    }
     _fetchInProgress = true;
     _fetchStartedAt = now;
     try {
-        const [summaryRes, controlRes] = await Promise.all([
+        const [summaryRes, controlRes] = await Promise.allSettled([
             _fetchWithTimeout(`${API_BASE}/dashboard/summary?days=${_dashboardDays}`),
             _fetchWithTimeout(`${API_BASE}/control/status`, { headers: _authHeaders() }),
         ]);
-        if (!summaryRes.ok) throw new Error(`HTTP ${summaryRes.status}`);
-        _cachedData = await summaryRes.json();
-        if (controlRes.ok) {
-            _cachedData.control_status = await controlRes.json();
+
+        const summaryResult = summaryRes.status === 'fulfilled' ? summaryRes.value : null;
+        if (!summaryResult || !summaryResult.ok) {
+            const err = summaryRes.status === 'rejected' ? summaryRes.reason : new Error(`HTTP ${summaryResult.status}`);
+            console.warn('[dashboard] summary fetch failed, keeping prior data:', err);
+            _lastFetchErrorAt = Date.now();
+            return _cachedData;
+        }
+
+        _cachedData = await summaryResult.json();
+        if (controlRes.status === 'fulfilled' && controlRes.value && controlRes.value.ok) {
+            _cachedData.control_status = await controlRes.value.json();
         }
         _lastFetch = Date.now();
         _lastSuccessfulFetch = _lastFetch;
         _lastFetchErrorAt = 0;
         return _cachedData;
     } catch (err) {
-        console.error('Dashboard fetch error:', err);
+        console.error('[dashboard] fetch error:', err);
         _lastFetchErrorAt = Date.now();
         return _cachedData;
     } finally {
         _fetchInProgress = false;
+    }
+}
+
+async function hydrateCriticalPanels() {
+    try {
+        const [openRes, futuresRes, closedRes] = await Promise.allSettled([
+            _fetchWithTimeout(`${API_BASE}/positions/open`, { headers: _authHeaders() }, 15000),
+            _fetchWithTimeout(`${API_BASE}/futures/positions`, { headers: _authHeaders() }, 90000),
+            _fetchWithTimeout(`${API_BASE}/positions/closed?limit=100`, { headers: _authHeaders() }, 15000),
+        ]);
+
+        if (openRes.status === 'fulfilled' && openRes.value?.ok) {
+            const openData = await openRes.value.json();
+            if (futuresRes.status === 'fulfilled' && futuresRes.value?.ok) {
+                const futuresData = await futuresRes.value.json();
+                const spotPositions = (openData.positions || []).filter(p => p.trade_type !== 'futures');
+                const futuresPositions = (futuresData.positions || []).map(p => ({
+                    ...p,
+                    position_id: p.position_id || `futures_${p.symbol}_${p.side}`,
+                    quantity: p.quantity ?? p.qty,
+                    invested_usdt: p.invested_usdt ?? (parseFloat(p.entry_price || 0) * parseFloat(p.qty || 0)),
+                    margin_usdt: p.margin_usdt,
+                    stop_loss: p.stop_loss ?? p.sl_price,
+                    take_profit: p.take_profit ?? p.tp_price,
+                    entry_time: p.entry_time || p.opened_at,
+                    first_entry_time: p.first_entry_time || p.first_opened_at || p.opened_at,
+                    trade_type: 'futures',
+                }));
+                openData.positions = [...spotPositions, ...futuresPositions];
+                openData.count = openData.positions.length;
+                openData.spot_count = spotPositions.length;
+                openData.futures_count = futuresPositions.length;
+            }
+            renderOpenPositions(openData);
+        }
+        if (closedRes.status === 'fulfilled' && closedRes.value?.ok) {
+            const closedData = await closedRes.value.json();
+            renderClosedPositions(closedData);
+        }
+    } catch (_) {
+        // Best-effort fallback only.
     }
 }
 
@@ -1534,6 +1604,9 @@ function renderOpenPositions(d) {
             : realHrs < 24 ? realHrs.toFixed(0) + 'h' : (realHrs / 24).toFixed(1) + 'd';
 
         const overflowBadge = p.is_overflow ? ' <span class="badge-overflow" title="Posición extra por señal excepcional">⚡OVF</span>' : '';
+        const truthWarnBadge = p.verification_mismatch
+            ? ` <span class="badge-overflow" title="Mismatch de verdad operativa (${(p.trade_type || 'spot').toUpperCase()}) entre valor operable y agregado histórico. Revisar detalle de verificación.">⚠️TRUTH</span>`
+            : '';
         const _btcTip = p.btc_chg_since_entry_pct != null ? ` BTC ${p.btc_chg_since_entry_pct >= 0 ? '+' : ''}${p.btc_chg_since_entry_pct.toFixed(1)}% desde entrada` : '';
         const _bGateBlocked = _isBounce && (p.bounce_gate_blocked_count || 0) > 0;
         const _bGateSig = p.bounce_gate_last_signal ? ` Señal: ${p.bounce_gate_last_signal}` : '';
@@ -1593,7 +1666,7 @@ function renderOpenPositions(d) {
             : '';
         rows.push(`
         <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'open')" style="cursor:pointer" data-symbol="${p.symbol}">
-            <td><strong>${p.symbol}</strong>${contextBadge}${overflowBadge}${escBadge}${partialBadge}${bounceBadge}${earlyPeakBadge}<br><div class="ops-row-actions"><button class="ops-action-btn" onclick="event.stopPropagation();openSelectionSymbolChart('${p.symbol}', '${p.trade_type || 'spot'}', '${p.side || 'LONG'}')">Ver gráfico</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'tradingview', '${p.trade_type || 'spot'}')">TV</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'binance', '${p.trade_type || 'spot'}')">BIN</button></div></td>
+            <td><strong>${p.symbol}</strong>${contextBadge}${overflowBadge}${truthWarnBadge}${escBadge}${partialBadge}${bounceBadge}${earlyPeakBadge}<br><div class="ops-row-actions"><button class="ops-action-btn" onclick="event.stopPropagation();openSelectionSymbolChart('${p.symbol}', '${p.trade_type || 'spot'}', '${p.side || 'LONG'}')">Ver gráfico</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'tradingview', '${p.trade_type || 'spot'}')">TV</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'binance', '${p.trade_type || 'spot'}')">BIN</button></div></td>
             <td>${fmtPositionId(p)}</td>
             <td class="direction-cell">${tradeDirectionBadge}</td>
             <td class="profile-cell">${profileBadge}</td>
@@ -1975,6 +2048,145 @@ function renderExpectativaVsRealidad(data) {
             <small>🧠 <strong>¿Qué es "PnL Pred."?</strong> Es lo que el modelo esperaba al abrir. Esta vista usa exclusivamente el PnL no realizado actual de cada posición abierta.</small>
         </div>
     `;
+}
+
+function renderStagingComparison(data) {
+    const el = document.getElementById('stagingComparisonData');
+    if (!el) return;
+    if (!data || data.ok === false) {
+        el.innerHTML = '<p class="loading">Sin comparación de impacto disponible.</p>';
+        return;
+    }
+    const summary = data.summary || {};
+    const domains = summary.domains || {};
+    const signals = summary.signals || {};
+    const totalDiff = Number(summary.total_diff_count || 0);
+    const totalDelta = Number(summary.total_delta || 0);
+
+    const domainRows = Object.entries(domains).map(([domain, payload]) => {
+        const status = String(payload.status || 'stable');
+        const deltas = Number(payload.delta_total || 0);
+        const reasons = Array.isArray(payload.reasons) ? payload.reasons.slice(0, 3).join(' · ') : 'Sin razones';
+        return `
+            <div class="staging-gate ${status === 'rollback_needed' ? 'fail' : 'pass'}">
+                <div>
+                    <div class="name">${domain}</div>
+                    <div class="meta">${payload.diffs || 0} diferencias · ${reasons}</div>
+                </div>
+                <span class="status">${status === 'rollback_needed' ? 'ROLLBACK' : 'OK'} · ${deltas >= 0 ? '+' : ''}${deltas.toFixed(2)}</span>
+            </div>
+        `;
+    }).join('') || '<p class="loading">Sin divergencias registradas.</p>';
+
+    const signalRows = Object.entries(signals).map(([status, count]) => `
+        <div class="staging-kpi"><span>${status}</span><strong>${count}</strong><small>eventos</small></div>
+    `).join('') || '<p class="loading">Sin señales de impacto.</p>';
+
+    el.innerHTML = `
+        <div class="staging-inline-grid">
+            <div class="staging-kpi"><span>Diferencias</span><strong>${totalDiff}</strong><small>eventos comparados</small></div>
+            <div class="staging-kpi"><span>Delta total</span><strong>${totalDelta >= 0 ? '+' : ''}${totalDelta.toFixed(2)}</strong><small>impacto acumulado</small></div>
+            ${signalRows}
+        </div>
+        <div class="staging-gate-list">${domainRows}</div>
+    `;
+}
+
+function renderStagingDashboard(data) {
+    const el = document.getElementById('stagingOverviewData');
+    const truthEl = document.getElementById('stagingTruthData');
+    const promotionEl = document.getElementById('stagingPromotionData');
+    const compareEl = document.getElementById('stagingComparisonData');
+    if (!el || !truthEl || !promotionEl || !compareEl) return;
+    if (!data || data.ok === false) {
+        el.innerHTML = '<p class="loading">Staging no disponible.</p>';
+        truthEl.innerHTML = '<p class="loading">Sin truth snapshot.</p>';
+        promotionEl.innerHTML = '<p class="loading">Sin gate de promoción.</p>';
+        compareEl.innerHTML = '<p class="loading">Sin comparación de impacto.</p>';
+        return;
+    }
+
+    const components = Array.isArray(data.components) ? data.components : [];
+    const truthComponent = components.find(c => c.id === 'staging_truth_parity') || null;
+    const promotionComponent = components.find(c => c.id === 'staging_promotion_gate') || null;
+    const truthGates = Array.isArray(truthComponent?.gates) ? truthComponent.gates : [];
+    const promotionGates = Array.isArray(promotionComponent?.gates) ? promotionComponent.gates : [];
+    const ready = Number((data.summary && data.summary.ready_to_implement) || 0);
+    const collecting = Number((data.summary && data.summary.collecting) || 0);
+    const active = Number((data.summary && data.summary.active) || 0);
+    const blocked = Number((data.summary && data.summary.disabled) || 0);
+    const truthRows = truthGates.map(gate => {
+        const label = String(gate.name || '').replace(/^staging_truth_/, '').replace(/_/g, ' ').toUpperCase();
+        const passes = Boolean(gate.passed);
+        return `
+            <div class="staging-gate ${passes ? 'pass' : 'fail'}">
+                <div>
+                    <div class="name">${label}</div>
+                    <div class="meta">${gate.actual ?? '—'} / ${gate.required ?? '—'} · ${gate.remediation || 'Sin remedio registrado'}</div>
+                </div>
+                <span class="status">${passes ? 'OK' : 'BLOQ'}</span>
+            </div>
+        `;
+    }).join('') || '<p class="loading">Sin gates truth disponbles.</p>';
+
+    const promotionRows = promotionGates.map(gate => {
+        const passes = Boolean(gate.passed);
+        return `
+            <div class="staging-gate ${passes ? 'pass' : 'fail'}">
+                <div>
+                    <div class="name">${gate.name || 'promotion_ready'}</div>
+                    <div class="meta">${gate.actual ?? '—'} / ${gate.required ?? '—'} · ${gate.remediation || 'Se requiere truth + persistence'}</div>
+                </div>
+                <span class="status">${passes ? 'LISTO' : 'PEND.'}</span>
+            </div>
+        `;
+    }).join('') || '<p class="loading">Sin gate de promoción.</p>';
+
+    el.innerHTML = `
+        <div class="staging-inline-grid">
+            <div class="staging-kpi"><span>Listos</span><strong>${ready}</strong><small>ready_to_implement</small></div>
+            <div class="staging-kpi"><span>Recolectando</span><strong>${collecting}</strong><small>evidencia en ventana</small></div>
+            <div class="staging-kpi"><span>Activos</span><strong>${active}</strong><small>shadow activos</small></div>
+            <div class="staging-kpi"><span>Bloqueados</span><strong>${blocked}</strong><small>requieren remedio</small></div>
+        </div>
+        <div class="staging-gate-list">
+            ${truthComponent ? `<div class="staging-gate ${truthComponent.state === 'READY_TO_IMPLEMENT' ? 'pass' : 'fail'}"><div><div class="name">${truthComponent.name || 'Truth parity'}</div><div class="meta">${truthComponent.summary || 'Sin resumen'}</div></div><span class="status">${truthComponent.state === 'READY_TO_IMPLEMENT' ? 'OK' : 'OBS'}</span></div>` : ''}
+            ${promotionComponent ? `<div class="staging-gate ${promotionComponent.state === 'READY_TO_IMPLEMENT' ? 'pass' : 'fail'}"><div><div class="name">${promotionComponent.name || 'Promotion gate'}</div><div class="meta">${promotionComponent.summary || 'Sin resumen'}</div></div><span class="status">${promotionComponent.state === 'READY_TO_IMPLEMENT' ? 'OK' : 'OBS'}</span></div>` : ''}
+        </div>
+    `;
+
+    truthEl.innerHTML = `
+        <div class="staging-regime-grid">${truthRows}</div>
+    `;
+
+    promotionEl.innerHTML = `
+        <div class="staging-gate-list">${promotionRows}</div>
+    `;
+}
+
+async function updateStagingPanel() {
+    const overviewEl = document.getElementById('stagingOverviewData');
+    const truthEl = document.getElementById('stagingTruthData');
+    const promotionEl = document.getElementById('stagingPromotionData');
+    const compareEl = document.getElementById('stagingComparisonData');
+    if (!overviewEl || !truthEl || !promotionEl || !compareEl) return;
+    try {
+        const [shadowRes, compareRes] = await Promise.all([
+            fetch(`${API_BASE}/metrics/shadow-readiness`, { headers: _authHeaders() }),
+            fetch(`${API_BASE}/metrics/staging-comparison`, { headers: _authHeaders() }),
+        ]);
+        if (!shadowRes.ok) throw new Error(`shadow readiness failed: ${shadowRes.status}`);
+        const shadowData = await shadowRes.json();
+        const compareData = compareRes.ok ? await compareRes.json() : { ok: false };
+        renderStagingDashboard(shadowData);
+        renderStagingComparison(compareData);
+    } catch (error) {
+        console.error('Staging panel fetch error:', error);
+        overviewEl.innerHTML = '<p class="loading">No se pudo cargar el estado de staging.</p>';
+        truthEl.innerHTML = '<p class="loading">Sin truth snapshot.</p>';
+        promotionEl.innerHTML = '<p class="loading">Sin gate de promoción.</p>';
+        compareEl.innerHTML = '<p class="loading">Sin comparación de impacto.</p>';
+    }
 }
 
 function renderShadowReadiness(data) {
@@ -2774,7 +2986,9 @@ function showPositionDetailModal(symbol, positionId, status) {
     }
     
     const expectedPnl = parseFloat(pred.expected_pnl || 0);
-    const actualPnl = parseFloat(position.unrealized_pnl || position.pnl || 0);
+    const actualPnl = status === 'open'
+        ? parseFloat(position.binance_unrealized_pnl ?? position.unrealized_pnl ?? 0)
+        : parseFloat(position.pnl ?? 0);
     const diff = actualPnl - expectedPnl;
     
     // Helper: format ISO date in a readable local format for modal
@@ -2797,12 +3011,23 @@ function showPositionDetailModal(symbol, positionId, status) {
     const _contextBadge = fmtContextBadge(position);
     const _profileBadge = fmtProfileBadge(position);
     const _modeBadge = fmtModeBadge(position);
+    const _truthStatus = position.verification_status || position.close_verification_status || 'unknown';
+    const _truthNotes = Array.isArray(position.verification_notes)
+        ? position.verification_notes.join(' | ')
+        : (Array.isArray(position.close_verification_notes) ? position.close_verification_notes.join(' | ') : '');
+    const _truthBadgeCls = _truthStatus.includes('warning') || _truthStatus.includes('unverified')
+        ? 'negative'
+        : (_truthStatus.includes('verified') || _truthStatus.includes('confirmed') ? 'positive' : 'exec-warn');
+    const _truthBadge = `<span class="badge-context ${_truthBadgeCls}" title="${_truthNotes || 'Sin detalle'}">${_truthStatus}</span>`;
     const _peakTuningBadges = fmtPeakTuningBadges(position);
     const _ep = position.exit_policy_params || {};
     const _escTableHtml = _showEscTable ? (() => {
         const _knownModalIdx = new Set(_modalEntries.map(e => e.escalonamiento_index || 1));
         const totalCost = _modalEntries.reduce((s, e) => s + parseFloat(e.entry_price||0)*parseFloat(e.qty||0), 0);
         const totalPnlEsc = _modalEntries.reduce((s, e) => s + parseFloat(e.pnl_usdt||0), 0);
+        const liveQty = parseFloat(position.binance_quantity ?? position.quantity ?? 0);
+        const liveInvested = parseFloat(position.binance_invested_usdt ?? position.invested_usdt ?? 0);
+        const livePnl = parseFloat(position.binance_unrealized_pnl ?? position.unrealized_pnl ?? position.pnl ?? 0);
         // Rows: placeholder for missing indices + real entries
         let rows = '';
         for (let _mi = 1; _mi < _modalMaxIdx; _mi++) {
@@ -2833,6 +3058,9 @@ function showPositionDetailModal(symbol, positionId, status) {
         }).join('');
         return `<div class="modal-section">
             <h4>📊 ESCALAMIENTOS (${_modalEntries.length} activas, idx máx ${_modalMaxIdx})</h4>
+            <div style="margin:0 0 8px 0;color:#b8bcc8;font-size:12px;line-height:1.4">
+                La posición operable real es la posición neta viva de Binance. Las filas de escalonamiento son historial/enriquecimiento DB y no representan exposición independiente stoppeable.
+            </div>
             <div style="overflow-x:auto">
             <table style="width:100%;font-size:12px;border-collapse:collapse">
                 <thead><tr style="color:#888;border-bottom:1px solid #333">
@@ -2847,12 +3075,18 @@ function showPositionDetailModal(symbol, positionId, status) {
                 </tr></thead>
                 <tbody>${rows}</tbody>
                 <tfoot><tr style="border-top:1px solid #444;font-weight:600;color:#ccc">
-                    <td colspan="3" style="padding:4px 6px">TOTAL (entradas disponibles)</td>
+                    <td colspan="3" style="padding:4px 6px">TOTAL histórico DB (escalonamientos)</td>
                     <td style="padding:4px 6px;color:#888">~$${fmt(totalCost)}</td>
                     <td style="padding:4px 6px" class="${totalPnlEsc>=0?'positive':'negative'}">${totalPnlEsc>=0?'+':''}${fmt(totalPnlEsc)}</td>
                     <td colspan="3"></td>
                 </tr></tfoot>
             </table>
+            </div>
+            <div style="margin-top:8px;border-top:1px solid #333;padding-top:8px;color:#d6d8df;font-size:12px">
+                <strong>Binance live ahora:</strong>
+                qty ${fmt(liveQty, 4)} |
+                notional $${fmt(liveInvested)} |
+                PnL ${livePnl >= 0 ? '+' : ''}${fmt(livePnl)} USDT
             </div>
         </div>`;
     })() : '';
@@ -2868,13 +3102,14 @@ function showPositionDetailModal(symbol, positionId, status) {
                     <div class="modal-section">
                         <h4>📍 ENTRADA</h4>
                         <div class="detail-grid">
-                            <div><label>Precio:</label><span>$${fmt(position.entry_price)}</span></div>
-                            <div><label>Cantidad:</label><span>${fmt(position.quantity, 4)}</span></div>
-                            <div><label>Invertido:</label><span>$${fmt(position.invested_usdt || (position.entry_price * position.quantity))} USDT</span></div>
+                            <div><label>Precio Binance:</label><span>$${fmt(position.binance_entry_price ?? position.entry_price)}</span></div>
+                            <div><label>Cantidad Binance:</label><span>${fmt(position.binance_quantity ?? position.quantity, 4)}</span></div>
+                            <div><label>Notional Binance:</label><span>$${fmt((position.binance_invested_usdt ?? position.invested_usdt) || (position.entry_price * position.quantity))} USDT</span></div>
                             <div><label>Apertura:</label><span>${fmtModalDate(position.entry_time)}</span></div>
                             <div><label>Perfil:</label><span>${_profileBadge}</span></div>
                             <div><label>Modo:</label><span>${_modeBadge}</span></div>
                             <div><label>Contexto:</label><span>${_contextBadge}</span></div>
+                            <div><label>Verificación:</label><span>${_truthBadge}</span></div>
                         </div>
                     </div>
                     <div class="modal-section">
@@ -2943,7 +3178,7 @@ function showPositionDetailModal(symbol, positionId, status) {
                         <h4>💰 ${status === 'open' ? 'RESULTADO ACTUAL' : 'RESULTADO FINAL'}</h4>
                         <div class="detail-grid">
                             <div><label>Precio ${status === 'open' ? 'Actual' : 'Salida'}:</label><span>$${fmt(status === 'open' ? position.current_price : position.exit_price, 5)}</span></div>
-                            <div><label>PnL Real:</label><span class="${actualPnl >= 0 ? 'positive' : 'negative'}">${actualPnl >= 0 ? '+' : ''}${fmt(actualPnl)} USDT</span></div>
+                            <div><label>PnL Live Binance:</label><span class="${actualPnl >= 0 ? 'positive' : 'negative'}">${actualPnl >= 0 ? '+' : ''}${fmt(actualPnl)} USDT</span></div>
                             <div><label>vs Esperado:</label><span class="${diff >= 0 ? 'positive' : 'negative'}">${diff >= 0 ? '↑' : '↓'} ${Math.abs(diff).toFixed(2)} USDT</span></div>
                             <div><label>Accuracy:</label><span>${fmtAccuracy(actualPnl, expectedPnl)}</span></div>
                         </div>
@@ -5572,7 +5807,13 @@ function renderCommissionPanel(status) {
 
 async function updateDashboard() {
     const data = await fetchDashboardData();
-    if (!data) return;
+    if (!data) {
+        await hydrateCriticalPanels();
+        return;
+    }
+
+    // Keep environment pill in sync even when /dashboard/config gating ran before runtime settled.
+    hydrateEnvironmentBadge();
 
     renderSystemStatus(data.system_status, data.unified_status);
     renderExecutiveSummary(data);
@@ -5581,7 +5822,24 @@ async function updateDashboard() {
     renderBalance(data.balance);
     renderPnlHistory(data.pnl_history);
     renderProfitTracker(data.pnl_by_close_reason);
-    renderOpenPositions(data.open_positions);
+    let openPositionsData = data.open_positions;
+    const summaryOpenPositions = Array.isArray(openPositionsData?.positions) ? openPositionsData.positions : [];
+    if (!summaryOpenPositions.length) {
+        // Fallback: summary can be stale/empty while dedicated endpoint already has live positions.
+        try {
+            const openRes = await _fetchWithTimeout(`${API_BASE}/positions/open`, { headers: _authHeaders() }, 15000);
+            if (openRes.ok) {
+                const liveOpen = await openRes.json();
+                if (Array.isArray(liveOpen?.positions)) {
+                    openPositionsData = liveOpen;
+                }
+            }
+        } catch (_) {
+            // Keep summary data if direct endpoint fails.
+        }
+    }
+
+    renderOpenPositions(openPositionsData);
     renderExpectativaVsRealidad(data);
     renderSelectionObservability(data.selection_observability);
     updateEntryEvidence();
@@ -5605,7 +5863,7 @@ async function updateDashboard() {
     // ── New tab renders ────────────────────────────────────────────────────────
     renderBTCContext(data.market_regime);
     renderPairScanner(data.pair_screener);
-    renderPredEvalMarket(data.open_positions);
+    renderPredEvalMarket(openPositionsData || data.open_positions);
     renderSignalsMarket(data.signals);
     renderMarketHeatmap(data.daily_ticker);
     renderPnlSvgChart('pnlChartSvg', data.pnl_history);
@@ -6876,6 +7134,9 @@ async function controlAction(path) {
             const txt = await res.text();
             throw new Error(txt || `HTTP ${res.status}`);
         }
+        if (path === '/control/resume-all') {
+            await ensureResumeFullyCleared();
+        }
         _cachedData = null;
         await updateDashboard();
         if (statusEl) statusEl.textContent = `✅ Acción ejecutada: ${actionLabel}`;
@@ -6884,6 +7145,33 @@ async function controlAction(path) {
         if (statusEl) statusEl.textContent = `❌ Falló: ${actionLabel} (${e.message})`;
         pushControlAudit(actionLabel, `Error: ${e.message}`, 'error');
         console.error('Control error:', e);
+    }
+}
+
+async function ensureResumeFullyCleared() {
+    try {
+        const statusRes = await _fetchWithTimeout(`${API_BASE}/control/status`, { headers: _authHeaders() });
+        if (!statusRes.ok) return;
+        const status = await statusRes.json();
+        const pauseActive = Boolean(status?.pause_new_entries?.active);
+        const effective = String(status?.unified_status?.effective_state || '').toUpperCase();
+        const runningFull = effective === 'RUNNING_FULL' || effective === 'RUNNING';
+        if (!pauseActive && runningFull) return;
+
+        const headers = _authHeaders();
+        await fetch(`${API_BASE}/control/pause-new-entries`, {
+            method: 'DELETE',
+            headers,
+        });
+        if (!runningFull || String(status?.system_status?.state || '').toUpperCase() === 'PAUSED') {
+            await fetch(`${API_BASE}/control/start`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ reason: 'dashboard resume fallback' }),
+            });
+        }
+    } catch (e) {
+        console.warn('[dashboard] resume verification fallback failed:', e);
     }
 }
 
@@ -7303,6 +7591,36 @@ function renderPredVsRealChart(containerId, expectativaData) {
 
 document.addEventListener('DOMContentLoaded', async () => {
     await _apiKeyReady;
+    try {
+        const configRes = await fetch(`${API_BASE}/dashboard/config`);
+        if (configRes.ok) {
+            const cfg = await configRes.json();
+            const isStaging = String(cfg.environment || '').toLowerCase() === 'staging';
+            const hideNodes = [
+                document.getElementById('tab-super-mimic'),
+                document.getElementById('runSmartBacktestBtn'),
+                document.getElementById('controlPauseBtn'),
+                document.getElementById('controlStopBtn'),
+                document.getElementById('controlStartBtn'),
+                document.getElementById('runBacktestBtn'),
+            ];
+            hideNodes.forEach(node => {
+                if (!node) return;
+                if (isStaging) {
+                    node.style.display = 'none';
+                    node.setAttribute('aria-hidden', 'true');
+                }
+            });
+            const controlTabBtn = document.querySelector('[data-tab="tab-control"]');
+            if (controlTabBtn && isStaging) {
+                controlTabBtn.style.display = 'none';
+            }
+        }
+    } catch (err) {
+        console.warn('Staging-only UI gating unavailable:', err);
+    }
+    hydrateEnvironmentBadge();
+    hydrateCriticalPanels();
     _restoreSmartRunId();
 
     // ── Tab navigation ────────────────────────────────────────────────────────
@@ -7507,6 +7825,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     updateDashboard();
+    updateStagingPanel();
     updateHealthAndErrors();
     updateReconciliation();
     updateRangeScalpDual();
@@ -7525,6 +7844,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     setInterval(updateSRPoolPanel, 30000);        // SR-pool panel every 30s
     setInterval(updateOperatorAlerts, 30000);   // Operator alerts every 30s
     setInterval(updateBacktestProgressWidget, BACKTEST_PROGRESS_POLL_MS);
+
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+            fetchDashboardData(true);
+            if (_cachedData) renderOpenPositions(_cachedData.open_positions);
+        }
+    });
+    window.addEventListener('focus', () => {
+        fetchDashboardData(true);
+    });
+
     // Toggle MXN re-renders open positions
     const toggleMxnEl = document.getElementById('toggleMxn');
     if (toggleMxnEl) toggleMxnEl.addEventListener('change', () => {

@@ -357,12 +357,23 @@ class AutonomousSignalGenerator:
             # ── Support/Resistance features (shadow, no-look-ahead) ───────────
             try:
                 from support_resistance import compute_sr_features as _compute_sr
+                from config_helpers import get_staged_entry_regime_config as _get_staged_cfg
+                _cfg_runtime = getattr(self, '_settings', None) or getattr(self, 'settings', None)
+                _regime_runtime = str(getattr(self, '_regime_mode', None) or getattr(self, 'regime_mode', None) or 'RANGE_SCALP').upper()
+                _sr_cfg = _get_staged_cfg(_cfg_runtime, _regime_runtime) if _cfg_runtime is not None else {}
+                _sr_lookback = int(_sr_cfg.get('sr_lookback_bars', 96) or 96)
+                _sr_order = int(_sr_cfg.get('sr_pivot_order', 3) or 3)
+                _sr_band_atr = float(_sr_cfg.get('sr_near_band_atr_mult', 0.25) or 0.25)
+                _sr_band_px = float(_sr_cfg.get('sr_near_band_price_pct', 0.0025) or 0.0025)
                 _atr_for_sr = analysis.get('indicators', {}).get('atr')
                 _sr = _compute_sr(
                     closes, highs, lows, volumes,
                     current_price=closes[-1],
                     atr=_atr_for_sr,
-                    lookback=min(96, len(closes)),
+                    lookback=min(max(20, _sr_lookback), len(closes)),
+                    order=max(1, _sr_order),
+                    near_band_atr_mult=max(0.0, _sr_band_atr),
+                    near_band_price_pct=max(0.0, _sr_band_px),
                 )
                 for _k, _v in _sr.items():
                     analysis.setdefault(_k, _v)

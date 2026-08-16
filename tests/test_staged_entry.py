@@ -388,6 +388,39 @@ def _direction_row(regime="SPOT_BULL", side="LONG", base=100.0):
     }
 
 
+def test_staging_truth_snapshot_exposes_production_parity_contract():
+    cfg = FakeSettings()
+    db = FakeDBClient()
+    db.ready.append({
+        "id": 1,
+        "symbol": "ETHUSDT",
+        "trade_type": "spot",
+        "regime_mode": "SPOT_BULL",
+        "status": "validated",
+        "created_at": datetime.now(timezone.utc),
+        "data": {},
+    })
+    db.ready.append({
+        "id": 2,
+        "symbol": "SOLUSDT",
+        "trade_type": "spot",
+        "regime_mode": "SPOT_BULL",
+        "status": "discarded",
+        "created_at": datetime.now(timezone.utc),
+        "data": {},
+    })
+
+    snapshot = staged_entry.get_staging_truth_snapshot(cfg, "SPOT_BULL", db_client=db)
+
+    assert snapshot["regime_mode"] == "SPOT_BULL"
+    assert snapshot["mirror_mode"] == "shadow"
+    assert snapshot["truth_window_days"] == 7
+    assert snapshot["staging_enabled"] is True
+    assert snapshot["last_7d_candidates"] >= 2
+    assert snapshot["last_7d_validated"] >= 1
+    assert snapshot["last_7d_discarded"] >= 1
+
+
 def test_geometry_anchor_requires_more_than_flat_bps_when_stop_is_wide():
     """s111: with direction_geometry_anchor_enabled, a tick that would have
     "confirmed" under a flat 1bps threshold must be held as noise when the
@@ -1280,6 +1313,102 @@ def test_stage_kind_progresses_setup_trigger_risk(fake_db, settings):
     assert row["status"] == "validated"
     assert row["data"]["stage_kind"] == "risk_authorized"
     assert row["data"]["stage_reason"] == "TRIGGER_FIRED_VALIDATED"
+
+
+def test_staging_retention_policy_exposes_7d_cleanup_contract(fake_db, settings):
+    policy = staged_entry.get_staging_retention_policy(settings, "SPOT_BULL")
+    assert policy["retention_days"] == 7
+    assert policy["status_filter"] == ["discarded", "opened"]
+    assert policy["keep_validated_recent"] is True
+
+
+def test_staging_persistence_audit_requires_traceable_fields(fake_db, settings):
+    fake_db.ready.append({
+        "id": 99,
+        "symbol": "ETHUSDT",
+        "trade_type": "spot",
+        "regime_mode": "SPOT_BULL",
+        "status": "validated",
+        "created_at": datetime.now(timezone.utc),
+        "signal_meta": {"expected_side": "LONG"},
+        "config_snapshot": {"required_positive_checks": 2},
+        "data": {"candidate_revision": 1, "stage_reason": "SETUP_CAPTURED"},
+    })
+
+    audit = staged_entry.get_staging_persistence_audit(fake_db, "SPOT_BULL")
+
+    assert audit["total_candidates"] >= 1
+    assert audit["with_signal_meta"] >= 1
+    assert audit["with_config_snapshot"] >= 1
+    assert audit["with_data"] >= 1
+    assert audit["with_candidate_revision"] >= 1
+    assert audit["ok"] is True
+
+
+def test_staging_promotion_gate_requires_truth_and_persistence(fake_db, settings):
+    fake_db.ready = [
+        {
+            "id": 1,
+            "symbol": "ETHUSDT",
+            "trade_type": "spot",
+            "regime_mode": "SPOT_BULL",
+            "status": "validated",
+            "created_at": datetime.now(timezone.utc),
+            "signal_meta": {"expected_side": "LONG"},
+            "config_snapshot": {"required_positive_checks": 2},
+            "data": {"candidate_revision": 1, "stage_reason": "SETUP_CAPTURED"},
+        },
+        {
+            "id": 2,
+            "symbol": "SOLUSDT",
+            "trade_type": "spot",
+            "regime_mode": "SPOT_BULL",
+            "status": "discarded",
+            "created_at": datetime.now(timezone.utc),
+            "signal_meta": {"expected_side": "LONG"},
+            "config_snapshot": {"required_positive_checks": 2},
+            "data": {"candidate_revision": 1, "stage_reason": "SETUP_CAPTURED"},
+        },
+        {
+            "id": 3,
+            "symbol": "BTCUSDT",
+            "trade_type": "spot",
+            "regime_mode": "SPOT_BULL",
+            "status": "validated",
+            "created_at": datetime.now(timezone.utc),
+            "signal_meta": {"expected_side": "LONG"},
+            "config_snapshot": {"required_positive_checks": 2},
+            "data": {"candidate_revision": 1, "stage_reason": "SETUP_CAPTURED"},
+        },
+        {
+            "id": 4,
+            "symbol": "BNBUSDT",
+            "trade_type": "spot",
+            "regime_mode": "SPOT_BULL",
+            "status": "validated",
+            "created_at": datetime.now(timezone.utc),
+            "signal_meta": {"expected_side": "LONG"},
+            "config_snapshot": {"required_positive_checks": 2},
+            "data": {"candidate_revision": 1, "stage_reason": "SETUP_CAPTURED"},
+        },
+        {
+            "id": 5,
+            "symbol": "XRPUSDT",
+            "trade_type": "spot",
+            "regime_mode": "SPOT_BULL",
+            "status": "validated",
+            "created_at": datetime.now(timezone.utc),
+            "signal_meta": {"expected_side": "LONG"},
+            "config_snapshot": {"required_positive_checks": 2},
+            "data": {"candidate_revision": 1, "stage_reason": "SETUP_CAPTURED"},
+        },
+    ]
+
+    gate = staged_entry.get_staging_promotion_gate(fake_db, settings, "SPOT_BULL")
+
+    assert gate["truth_ok"] is True
+    assert gate["persistence_ok"] is True
+    assert gate["ready"] is True
 
 
 def test_cleanup_old(fake_db, settings):

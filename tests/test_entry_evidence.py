@@ -101,6 +101,16 @@ def test_shadow_readiness_endpoint_reports_component_states(monkeypatch):
 
     class ShadowDb(EvidenceDb):
         def execute_query(self, sql, params=None):
+            if "lifecycle_runner_profit_floor_shadow" in sql:
+                assert params == (5.5, 5.5, 5.5)
+                return [{
+                    "sso_closes": 12,
+                    "would_defer": 4,
+                    "truncated_profit_usdt": 6.25,
+                    "winners_at_or_above_floor": 3,
+                    "loss_exits_preserved": 5,
+                    "last_at": "2026-08-15T00:00:00+00:00",
+                }]
             if "FROM trades_audit" in sql and "lifecycle_structure_decision" in sql:
                 return [{"total": 30, "available": 30, "actionable": 8}]
             if "FROM trades_audit" in sql:
@@ -136,9 +146,16 @@ def test_shadow_readiness_endpoint_reports_component_states(monkeypatch):
     assert states["directional_v2"] == "COLLECTING"
     assert states["ug_loss_v2"] == "COLLECTING"
     assert states["lifecycle_structure"] == "ACTIVE"
+    assert states["staging_runner_profit_floor"] == "COLLECTING"
     assert states["range_reversion"] == "COLLECTING"
     assert states["position_telemetry_watcher"] == "ACTIVE"
     assert states["hard_risk_backstop"] == "ACTIVE"
+    runner = next(item for item in payload["components"] if item["id"] == "staging_runner_profit_floor")
+    assert runner["mode"] == "shadow"
+    assert "challenger STG=$5.50" in runner["summary"]
+    assert "sizing=$150, SSO-3=off, PRS futures=off" in runner["summary"]
+    assert "4/12 cierres SSO would-defer" in runner["summary"]
+    assert "$6.25 de ganancia truncada" in runner["summary"]
 
 
 def test_evidence_does_not_promote_legacy_or_missing_snapshot():

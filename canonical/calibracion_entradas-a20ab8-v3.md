@@ -5,6 +5,7 @@ status: active
 created_at: 2026-07-22
 merged_from: Calibracion_Entradas-a20ab8-v2.md
 supersedes: Calibracion_Entradas-a20ab8-v2.md
+updated_at: 2026-08-16
 ---
 
 ## Arquitectura canónica de calibración de entrada
@@ -24,6 +25,43 @@ supersedes: Calibracion_Entradas-a20ab8-v2.md
   - `futures_kelly_max_pct_liquid >= 0.90`
 - Cualquier endpoint de aplicación de configuración, carga de overrides desde DB o activación de perfiles debe respetar estos pisos.
 - El objetivo de la recalibración es optimizar selección, timing y calidad de entrada/salida, no reducir la capacidad de capitalización por sizing conservador.
+
+### Actualización operativa (2026-08-16) - paridad Kelly PROD/STG
+
+Se corrigió la diferencia de tamaño observada entre aperturas nativas de STG y
+PROD. La causa no era solo `FUTURES_KELLY_BASE_USDT=150`: el dry-run aplicaba
+además un factor de margen de `0.30` y partía de una base de capital distinta,
+produciendo un doble recorte antes de abrir.
+
+- Política Kelly STG alineada con PROD:
+  - `kelly_base_usdt = 150`
+  - `kelly_max_usdt = 2500`
+  - `kelly_dynamic_base_pct = 0.22`
+  - `kelly_max_pct_liquid = 0.90`
+  - `futures_kelly_base_usdt = 200`
+  - `futures_kelly_max_usdt = 2500`
+  - `futures_kelly_max_pct_liquid = 0.90`
+  - `futures_kelly_cap_pct = 0.90`
+- Base de capital comparable:
+  - `dry_run_simulated_capital_usdt = 2324`, snapshot de
+    `totalWalletBalance` PROD del 2026-08-16.
+  - `dry_run_futures_margin_fraction = 1.0` elimina el doble recorte exclusivo
+    de dry-run.
+  - El líquido simulado descuenta margen comprometido por posiciones simuladas.
+- Invariantes de seguridad no negociables:
+  - `APP_ENV=staging`
+  - `DRY_RUN=true`
+  - `ALLOW_REAL_TRADING=false`
+  - DB, Redis y puerto separados de PROD.
+- Alcance de la paridad:
+  - Se igualan política Kelly, leverage y base de capital.
+  - Los tickets individuales aún pueden diferir por probabilidad, fuerza,
+    perfil A/B/C, régimen, concentración, correlación y capital ya comprometido.
+  - La validación final requiere una apertura STG nativa posterior al despliegue;
+    datos seed o reconciliados no prueban paridad.
+
+La operación, recertificación de capital y comandos de verificación viven en
+`canonical/staging_env.md`.
 
 ### Actualización operativa (s121, 2026-08-07) - calibración SR ganadora aplicada
 

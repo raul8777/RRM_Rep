@@ -70,6 +70,10 @@ def run_sweep(design: DesignSpec) -> Dict[str, Any]:
         cmd += ["--max-cycles", str(design.max_cycles)]
     if design.lifecycle:
         cmd += ["--lifecycle"]
+    if design.forced_regime:
+        cmd += ["--forced-regime", str(design.forced_regime)]
+    if design.profiles and len(design.profiles) == 1:
+        cmd += ["--profile", str(design.profiles[0])]
 
     grid_file: Optional[str] = None
     if design.strategy == "custom_grid":

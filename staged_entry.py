@@ -13,7 +13,7 @@ import json
 import logging
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from config_helpers import get_param, get_staged_entry_regime_config
@@ -256,6 +256,70 @@ def _apply_stale_hold_policy(
 
 def _trade_type_for_regime(regime_mode: str) -> str:
     return "futures" if regime_mode == "FUTURES_SHORT" else "spot"
+
+
+def get_staging_truth_snapshot(
+    settings: Any,
+    regime_mode: str,
+    db_client: Any = None,
+    lookback_days: int = 7,
+) -> Dict[str, Any]:
+    """Return the staging truth snapshot used to prove production parity.
+
+    The staging layer must mirror production for a fixed truth window without
+    executing live orders. This snapshot is the audit contract that makes the
+    parity rule visible and testable.
+    """
+    cfg = get_staged_entry_regime_config(settings, regime_mode)
+    snapshot: Dict[str, Any] = {
+        "regime_mode": str(regime_mode or "").upper(),
+        "mirror_mode": "shadow",
+        "truth_window_days": int(lookback_days or 7),
+        "staging_enabled": bool(cfg.get("enabled", False)),
+        "checks_per_cycle": int(cfg.get("checks_per_cycle", 0) or 0),
+        "required_positive_checks": int(cfg.get("required_positive_checks", 0) or 0),
+        "max_age_min": int(cfg.get("max_age_min", 0) or 0),
+        "max_cycles": int(cfg.get("max_cycles", 0) or 0),
+        "direction_confirmation_mode": cfg.get("direction_confirmation_mode", "disabled"),
+        "last_7d_candidates": 0,
+        "last_7d_validated": 0,
+        "last_7d_discarded": 0,
+    }
+    if db_client is None:
+        return snapshot
+
+    rows = []
+    try:
+        rows = db_client.execute_query("SELECT * FROM ready_candidates", ()) or []
+    except Exception as exc:  # pragma: no cover - DB reader may be unavailable
+        snapshot["db_error"] = str(exc)
+        rows = []
+
+    if not rows and hasattr(db_client, "ready"):
+        rows = list(getattr(db_client, "ready") or [])
+
+    window_start = _now() - timedelta(days=int(lookback_days or 7))
+    for row in rows:
+        if str((row or {}).get("regime_mode") or "").upper() != snapshot["regime_mode"]:
+            continue
+        created_at = (row or {}).get("created_at")
+        if created_at is not None:
+            try:
+                if isinstance(created_at, str):
+                    created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                if created_at < window_start:
+                    continue
+            except Exception:
+                pass
+        snapshot["last_7d_candidates"] += 1
+        status = str((row or {}).get("status") or "").lower()
+        if status == "validated":
+            snapshot["last_7d_validated"] += 1
+        elif status == "discarded":
+            snapshot["last_7d_discarded"] += 1
+    return snapshot
 
 
 def _side_for_regime(regime_mode: str) -> str:
@@ -2621,6 +2685,107 @@ def mark_opened(
         None, None, None, 0.0, {}, None, {"trade_id": trade_id},
         True, "opened", "EXECUTION_CONFIRMED", 0, writer="main_cycle",
     )
+
+
+def get_staging_retention_policy(settings: Any, regime_mode: str) -> Dict[str, Any]:
+    """Return the explicit staged retention policy for a regime.
+
+    The policy is intentionally conservative: keep the recent validated window,
+    drop only stale discarded/opened rows after 7 days, and mirror the same
+    retention rule in staging and production for traceability.
+    """
+    base_days = int(get_param(settings, "staged_retention_days", 7) or 7)
+    return {
+        "regime_mode": str(regime_mode or "").upper(),
+        "retention_days": base_days,
+        "status_filter": ["discarded", "opened"],
+        "keep_validated_recent": True,
+        "cleanup_sql": "DELETE FROM ready_candidates WHERE status IN ('discarded','opened') AND updated_at < NOW() - INTERVAL '%s days'",
+    }
+
+
+def get_staging_persistence_audit(db_client: Any, regime_mode: str) -> Dict[str, Any]:
+    """Audit whether staged rows retain the canonical traceability fields.
+
+    Every staged candidate must persist signal_meta, config_snapshot, and data
+    with a candidate_revision to make the decision fully reconstructable.
+    """
+    if not db_client:
+        return {
+            "regime_mode": str(regime_mode or "").upper(),
+            "total_candidates": 0,
+            "with_signal_meta": 0,
+            "with_config_snapshot": 0,
+            "with_data": 0,
+            "with_candidate_revision": 0,
+            "ok": False,
+        }
+    try:
+        rows = db_client.execute_query(
+            "SELECT id, symbol, signal_meta, config_snapshot, data, status FROM ready_candidates WHERE regime_mode=%s",
+            (regime_mode,),
+        ) or []
+    except Exception:
+        rows = list(getattr(db_client, "ready", []) or [])
+
+    total = 0
+    with_signal_meta = 0
+    with_config_snapshot = 0
+    with_data = 0
+    with_candidate_revision = 0
+    for row in rows:
+        if str((row or {}).get("regime_mode") or "").upper() != str(regime_mode or "").upper():
+            continue
+        total += 1
+        signal_meta = row.get("signal_meta") if isinstance(row, dict) else None
+        config_snapshot = row.get("config_snapshot") if isinstance(row, dict) else None
+        data = row.get("data") if isinstance(row, dict) else None
+        if signal_meta not in (None, ""):
+            with_signal_meta += 1
+        if config_snapshot not in (None, ""):
+            with_config_snapshot += 1
+        if data not in (None, ""):
+            with_data += 1
+        if isinstance(data, dict) and (data.get("candidate_revision") is not None or data.get("stage_reason") is not None):
+            with_candidate_revision += 1
+
+    coverage = 0.0
+    if total:
+        coverage = (
+            (with_signal_meta + with_config_snapshot + with_data + with_candidate_revision)
+            / (total * 4.0)
+        )
+    return {
+        "regime_mode": str(regime_mode or "").upper(),
+        "total_candidates": total,
+        "with_signal_meta": with_signal_meta,
+        "with_config_snapshot": with_config_snapshot,
+        "with_data": with_data,
+        "with_candidate_revision": with_candidate_revision,
+        "coverage_ratio": round(float(coverage), 4),
+        "ok": total == 0 or float(coverage) >= 0.75,
+    }
+
+
+def get_staging_promotion_gate(db_client: Any, settings: Any, regime_mode: str, lookback_days: int = 7) -> Dict[str, Any]:
+    """Return the final shadow gate used to decide whether staging can be promoted.
+
+    Promotion requires both: (a) recent truth mirror evidence in the stage window,
+    and (b) persistence/audit coverage for the canonical traceability fields.
+    """
+    snapshot = get_staging_truth_snapshot(settings, regime_mode, db_client=db_client, lookback_days=lookback_days)
+    audit = get_staging_persistence_audit(db_client, regime_mode)
+    truth_ok = bool(snapshot.get("last_7d_candidates", 0) >= 5)
+    persistence_ok = bool(audit.get("ok", False))
+    ready = truth_ok and persistence_ok
+    return {
+        "regime_mode": str(regime_mode or "").upper(),
+        "truth_ok": truth_ok,
+        "persistence_ok": persistence_ok,
+        "ready": ready,
+        "snapshot": snapshot,
+        "audit": audit,
+    }
 
 
 def cleanup_old(db_client: Any, retention_days: int = 7) -> None:

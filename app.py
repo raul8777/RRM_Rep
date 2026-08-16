@@ -19,6 +19,7 @@ import config_helpers
 from signal_store import add_signal, get_signals, get_recent_signals, set_db_client
 from strategy import parse_signal
 import run_trades
+import staged_entry
 import sr_pool_scanner
 import analysis_cycle
 from analysis_cache import analysis_cache
@@ -46,15 +47,221 @@ from binance_truth_guard import (
 )
 from trade_utils import get_min_notional_delta, get_symbol_filters
 from entry_evidence import build_entry_evidence, build_sr_hunt_48h_report
+from dashboard_truth import verify_open_dashboard_row, summarize_closed_position_verification
 
 settings = get_settings()
+APP_ENV = str(os.getenv("APP_ENV", "production")).strip().lower() or "production"
+APP_ENV_LABEL = "STAGING" if APP_ENV == "staging" else "PRODUCTION"
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_staging_compare_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate staging-vs-production decision deltas into a summary for evidence dashboards.
+
+    Each row is expected to represent one divergence event with keys such as:
+    - decision_domain
+    - status
+    - prod_selected
+    - staging_selected
+    - delta_total
+    - reason_prod
+    - reason_staging
+    """
+    diff_rows = list(rows or [])
+    total_delta = sum(_as_float(r.get("delta_total")) for r in diff_rows)
+
+    status_counts: Dict[str, int] = {}
+    domain_summary: Dict[str, Dict[str, Any]] = {}
+    for row in diff_rows:
+        status = str(row.get("status") or "unknown").strip() or "unknown"
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+        domain = str(row.get("decision_domain") or "general").strip() or "general"
+        domain_entry = domain_summary.setdefault(domain, {
+            "diffs": 0,
+            "delta_total": 0.0,
+            "status": status,
+            "reasons": [],
+        })
+        domain_entry["diffs"] += 1
+        domain_entry["delta_total"] += _as_float(row.get("delta_total"))
+        domain_entry["status"] = status if domain_entry["status"] == "rollback_needed" else domain_entry["status"]
+        reason_prod = str(row.get("reason_prod") or "").strip()
+        reason_staging = str(row.get("reason_staging") or "").strip()
+        if reason_prod:
+            domain_entry["reasons"].append(reason_prod)
+        if reason_staging:
+            domain_entry["reasons"].append(reason_staging)
+
+    domains = {}
+    for domain, payload in domain_summary.items():
+        domains[domain] = {
+            "diffs": payload["diffs"],
+            "delta_total": round(payload["delta_total"], 4),
+            "status": payload["status"],
+            "reasons": payload["reasons"][:10],
+        }
+
+    return {
+        "total_diff_count": len(diff_rows),
+        "total_delta": round(total_delta, 4),
+        "signals": {k: v for k, v in sorted(status_counts.items())},
+        "domains": domains,
+        "environment": APP_ENV,
+        "environment_label": APP_ENV_LABEL,
+    }
+
+
+def ensure_staging_runtime_ready() -> Dict[str, Any]:
+    """Bootstrap staging-specific runtime metadata and comparison table if missing."""
+    if APP_ENV != "staging":
+        return {"ok": True, "environment": APP_ENV, "environment_label": APP_ENV_LABEL, "status": "skipped"}
+    if db_client is None:
+        return {"ok": False, "environment": APP_ENV, "environment_label": APP_ENV_LABEL, "error": "db_client_unavailable"}
+
+    try:
+        db_client.execute_update(
+            """
+            CREATE TABLE IF NOT EXISTS staging_decision_compare (
+                id SERIAL PRIMARY KEY,
+                ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                decision_run_id TEXT NOT NULL,
+                parent_trade_ref TEXT,
+                market_snapshot_id TEXT,
+                decision_domain TEXT NOT NULL DEFAULT 'general',
+                status TEXT NOT NULL DEFAULT 'stable',
+                prod_selected BOOLEAN NOT NULL DEFAULT FALSE,
+                staging_selected BOOLEAN NOT NULL DEFAULT FALSE,
+                delta_total NUMERIC(18,8) NOT NULL DEFAULT 0,
+                reason_prod TEXT,
+                reason_staging TEXT,
+                config_hash_prod TEXT,
+                config_hash_staging TEXT,
+                migration_hash_prod TEXT,
+                migration_hash_staging TEXT,
+                prod_version TEXT,
+                staging_version TEXT,
+                metadata JSONB NOT NULL DEFAULT '{}'
+            )
+            """,
+            (),
+        )
+        db_client.execute_update(
+            """
+            CREATE TABLE IF NOT EXISTS trading_runtime_state (
+                key TEXT PRIMARY KEY,
+                value JSONB NOT NULL DEFAULT '{}',
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            (),
+        )
+        payload = {
+            "environment": APP_ENV,
+            "environment_label": APP_ENV_LABEL,
+            "ready": True,
+            "bootstrapped_at": datetime.now(timezone.utc).isoformat(),
+            "status": "staging_runtime_ready",
+        }
+        db_client.execute_update(
+            """
+            INSERT INTO trading_runtime_state (key, value, updated_at)
+            VALUES (%s, %s::jsonb, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            """,
+            ("staging_runtime_bootstrap", json.dumps(payload, default=str)),
+        )
+        return {"ok": True, "environment": APP_ENV, "environment_label": APP_ENV_LABEL, "status": "ready"}
+    except Exception as exc:
+        return {"ok": False, "environment": APP_ENV, "environment_label": APP_ENV_LABEL, "error": str(exc)}
+
+
+def record_staging_decision_compare(
+    *,
+    decision_run_id: str,
+    parent_trade_ref: Optional[str] = None,
+    market_snapshot_id: Optional[str] = None,
+    decision_domain: str = "general",
+    status: str = "stable",
+    prod_selected: bool = False,
+    staging_selected: bool = False,
+    delta_total: float = 0.0,
+    reason_prod: Optional[str] = None,
+    reason_staging: Optional[str] = None,
+    config_hash_prod: Optional[str] = None,
+    config_hash_staging: Optional[str] = None,
+    migration_hash_prod: Optional[str] = None,
+    migration_hash_staging: Optional[str] = None,
+    prod_version: Optional[str] = None,
+    staging_version: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Persist one prod-vs-staging comparison record for the evidence ledger."""
+    if db_client is None:
+        return {"ok": False, "error": "db_client_unavailable"}
+
+    try:
+        sql = """
+            INSERT INTO staging_decision_compare (
+                decision_run_id,
+                parent_trade_ref,
+                market_snapshot_id,
+                decision_domain,
+                status,
+                prod_selected,
+                staging_selected,
+                delta_total,
+                reason_prod,
+                reason_staging,
+                config_hash_prod,
+                config_hash_staging,
+                migration_hash_prod,
+                migration_hash_staging,
+                prod_version,
+                staging_version,
+                metadata
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        params = (
+            str(decision_run_id or "unknown"),
+            parent_trade_ref,
+            market_snapshot_id,
+            str(decision_domain or "general"),
+            str(status or "stable"),
+            bool(prod_selected),
+            bool(staging_selected),
+            float(delta_total),
+            reason_prod,
+            reason_staging,
+            config_hash_prod,
+            config_hash_staging,
+            migration_hash_prod,
+            migration_hash_staging,
+            prod_version,
+            staging_version,
+            metadata or {},
+        )
+        db_client.execute_update(sql, params)
+        return {"ok": True, "decision_run_id": str(decision_run_id or "unknown")}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 app = FastAPI(title="Binance Trading Agent")
 app.include_router(super_mimic_router)
 
-# Add CORS middleware — restrict to localhost only
+# Add CORS middleware — allow both local production and staging ports
 _CORS_ORIGINS = [
-    "http://localhost", "http://localhost:8000",
-    "http://127.0.0.1", "http://127.0.0.1:8000",
+    "http://localhost", "http://localhost:8000", "http://localhost:8001",
+    "http://127.0.0.1", "http://127.0.0.1:8000", "http://127.0.0.1:8001",
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -409,6 +616,11 @@ def _enrich_entries(entries: list, current_price: float, side: str) -> list:
 
 @app.on_event("startup")
 def startup_event():
+    try:
+        staging_ready = ensure_staging_runtime_ready()
+        print(f"Staging bootstrap: {staging_ready}")
+    except Exception as exc:
+        print(f"Staging bootstrap error (non-fatal): {exc}")
     # Set RUNNING state FIRST so cycles can execute on first iteration
     orchestrator.start(changed_by="startup", reason="System startup")
     # Sync exchange balance: import pre-existing/orphan assets as managed positions
@@ -934,6 +1146,8 @@ class CommandPayload(BaseModel):
 async def status() -> Dict[str, str]:
     return {
         "status": "ok",
+        "environment": APP_ENV,
+        "environment_label": APP_ENV_LABEL,
         "agent_mode": settings.agent_mode,
         "binance_testnet": str(settings.binance_use_testnet),
         "signal_count": str(len(get_signals())),
@@ -1228,6 +1442,11 @@ async def resume_all(payload: ControlRequest, _auth: None = Depends(_require_api
     _orchestrator_started = False
     if not orchestrator.is_running():
         _orchestrator_started = bool(orchestrator.start(changed_by="api", reason=_resume_reason))
+    else:
+        try:
+            orchestrator.should_run = True
+        except Exception:
+            pass
 
     db_client.execute_update(
         "DELETE FROM trading_runtime_state WHERE key=%s",
@@ -1244,6 +1463,23 @@ async def resume_all(payload: ControlRequest, _auth: None = Depends(_require_api
             "DELETE FROM trading_runtime_state WHERE key LIKE %s",
             ('operator_alert_%',),
         )
+
+    _trade_cycle_woke = False
+    try:
+        if getattr(orchestrator, 'trade_cycle_wake_event', None):
+            orchestrator.trade_cycle_wake_event.set()
+            _trade_cycle_woke = True
+    except Exception:
+        pass
+    try:
+        _cycle_func = getattr(orchestrator, '_trade_cycle_func', None)
+        _cycle_interval = int(getattr(orchestrator, '_trade_cycle_interval_minutes', 5) or 5)
+        _cycle_thread = getattr(orchestrator, 'trade_cycle_thread', None)
+        if callable(_cycle_func) and (_cycle_thread is None or not _cycle_thread.is_alive()):
+            orchestrator.start_trade_cycle(_cycle_func, _cycle_interval)
+            _trade_cycle_woke = True
+    except Exception:
+        pass
 
     _after_state = orchestrator.get_state()
     _after_pause = _get_pause_new_entries_status()
@@ -1267,6 +1503,7 @@ async def resume_all(payload: ControlRequest, _auth: None = Depends(_require_api
                 "orchestrator_started": _orchestrator_started,
                 "pause_cleared": bool(_before_pause.get("active")),
                 "alerts_cleared": _cleared_alert_types,
+                "trade_cycle_woke": _trade_cycle_woke,
             },
             "ts": datetime.now(timezone.utc).isoformat(),
         }
@@ -2059,9 +2296,13 @@ async def get_closed_positions(limit: int = 20) -> Dict:
                 else 'FUTURES_LONG' if _closed_trade_type == 'futures'
                 else 'SPOT_LONG'
             )
+            _closed_position_id = getattr(pos, 'position_id', None) or f"{pos.symbol}:{pos.entry_time}:{pos.exit_time}:{_closed_position_mode}"
             positions_data.append({
                 "symbol": pos.symbol,
-                "position_id": f"{pos.symbol}:{pos.entry_time}:{pos.exit_time}:{_closed_position_mode}",
+                "position_id": _closed_position_id,
+                "entry_order_id": getattr(pos, 'entry_order_id', None) or (_closed_meta.get('entry_order_id') if isinstance(_closed_meta, dict) else None),
+                "exit_order_id": getattr(pos, 'exit_order_id', None) or (_closed_meta.get('exit_order_id') if isinstance(_closed_meta, dict) else None),
+                "close_group_id": getattr(pos, 'close_group_id', None) or (_closed_meta.get('close_group_id') if isinstance(_closed_meta, dict) else None),
                 "side": pos.side,
                 "trade_type": _closed_trade_type,
                 "position_mode": _closed_position_mode,
@@ -2078,6 +2319,7 @@ async def get_closed_positions(limit: int = 20) -> Dict:
                 "exit_commission": pos.exit_commission,
                 "bounce_entry": (getattr(pos, 'metadata', None) or {}).get('bounce_entry', False),
                 **_normalize_transaction_context(getattr(pos, 'metadata', {}) or {}, _runtime_ctx),
+                **summarize_closed_position_verification(_closed_meta, pos.close_reason),
             })
             _enrich_position_with_exit_policy(positions_data[-1])
         
@@ -3117,7 +3359,59 @@ async def get_dashboard_config(request: Request) -> Dict:
         or client_host.startswith("10.")    # Private network
     )
     api_key = os.environ.get("DASHBOARD_API_KEY", "") if is_local else ""
-    return {"api_key": api_key}
+    return {
+        "api_key": api_key,
+        "environment": APP_ENV,
+        "environment_label": APP_ENV_LABEL,
+        "show_prod_only_controls": APP_ENV != "staging",
+    }
+
+
+@app.get("/metrics/staging-comparison")
+async def get_staging_comparison_metrics() -> Dict:
+    """Return a staging-vs-production decision comparison summary for evidence dashboards."""
+    try:
+        if not db_client:
+            return {"ok": False, "error": "db_client_unavailable", "summary": _build_staging_compare_summary([])}
+
+        try:
+            rows = db_client.execute_query(
+                """
+                SELECT
+                    decision_domain,
+                    status,
+                    prod_selected,
+                    staging_selected,
+                    delta_total,
+                    reason_prod,
+                    reason_staging,
+                    config_hash_prod,
+                    config_hash_staging,
+                    migration_hash_prod,
+                    migration_hash_staging,
+                    decision_run_id,
+                    parent_trade_ref,
+                    market_snapshot_id,
+                    ts
+                FROM staging_decision_compare
+                ORDER BY ts DESC
+                LIMIT 200
+                """
+            ) or []
+        except Exception as exc:
+            return {"ok": False, "error": f"staging_decision_compare_table_missing: {exc}", "summary": _build_staging_compare_summary([])}
+
+        summary = _build_staging_compare_summary(rows)
+        return {
+            "ok": True,
+            "environment": APP_ENV,
+            "environment_label": APP_ENV_LABEL,
+            "summary": summary,
+            "rows": rows,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "summary": _build_staging_compare_summary([])}
 
 
 async def _background_refresh_dashboard_summary(days: int) -> Dict:
@@ -3596,6 +3890,7 @@ async def _compute_dashboard_summary(days: int) -> Dict:
             _ov_positions = set()
         positions = position_manager.get_all_positions()
         open_list = []
+        _open_truth_rows: List[Dict[str, Any]] = []
         for symbol, pos_list in positions.items():
             # Fetch price once per symbol (avg/VWAP for dashboard unrealized PnL)
             try:
@@ -3736,7 +4031,7 @@ async def _compute_dashboard_summary(days: int) -> Dict:
             elif _trail_peak is not None and _sp_wap > 0:
                 _sp_peak_pnl_pct = round((_trail_peak - _sp_wap) / _sp_wap * 100, 2)
 
-            open_list.append({
+            _sp_row = {
                 "symbol": symbol,
                 "position_id": _sp_first.position_id,
                 "position_display_id": _short_position_id(_sp_first.position_id, symbol, _sp_first.side, "spot"),
@@ -3791,7 +4086,20 @@ async def _compute_dashboard_summary(days: int) -> Dict:
                 "btc_chg_since_entry_pct": None,
                 "metadata": _sp_meta_last,
                 **_normalize_transaction_context(_sp_meta_last, _runtime_ctx),
+            }
+            _sp_truth = verify_open_dashboard_row(_sp_row)
+            _sp_row.update(_sp_truth)
+            _open_truth_rows.append({
+                "symbol": _sp_row.get("symbol"),
+                "trade_type": _sp_row.get("trade_type"),
+                "verification_mode": _sp_row.get("verification_mode"),
+                "verification_status": _sp_row.get("verification_status"),
+                "verification_mismatch": bool(_sp_row.get("verification_mismatch")),
+                "verification_notes": list(_sp_row.get("verification_notes") or []),
+                "verification_delta_qty": _sp_row.get("verification_delta_qty"),
+                "verification_delta_unrealized_pnl": _sp_row.get("verification_delta_unrealized_pnl"),
             })
+            open_list.append(_sp_row)
             _enrich_position_with_exit_policy(open_list[-1])
             _enrich_entry_expectation(open_list[-1])
         # Add futures positions to the dashboard
@@ -3892,34 +4200,23 @@ async def _compute_dashboard_summary(days: int) -> Dict:
                 _fp_sl = fp["sl_price"]
                 _fp_tp = fp["tp_price"]
 
-                # ESC-AGG-A: Aggregate entry_price (WAP), qty, PnL from DB entries when >1 escalamiento
+                # Keep the main futures row anchored to the live Binance net position.
+                # Historical DB legs remain available only as an expanded breakdown.
                 _fp_cur = fp["current_price"]
                 _fp_db_entries = [e for e in _dash_esc_map.get(fp["symbol"], [])
                                   if e.get('trade_type', 'spot') == 'futures']
-                _is_short = fp["side"] == "SHORT"
-                if len(_fp_db_entries) > 1:
-                    _fp_total_qty = sum(float(e['qty']) for e in _fp_db_entries)
-                    _fp_total_cost = sum(float(e['entry_price']) * float(e['qty']) for e in _fp_db_entries)
-                    _fp_wap = _fp_total_cost / _fp_total_qty if _fp_total_qty > 0 else fp["entry_price"]
-                    _fp_total_upnl = sum(
-                        (float(e['entry_price']) - _fp_cur) * float(e['qty']) if _is_short
-                        else (_fp_cur - float(e['entry_price'])) * float(e['qty'])
-                        for e in _fp_db_entries
-                    )
-                    _fp_entry  = round(_fp_wap, 8)
-                    _fp_qty    = round(_fp_total_qty, 8)
-                    _fp_upnl   = round(_fp_total_upnl, 4)
-                    _fp_invested = round(_fp_total_cost, 4)
-                else:
-                    _fp_entry  = fp["entry_price"]
-                    _fp_qty    = fp["qty"]
-                    _fp_upnl   = fp["unrealized_pnl"]
-                    _fp_invested = round(_fp_entry * _fp_qty, 4)
+                _fp_db_total_qty = round(sum(float(e['qty']) for e in _fp_db_entries), 8) if _fp_db_entries else fp["qty"]
+                _fp_db_total_cost = round(sum(float(e['entry_price']) * float(e['qty']) for e in _fp_db_entries), 4) if _fp_db_entries else round(fp["entry_price"] * fp["qty"], 4)
+                _fp_db_total_upnl = round(sum(float(e.get('pnl_usdt') or 0.0) for e in _fp_db_entries), 4) if _fp_db_entries else fp["unrealized_pnl"]
+                _fp_entry  = fp["entry_price"]
+                _fp_qty    = fp["qty"]
+                _fp_upnl   = fp["unrealized_pnl"]
+                _fp_invested = round(_fp_entry * _fp_qty, 4)
 
                 _fp_sl_dist = round((_fp_sl - _fp_entry) / _fp_entry * 100, 2) if _fp_entry > 0 else None
                 _fp_tp_dist = round((_fp_tp - _fp_entry) / _fp_entry * 100, 2) if _fp_entry > 0 else None
 
-                open_list.append({
+                _fp_row = {
                     "symbol": fp["symbol"],
                     "position_id": f"futures_{fp['symbol']}_{fp['side']}",
                     "position_display_id": _short_position_id(f"futures_{fp['symbol']}_{fp['side']}", fp["symbol"], fp["side"], "futures"),
@@ -3937,6 +4234,13 @@ async def _compute_dashboard_summary(days: int) -> Dict:
                     "current_value_mxn": round(_fp_cur * _fp_qty * _usd_mxn, 2),
                     "unrealized_pnl": _fp_upnl,
                     "unrealized_pnl_mxn": round(_fp_upnl * _usd_mxn, 2),
+                    "binance_quantity": _fp_qty,
+                    "binance_entry_price": _fp_entry,
+                    "binance_invested_usdt": _fp_invested,
+                    "binance_unrealized_pnl": _fp_upnl,
+                    "db_entries_total_qty": _fp_db_total_qty,
+                    "db_entries_total_invested_usdt": _fp_db_total_cost,
+                    "db_entries_total_unrealized_pnl": _fp_db_total_upnl,
                     "entry_time": _fp_entry_time_str,
                     "first_entry_time": _fp_entry_time_str,
                     "hours_held": _fp_hours,
@@ -3972,7 +4276,20 @@ async def _compute_dashboard_summary(days: int) -> Dict:
                     "escalamientos": max(len(_dash_esc_map.get(fp["symbol"], [])), max((e.get('escalonamiento_index', 1) for e in _dash_esc_map.get(fp["symbol"], [])), default=1)),
                     "entries": _enrich_entries(_dash_esc_map.get(fp["symbol"], []), fp["current_price"], fp["side"]),
                     **_normalize_transaction_context(fp.get('_smart_meta') or fp.get('metadata') or {}, _runtime_ctx),
+                }
+                _fp_truth = verify_open_dashboard_row(_fp_row)
+                _fp_row.update(_fp_truth)
+                _open_truth_rows.append({
+                    "symbol": _fp_row.get("symbol"),
+                    "trade_type": _fp_row.get("trade_type"),
+                    "verification_mode": _fp_row.get("verification_mode"),
+                    "verification_status": _fp_row.get("verification_status"),
+                    "verification_mismatch": bool(_fp_row.get("verification_mismatch")),
+                    "verification_notes": list(_fp_row.get("verification_notes") or []),
+                    "verification_delta_qty": _fp_row.get("verification_delta_qty"),
+                    "verification_delta_unrealized_pnl": _fp_row.get("verification_delta_unrealized_pnl"),
                 })
+                open_list.append(_fp_row)
                 _enrich_position_with_exit_policy(open_list[-1])
                 _enrich_entry_expectation(open_list[-1])
         except Exception as e:
@@ -4004,8 +4321,47 @@ async def _compute_dashboard_summary(days: int) -> Dict:
             "current_context_count": _open_context_counts["current"],
             "unknown_context_count": _open_context_counts["unknown"],
         }
+        _mismatches = [r for r in _open_truth_rows if r.get("verification_mismatch")]
+        _spot_rows_checked = sum(1 for r in _open_truth_rows if str(r.get("trade_type", "")).lower() == "spot")
+        _futures_rows_checked = sum(1 for r in _open_truth_rows if str(r.get("trade_type", "")).lower() == "futures")
+        _spot_mismatch_count = sum(1 for r in _mismatches if str(r.get("trade_type", "")).lower() == "spot")
+        _futures_mismatch_count = sum(1 for r in _mismatches if str(r.get("trade_type", "")).lower() == "futures")
+        _mode_rows_checked: Dict[str, int] = {}
+        _mode_mismatch_count: Dict[str, int] = {}
+        for _tr in _open_truth_rows:
+            _mode = str(_tr.get("verification_mode") or "UNKNOWN").upper()
+            _mode_rows_checked[_mode] = _mode_rows_checked.get(_mode, 0) + 1
+            if _tr.get("verification_mismatch"):
+                _mode_mismatch_count[_mode] = _mode_mismatch_count.get(_mode, 0) + 1
+        result["truth_invariants"] = {
+            "open_rows_checked": len(_open_truth_rows),
+            "open_mismatch_count": len(_mismatches),
+            "spot_rows_checked": _spot_rows_checked,
+            "futures_rows_checked": _futures_rows_checked,
+            "spot_mismatch_count": _spot_mismatch_count,
+            "futures_mismatch_count": _futures_mismatch_count,
+            "mode_rows_checked": _mode_rows_checked,
+            "mode_mismatch_count": _mode_mismatch_count,
+            "open_mismatches": _mismatches,
+            "futures_mismatches": [r for r in _mismatches if str(r.get("trade_type", "")).lower() == "futures"],
+            "status": "warning" if _mismatches else "ok",
+        }
     except Exception as e:
         result["open_positions"] = {"positions": [], "count": 0, "error": str(e)}
+        result["truth_invariants"] = {
+            "open_rows_checked": 0,
+            "open_mismatch_count": 0,
+            "spot_rows_checked": 0,
+            "futures_rows_checked": 0,
+            "spot_mismatch_count": 0,
+            "futures_mismatch_count": 0,
+            "mode_rows_checked": {},
+            "mode_mismatch_count": {},
+            "open_mismatches": [],
+            "futures_mismatches": [],
+            "status": "error",
+            "error": str(e),
+        }
 
     # Closed Positions (with pnl_prediction & prediction_accuracy) - configurable range (default 7 days)
     try:
@@ -4058,6 +4414,7 @@ async def _compute_dashboard_summary(days: int) -> Dict:
                 "metadata": _cl_meta,
                 "bounce_entry": bool(_cl_meta.get('bounce_entry', False)),
                 **_normalize_transaction_context(_cl_meta, _runtime_ctx),
+                **summarize_closed_position_verification(_cl_meta, pos.close_reason),
                 "_close_group_id": _cl_meta.get('close_group_id'),
             })
         # ESC-AGG-C: Group rows with same close_group_id into one parent row
@@ -6202,6 +6559,62 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
             _shadow_readiness_gate("decision_sample", lifecycle_total, 30, lifecycle_total >= 30, "Recolectar decisiones lifecycle auditadas."),
         ]
 
+        runner_floor_usdt = 5.5
+        runner_rows = _query("lifecycle_runner_profit_floor", """
+            /* lifecycle_runner_profit_floor_shadow */
+            SELECT
+                COUNT(*) AS sso_closes,
+                COUNT(*) FILTER (WHERE pnl >= 0 AND pnl < %s) AS would_defer,
+                COALESCE(SUM(pnl) FILTER (WHERE pnl >= 0 AND pnl < %s), 0) AS truncated_profit_usdt,
+                COUNT(*) FILTER (WHERE pnl >= %s) AS winners_at_or_above_floor,
+                COUNT(*) FILTER (WHERE pnl < 0) AS loss_exits_preserved,
+                MAX(exit_time) AS last_at
+            FROM trades_closed
+            WHERE exit_time >= NOW() - INTERVAL '7 days'
+              AND close_reason LIKE 'sso_%%'
+              AND COALESCE(is_synthetic, FALSE) = FALSE
+              AND COALESCE(is_corrupted, FALSE) = FALSE
+            """, (runner_floor_usdt, runner_floor_usdt, runner_floor_usdt))
+        runner = runner_rows[0] if runner_rows else {}
+        runner_sso_closes = int(runner.get("sso_closes") or 0)
+        runner_would_defer = int(runner.get("would_defer") or 0)
+        runner_truncated_profit = float(runner.get("truncated_profit_usdt") or 0.0)
+        runner_gates = [
+            _shadow_readiness_gate("production_sso_sample", runner_sso_closes, 30, runner_sso_closes >= 30, "Recolectar 30 cierres SSO de producción para estabilizar el contrafactual."),
+            _shadow_readiness_gate("would_defer_sample", runner_would_defer, 5, runner_would_defer >= 5, "Recolectar al menos 5 cierres positivos que el challenger habría diferido."),
+            _shadow_readiness_gate("staging_mature_outcomes", 0, 20, False, "Validar 20 cierres STG posteriores al cambio antes de considerar promoción."),
+        ]
+
+        staging_truth = {}
+        try:
+            staging_truth = {
+                "SPOT_BULL": staged_entry.get_staging_truth_snapshot(live_settings, "SPOT_BULL", db_client=db_client),
+                "RANGE_SCALP": staged_entry.get_staging_truth_snapshot(live_settings, "RANGE_SCALP", db_client=db_client),
+                "FUTURES_SHORT": staged_entry.get_staging_truth_snapshot(live_settings, "FUTURES_SHORT", db_client=db_client),
+                "PRESERVATION": staged_entry.get_staging_truth_snapshot(live_settings, "PRESERVATION", db_client=db_client),
+            }
+        except Exception as exc:
+            source_errors.append({"source": "staged_truth_snapshot", "error": str(exc)})
+            staging_truth = {}
+        staging_truth_gates = []
+        for regime_key, snapshot in staging_truth.items():
+            staging_truth_gates.append(
+                _shadow_readiness_gate(
+                    f"staging_truth_{regime_key.lower()}",
+                    int(snapshot.get("last_7d_candidates") or 0),
+                    5,
+                    int(snapshot.get("last_7d_candidates") or 0) >= 5,
+                    "Mantener una mini-copia shadow de production para la ventana de verdad de 7 días.",
+                )
+            )
+        promotion_gate = {}
+        for regime_key, snapshot in staging_truth.items():
+            try:
+                promotion_gate[regime_key] = staged_entry.get_staging_promotion_gate(db_client, live_settings, regime_key)
+            except Exception as exc:
+                source_errors.append({"source": f"staging_promotion_gate_{regime_key}", "error": str(exc)})
+                promotion_gate[regime_key] = {"regime_mode": regime_key, "truth_ok": False, "persistence_ok": False, "ready": False}
+
         range_rows = _query("range_candidates", """
             SELECT
                 COUNT(*) AS total,
@@ -6580,6 +6993,56 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
                 "state": _shadow_readiness_state(_cfg_param(live_settings, "lifecycle_structure_mode", "shadow"), lifecycle_gates),
                 "summary": f"{lifecycle_available}/{lifecycle_total} snapshots disponibles; {int(lifecycle.get('actionable') or 0)} decisiones estructurales.",
                 "gates": lifecycle_gates,
+            },
+            {
+                "id": "staging_runner_profit_floor",
+                "name": "STG runner: piso de ganador SSO",
+                "mode": "shadow",
+                "state": _shadow_readiness_state("shadow", runner_gates),
+                "summary": (
+                    f"Baseline PROD=$0; challenger STG=${runner_floor_usdt:.2f} bruto. "
+                    "Perfil: sizing=$150, SSO-3=off, PRS futures=off, estructura=shadow, momentum mínimo=2%. "
+                    f"Contrafactual PROD 7d: {runner_would_defer}/{runner_sso_closes} cierres SSO would-defer, "
+                    f"${runner_truncated_profit:.2f} de ganancia truncada observada; "
+                    f"ganadores >= piso={int(runner.get('winners_at_or_above_floor') or 0)}; "
+                    f"salidas en pérdida preservadas={int(runner.get('loss_exits_preserved') or 0)}; "
+                    f"última muestra={runner.get('last_at') or 'n/a'}."
+                ),
+                "gates": runner_gates,
+            },
+            {
+                "id": "staging_truth_parity",
+                "name": "Paridad truth shadow vs producción (7d)",
+                "mode": "shadow",
+                "state": _shadow_readiness_state("shadow", staging_truth_gates),
+                "summary": "Candidatas shadow persistidas en la ventana de verdad: " + ", ".join(
+                    f"{k.lower()}={int(v.get('last_7d_candidates') or 0)}" for k, v in staging_truth.items()
+                ) if staging_truth else "Sin snapshot de truth staging disponible.",
+                "gates": staging_truth_gates,
+            },
+            {
+                "id": "staging_promotion_gate",
+                "name": "Gate de promoción staging -> producción",
+                "mode": "shadow",
+                "state": _shadow_readiness_state("shadow", [
+                    _shadow_readiness_gate(
+                        "promotion_ready",
+                        sum(1 for v in promotion_gate.values() if v.get("ready")),
+                        max(1, len(promotion_gate)),
+                        all(v.get("ready") for v in promotion_gate.values()) if promotion_gate else False,
+                        "Se requiere truth + persistence antes de promocionar staging.",
+                    )
+                ]),
+                "summary": "Promoción lista: " + (", ".join(f"{k}={v.get('ready')}" for k, v in promotion_gate.items()) if promotion_gate else "sin evidencias"),
+                "gates": [
+                    _shadow_readiness_gate(
+                        "promotion_ready",
+                        sum(1 for v in promotion_gate.values() if v.get("ready")),
+                        max(1, len(promotion_gate)),
+                        all(v.get("ready") for v in promotion_gate.values()) if promotion_gate else False,
+                        "Se requiere truth + persistence antes de promocionar staging.",
+                    )
+                ],
             },
             {
                 "id": "range_quality_model",
@@ -7302,14 +7765,33 @@ async def get_futures_positions() -> Dict:
         _runtime_ctx = _get_dashboard_context_reference()
         if not getattr(_s, 'futures_enabled', True):
             return {"enabled": False, "positions": [], "count": 0}
+        _fc = _get_futures_client(_s)
+
         if bool(getattr(_s, 'dry_run', False)):
+            tracked_positions = await asyncio.to_thread(_fc.get_open_positions_summary)
+            leverage = max(1, int(getattr(_s, 'futures_leverage', 1) or 1))
+            positions = []
+            for position in tracked_positions:
+                invested_usdt = round(
+                    float(position.get("entry_price", 0) or 0)
+                    * float(position.get("qty", 0) or 0),
+                    4,
+                )
+                positions.append({
+                    **position,
+                    "invested_usdt": invested_usdt,
+                    "margin_usdt": round(invested_usdt / leverage, 4),
+                    "trade_type": "futures",
+                })
             return {
                 "enabled": True,
-                "positions": [],
-                "count": 0,
+                "positions": positions,
+                "count": len(positions),
                 "source": "dry_run",
+                "simulated": True,
+                "leverage": leverage,
+                "timestamp": datetime.utcnow().isoformat(),
             }
-        _fc = _get_futures_client(_s)
 
         # Query Binance directly — single source of truth
         live_positions = _fc.get_positions()  # non-zero positionAmt only
