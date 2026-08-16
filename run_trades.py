@@ -11682,59 +11682,70 @@ def execute_once(monitor_only: bool = False, components=None):
 
     # Binance-first gate: runtime-vs-exchange parity for futures must be healthy
     # before allowing new entries. Hard protections (SL/TP) stay enabled.
+    #
+    # s130c: skipped entirely when dry_run=True. In a dry-run environment (e.g.
+    # staging) the account queried by evaluate_futures_parity()/evaluate_spot_parity()
+    # is Binance's REAL account — which may be shared with a real production
+    # deployment using the same API key. Comparing that real account state against
+    # a dry-run DB that never opens real positions always reports false "critical"
+    # mismatches, which (via is_truth_critical() in analysis_cycle.py/orchestrator.py)
+    # permanently blocks AnalysisCycle/LearningCycle and starves the dry-run pipeline
+    # of new signals. This mirrors the existing dry_run guard already used in
+    # futures_client.py::check_positions() (line ~3584) for the same reconciliation call.
     _binance_truth_status = {"ok": True, "severity": "unknown", "mismatch_count": 0}
-    try:
-        if getattr(settings, 'futures_enabled', True):
-            _fc_truth = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None), injected_client=getattr(comp, 'futures_client', None))
-            _wire_futures_client(_fc_truth, client, settings)
-            _binance_truth_status = evaluate_futures_parity(_fc_truth)
-            persist_truth_status(_db_client_ref, _binance_truth_status, source='execute_once_pretrade')
-            if (_binance_truth_status.get('mismatch_count') or 0) > 0:
-                audit_truth_mismatches(_db_client_ref, _binance_truth_status, source='execute_once_pretrade')
-                print(
-                    f"[BinanceTruth] severity={_binance_truth_status.get('severity')} "
-                    f"mismatches={_binance_truth_status.get('mismatch_count')}"
-                )
-            if (not monitor_only) and str(_binance_truth_status.get('severity', '')).lower() == 'critical':
-                _persist_operator_alert(_db_client_ref, "binance_truth_critical", f"Binance futures parity critical — mismatches={_binance_truth_status.get('mismatch_count',0)}. Las protecciones SL/TP siguen activas.")
-                print(f"[execute_once] ⚠️  binance_truth_status=critical — ALERTA al operador (no auto-pausa). mismatches={_binance_truth_status.get('mismatch_count',0)}")
-    except Exception as _truth_gate_err:
-        print(f"[BinanceTruth] pretrade gate failed: {_truth_gate_err}")
+    if not getattr(settings, 'dry_run', False):
+        try:
+            if getattr(settings, 'futures_enabled', True):
+                _fc_truth = _get_futures_client(settings, db_client=getattr(comp, 'db_client', None), injected_client=getattr(comp, 'futures_client', None))
+                _wire_futures_client(_fc_truth, client, settings)
+                _binance_truth_status = evaluate_futures_parity(_fc_truth)
+                persist_truth_status(_db_client_ref, _binance_truth_status, source='execute_once_pretrade')
+                if (_binance_truth_status.get('mismatch_count') or 0) > 0:
+                    audit_truth_mismatches(_db_client_ref, _binance_truth_status, source='execute_once_pretrade')
+                    print(
+                        f"[BinanceTruth] severity={_binance_truth_status.get('severity')} "
+                        f"mismatches={_binance_truth_status.get('mismatch_count')}"
+                    )
+                if (not monitor_only) and str(_binance_truth_status.get('severity', '')).lower() == 'critical':
+                    _persist_operator_alert(_db_client_ref, "binance_truth_critical", f"Binance futures parity critical — mismatches={_binance_truth_status.get('mismatch_count',0)}. Las protecciones SL/TP siguen activas.")
+                    print(f"[execute_once] ⚠️  binance_truth_status=critical — ALERTA al operador (no auto-pausa). mismatches={_binance_truth_status.get('mismatch_count',0)}")
+        except Exception as _truth_gate_err:
+            print(f"[BinanceTruth] pretrade gate failed: {_truth_gate_err}")
 
-    try:
-        _spot_truth_status = evaluate_spot_parity(position_manager, client, settings=settings, min_notional_usdt=5.0)
-        persist_truth_status_spot(_db_client_ref, _spot_truth_status, source='execute_once_pretrade')
-        if (_spot_truth_status.get('mismatch_count') or 0) > 0:
-            audit_truth_mismatches(_db_client_ref, _spot_truth_status, source='execute_once_pretrade_spot')
-            print(
-                f"[SpotTruth] severity={_spot_truth_status.get('severity')} "
-                f"mismatches={_spot_truth_status.get('mismatch_count')}"
-            )
-            # Anti-ghost auto-fix: close DB ghosts and import orphan positions > $5 immediately.
-            for _mm in _spot_truth_status.get('mismatches', []):
-                _mm_code = _mm.get('code')
-                _mm_sym = _mm.get('symbol')
-                if _mm_code == 'SPOT_GHOST_IN_DB':
-                    try:
-                        _mm_price = float(client.get_symbol_price(_mm_sym) or _mm.get('price', 0))
-                        position_manager.close_all_positions_for_symbol(
-                            _mm_sym, _mm_price, 'pretrade_ghost_auto_close',
-                            float(getattr(settings, 'binance_commission_rate', 0.001))
-                        )
-                        print(f"[SpotTruth/AutoFix] Closed ghost DB position {_mm_sym}")
-                    except Exception as _mm_err:
-                        print(f"[SpotTruth/AutoFix] Failed to close ghost {_mm_sym}: {_mm_err}")
-                elif _mm_code == 'SPOT_ORPHAN_IN_BINANCE':
-                    try:
-                        _mm_value = float(_mm.get('value_usdt') or 0.0)
-                        if _mm_value >= 5.0:
-                            _imported = position_manager.sync_with_exchange_balance(client, settings, min_value_usdt=5.0)
-                            if _mm_sym in (_imported or []):
-                                print(f"[SpotTruth/AutoFix] Imported orphan position {_mm_sym} (${_mm_value:.2f})")
-                    except Exception as _mm_err:
-                        print(f"[SpotTruth/AutoFix] Failed to import orphan {_mm_sym}: {_mm_err}")
-    except Exception as _spot_truth_err:
-        print(f"[SpotTruth] pretrade gate failed: {_spot_truth_err}")
+        try:
+            _spot_truth_status = evaluate_spot_parity(position_manager, client, settings=settings, min_notional_usdt=5.0)
+            persist_truth_status_spot(_db_client_ref, _spot_truth_status, source='execute_once_pretrade')
+            if (_spot_truth_status.get('mismatch_count') or 0) > 0:
+                audit_truth_mismatches(_db_client_ref, _spot_truth_status, source='execute_once_pretrade_spot')
+                print(
+                    f"[SpotTruth] severity={_spot_truth_status.get('severity')} "
+                    f"mismatches={_spot_truth_status.get('mismatch_count')}"
+                )
+                # Anti-ghost auto-fix: close DB ghosts and import orphan positions > $5 immediately.
+                for _mm in _spot_truth_status.get('mismatches', []):
+                    _mm_code = _mm.get('code')
+                    _mm_sym = _mm.get('symbol')
+                    if _mm_code == 'SPOT_GHOST_IN_DB':
+                        try:
+                            _mm_price = float(client.get_symbol_price(_mm_sym) or _mm.get('price', 0))
+                            position_manager.close_all_positions_for_symbol(
+                                _mm_sym, _mm_price, 'pretrade_ghost_auto_close',
+                                float(getattr(settings, 'binance_commission_rate', 0.001))
+                            )
+                            print(f"[SpotTruth/AutoFix] Closed ghost DB position {_mm_sym}")
+                        except Exception as _mm_err:
+                            print(f"[SpotTruth/AutoFix] Failed to close ghost {_mm_sym}: {_mm_err}")
+                    elif _mm_code == 'SPOT_ORPHAN_IN_BINANCE':
+                        try:
+                            _mm_value = float(_mm.get('value_usdt') or 0.0)
+                            if _mm_value >= 5.0:
+                                _imported = position_manager.sync_with_exchange_balance(client, settings, min_value_usdt=5.0)
+                                if _mm_sym in (_imported or []):
+                                    print(f"[SpotTruth/AutoFix] Imported orphan position {_mm_sym} (${_mm_value:.2f})")
+                        except Exception as _mm_err:
+                            print(f"[SpotTruth/AutoFix] Failed to import orphan {_mm_sym}: {_mm_err}")
+        except Exception as _spot_truth_err:
+            print(f"[SpotTruth] pretrade gate failed: {_spot_truth_err}")
 
     # ── PAUSED / monitor_only: solo ejecutar SL/TP y retornar ───────────────────
     if monitor_only:
