@@ -1934,7 +1934,6 @@ function renderClosedPositions(d) {
                     return `
                     <tr class="${rowCls}" onclick="showPositionDetailModal('${p.symbol}', '${p.position_id || ''}', 'closed')" style="cursor:pointer">
                         <td>${catIcon(p.category || 'MIDCAP_ALT')} <strong>${p.symbol}</strong>${contextBadge}<br><div class="ops-row-actions"><button class="ops-action-btn" onclick="event.stopPropagation();openSelectionSymbolChart('${p.symbol}', '${p.trade_type || 'spot'}', '${p.side || 'LONG'}')">Ver gráfico</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'tradingview', '${p.trade_type || 'spot'}')">TV</button><button class="ops-action-btn" onclick="event.stopPropagation();openSymbolChart('${p.symbol}', 'binance', '${p.trade_type || 'spot'}')">BIN</button></div></td>
-                        <td>${fmtPositionId(p)}</td>
                         <td class="direction-cell">${tradeDirectionBadge}</td>
                         <td class="profile-cell">${profileBadge}</td>
                         <td class="mode-cell">${modeBadge}</td>
