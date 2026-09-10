@@ -7588,6 +7588,34 @@ function renderPredVsRealChart(containerId, expectativaData) {
     });
 }
 
+// ── Dedicated position polls (lightweight, independent of heavy summary) ───────
+async function pollOpenPositions() {
+    try {
+        const res = await _fetchWithTimeout(`${API_BASE}/positions/open`, { headers: _authHeaders() }, 15000);
+        if (res.ok) {
+            const data = await res.json();
+            if (_cachedData) _cachedData.open_positions = data;
+            renderOpenPositions(data);
+        }
+    } catch (e) {
+        console.warn('[dashboard] open positions poll failed:', e);
+    }
+}
+
+async function pollClosedPositions() {
+    try {
+        const res = await _fetchWithTimeout(`${API_BASE}/positions/closed?limit=100&days=${_dashboardDays}`, { headers: _authHeaders() }, 15000);
+        if (res.ok) {
+            const data = await res.json();
+            data.period_days = data.period_days || _dashboardDays;
+            if (_cachedData) _cachedData.closed_positions = data;
+            renderClosedPositions(data);
+        }
+    } catch (e) {
+        console.warn('[dashboard] closed positions poll failed:', e);
+    }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     await _apiKeyReady;
     try {
@@ -7832,12 +7860,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateOperatorAlerts();
     pollBacktestResults();
     updateBacktestProgressWidget();
-    setInterval(updateDashboard, POLL_INTERVAL_MS);
-    setInterval(() => {
-        if (_cachedData) {
-            renderOpenPositions(_cachedData.open_positions);
-        }
-    }, OPEN_POSITIONS_POLL_MS);
+    // Self-rescheduling summary poll so long-running /dashboard/summary calls don't overlap.
+    function scheduleSummaryPoll() {
+        setTimeout(async () => {
+            try {
+                await updateDashboard();
+            } catch (e) {
+                console.error('[dashboard] summary poll error:', e);
+            }
+            scheduleSummaryPoll();
+        }, POLL_INTERVAL_MS);
+    }
+    scheduleSummaryPoll();
+
+    // Dedicated position polls: open fastest, closed/PnL less frequent.
+    setInterval(pollOpenPositions, OPEN_POSITIONS_POLL_MS);
+    setInterval(pollClosedPositions, POLL_INTERVAL_MS);
     setInterval(updateReconciliation, 60000);
     setInterval(updateHealthAndErrors, 60000);  // Health & errors refresh every 60s
     setInterval(updateSRPoolPanel, 30000);        // SR-pool panel every 30s
@@ -7847,11 +7885,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden) {
             fetchDashboardData(true);
-            if (_cachedData) renderOpenPositions(_cachedData.open_positions);
+            pollOpenPositions();
         }
     });
     window.addEventListener('focus', () => {
         fetchDashboardData(true);
+        pollOpenPositions();
     });
 
     // Toggle MXN re-renders open positions
