@@ -17,7 +17,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from config_helpers import get_param, get_staged_entry_regime_config
-from directional_confirmation import evaluate_shadow as evaluate_directional_shadow
+from directional_confirmation import evaluate_direction
+from execution_modes import side_for_mode, trade_type_for_mode
 from entry_decision import evaluate as evaluate_entry_decision
 from entry_profile_gate import _DEFAULT_THRESHOLDS_PATH as _ENTRY_PROFILE_THRESHOLDS_PATH
 
@@ -38,7 +39,13 @@ def _to_native(obj: Any) -> Any:
         return [_to_native(v) for v in obj]
     if hasattr(obj, "item") and callable(getattr(obj, "item")):
         return obj.item()
-    if isinstance(obj, (int, float, bool, str, type(None))):
+    if isinstance(obj, float):
+        if math.isinf(obj):
+            return 1e308 if obj > 0 else -1e308
+        if math.isnan(obj):
+            return None
+        return obj
+    if isinstance(obj, (int, bool, str, type(None))):
         return obj
     return str(obj)
 
@@ -336,19 +343,11 @@ def _selected_mode_for_meta(meta: Dict[str, Any]) -> str:
 
 
 def _trade_type_for_selected_mode(selected_mode: str) -> Optional[str]:
-    if selected_mode in {"FUTURES_SHORT", "FUTURES_LONG"}:
-        return "futures"
-    if selected_mode == "SPOT_LONG":
-        return "spot"
-    return None
+    return trade_type_for_mode(selected_mode)
 
 
 def _side_for_selected_mode(selected_mode: str) -> Optional[str]:
-    if selected_mode == "FUTURES_SHORT":
-        return "SHORT"
-    if selected_mode in {"FUTURES_LONG", "SPOT_LONG"}:
-        return "LONG"
-    return None
+    return side_for_mode(selected_mode)
 
 
 def _trade_type_for_meta(meta: Dict[str, Any], regime_mode: str) -> str:
@@ -598,7 +597,7 @@ def build_range_reversion_prediction(
 
 
 def _range_reversion_shadow(meta: Dict[str, Any], current_price: Optional[float], settings: Any) -> Optional[Dict[str, Any]]:
-    if str(getattr(settings, "range_reversion_predictor_mode", "shadow")).lower() == "disabled":
+    if str(getattr(settings, "range_reversion_predictor_mode", "enforced")).lower() == "disabled":
         return None
     return build_range_reversion_prediction(meta, current_price, settings)
 
@@ -1800,8 +1799,9 @@ def evaluate_inter_cycle(
         start = time.monotonic()
         expected_revision = int((row.get("data") or {}).get("candidate_revision", 0) or 0)
 
-        meta = _build_meta_for_symbol(symbol, signal_meta, predictions, top_by_symbol.get(symbol))
-        meta.update(row.get("signal_meta") or {})
+        fresh_meta = _build_meta_for_symbol(symbol, signal_meta, predictions, top_by_symbol.get(symbol))
+        meta = dict(row.get("signal_meta") or {})
+        meta.update(fresh_meta)
         trade_type = str(row.get("trade_type") or _trade_type_for_meta(meta, regime_mode)).strip().lower()
         meta["trade_type"] = trade_type
         meta["expected_side"] = _side_for_meta(meta, regime_mode, trade_type)
@@ -1856,7 +1856,7 @@ def evaluate_inter_cycle(
             direction_snapshot = {}
         input_features["policy"] = policy_data
         input_features["direction"] = direction_snapshot
-        directional_shadow = evaluate_directional_shadow(row, policy_data, current_price, cycle_cfg)
+        directional_shadow = evaluate_direction(row, policy_data, current_price, cycle_cfg)
         directional_shadow["legacy"] = {
             "positive": bool(positive),
             "terminal": bool(terminal),
@@ -2113,9 +2113,11 @@ def _watcher_process_row(
         direction_snapshot = {}
     execution_ms = int((time.monotonic() - start) * 1000)
 
+    directional_evaluation = evaluate_direction(row, policy_data, current_price, cfg)
     data_update: Dict[str, Any] = {
         "policy": policy_data,
-        "directional_shadow_last": evaluate_directional_shadow(row, policy_data, current_price, cfg),
+        "directional_evaluation_last": directional_evaluation,
+        "directional_shadow_last": directional_evaluation,
     }
     if direction_snapshot and direction_snapshot.get("direction"):
         data_update["direction"] = direction_snapshot["direction"]
@@ -2329,7 +2331,7 @@ def perform_intra_cycle_check(
             direction_snapshot = {}
         input_features["policy"] = policy_data
         input_features["direction"] = direction_snapshot
-        directional_shadow = evaluate_directional_shadow(row, policy_data, current_price, cfg)
+        directional_shadow = evaluate_direction(row, policy_data, current_price, cfg)
         directional_shadow["legacy"] = {
             "positive": bool(positive),
             "terminal": bool(terminal),
@@ -2528,7 +2530,12 @@ def get_openable_candidates(
                 # Keep the candidate validated and let the watcher keep monitoring it.
                 # Do NOT requeue to ready, which resets the clock and can cause MAX_AGE_EXPIRED.
                 continue
-            sr_side_guard = _evaluate_sr_side_guard(row, cfg)
+            bilateral_active = str(getattr(settings, "directional_policy_mode", "active") or "active").lower() != "disabled"
+            sr_side_guard = (
+                {"passed": True, "apply_guard": False, "reason": "BILATERAL_ATOMIC_PREFLIGHT_OWNS_SR_SIDE"}
+                if bilateral_active
+                else _evaluate_sr_side_guard(row, cfg)
+            )
             row.setdefault("_selection_shadow", {})["sr_side_guard"] = sr_side_guard
             if not bool(sr_side_guard.get("passed")) and bool(sr_side_guard.get("apply_guard")):
                 _row_revision = int((row.get("data") or {}).get("candidate_revision", 0) or 0)
