@@ -19,6 +19,7 @@ Usage:
 
 import copy
 import json
+import os
 import re
 import time
 import hashlib
@@ -28,6 +29,7 @@ import urllib.request
 import urllib.parse
 import uuid
 from dataclasses import dataclass, field
+from functools import wraps
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
@@ -57,6 +59,7 @@ from binance_truth_guard import (
     audit_truth_mismatches,
 )
 from close_contract import apply_close_contract
+from close_execution import build_close_plan
 
 
 def _parse_utc_datetime(value):
@@ -95,6 +98,7 @@ def _normalize_metadata(raw, default_trade_type: str = "futures"):
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 FAPI_BASE     = "https://fapi.binance.com"
+FAPI_BASE_TESTNET = "https://testnet.binancefuture.com"
 # Global safe caps — these are UPPER BOUNDS, not the active configured values.
 # Active values come from settings.futures_leverage / settings.futures_max_shorts.
 LEVERAGE_MAX  = 10         # hard upper bound; active leverage is settings.futures_leverage (backtest run_0812: 10)
@@ -149,6 +153,14 @@ class FuturesPosition:
         return current_price <= self.tp_price       # SHORT TP is below entry
 
 
+def _serialized_position_management(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._close_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class FuturesClient:
     def __init__(self, api_key: str, api_secret: str, dry_run: bool = False,
                  max_shorts: int = MAX_SHORTS, max_longs: int = 3,
@@ -157,6 +169,12 @@ class FuturesClient:
         self.api_secret = api_secret
         self.dry_run    = dry_run
         self.settings = settings
+        # Resolve base URL: testnet when BINANCE_USE_TESTNET env/setting is set
+        _use_testnet = (
+            str(os.environ.get('BINANCE_USE_TESTNET', 'false')).lower() in ('1', 'true', 'yes')
+            or bool(getattr(settings, 'binance_use_testnet', True) if settings else True)
+        )
+        self._fapi_base = FAPI_BASE_TESTNET if _use_testnet else FAPI_BASE
         # Active trading caps are read from settings; module constants are only safety upper bounds.
         from config_helpers import get_param
         self._active_leverage = min(
@@ -231,8 +249,17 @@ class FuturesClient:
             _es_esc = _existing_count > 0
             # Commission on entry
             from binance_commission import entry_commission
+            from position_thesis import build_thesis_snapshot
             _entry_comm = round(entry_commission(pos.qty, pos.entry_price, 'futures', self._cached_settings), 6)
-            meta = json.dumps({
+            _position_id = str(pos._smart_meta.get('position_id') or uuid.uuid4())
+            _thesis_id = str(pos._smart_meta.get('thesis_id') or uuid.uuid4())
+            _close_group_id = str(pos._smart_meta.get('close_group_id') or uuid.uuid4())
+            pos._smart_meta.update({
+                'position_id': _position_id,
+                'thesis_id': _thesis_id,
+                'close_group_id': _close_group_id,
+            })
+            _meta = {
                 'trade_type': 'futures',
                 'order_id': pos.order_id,
                 'sl_order_id': pos.sl_order_id,
@@ -243,15 +270,29 @@ class FuturesClient:
                 'regime_at_entry': pos._smart_meta.get('regime_at_entry'),
                 'profile_at_entry': pos._smart_meta.get('profile_at_entry'),
                 'signal_id': pos._smart_meta.get('signal_id', ''),
-            })
+                'position_id': _position_id,
+                'thesis_id': _thesis_id,
+                'close_group_id': _close_group_id,
+            }
+            _thesis = build_thesis_snapshot(
+                metadata=_meta,
+                pnl_prediction=pos.pnl_prediction,
+                indicators_at_entry=pos.indicators_at_entry,
+                side=pos.side,
+                regime_mode=_meta.get('regime_at_entry'),
+            )
+            if _thesis:
+                _meta['thesis_snapshot_v1'] = _thesis
+            meta = json.dumps(_meta)
             _pnl_pred_json = json.dumps(pos.pnl_prediction) if pos.pnl_prediction else None
             _ind_json      = json.dumps(pos.indicators_at_entry) if pos.indicators_at_entry else None
             self.db_client.execute_update(
                 """
                 INSERT INTO trades_open
                     (symbol, side, quantity, price, entry_time, stop_loss, take_profit,
-                     metadata, entry_commission, pnl_prediction, indicators_at_entry)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     metadata, entry_commission, pnl_prediction, indicators_at_entry,
+                     position_id, thesis_id, close_group_id, entry_order_id)
+                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     pos.symbol,
@@ -265,6 +306,10 @@ class FuturesClient:
                     _entry_comm,
                     _pnl_pred_json,
                     _ind_json,
+                    _position_id,
+                    _thesis_id,
+                    _close_group_id,
+                    str(pos.order_id or '') or None,
                 )
             )
             print(f'[Futures/DB] {pos.symbol} {pos.side} OPEN saved to trades_open '
@@ -279,6 +324,15 @@ class FuturesClient:
                 'sl': pos.sl_price, 'tp': pos.tp_price,
                 'order_id': pos.order_id, 'esc_index': _esc_index,
                 'signal_id': pos._smart_meta.get('signal_id', ''),
+                'ready_candidate_id': pos._smart_meta.get('ready_candidate_id'),
+                'thesis_type': pos._smart_meta.get('thesis_type'),
+                'directional_arbitration': pos._smart_meta.get('directional_arbitration'),
+                'selected_contract': pos._smart_meta.get('selected_contract'),
+                'alternative_contract': pos._smart_meta.get('alternative_contract'),
+                'locked_position_size_usdt': pos._smart_meta.get('locked_position_size_usdt'),
+                'actual_margin_usdt': pos._smart_meta.get('actual_margin_usdt'),
+                'actual_notional_usdt': pos._smart_meta.get('actual_notional_usdt'),
+                'projected_costs': pos._smart_meta.get('projected_costs'),
                 'binance_confirmed': pos._smart_meta.get('binance_entry_confirmed', False),
             }, binance_confirmed=bool(pos._smart_meta.get('binance_entry_confirmed', False)))
         except Exception as e:
@@ -429,6 +483,21 @@ class FuturesClient:
             if pos._smart_meta.get('pnl_accounting_mode') == 'binance_user_trade_verified':
                 _exit_comm = round(float(pos._smart_meta.get('binance_close_commission', _exit_comm) or 0.0), 6)
             _total_comm = _entry_comm + _exit_comm
+            _close_execution = pos._smart_meta.get('close_execution') or {}
+            _decision_price = float(_close_execution.get('decision_price') or 0.0)
+            _expected_price = float(
+                _close_execution.get('expected_vwap') or _decision_price or exit_price
+            )
+            _expected_gross = (
+                (_expected_price - pos.entry_price) * pos.qty
+                if pos.side == 'LONG'
+                else (pos.entry_price - _expected_price) * pos.qty
+            )
+            _realized_gross = gross_pnl
+            if _decision_price > 0:
+                _realized_slippage_bps = abs(exit_price - _decision_price) / _decision_price * 10000.0
+            else:
+                _realized_slippage_bps = None
             _position_id = str(
                 pos._smart_meta.get('position_id')
                 or f"{pos.symbol}:{pos.opened_at.isoformat()}:{(pos.closed_at or datetime.now(timezone.utc)).isoformat()}:FUTURES_{pos.side.upper()}"
@@ -472,6 +541,25 @@ class FuturesClient:
                 'spread_bps_estimate': pos._smart_meta.get('spread_bps_estimate'),
                 'slippage_bps_estimate': pos._smart_meta.get('slippage_bps_estimate'),
                 'funding_bps': pos._smart_meta.get('funding_bps', 0.0),
+                'close_expected_price': _expected_price,
+                'close_real_price': exit_price,
+                'expected_vwap': _close_execution.get('expected_vwap'),
+                'realized_avg_price': exit_price,
+                'expected_slippage_bps': _close_execution.get('estimated_slippage_bps'),
+                'realized_slippage_bps': _realized_slippage_bps,
+                'expected_slippage_usdt': _close_execution.get('estimated_slippage_usdt'),
+                'realized_slippage_usdt': (
+                    abs(exit_price - _decision_price) * pos.qty if _decision_price > 0 else None
+                ),
+                'expected_gross_pnl': round(_expected_gross, 6),
+                'realized_gross_pnl': round(_realized_gross, 6),
+                'expected_net_pnl': round(_expected_gross - _total_comm, 6),
+                'realized_net_pnl': round(pnl, 6),
+                'close_order_type': _close_execution.get('order_type'),
+                'close_limit_price': _close_execution.get('expected_vwap') if _close_execution.get('order_type') == 'LIMIT_FOK' else None,
+                'close_retries': _close_execution.get('retries', 0),
+                'close_escalation_reason': _close_execution.get('escalation_reason'),
+                'close_depth': _close_execution.get('book'),
             }
             meta_payload = apply_close_contract(
                 meta_payload,
@@ -604,6 +692,12 @@ class FuturesClient:
                 'bounce_entry': bool(pos._smart_meta.get('bounce_entry', False)),
                 'esc': f"{esc_index}/{total_esc}", 'group': _cgid[:8],
                 'signal_id': pos._smart_meta.get('signal_id', ''),
+                'close_execution': _close_execution,
+                'expected_price': _expected_price,
+                'real_price': exit_price,
+                'expected_gross_pnl': round(_expected_gross, 6),
+                'realized_gross_pnl': round(_realized_gross, 6),
+                'realized_net_pnl': round(pnl, 6),
             }, binance_confirmed=_binance_close)
             return True
         except Exception as e:
@@ -1028,7 +1122,7 @@ class FuturesClient:
             query += f"&signature={self._sign(query)}"
         else:
             query = urllib.parse.urlencode(p)
-        url = f"{FAPI_BASE}{path}?{query}" if query else f"{FAPI_BASE}{path}"
+        url = f"{self._fapi_base}{path}?{query}" if query else f"{self._fapi_base}{path}"
         req = urllib.request.Request(url, headers={"X-MBX-APIKEY": self.api_key})
         return json.loads(self._request_with_retry(req, timeout, path))
 
@@ -1051,7 +1145,7 @@ class FuturesClient:
         params["timestamp"] = int(time.time() * 1000)
         query = urllib.parse.urlencode(params)
         query += f"&signature={self._sign(query)}"
-        url  = f"{FAPI_BASE}{path}"
+        url  = f"{self._fapi_base}{path}"
         data = query.encode("utf-8")
         req  = urllib.request.Request(
             url, data=data, method="POST",
@@ -1063,7 +1157,7 @@ class FuturesClient:
         params["timestamp"] = int(time.time() * 1000)
         query = urllib.parse.urlencode(params)
         query += f"&signature={self._sign(query)}"
-        url  = f"{FAPI_BASE}{path}?{query}"
+        url  = f"{self._fapi_base}{path}?{query}"
         req  = urllib.request.Request(
             url, method="DELETE",
             headers={"X-MBX-APIKEY": self.api_key}
@@ -2587,6 +2681,15 @@ class FuturesClient:
         "spread_bps_estimate",
         "slippage_bps_estimate",
         "funding_bps",
+        "thesis_type",
+        "directional_arbitration",
+        "bilateral_preflight_evidence",
+        "locked_position_size_usdt",
+        "selected_contract",
+        "alternative_contract",
+        "projected_costs",
+        "actual_margin_usdt",
+        "actual_notional_usdt",
     )
 
     @classmethod
@@ -2600,6 +2703,30 @@ class FuturesClient:
         for key in cls._ENTRY_CONTEXT_KEYS:
             if key in entry_context and entry_context[key] is not None:
                 smart_meta[key] = entry_context[key]
+
+    @staticmethod
+    def _persist_actual_executable_contract(pos: FuturesPosition, leverage: int) -> None:
+        contract = pos._smart_meta.get("selected_contract")
+        if not isinstance(contract, dict):
+            return
+        actual_notional = float(pos.entry_price) * float(pos.qty)
+        actual_margin = actual_notional / max(1, leverage)
+        exit_reserve = sum(float(contract.get(key) or 0.0) for key in (
+            "projected_exit_fee_usdt", "slippage_reserve_usdt", "funding_reserve_usdt"))
+        gross_risk = abs(float(pos.sl_price) - float(pos.entry_price)) * float(pos.qty)
+        actual_contract = dict(contract)
+        actual_contract.update({
+            "entry_price": float(pos.entry_price),
+            "margin_usdt": actual_margin,
+            "qty": float(pos.qty),
+            "notional_usdt": actual_notional,
+            "effective_stop_price": float(pos.sl_price),
+            "effective_target_price": float(pos.tp_price),
+            "economic_risk_usdt": gross_risk + exit_reserve,
+        })
+        pos._smart_meta["selected_contract"] = actual_contract
+        pos._smart_meta["actual_margin_usdt"] = actual_margin
+        pos._smart_meta["actual_notional_usdt"] = actual_notional
 
     def open_short(
         self,
@@ -2667,6 +2794,13 @@ class FuturesClient:
         sl_price = self._align_price(price * (1 + sl_pct / 100), tick)
         tp_price = self._align_price(price * (1 - tp_pct / 100), tick)
 
+        if sl_price <= price or tp_price >= price:
+            print(
+                f"[Futures] SHORT {symbol} rejected: tick={tick} too coarse for "
+                f"entry={price} SL={sl_price} TP={tp_price} (no usable risk/reward distance)"
+            )
+            return None
+
         print(f"[Futures] Opening SHORT {symbol}: qty={qty}, entry~{price:.4f}, "
               f"SL={sl_price:.4f} (+{sl_pct}%), TP={tp_price:.4f} (-{tp_pct}%), "
               f"leverage={leverage}×, notional=${notional:.2f}")
@@ -2678,6 +2812,8 @@ class FuturesClient:
                 order_id=f"DRY_{symbol}_{int(time.time())}",
                 sl_order_id=None, tp_order_id=None,
             )
+            self._apply_entry_context(pos._smart_meta, entry_context)
+            self._persist_actual_executable_contract(pos, max(1, min(leverage, self._active_leverage)))
             self._open_positions[self._pos_key(symbol, "SHORT")] = pos
             return pos
 
@@ -2701,11 +2837,19 @@ class FuturesClient:
                 confirmed=False,
             )
 
-            # Recalculate SL/TP based on actual fill price
+            # Economic max-loss is recalculated from the real Binance average fill/qty.
+            _ctx = entry_context if isinstance(entry_context, dict) else {}
+            _costs = _ctx.get("projected_costs") if isinstance(_ctx.get("projected_costs"), dict) else {}
+            _exit_reserve = sum(float(_costs.get(k) or 0.0) for k in (
+                "projected_exit_fee_usdt", "slippage_reserve_usdt", "funding_reserve_usdt"))
+            if _max_loss_usd > 0 and qty > 0:
+                _price_risk_budget = max(0.0, _max_loss_usd - _exit_reserve)
+                sl_pct = min(sl_pct, _price_risk_budget / (filled_price * qty) * 100.0)
             # FIX-T2A: software SL = tight (3%), Binance safety SL = wide (4.5%)
             sl_price = round(filled_price * (1 + sl_pct / 100), 6)  # software SL (used by is_sl_hit)
             tp_price = round(filled_price * (1 - tp_pct / 100), 6)
-            _binance_sl_pct = sl_pct * _SL_SAFETY_MARGIN_MULTIPLIER  # safety net: wider than software SL
+            _contract_backed = isinstance(_ctx.get("selected_contract"), dict)
+            _binance_sl_pct = sl_pct if _contract_backed else sl_pct * _SL_SAFETY_MARGIN_MULTIPLIER
 
             # 2. Stop-loss order via Algo Orders API (required since Binance API change 2025-12-09)
             # POST /fapi/v1/algoOrder with algoType=CONDITIONAL + orderType=STOP_MARKET
@@ -2810,9 +2954,11 @@ class FuturesClient:
             if signal_id:
                 pos._smart_meta['signal_id'] = signal_id
             self._apply_entry_context(pos._smart_meta, entry_context)
+            self._persist_actual_executable_contract(pos, max(1, min(leverage, self._active_leverage)))
             # USD loss guard audit fields
             pos._smart_meta['max_loss_usd_per_trade'] = _max_loss_usd
-            pos._smart_meta['effective_sl_usd'] = min(_max_loss_usd, actual_notional * 0.95) if _max_loss_usd > 0 else None
+            _actual_contract = pos._smart_meta.get('selected_contract') if isinstance(pos._smart_meta.get('selected_contract'), dict) else {}
+            pos._smart_meta['effective_sl_usd'] = _actual_contract.get('economic_risk_usdt') if _actual_contract else (min(_max_loss_usd, actual_notional * 0.95) if _max_loss_usd > 0 else None)
             pos._smart_meta['effective_sl_price'] = sl_price
             pos._smart_meta['hard_sl_price'] = _sl_trigger  # s107: real Binance algo trigger, for close-reason classification
             pos._smart_meta['sl_source'] = 'usd_cap' if (_max_loss_usd > 0 and actual_notional > 0 and sl_pct < (_max_loss_usd / actual_notional * 100.0) * (1 + 1e-12)) else 'category_pct'
@@ -2851,7 +2997,9 @@ class FuturesClient:
         signal_id: Optional[str] = None,
         peak_quality_profile: Optional[str] = None,
         peak_quality_score: Optional[float] = None,
+        pnl_prediction: Optional[Dict] = None,
         entry_context: Optional[Dict] = None,  # directional_arbitration_reason, sr_zone_position_at_entry, etc.
+        indicators_at_entry: Optional[Dict] = None,  # s130: S/R geometry for thesis-anchored lifecycle
     ) -> Optional[FuturesPosition]:
         """
         Open a LONG position with mandatory SL and TP orders.
@@ -2909,6 +3057,13 @@ class FuturesClient:
         sl_price = self._align_price(price * (1 - sl_pct / 100), tick)  # below entry
         tp_price = self._align_price(price * (1 + tp_pct / 100), tick)  # above entry
 
+        if sl_price >= price or tp_price <= price:
+            print(
+                f"[Futures] LONG {symbol} rejected: tick={tick} too coarse for "
+                f"entry={price} SL={sl_price} TP={tp_price} (no usable risk/reward distance)"
+            )
+            return None
+
         print(f"[Futures] Opening LONG {symbol}: qty={qty}, entry~{price:.4f}, "
               f"SL={sl_price:.4f} (-{sl_pct}%), TP={tp_price:.4f} (+{tp_pct}%), "
               f"leverage={leverage}×, notional=${notional:.2f}")
@@ -2919,7 +3074,10 @@ class FuturesClient:
                 entry_price=price, sl_price=sl_price, tp_price=tp_price,
                 order_id=f"DRY_LONG_{symbol}_{int(time.time())}",
                 sl_order_id=None, tp_order_id=None,
+                pnl_prediction=pnl_prediction,
             )
+            self._apply_entry_context(pos._smart_meta, entry_context)
+            self._persist_actual_executable_contract(pos, max(1, min(leverage, self._active_leverage)))
             self._open_positions[self._pos_key(symbol, "LONG")] = pos
             return pos
 
@@ -2942,10 +3100,18 @@ class FuturesClient:
                 confirmed=False,
             )
 
+            _ctx = entry_context if isinstance(entry_context, dict) else {}
+            _costs = _ctx.get("projected_costs") if isinstance(_ctx.get("projected_costs"), dict) else {}
+            _exit_reserve = sum(float(_costs.get(k) or 0.0) for k in (
+                "projected_exit_fee_usdt", "slippage_reserve_usdt", "funding_reserve_usdt"))
+            if _max_loss_usd > 0 and qty > 0:
+                _price_risk_budget = max(0.0, _max_loss_usd - _exit_reserve)
+                sl_pct = min(sl_pct, _price_risk_budget / (filled_price * qty) * 100.0)
             # FIX-T2A: software SL = tight, Binance safety SL = wide (50% wider)
             sl_price = self._align_price(filled_price * (1 - sl_pct / 100), tick)  # software SL
             tp_price = self._align_price(filled_price * (1 + tp_pct / 100), tick)
-            _binance_sl_pct = sl_pct * _SL_SAFETY_MARGIN_MULTIPLIER  # safety net: wider
+            _contract_backed = isinstance(_ctx.get("selected_contract"), dict)
+            _binance_sl_pct = sl_pct if _contract_backed else sl_pct * _SL_SAFETY_MARGIN_MULTIPLIER
             _binance_sl_trigger = self._align_price(filled_price * (1 - _binance_sl_pct / 100), tick)
 
             # 2. Stop-loss: SELL STOP_MARKET with positionSide=LONG
@@ -2997,6 +3163,8 @@ class FuturesClient:
                 symbol=symbol, side="LONG", qty=qty,
                 entry_price=filled_price, sl_price=sl_price, tp_price=tp_price,
                 order_id=order_id, sl_order_id=sl_order_id, tp_order_id=tp_order_id,
+                pnl_prediction=pnl_prediction,
+                indicators_at_entry=indicators_at_entry,
             )
             pos._smart_meta['fut_total_at_open'] = self.get_total_wallet_usdt()  # SSO gate anchor
             try:
@@ -3031,7 +3199,7 @@ class FuturesClient:
                 {"order_id": order_id, "qty": qty, "filled_price": filled_price},
                 confirmed=True,
             )
-            pos._smart_meta['regime_at_entry'] = str(getattr(settings, 'current_regime_mode', '') or '').strip().upper() or None
+            pos._smart_meta['regime_at_entry'] = str(getattr(_fut_settings, 'current_regime_mode', '') or '').strip().upper() or None
             pos._smart_meta['profile_at_entry'] = str(peak_quality_profile or 'B').strip().upper() or None
             pos._smart_meta['peak_quality_profile'] = str(peak_quality_profile or '').strip().upper() or None
             if peak_quality_score is not None:
@@ -3042,9 +3210,11 @@ class FuturesClient:
             if signal_id:
                 pos._smart_meta['signal_id'] = signal_id
             self._apply_entry_context(pos._smart_meta, entry_context)
+            self._persist_actual_executable_contract(pos, max(1, min(leverage, self._active_leverage)))
             # USD loss guard audit fields
             pos._smart_meta['max_loss_usd_per_trade'] = _max_loss_usd
-            pos._smart_meta['effective_sl_usd'] = min(_max_loss_usd, actual_notional * 0.95) if _max_loss_usd > 0 else None
+            _actual_contract = pos._smart_meta.get('selected_contract') if isinstance(pos._smart_meta.get('selected_contract'), dict) else {}
+            pos._smart_meta['effective_sl_usd'] = _actual_contract.get('economic_risk_usdt') if _actual_contract else (min(_max_loss_usd, actual_notional * 0.95) if _max_loss_usd > 0 else None)
             pos._smart_meta['effective_sl_price'] = sl_price
             pos._smart_meta['hard_sl_price'] = _binance_sl_trigger  # s107: real Binance algo trigger, for close-reason classification
             pos._smart_meta['sl_source'] = 'usd_cap' if (_max_loss_usd > 0 and actual_notional > 0 and sl_pct < (_max_loss_usd / actual_notional * 100.0) * (1 + 1e-12)) else 'category_pct'
@@ -3092,6 +3262,92 @@ class FuturesClient:
             pass
         return fallback
 
+    def _execute_close_order(
+        self,
+        symbol: str,
+        position_side: str,
+        quantity: float,
+        reason: str,
+        current_price: float,
+    ) -> Tuple[dict, Dict[str, Any]]:
+        """Execute one complete close using the active Staging policy."""
+        settings = getattr(self, '_cached_settings', None) or self.settings
+        mode = str(get_param(settings, 'close_execution_mode', 'active') or 'active').strip().lower()
+        urgency = 'HARD_RISK' if any(token in str(reason).upper() for token in ('STOP', 'HARD_RISK', 'LIQUIDAT', 'EMERGENCY')) else (
+            'STRUCTURAL_INVALIDATION' if any(token in str(reason).lower() for token in ('invalidat', 'stalled', 'structure')) else 'SOFT_PROFIT'
+        )
+        max_slippage = float(get_param(settings, 'close_execution_max_slippage_bps', 10.0) or 10.0)
+        depth_limit = int(get_param(settings, 'close_execution_depth_levels', 20) or 20)
+        retries = max(0, int(get_param(settings, 'close_execution_fok_retries', 1) or 0))
+        execution: Dict[str, Any] = {
+            'mode': mode,
+            'urgency': urgency,
+            'full_quantity': float(quantity),
+            'decision_price': float(current_price),
+            'retries': 0,
+            'escalation_reason': None,
+        }
+
+        if mode != 'disabled' and urgency not in {'HARD_RISK', 'EMERGENCY'}:
+            try:
+                depth = self._get('/fapi/v1/depth', {'symbol': symbol, 'limit': str(depth_limit)}) or {}
+                plan = build_close_plan(
+                    symbol, position_side, quantity, urgency,
+                    bids=depth.get('bids') or [], asks=depth.get('asks') or [],
+                    max_slippage_bps=max_slippage,
+                    notional_usdt=quantity * current_price,
+                    depth_timestamp=datetime.now(timezone.utc).isoformat(),
+                )
+                execution.update(plan.to_dict())
+            except Exception as exc:
+                execution.update({
+                    'order_type': 'MARKET',
+                    'reason': 'depth_unavailable_fallback_market',
+                    'depth_error': str(exc),
+                })
+        else:
+            execution.update({
+                'order_type': 'MARKET',
+                'reason': 'close_execution_disabled' if mode == 'disabled' else 'hard_risk_immediate',
+            })
+
+        if execution.get('order_type') == 'LIMIT_FOK' and execution.get('expected_vwap'):
+            for attempt in range(retries + 1):
+                execution['retries'] = attempt
+                try:
+                    result = self._post('/fapi/v1/order', {
+                        'symbol': symbol, 'side': 'SELL' if position_side == 'LONG' else 'BUY',
+                        'type': 'LIMIT', 'timeInForce': 'FOK',
+                        'quantity': str(quantity), 'price': str(execution['expected_vwap']),
+                        'positionSide': position_side,
+                        'newClientOrderId': self._gen_client_order_id('x', reason),
+                    })
+                    filled_qty = float(result.get('executedQty', 0) or 0)
+                    if filled_qty >= quantity - 1e-12:
+                        execution['order_type'] = 'LIMIT_FOK'
+                        execution['filled_quantity'] = filled_qty
+                        return result, execution
+                    order_id = result.get('orderId')
+                    if order_id:
+                        try:
+                            self._delete('/fapi/v1/order', {'symbol': symbol, 'orderId': order_id})
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    execution['last_fok_error'] = str(exc)
+                if attempt < retries:
+                    execution['escalation_reason'] = 'fok_retry'
+            execution['order_type'] = 'MARKET'
+            execution['escalation_reason'] = execution.get('last_fok_error') or 'fok_not_fully_filled'
+
+        result = self._post('/fapi/v1/order', {
+            'symbol': symbol, 'side': 'SELL' if position_side == 'LONG' else 'BUY',
+            'type': 'MARKET', 'quantity': str(quantity), 'positionSide': position_side,
+            'newClientOrderId': self._gen_client_order_id('x', reason),
+        })
+        return result, execution
+
+    @_serialized_position_management
     def close_long(self, symbol: str, qty: float = None, reason: str = "manual") -> Optional[dict]:
         """Close a LONG position with a SELL MARKET order."""
         key = self._pos_key(symbol, "LONG")
@@ -3124,11 +3380,11 @@ class FuturesClient:
                 {"qty": aligned_qty, "reason": reason},
                 confirmed=False,
             )
-            result = self._post("/fapi/v1/order", {
-                "symbol": symbol, "side": "SELL", "type": "MARKET",
-                "quantity": str(aligned_qty), "positionSide": "LONG",
-                "newClientOrderId": self._gen_client_order_id("x", reason),
-            })
+            result, close_execution = self._execute_close_order(
+                symbol, "LONG", aligned_qty, reason, current_price,
+            )
+            if pos:
+                pos._smart_meta['close_execution'] = close_execution
             # Verify real position size before persisting close; if still open, keep tracking residual.
             _real_qty = self._get_position_qty_real(symbol, "LONG")
             if _real_qty > 0:
@@ -3154,6 +3410,7 @@ class FuturesClient:
                     pos.exit_price = _fill_price
                     _real = self._get_realized_pnl_from_trades(symbol, "LONG", pos.opened_at, pos=pos)
                     if _real.get('pnl_accounting_mode'):
+                        pos.exit_price = float(_real.get('exit_price') or _fill_price)
                         pos.pnl = _real['pnl']
                         pos._smart_meta['pnl_accounting_mode'] = _real['pnl_accounting_mode']
                         pos._smart_meta['binance_realized_pnl'] = _real.get('realized_pnl')
@@ -3216,6 +3473,7 @@ class FuturesClient:
             print(f"[Futures] close_long {symbol} failed: {e}")
             return None
 
+    @_serialized_position_management
     def close_short(self, symbol: str, qty: float = None, reason: str = "manual") -> Optional[dict]:
         """
         Close a SHORT position with a BUY MARKET order.
@@ -3265,11 +3523,11 @@ class FuturesClient:
                 {"qty": aligned_qty, "reason": reason},
                 confirmed=False,
             )
-            result = self._post("/fapi/v1/order", {
-                "symbol": symbol, "side": "BUY", "type": "MARKET",
-                "quantity": str(aligned_qty), "positionSide": "SHORT",
-                "newClientOrderId": self._gen_client_order_id("x", reason),
-            })
+            result, close_execution = self._execute_close_order(
+                symbol, "SHORT", aligned_qty, reason, current_price,
+            )
+            if pos:
+                pos._smart_meta['close_execution'] = close_execution
             # Verify real position size before persisting close; if still open, keep tracking residual.
             _real_qty = self._get_position_qty_real(symbol, "SHORT")
             if _real_qty > 0:
@@ -3289,6 +3547,7 @@ class FuturesClient:
                     pos.exit_price = _fill_price
                     _real = self._get_realized_pnl_from_trades(symbol, "SHORT", pos.opened_at, pos=pos)
                     if _real.get('pnl_accounting_mode'):
+                        pos.exit_price = float(_real.get('exit_price') or _fill_price)
                         pos.pnl = _real['pnl']
                         pos._smart_meta['pnl_accounting_mode'] = _real['pnl_accounting_mode']
                         pos._smart_meta['binance_realized_pnl'] = _real.get('realized_pnl')
@@ -3547,6 +3806,7 @@ class FuturesClient:
 
         return success
 
+    @_serialized_position_management
     def check_positions(self, settings=None, monitor_only: bool = False) -> List[dict]:
         """
         Check all tracked positions (LONG and SHORT) for SL/TP hits.
@@ -4257,6 +4517,21 @@ class FuturesClient:
                             if _gate_changed:
                                 self._persist_smart_meta(pos)
                         if _sso_action.should_close:
+                            if (
+                                0.0 < float(_sso_action.close_pct or 0.0) < 1.0
+                                and str(get_param(settings, "exit_fractionation_mode", "disabled") or "disabled").lower() != "legacy"
+                            ):
+                                self._audit(symbol, "partial_exit_blocked", {
+                                    "side": pos.side,
+                                    "trade_type": "futures",
+                                    "source": "smart_scale_out",
+                                    "reason": _sso_action.reason,
+                                    "requested_pct": float(_sso_action.close_pct),
+                                })
+                                print(f"[Futures/SSO] {symbol} {pos.side}: partial exit blocked; holding full thesis")
+                                _sso_action.should_close = False
+
+                        if _sso_action.should_close:
                             _sso_close_pct = _sso_action.close_pct
                             _sso_qty = pos.qty * _sso_close_pct
                             _step = self._get_step_size(symbol)
@@ -4522,6 +4797,7 @@ class FuturesClient:
                             'sr_behavior': _ug_meta.get('sr_behavior') or {},
                             'pim_flag_exit': _ug_meta.get('pim_flag_exit'),
                         },
+                        sr_path_state=_ug_meta.get('sr_path_state'),
                         fear_greed_value=_ug_fng_value,
                     )
                     _ug_decision = _evaluate_unified_governance(_ug_ctx, settings)
@@ -4568,6 +4844,24 @@ class FuturesClient:
                         'close_pct': float(_ug_decision.close_pct or 0.0),
                         'lifecycle_structure': _lifecycle_structure.get('decision') or {},
                     })
+
+                    _ug_partial_blocked = (
+                        _ug_decision.should_close
+                        and 0.0 < float(_ug_decision.close_pct or 0.0) < 1.0
+                        and str(get_param(settings, "exit_fractionation_mode", "disabled") or "disabled").lower() != "legacy"
+                    )
+                    if _ug_partial_blocked:
+                        self._audit(symbol, 'partial_exit_blocked', {
+                            'side': pos.side,
+                            'trade_type': 'futures',
+                            'source': 'unified_governance_execution_boundary',
+                            'reason': _ug_decision.reason,
+                            'requested_pct': float(_ug_decision.close_pct),
+                        })
+                        _ug_decision.should_close = False
+                        _ug_decision.close_pct = 0.0
+                        _ug_decision.action = 'hold'
+                        _ug_decision.reason = 'partial_exit_blocked'
 
                     if _ug_decision.should_close:
                         self._audit(symbol, 'unified_governance_close_triggered', {
