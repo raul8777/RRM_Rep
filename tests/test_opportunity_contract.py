@@ -57,12 +57,15 @@ def test_generic_directional_prediction_builds_geometry_from_risk_metrics():
 
 def test_max_loss_contract_reserves_exit_costs_before_price_risk():
     contract = build_executable_opportunity(
-        "SHORT", "SHORT_SUPPORT_BREAKDOWN", _prediction(stop_price=110.0),
-        {"current_price": 100.0}, leverage=2, max_loss_usd=18.0,
+        "SHORT", "SHORT_SUPPORT_BREAKDOWN", _prediction(stop_price=102.0),
+        {"current_price": 100.0}, leverage=2, max_loss_usd=1.0,
         entry_fee_bps=2.0, exit_fee_bps=8.0, slippage_bps=5.2,
     )
-    assert contract.economic_risk_usdt <= 18.0 + 1e-9
-    assert contract.effective_stop_price < 110.0
+    assert contract.economic_risk_usdt <= 1.0 + 1e-9
+    assert contract.effective_stop_price == pytest.approx(102.0)
+    # Max-loss scaled notional down, not the stop.
+    assert contract.notional_usdt < 200.0
+    assert contract.margin_usdt < 100.0
 
 
 def test_rejection_with_bullish_momentum_is_not_confirmed():

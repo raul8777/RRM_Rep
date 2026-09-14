@@ -82,12 +82,10 @@ def build_executable_opportunity(
     minimum_probability: float = 0.0,
 ) -> ExecutableOpportunity:
     pred = prediction if isinstance(prediction, dict) else {}
-    entry = _n(metadata.get("current_price") or metadata.get("price") or pred.get("entry_price") or pred.get("current_price"))
-    margin = max(0.0, _n(pred.get("position_size_usdt") or pred.get("margin_usdt")))
-    leverage = 2 if leverage > 1 else 1
-    notional = margin * leverage
-    qty = notional / entry if entry > 0 else 0.0
     is_short = side.upper() == "SHORT"
+    entry = _n(metadata.get("current_price") or metadata.get("price") or pred.get("entry_price") or pred.get("current_price"))
+
+    # Resolve target and stop from prediction percentages / risk_metrics or structural SR.
     target = _n(pred.get("target_price") or pred.get("take_profit_price"))
     stop = _n(pred.get("stop_price") or pred.get("stop_loss_price"))
     risk_metrics = pred.get("risk_metrics") if isinstance(pred.get("risk_metrics"), dict) else {}
@@ -105,24 +103,40 @@ def build_executable_opportunity(
         target = entry * (1 - tp_pct / 100 if is_short else 1 + tp_pct / 100)
     if not stop and entry and sl_pct:
         stop = entry * (1 + sl_pct / 100 if is_short else 1 - sl_pct / 100)
+    if not stop and entry > 0:
+        stop = _n(metadata.get("resistance_level")) if is_short else _n(metadata.get("support_level"))
+    if not target and entry > 0:
+        target = _n(metadata.get("support_level")) if is_short else _n(metadata.get("resistance_level"))
+
+    # Size by max_loss: scale notional down to the model/structural stop,
+    # never move the stop closer to the entry.
+    margin = max(0.0, _n(pred.get("position_size_usdt") or pred.get("margin_usdt")))
+    leverage = 2 if leverage > 1 else 1
+    requested_notional = margin * leverage
+    price_distance_pct = abs(stop - entry) / entry if entry > 0 and stop > 0 else 0.0
+    total_cost_bps = max(0.0, entry_fee_bps + exit_fee_bps + slippage_bps + funding_bps)
+    cost_ratio = total_cost_bps / 10000.0
+    notional = requested_notional
+    if max_loss_usd > 0 and price_distance_pct > 0 and cost_ratio >= 0:
+        max_notional = max_loss_usd / (price_distance_pct + cost_ratio)
+        notional = min(requested_notional, max_notional)
+    notional = max(0.0, notional)
+    min_notional = 10.0
+    margin = notional / leverage
+    qty = notional / entry if entry > 0 else 0.0
 
     entry_fee = notional * max(0.0, entry_fee_bps) / 10000.0
     exit_fee = notional * max(0.0, exit_fee_bps) / 10000.0
     slippage = notional * max(0.0, slippage_bps) / 10000.0
     funding = notional * abs(funding_bps) / 10000.0 if leverage > 1 else 0.0
     exit_reserve = exit_fee + slippage + funding
-    if max_loss_usd > 0 and entry > 0 and qty > 0:
-        price_risk_budget = max(0.0, max_loss_usd - exit_reserve)
-        max_distance = price_risk_budget / qty
-        capped_stop = entry + max_distance if is_short else entry - max_distance
-        stop = min(stop, capped_stop) if is_short and stop > 0 else max(stop, capped_stop) if stop > 0 else capped_stop
 
-    geometry = entry > 0 and qty > 0 and target > 0 and stop > 0 and (
+    geometry = entry > 0 and qty > 0 and notional >= min_notional and target > 0 and stop > 0 and (
         (target < entry < stop) if is_short else (stop < entry < target)
     )
     gross_risk = abs(stop - entry) * qty if geometry else 0.0
     gross_reward = abs(target - entry) * qty if geometry else 0.0
-    economic_risk = gross_risk + exit_reserve
+    economic_risk = gross_risk + entry_fee + exit_reserve
     probability = _n(pred.get("success_probability"))
     total_costs = entry_fee + exit_reserve
     expected_net = probability * gross_reward - (1.0 - probability) * gross_risk - total_costs
@@ -131,6 +145,8 @@ def build_executable_opportunity(
         executable and pred and geometry and economic_risk > 0
         and expected_net > 0 and probability >= minimum_probability
     )
+    if max_loss_usd > 0:
+        valid = valid and (economic_risk <= max_loss_usd + 1e-9)
     if rejection is not None:
         valid = valid and bool(rejection["confirmed"])
     return ExecutableOpportunity(
