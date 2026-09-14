@@ -1682,7 +1682,9 @@ def stage_ready_candidates(
         required = int(cand_cfg.get("required_positive_checks", 2))
         checks_per_cycle = int(cand_cfg.get("checks_per_cycle", 1))
         max_cycles = int(cand_cfg.get("max_cycles", 2))
-        max_age = int(cand_cfg.get("max_age_min", 25))
+        # Fase 3: RANGE_SCALP setups expire faster so stale contracts do not open.
+        _regime_age = 15 if str(regime_mode or "").upper() == "RANGE_SCALP" else 25
+        max_age = int(cand_cfg.get("max_age_min", _regime_age))
         initial_stage = _stage_payload(
             {},
             stage_kind="setup_detected",
