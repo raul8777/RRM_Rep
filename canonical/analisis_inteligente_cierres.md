@@ -10,6 +10,14 @@
 - Primera ejecución: `AIC-20260807-01`.
 - Unidad primaria: tesis consolidada por `(symbol, entry_time)`; las filas de cierres parciales no se cuentan como tesis independientes.
 
+## Actualización s138 — AIC de ejecución y slippage
+
+- Todo análisis de cierre debe separar precio observado/esperado, VWAP estimado, fill promedio real, slippage esperado/real, PnL bruto/neto esperado/real, fees y funding.
+- La política se evalúa por urgencia: hard-risk/emergencia priorizan salida inmediata; invalidación no crítica y profit pueden usar FOK full-size con fallback MARKET.
+- La unidad sigue siendo la tesis, nunca cada fill interno de Binance.
+- El dashboard debe reportar cobertura expected-vs-real y diferencias por SPOT/FUTURES, LONG/SHORT, venue, régimen y perfil A/B/C.
+- Ningún cambio se promueve con datos históricos mezclados: el corte post-deploy y la muestra válida deben quedar identificados explícitamente.
+
 ## Preguntas obligatorias
 
 Cada ejecución debe responder, en este orden:
@@ -111,3 +119,25 @@ Ejecutar AIC:
 - Producción: `RUNNING`, hard-risk y telemetry sin error; 21 snapshots recientes para 3 posiciones FUTURES tras el restart.
 - Evidencia: `Dev/benchmarks/futures_short_near_support_gate_20260807.json` y `Dev/benchmarks/incident_preopen_1h_replay_20260807.json`.
 - Pendiente: medir fuera de muestra la mejora neta y la tasa de `SHORT_NEAR_SUPPORT_EXHAUSTION` durante 5-7 días.
+
+### AIC-20260913-01 — `SEIUSDT` FUTURES SHORT: stop forzado, slippage y cierre con triggerPrice
+
+- **Cohorte**: 1 tesis (`SEIUSDT`, `RANGE_SCALP`, `SHORT_SUPPORT_BREAKDOWN`), `trades.id=2386`.
+- **Resumen**: entrada `0.04440`, cierre por stop Binance, `realized_profit_raw=-20.90`, `pnl=-22.07`. El `trades_closed.exit_price=0.0447` era el trigger, no el fill real (`~0.04488`).
+- **Rama A — No abrir**:
+  - El cap `$18` acercó el stop a `0.0447` (0.68 %), por debajo de la resistencia `0.04496`.
+  - El notional `$1,915` era demasiado alto para `SEI` a `$0.044`; el contrato solo reservaba `slippage` de 5.2 bps.
+  - El LONG Spot alternativo (`LONG_SUPPORT_BOUNCE`) recibió `notional=0` por falta de `position_size_usdt`, eliminando la comparación bilateral.
+- **Rama B — Proteger después de abrir**:
+  - El cierre por Binance ejecutó como `STOP_MARKET` y el fill real estuvo 41 bps por encima del trigger.
+  - `position_telemetry` y `hard_risk_monitor` usaban `pos.exit_price=0.0447` (trigger), no el fill real.
+- **Código / Configuración**:
+  - `opportunity_contract` acercaba el stop en vez de escalar notional.
+  - `futures_client` persistía `exit_price` y `realized_gross_pnl` con `triggerPrice`.
+  - `slippage_pct=0.00052` global no ajustaba por tick/ATR/liquidez.
+  - `ready_candidates` `max_age_min=25` permitió un setup de 31 minutos.
+- **Corrección implementada**:
+  - `opportunity_contract` escala notional al stop; `directional_arbiter` inyecta `position_size_usdt` en LONG; `futures_client` usa fill real; `staged_entry` TTL `RANGE_SCALP` 15 min.
+- **Tests**: `591 passed, 3 skipped, 59 warnings`.
+- **Evidencia**: `trades_audit` filas `2026-09-14 00:30–00:54` para `SEIUSDT`; `trades.id=2386`; `ready_candidate.id=5380`.
+- **Pendiente**: medir fuera de muestra el efecto del sizing ajustado y la tasa de `RANGE_SCALP` descartados por TTL en 15 min.

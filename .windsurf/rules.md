@@ -18,15 +18,43 @@ Son contexto arquitectónico y guía de diagnóstico, no valores hardcodeados.
 5. ¿Cómo se mide contra baseline/changepoint (3y/60000)?
 6. ¿Qué endpoint/dashboard mostrará la salud del cambio?
 
+**Estado operativo canónico (sep 12 2026, s135/s136/s138):** Staging recreado y saludable; suite `592 passed, 3 skipped, 0 failed`. Todo candidato pasa por arbitraje bilateral fresco en soporte/resistencia y el régimen no preasigna lado. La selección maximiza retorno neto esperado sobre riesgo, sin margen fijo, score probability+edge ni preferencia SHORT. La confirmación temporal está retirada (`direction_confirmation_mode=disabled`, `direction_required_confirmations=0`); fast-path y ciclo normal re-arbitran justo antes del submit. `range_scalp_quality_model_mode=shadow` mientras no exista el artefacto entrenado. `exit_fractionation_mode=disabled` bloquea cierres parciales; hard-risk y tesis estructural rota/estancada cierran 100%. Staging usa `close_execution_mode=active`: FOK full-size para cierres no urgentes con profundidad suficiente y MARKET inmediato/fallback para riesgo urgente o FOK incompleto. Cada cierre persiste evidencia expected-vs-real y el dashboard expone `close_execution_active`. Este documento y `SYSTEM_REFERENCE.md` son la fuente de verdad para Devin y cualquier agente del workspace.
+
+**Precedencia:** las secciones históricas que describen `direction_confirmed`, confirmaciones por bps, `short_priority`, márgenes direccionales o quality model `enforced` se conservan solo como trazabilidad y están supersedidas por s135.
+
+**Estado s136 (sep 12 2026):** reparado circuit breaker fast-path (`611 -> 0`): solo pausa técnica activa bloquea y éxitos confirmados reinician estado. `entry_decision` valida por `thesis_type`: reversión para bounce/rejection, continuación para breakout/breakdown; `RANGE_MODEL_INVALID` no veta continuación y target/stop orientados siguen obligatorios.
+
+**Estado s137 (sep 12 2026):** arbitraje y ejecución comparten `ExecutableOpportunity`: mismo entry, target/stop, 2x, max-loss económico y costes observados. Sizing solo reduce desde `locked_position_size_usdt`; el contrato se actualiza con fill/qty reales. Rejection SHORT exige evidencia explícita y no breakout. SR Pool directo está desactivado (`sr_pool_trade_enabled=False`) para eliminar executor paralelo.
+
 Si una propuesta no responde estos 6 puntos, no está lista para rollout.
 
-**🔴 Regla dura — cierres parciales:** todo cierre parcial (SSO, PRS, UG, PredExit) debe insertar un registro en `trades_closed` con `metadata.partial_close=True` y reducir `quantity` en `trades_open`. Nunca se limita a mutar `quantity` o metadata sin fila de cierre. El dashboard debe mostrar PnL realizado + no realizado + total por posición abierta.
+**🔴 Regla dura — cero cierres parciales:** con `exit_fractionation_mode=disabled`, ninguna capa (SSO, PRS, UG, PredExit, SmartTP, Futures o lifecycle) puede enviar una orden parcial, mutar `quantity` ni escribir `metadata.partial_close=True`. Debe mantener el 100% y auditar `partial_exit_blocked` con fuente, razón y porcentaje solicitado. Solo un cierre completo confirmado puede crear `trades_closed`.
 
 **🔴 Regla dura — visibilidad de shadow evidence:** todo mecanismo que se despliegue "en observación"/shadow (no activo en producción real) debe ser visible en `/metrics/shadow-readiness` — agregar una entrada en `app.py::get_shadow_readiness` con `id`, `name`, `mode` (leído de la config real, no hardcodeado), `state`, `summary` con métricas reales, y `gates` con los umbrales de graduación a activo. No es aceptable dejar un flag `*_enabled=False`/modo shadow en el código sin su contraparte visible en el dashboard — la falta de visibilidad fue precisamente lo que permitió que el bug de `range_reversion_shadow`/`invalid_reversion_payoff` (ver s108/s115) pasara desapercibido durante semanas. Al implementar un mecanismo nuevo en shadow, agregar su entrada al dashboard es parte de la misma tarea, no un paso separado opcional.
 
 **🔴 Regla dura — ejecución real con evidencia obligatoria:** cuando una calibración se despliega en `active` (ejecución real), también debe dejar evidencia en `/metrics/shadow-readiness` como control de calidad de rollout. En este caso la tarjeta debe mostrar explícitamente decisiones ejecutadas vs decisiones que se habrían diferido/cortado, con gates de muestra mínima para recalibrar umbrales. No se acepta un mecanismo activo sin telemetría de evidencia comparable.
 
 **�🟡 Guía — limpieza de candidatos activos tras un fix de evaluación/priorización:** todo cambio que altere cómo se evalúan, confirman o priorizan candidatos (`staged_entry.py::_direction_transition`, `get_openable_candidates`, gates de ejecución en `run_trades.py`) debe cerrar con una revisión de `ready_candidates` en estado `ready`/`validated`: consultar `data.last_execution_gate`, `data.direction`, y el conteo de `risk_queue_selected`/`execution_attempt_blocked` en `ready_candidate_checks` por candidato, para detectar y descartar (`_discard_ready`) cualquiera que haya quedado en un estado inconsistente con la lógica nueva o arrastrando el patrón que motivó el fix (ver s110/s111, HEIUSDT/RIFUSDT monopolizando la cola). No dar el fix por cerrado sin este chequeo, aunque el resultado sea "nada que limpiar".
+
+## s131 — salidas gobernadas por estructura + hueco de datos futures cerrado (sep 7 2026)
+
+- **Regla de diseño (explícita del usuario):** con tantos procesos monitoreando cada posición (hard_risk 2s, PIM, belief, UG, watcher 1s), la fragmentación es fricción y no gestión de riesgo. Una posición vigilada captura el 100% si la estructura confirma continuación, o se liquida entera si deja de moverse como se quiere. En Staging no existe excepción automática de parcialización.
+- **Gobierno estructural en UG (ACTIVO):** `sr_path_state` (del evaluador anclado, candle-close gated) llega al `UnifiedGovernanceContext` en spot y futures. En modo activo: `invalidated`/`stalled` → cierre 100% (prioridad 97); `extended_to_next_level`/`on_track`/`target_reached` → supresión de cierres parciales (incl. la rama `lifecycle_structure_partial_profit`). Hard SL precedence preservada — el guard `near_sl` de la rama de pérdida nunca se sobrescribe.
+- **Hueco de datos (la causa raíz de ASTERUSDT −$15.30):** las rutas de apertura futures no poblaban `indicators_at_entry` con la geometría SR del candidato → el evaluador nunca podía construir el ancla. Ahora `run_trades._build_indicators_at_entry` fusiona la metadata raíz (`sr_path_*`, `atr`, `interval`, niveles) y se pasa en las 4 rutas futures; `futures_client.open_long` lo acepta y persiste.
+- **Sizing SR-pool por convicción:** `SR_POOL_BREAK` mapeado explícitamente a base completa (no más default accidental), modulado ±25% por `sr_pool_score`, registrado en `kelly_sizing_log`.
+- **Evidencia XRPUSDT (+$0.33):** tesis `SR_POOL_BREAK` válida durante todo el trade, pero fragmentada en 4 tramos — capturó ~14% del movimiento predicho. Con el gobierno estructural activo, una tesis confirmada en continuación ya no se fragmenta.
+- Rollback: `sr_path_evaluator_mode=disabled` y/o `sr_path_horizon_gate_mode=disabled` (hot-config); sizing SR-pool revierte al mapa estático.
+
+## s130 — ciclo de vida anclado a tesis S/R (sr_path_v1) + gate de horizonte geométrico (sep 6 2026)
+
+- **Contrato `sr_path_v1` (instrumentación activa):** toda apertura persiste en `thesis_snapshot_v1` el mapa forward ordenado de S/R — `anchor_level` (nivel cuya pérdida invalida la tesis), `target_level` (primer objetivo), `next_levels` (hasta 2 objetivos más allá del target, para extender ganadores en vez de expirar por tiempo), `primary_timeframe`, `atr_per_candle` y `expected_candles = |target-entry| / atr_por_vela`. Velas del timeframe primario, nunca segundos hardcodeados. `atr_pct` se convierte a unidades de precio antes de usarse. Sin geometría, no se persiste nada (nunca se fabrica).
+- **Evaluador anclado (`position_intelligence.evaluate_thesis_path`, shadow por defecto vía `sr_path_evaluator_mode`):** 5 estados — `on_track`, `stalled` (candles_consumed ≥ `sr_path_stall_multiplier`×expected_candles con <50% progreso, o absorción del anchor), `invalidated` (cierre de vela primaria más allá del anchor), `target_reached`, `extended_to_next_level` (target roto + `vol_spike ≥ sr_path_extension_min_vol`). Evalúa SOLO al cierre de vela del timeframe primario (`should_evaluate_thesis_path`, bucket por vela) — nunca por tick del loop 2s.
+- **Cadena de autoridad (sin colisiones):** A1 hard-risk (SL/TP/emergency) > A2 UG árbitro final > evaluador de path como evidencia estructural vía `position_belief` (solo si `mode=active`: invalidated → adverse+2, stalled → adverse+1, on_track/target/extended → favor+1). El evaluador nunca cierra por sí mismo.
+- **Gate de horizonte (`run_trades._staged_sr_path_horizon_check`, shadow por defecto vía `sr_path_horizon_gate_mode`):** en `_staged_range_scalp_decision` evalúa si `expected_candles` cae en la banda medida en Fase A (1–4 velas de 1h: único tramo corto rentable, +$153/66.7% WR en 30d). En shadow registra `sr_path_horizon_shadow_block` en `trades_audit` sin bloquear; en active bloquea con `SR_PATH_HORIZON_OUT_OF_BAND`. Geometría ausente nunca bloquea (fail-open).
+- **Visibilidad (regla dura):** tarjeta `sr_path_lifecycle` en `/metrics/shadow-readiness` (grupo "Estrategia de SR") — cobertura de path en abiertas, transiciones `sr_path_state_change` (7d), bloqueos shadow de horizonte (7d). Gates de graduación: cobertura completa en abiertas nuevas, ≥20 transiciones, ≥5 bloqueos shadow.
+- **Obsolescencia diferida (NO retirado):** SSO-7, `time_stop_hours` y `stagnation_min_hours` contradicen el modelo geométrico pero permanecen activos hasta que la evidencia shadow demuestre cobertura (AIC: mejora neta incluyendo ganancias sacrificadas).
+- Ver `canonical/calibrar-ciclo-vida-52fe5d.md` §17 (ciclo de vida) y `canonical/calibracion_entradas-a20ab8-v3.md` §s130 (gate de horizonte) para el detalle completo.
+- Rollback: `PATCH /config/kelly {"sr_path_evaluator_mode": "disabled"}` y/o `{"sr_path_horizon_gate_mode": "disabled"}` (ambos hot-configurables). La persistencia de `sr_path_v1` no es decisional y no requiere rollback.
 
 ## s115 — revalidación de tesis S/R al ejecutar (activo, 5%) + visibilidad shadow obligatoria (ago 3 2026)
 
@@ -55,7 +83,7 @@ Si una propuesta no responde estos 6 puntos, no está lista para rollout.
 
 ## s110 — gates finales de ejecución condicionados a demora real (ago 2 2026)
 
-- **Regla de diseño (explícita del usuario):** la única razón legítima para volver a validar recompensa:riesgo o elegibilidad de un candidato `validated`/`direction_confirmed` es que haya esperado genuinamente por falta de capital o de slots disponibles. Fuera de ese escenario, debe abrir de inmediato al primer indicio de rompimiento hacia la dirección esperada — no re-derivar la tesis desde cero.
+- **Regla de diseño vigente:** un candidato `validated` siempre pasa por re-arbitraje bilateral atómico con precio fresco inmediatamente antes del submit. Si esperó por capital/slots se reconstruyen además target/stop y elegibilidad; no se acumulan confirmaciones temporales ni se confía en una dirección staged antigua.
 - `run_trades.py::_candidate_delayed_by_capital_or_slots()`: único punto de verdad para "¿esto esperó de verdad?" — capital (`data.capital_routing.retry_count`/`status`) o slots (`data.stage_reason in (RISK_BLOCKED, ROUTING_BLOCKED)`).
 - `_revalidate_entry_before_submit` (R:R≥2.0, s109) y `futures_executable` (cacheado desde `signal_meta.directional_arbitration` en vez de re-derivar del top-N rotativo del screener) deben respetar esta condición — ver `canonical/calibracion_entradas-a20ab8-v3.md` §s110 para el detalle completo.
 - Rollback: revertir `_candidate_delayed_by_capital_or_slots` a `return True` incondicional (comportamiento pre-s110) si se detectan aperturas prematuras sobre setups genuinamente agotados.
@@ -69,10 +97,11 @@ Si una propuesta no responde estos 6 puntos, no está lista para rollout.
 - Módulos que deben permanecer sincronizados en documentación:
   - `market_regime.py`, `pair_screener.py`, `autonomous_signals.py`, `entry_profile_gate.py`, `portfolio_selector.py`, `staged_entry.py`, `pnl_service.py`, `entry_decision.py`, `run_trades.py`, `analysis_cycle.py`, `external_data_client.py`, `technical_graph_analyst.py`, `app.py`.
 
-### Contrato SR canónico (sin bypass)
+### Contrato SR canónico bilateral e inmediato
 
-- Para señales SR, el estado `ready` representa espera activa de rompimiento/progreso direccional; no autoriza apertura por sí solo.
-- La secuencia obligatoria es: `ready` -> checks inter/intra -> `direction_confirmed` -> `validated` -> preflight -> ejecución -> fill confirmado -> `opened`.
+- Para señales SR, `near_support`/`near_resistance` solo activan análisis: soporte compara bounce LONG vs breakdown SHORT; resistencia compara rejection SHORT vs breakout LONG.
+- La secuencia activa es: detección SR -> evaluación bilateral -> calidad/EV -> `validated` -> preflight atómico con precio fresco y re-arbitraje -> ejecución -> fill confirmado -> `opened`; no acumula confirmaciones temporales.
+- Gana la oportunidad ejecutable con mayor retorno neto esperado sobre riesgo positivo; `short_priority` no puede restaurar preferencia por lado.
 - Si preflight o ejecución bloquean, se persiste razón terminal/no terminal en `ready_candidates.data` y se audita el evento.
 - Queda prohibido abrir posición sin confirmación de fill Binance/futures.
 
@@ -197,8 +226,8 @@ unified_governance_supervisor.py → UG: árbitro final — consolida advisories
 9. Un único retroceso limitado cambia a `recovery_pending` sin sumar checks positivos ni autorizar una orden. Solo se recupera al recapturar el setup y completar otro avance consecutivo. Un segundo retroceso, stop/drawdown, precio/referencia ausente, target inválido o expiración descarta terminalmente.
 10. Todo check persiste `ready_candidate_checks.input_features.direction`. Un descarte terminal tiene `decision="negative"`, razón `DIRECTION_*` y copia su contexto en `ready_candidates.data.last_rejection`; `recovery_pending` se registra como `decision="pending"`.
 11. La posición abierta conserva `ready_candidate_id` y `staged_direction` en metadata para atribuir el PnL realizado a su cadena de validación.
-12. Defaults activos: `direction_min_progress_bps=3.0`, `direction_max_adverse_bps=50.0`, `direction_required_confirmations=2`. En todo régimen de entrada, `direction_confirmation_mode="enforced"`; una candidata no puede permanecer `validated` sin `state="confirmed"` y dos confirmaciones. Ajustar los dos espejos canónicos (`config.py` y `config_helpers.py`) y comparar por régimen/ventana, no por una racha aislada.
-13. La validación staged no reemplaza el preflight final. Cada rechazo final se persiste como `data.last_execution_gate`; dashboard muestra `Pendiente de preflight` o `Dirección sin confirmar`, nunca `Lista para abrir` en esos estados.
+12. Defaults activos s135: `direction_confirmation_mode="disabled"` y `direction_required_confirmations=0` en todos los regímenes. Los campos de progreso/adversidad son compatibilidad histórica y no autorizan apertura.
+13. La validación staged no reemplaza el preflight bilateral final. Cada rechazo se persiste como `data.last_execution_gate`; dashboard diferencia candidatas listas, bloqueadas y rechazadas sin exigir estado `direction_confirmed`.
 
 **Monitoreo obligatorio de dirección:** por cada ventana de 24 h, medir staged, `recovery_pending`, validadas, abiertas, descartadas, razones `DIRECTION_*`, cobertura de aperturas y PnL neto de posiciones con `ready_candidate_id`. Si el rechazo terminal supera 90% o la cobertura cae materialmente, analizar `progress_bps`, `base_progress_bps` y `target_progress` antes de cambiar umbrales o desactivar la guarda.
 
@@ -209,6 +238,7 @@ unified_governance_supervisor.py → UG: árbitro final — consolida advisories
 - SSO/PRS/PredExit devuelven advisories; el 1s telemetry layer también los recalcula sobre snapshots vivos, mientras UG consolida en la acción final (nunca múltiples closes en el mismo ciclo)
 - La escalación automática de parcial a cierre total está desactivada por defecto: un advisory SSO partial + PRS full no colapsa a 100% sin confirmación explícita de UG
 - Regla de stop inteligente 1s: no cortar por umbral fijo aislado. Al cruzar drawdown se abre ventana de rescate (`monitoring`/`recoverable`), y el corte duro se habilita cuando hay `failed_recovery` o `shock` adverso confirmado.
+- **(s130) Evaluador de path anclado a tesis:** en paralelo al pipeline de exit, `hard_risk_monitor` evalúa el progreso de cada posición contra su `sr_path_v1` persistido al abrir (anchor/target/next_levels), al cierre de cada vela del timeframe primario. Persiste `smart_meta.sr_path_state` y audita `sr_path_state_change` en transiciones. Es evidencia estructural para `position_belief`, nunca una vía de cierre propia; en `shadow` no influye en decisiones. Ver §s130 arriba.
 
 **Salida:**
 - Parcial: INSERT `trades_closed` (PnL neto proporcional, comisiones, motivo, trigger, `metadata.partial_close=True`) + UPDATE `trades_open` (reduce qty, persiste `_smart_meta` actualizado)
@@ -632,7 +662,7 @@ python -m pytest tests/test_lifecycle_adapters.py tests/test_lifecycle_exit.py t
 
 ## 7. MIMIC AUTÓNOMO — EJECUCIÓN CONTINUA POR MICRO UNIVERSOS
 
-**Propósito:** Ejecutar MIMIC de forma autónoma, acumulando micro universos en el dataset global y mejorando la cobertura de regímenes/símbolos sin intervención manual.
+**Propósito:** Ejecutar MIMIC de forma autónoma, acumulando micro universos en el dataset global y mejorando la cobertura de regímenes/símbolos sin intervención manual. Desde s135 el worker automático requiere `mimic_autorun_enabled=true`; default `false`. Todo fallo respeta `mimic_autorun_failure_backoff_seconds` y nunca reintenta en tight loop.
 
 **Componentes:**
 - `simulation/mimic_scheduler.py` — máquina de estados con fases: `SELECT_UNIVERSE → AUDIT → DOWNLOAD → VALIDATE → MAP_REGIMES → CALIBRATE → CONSOLIDATE → CROSS_VALIDATE → APPLY → MONITOR`.
@@ -1029,3 +1059,27 @@ Cierre de la revisión de entry calibration con énfasis en `range_reversion_pre
 - Para volver al comportamiento anterior de `RANGE_SCALP`: `PATCH /config/apply {"range_reversion_predictor_mode": "blocking"}`.
 - Para restaurar SPOT_BULL 3 bps: editar `SPOT_BULL.direction_min_progress_bps` en `config.py` y `config_helpers.py`, rebuild/restart.
 - Para reactivar `volspike_override_enabled`: `PATCH /config/apply {"volspike_override_enabled": true}` (no recomendado bajo entry-profile gate).
+
+---
+
+## AIC-20260913-01 — `SEIUSDT` FUTURES SHORT: stop forzado, slippage y datos de cierre
+
+### Causa raíz
+El cierre adverso `-22.07 USDT` en `SEIUSDT` fue la conjunción de tres fallos:
+
+1. **Stop forzado por sizing incorrecto**: el contrato escaló el notional a `$1,915` con un cap de pérdida de `$18`, por lo que el stop efectivo quedó en `0.0447` (0.68 %), muy por debajo de la resistencia estructural `0.04496`.
+2. **Slippage subestimada**: para un precio de `$0.044` y `qty=43,138`, la salida de mercado se llenó a `~0.04488`, pero el contrato solo reservaba slippage para 5.2 bps.
+3. **Datos de cierre erróneos**: `trades_closed.exit_price` y `realized_gross_pnl` usaban el `triggerPrice` (`0.0447`) en lugar del fill real (`~0.04488`), ocultando el PnL real y la slippage.
+
+### Reglas/operativas derivadas
+
+- El contrato ejecutable debe **escalar notional** para que `economic_risk_usdt <= max_loss_usd`; **nunca** acercar el stop para respetar el cap.
+- El `exit_price` persistido en `trades_closed` y `trades_audit` es el **precio medio real del fill** (`avgPrice` o reconstruido desde `realizedPnl`), no el `triggerPrice` del algo order.
+- `pnl_percentage` se calcula como `pnl / actual_margin_usdt * 100`, no como cambio de precio.
+- `range_scalp_short_usdt_per_trade` y `position_size_usdt` se propagan a **ambos** lados del arbitraje (LONG Spot/Futures y SHORT) para comparaciones económicas reales.
+- `RANGE_SCALP` `ready_candidates` usan `max_age_min=15` minutos por defecto para evitar aperturas de setups enfriados.
+
+### Rollback
+
+- `PATCH /config/apply {"opportunity_contract_futures_exit_fee_rate": 0.0008}` restaura fee de salida anterior.
+- `PATCH /config/apply {"max_age_min": 25}` vuelve al TTL antiguo.
