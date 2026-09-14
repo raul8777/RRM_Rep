@@ -471,10 +471,8 @@ class FuturesClient:
             exit_price = pos.exit_price if pos.exit_price is not None and pos.exit_price > 0 else pos.entry_price
             if pos.side == 'SHORT':
                 gross_pnl = (pos.entry_price - exit_price) * pos.qty
-                pnl_pct   = round((pos.entry_price - exit_price) / pos.entry_price * 100, 4)
             else:
                 gross_pnl = (exit_price - pos.entry_price) * pos.qty
-                pnl_pct   = round((exit_price - pos.entry_price) / pos.entry_price * 100, 4)
             # Commission accounting — use centralized Binance commission module
             from binance_commission import entry_commission, exit_commission, total_commission
             _settings = getattr(self, '_cached_settings', None)
@@ -517,6 +515,14 @@ class FuturesClient:
             pos._smart_meta['entry_commission'] = _entry_comm
             pos._smart_meta['exit_commission'] = _exit_comm
             pos._smart_meta['total_commission'] = _total_comm
+            # Real PnL % is against margin, not price movement.
+            _margin_usdt = float(pos._smart_meta.get('actual_margin_usdt') or 0)
+            if _margin_usdt <= 0:
+                _leverage = int((pos._smart_meta.get('selected_contract') or {}).get('leverage', 2) or 2)
+                _margin_usdt = (float(pos.qty) * float(pos.entry_price)) / max(1, _leverage)
+            pos._smart_meta['actual_margin_usdt'] = _margin_usdt
+            pnl_pct = round(pnl / _margin_usdt * 100, 4) if _margin_usdt > 0 else 0.0
+            pos._smart_meta['pnl_margin_pct'] = pnl_pct
             _cgid = close_group_id or str(uuid.uuid4())
             meta_payload = {
                 'trade_type': 'futures',
@@ -979,6 +985,41 @@ class FuturesClient:
             except Exception as estimate_error:
                 print(f"[Futures] {symbol}: PnL estimate fallback failed: {estimate_error}")
         return {"exit_price": 0, "pnl": 0, "reason": "binance_safety_close", "pnl_estimated": True}
+
+    def _reconstruct_exit_price_from_realized(
+        self,
+        pos: Optional['FuturesPosition'],
+        realized_profit: float,
+    ) -> float:
+        """Reconstruct the real average exit price from Binance realized PnL (gross)."""
+        if pos is None:
+            return 0.0
+        qty = float(getattr(pos, 'qty', 0) or 0.0)
+        entry = float(getattr(pos, 'entry_price', 0) or 0.0)
+        if qty <= 0 or entry <= 0 or realized_profit == 0:
+            return 0.0
+        if str(pos.side).upper() == 'SHORT':
+            return float(entry - realized_profit / qty)
+        return float(entry + realized_profit / qty)
+
+    def _exit_price_matches_realized(
+        self,
+        pos: Optional['FuturesPosition'],
+        candidate_exit: float,
+        realized_profit: float,
+        tolerance_usd: float = 2.0,
+    ) -> bool:
+        if pos is None or not candidate_exit or candidate_exit <= 0:
+            return False
+        qty = float(getattr(pos, 'qty', 0) or 0.0)
+        entry = float(getattr(pos, 'entry_price', 0) or 0.0)
+        if qty <= 0 or entry <= 0:
+            return False
+        if str(pos.side).upper() == 'SHORT':
+            implied_gross = (entry - candidate_exit) * qty
+        else:
+            implied_gross = (candidate_exit - entry) * qty
+        return abs(implied_gross - realized_profit) <= max(tolerance_usd, abs(realized_profit) * 0.15)
 
     def _get_position_qty_real(self, symbol: str, side: str) -> float:
         """Return absolute positionAmt for symbol/side from Binance positionRisk."""
@@ -2129,14 +2170,31 @@ class FuturesClient:
 
                 # Reuse the already-tested reconciliation for authoritative PnL/commission.
                 real = self._get_realized_pnl_from_trades(symbol, position_side, pos.opened_at, fallback_reason=reason, pos=pos)
-                exit_price = real.get('exit_price') or avg_price or pos.sl_price
+                # `realized_profit` (rp) is the gross realized PnL before commission/funding.
+                gross_pnl = float(real.get('realized_pnl')) if real.get('realized_pnl') is not None else realized_profit
                 pnl = real.get('pnl')
                 if pnl is None:
                     pnl = realized_profit
                 close_reason = real.get('reason') or reason
 
+                # Prefer an exit price that is consistent with the gross realized PnL.
+                # The websocket's `ap` (average price) is the most direct fill price.
+                exit_price = None
+                for candidate in (avg_price if avg_price > 0 else None, real.get('exit_price')):
+                    if candidate and self._exit_price_matches_realized(pos, candidate, gross_pnl):
+                        exit_price = float(candidate)
+                        break
+                if not exit_price:
+                    exit_price = self._reconstruct_exit_price_from_realized(pos, gross_pnl)
+                if not exit_price:
+                    exit_price = real.get('exit_price') or avg_price or pos.sl_price
+
                 pos.exit_price = exit_price
                 pos.pnl = pnl
+                pos._smart_meta['pnl_accounting_mode'] = str(real.get('pnl_accounting_mode') or 'binance_user_trade_verified')
+                pos._smart_meta['binance_realized_pnl'] = float(gross_pnl)
+                pos._smart_meta['binance_close_commission'] = float(real.get('commission', 0) or 0)
+                pos._smart_meta['binance_funding'] = float(real.get('funding', 0) or 0)
                 saved = self._save_futures_closed(pos, close_reason)
                 if saved:
                     pos.closed = True
