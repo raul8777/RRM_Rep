@@ -13,6 +13,7 @@ except Exception:
         pass
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
+from exchange_filter_snapshot import describe_filter_snapshot
 
 
 class BinanceClient:
@@ -28,7 +29,7 @@ class BinanceClient:
             raise RuntimeError("python-binance is required for live BinanceClient usage")
         self.client = Client(self.api_key, self.api_secret)
         if self.testnet:
-            self.client.API_URL = "https://testnet.binance.vision/api"
+            self.client.API_URL = "https://demo-api.binance.com/api"
         # In-process caches: {symbol: (value, timestamp)}
         self._price_cache: Dict[str, Tuple[float, float]] = {}
         self._filters_cache: Dict[str, Tuple[Dict, float]] = {}
@@ -50,6 +51,38 @@ class BinanceClient:
             return balances
         except (BinanceAPIException, BinanceRequestException) as exc:
             raise RuntimeError(f"Binance balance error: {exc}") from exc
+
+    def get_account_balance_details(self) -> Dict[str, Dict[str, float]]:
+        """Return free, locked, and total Spot quantities per base asset."""
+        try:
+            account_info = self.get_account_info()
+            details: Dict[str, Dict[str, float]] = {}
+            for item in account_info.get("balances", []):
+                asset = str(item.get("asset") or "").strip()
+                if not asset:
+                    continue
+                free = float(item.get("free", 0.0) or 0.0)
+                locked = float(item.get("locked", 0.0) or 0.0)
+                if free < 0 or locked < 0:
+                    raise ValueError(f"Negative Spot balance for {asset}")
+                total = free + locked
+                details[asset] = {"free": free, "locked": locked, "total": total}
+            return details
+        except (BinanceAPIException, BinanceRequestException) as exc:
+            raise RuntimeError(f"Binance balance details error: {exc}") from exc
+
+    def get_wallet_balance(self) -> Dict[str, float]:
+        """Return total Spot wallet balances (free + locked).
+
+        This endpoint covers the Binance Spot account. Funding/Earn wallets that
+        are not present in the Spot account must be reconciled through their own
+        transfer/account APIs; they are not fabricated from missing fields.
+        """
+        return {
+            asset: row["total"]
+            for asset, row in self.get_account_balance_details().items()
+            if row["total"] > 0
+        }
 
     def get_commission_rate(self) -> float:
         """Return the live spot taker commission rate from Binance account info.
@@ -106,11 +139,106 @@ class BinanceClient:
         except (BinanceAPIException, BinanceRequestException) as exc:
             raise RuntimeError(f"Binance order error: {exc}") from exc
 
+    def create_oco_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        above_type: str,
+        below_type: str,
+        above_price: Optional[float] = None,
+        above_stop_price: Optional[float] = None,
+        below_price: Optional[float] = None,
+        below_stop_price: Optional[float] = None,
+        list_client_order_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Place a spot OCO (One-Cancels-the-Other) order: a LIMIT_MAKER leg
+        plus a STOP_LOSS_LIMIT leg submitted together, used to place TP+SL
+        simultaneously on a spot position (real or synthetic-short).
+
+        For a SELL OCO (closing a LONG): the LIMIT_MAKER leg sits above the
+        current price (take-profit) and the STOP_LOSS_LIMIT leg sits below it
+        (stop-loss). For a BUY OCO (closing a synthetic SHORT): the
+        STOP_LOSS_LIMIT leg sits above the current price (stop-loss) and the
+        LIMIT_MAKER leg sits below it (take-profit).
+
+        Maps the `above_*`/`below_*` price-position naming used by callers to
+        the Binance OCO API's `price`/`stopPrice`/`stopLimitPrice` fields,
+        which are always expressed relative to order type, not price position.
+        """
+        if above_type == "LIMIT_MAKER":
+            limit_price = above_price
+            stop_price = below_stop_price
+            stop_limit_price = below_price
+        else:
+            limit_price = below_price
+            stop_price = above_stop_price
+            stop_limit_price = above_price
+
+        if self.dry_run or os.environ.get("DRY_RUN", "false").lower() in ("1", "true", "yes"):
+            sim_id = f"SIM-{int(time.time() * 1000)}"
+            return {
+                "simulated": True,
+                "symbol": symbol,
+                "side": side.upper(),
+                "orderListId": sim_id,
+                "orders": [{"orderId": f"{sim_id}-1"}, {"orderId": f"{sim_id}-2"}],
+            }
+
+        try:
+            params: Dict[str, Any] = {
+                "symbol": symbol,
+                "side": side.upper(),
+                "quantity": self._format_amount(quantity),
+                "price": self._format_amount(limit_price),
+                "stopPrice": self._format_amount(stop_price),
+                "stopLimitPrice": self._format_amount(stop_limit_price),
+                "stopLimitTimeInForce": "GTC",
+            }
+            if list_client_order_id:
+                params["listClientOrderId"] = list_client_order_id
+            return self.client.create_oco_order(**params)
+        except (BinanceAPIException, BinanceRequestException) as exc:
+            raise RuntimeError(f"Binance OCO order error: {exc}") from exc
+
     def get_order_status(self, symbol: str, order_id: int) -> Dict[str, Any]:
         try:
             return self.client.get_order(symbol=symbol, orderId=order_id)
         except (BinanceAPIException, BinanceRequestException) as exc:
             raise RuntimeError(f"Binance order status error: {exc}") from exc
+
+    def get_order_book(self, symbol: str, limit: int = 20) -> Dict[str, Any]:
+        """Return a fresh public order-book snapshot for full-size close planning."""
+        try:
+            return self.client.get_order_book(symbol=symbol, limit=int(limit))
+        except (BinanceAPIException, BinanceRequestException) as exc:
+            raise RuntimeError(f"Binance order book error: {exc}") from exc
+
+    def create_limit_fok_order(
+        self, symbol: str, side: str, quantity: float, price: float,
+    ) -> Dict[str, Any]:
+        """Submit a fill-or-kill order; it cannot intentionally leave a residual."""
+        if self.dry_run or os.environ.get("DRY_RUN", "false").lower() in ("1", "true", "yes"):
+            return {
+                "simulated": True,
+                "symbol": symbol,
+                "side": side.upper(),
+                "type": "LIMIT",
+                "timeInForce": "FOK",
+                "quantity": self._format_amount(quantity),
+                "price": self._format_amount(price),
+            }
+        try:
+            return self.client.create_order(
+                symbol=symbol,
+                side=side.upper(),
+                type="LIMIT",
+                timeInForce="FOK",
+                quantity=self._format_amount(quantity),
+                price=self._format_amount(price),
+            )
+        except (BinanceAPIException, BinanceRequestException) as exc:
+            raise RuntimeError(f"Binance FOK order error: {exc}") from exc
 
     def verify_order_filled(self, order_result: dict, label: str = "") -> bool:
         """Verify a market order was actually filled by Binance.
@@ -184,16 +312,51 @@ class BinanceClient:
         try:
             info = self.client.get_symbol_info(symbol)
             filters_raw = info.get("filters", []) if info else []
-            result: Dict = {"step": 0.001, "min_qty": 0.001, "min_notional": 10.0}
+            filter_types = {item.get("filterType") for item in filters_raw if isinstance(item, dict)}
+            result: Dict = {
+                "step": 0.001,
+                "min_qty": 0.001,
+                "max_qty": 0.0,
+                "market_step": 0.001,
+                "market_min_qty": 0.001,
+                "market_max_qty": 0.0,
+                "min_notional": 10.0,
+                "tick_size": 0.0,
+                "filter_snapshot": filters_raw,
+                **describe_filter_snapshot(
+                    filters_raw,
+                    venue="spot_demo" if self.testnet else "spot_mainnet",
+                    symbol=symbol,
+                    source="BinanceClient.get_symbol_filters",
+                ),
+            }
             for f in filters_raw:
                 ft = f.get("filterType", "")
                 if ft == "LOT_SIZE":
                     result["step"] = float(f.get("stepSize", 0.001))
                     result["min_qty"] = float(f.get("minQty", 0.001))
+                    result["max_qty"] = float(f.get("maxQty", 0.0))
+                elif ft == "MARKET_LOT_SIZE":
+                    result["market_step"] = float(f.get("stepSize", result["step"]))
+                    result["market_min_qty"] = float(f.get("minQty", result["min_qty"]))
+                    result["market_max_qty"] = float(f.get("maxQty", result["max_qty"]))
+                elif ft == "PRICE_FILTER":
+                    result["tick_size"] = float(f.get("tickSize", 0.0))
                 elif ft == "NOTIONAL":
                     result["min_notional"] = float(f.get("minNotional", 10.0))
                 elif ft == "MIN_NOTIONAL":
                     result["min_notional"] = float(f.get("minNotional", 10.0))
+            result["exchange_filters_validated"] = bool(
+                info
+                and {"LOT_SIZE", "MARKET_LOT_SIZE", "PRICE_FILTER"}.issubset(filter_types)
+                and bool(filter_types.intersection({"MIN_NOTIONAL", "NOTIONAL"}))
+                and result["step"] > 0
+                and result["max_qty"] > 0
+                and result["market_step"] > 0
+                and result["market_max_qty"] > 0
+                and result["tick_size"] > 0
+                and result["min_notional"] > 0
+            )
             self._filters_cache[symbol] = (result, now)
             return result
         except (BinanceAPIException, BinanceRequestException) as exc:

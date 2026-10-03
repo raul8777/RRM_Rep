@@ -55,9 +55,9 @@ def test_sso_partial_plus_prs_full_is_capped_when_follow_through_is_alive():
 
     decision = evaluate(ctx, _settings(), now=now)
 
-    assert decision.should_close is True
-    assert decision.close_pct == 0.75
-    assert "follow-through guard" in decision.detail
+    assert decision.should_close is False
+    assert decision.close_pct == 0.0
+    assert decision.reason == "partial_exit_blocked"
 
 
 def test_sso_partial_plus_prs_full_escalates_when_regression_risk_is_high():

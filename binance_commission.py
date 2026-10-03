@@ -520,6 +520,7 @@ def auto_manage_bnb_discount(
     db_client=None,
     force: bool = False,
     regime_mode: str = None,
+    allow_funding_actions: bool = True,
 ) -> Dict[str, Any]:
     """
     Auto-detect BNB balance, top-up if needed, and activate BNB commission discount.
@@ -547,6 +548,7 @@ def auto_manage_bnb_discount(
         'futures_action': 'none',
         'use_bnb': False,
         'errors': [],
+        'funding_actions_allowed': bool(allow_funding_actions),
     }
     try:
         # Get BNB price
@@ -594,6 +596,42 @@ def auto_manage_bnb_discount(
         futures_bnb_usd = result['futures_bnb'] * result['bnb_price']
         min_usd = float(settings.bnb_min_balance_usd)
 
+        extra_usd = float(getattr(settings, 'bnb_extra_buffer_usd', 10.0))
+        bnb_max_reserve_usd = float(getattr(settings, 'bnb_max_reserve_usd', 100.0))
+        target_spot_usd = min(result['spot_buffer'] + extra_usd, bnb_max_reserve_usd)
+        target_futures_usd = min(result['futures_buffer'] + extra_usd, bnb_max_reserve_usd)
+
+        if not allow_funding_actions:
+            spot_shortfall = max(0.0, target_spot_usd - spot_bnb_usd)
+            futures_shortfall = max(0.0, target_futures_usd - futures_bnb_usd)
+            result['shortfall_usdt'] = round(spot_shortfall + futures_shortfall, 4)
+            result['spot_action'] = 'funding_deferred_until_accepted_entry' if spot_shortfall else 'reserve_ok'
+            result['futures_action'] = 'funding_deferred_until_accepted_entry' if futures_shortfall else 'reserve_ok'
+            result['use_bnb'] = bool(
+                getattr(settings, 'use_bnb_for_commission', False)
+                and spot_bnb_usd >= min_usd
+                and futures_bnb_usd >= min_usd
+            )
+            audit_bnb_status(
+                db_client,
+                result['spot_bnb'],
+                result['futures_bnb'],
+                result['spot_buffer'],
+                result['futures_buffer'],
+                result['use_bnb'],
+                result['bnb_price'],
+            )
+            record_bnb_operation(db_client, 'bnb_funding_deferred', {
+                'regime_mode': regime_mode,
+                'spot_reserve_usdt': result['spot_reserve_usdt'],
+                'futures_reserve_usdt': result['futures_reserve_usdt'],
+                'spot_bnb_usdt': round(spot_bnb_usd, 4),
+                'futures_bnb_usdt': round(futures_bnb_usd, 4),
+                'shortfall_usdt': result['shortfall_usdt'],
+                'reason': 'no_accepted_entry_decision',
+            })
+            return result
+
         auto_enabled = bool(getattr(settings, 'auto_bnb_for_commission', True)) or force
         if not auto_enabled:
             # Only audit, do not convert
@@ -603,15 +641,7 @@ def auto_manage_bnb_discount(
             return result
 
         # Targets: buffer + extra USD (default 10 USD) to avoid running out
-        extra_usd = float(getattr(settings, 'bnb_extra_buffer_usd', 10.0))
-        target_spot_usd = result['spot_buffer'] + extra_usd
-        target_futures_usd = result['futures_buffer'] + extra_usd
-
         # Hard cap on BNB reserve: never hold more than bnb_max_reserve_usd as commission reserve
-        bnb_max_reserve_usd = float(getattr(settings, 'bnb_max_reserve_usd', 100.0))
-        target_spot_usd = min(target_spot_usd, bnb_max_reserve_usd)
-        target_futures_usd = min(target_futures_usd, bnb_max_reserve_usd)
-
         # Calculate needed BNB for each wallet (rounded UP to 3 decimals for BNBUSDT LOT_SIZE)
         import math
         def _ceil_bnb(usd):

@@ -19,6 +19,7 @@ Usage:
 
 import copy
 import json
+import math
 import os
 import re
 import time
@@ -99,6 +100,8 @@ def _normalize_metadata(raw, default_trade_type: str = "futures"):
 # ── Constants ─────────────────────────────────────────────────────────────────
 FAPI_BASE     = "https://fapi.binance.com"
 FAPI_BASE_TESTNET = "https://testnet.binancefuture.com"
+SAPI_BASE = "https://api.binance.com"
+SAPI_BASE_TESTNET = "https://demo-api.binance.com"
 # Global safe caps — these are UPPER BOUNDS, not the active configured values.
 # Active values come from settings.futures_leverage / settings.futures_max_shorts.
 LEVERAGE_MAX  = 10         # hard upper bound; active leverage is settings.futures_leverage (backtest run_0812: 10)
@@ -174,7 +177,12 @@ class FuturesClient:
             str(os.environ.get('BINANCE_USE_TESTNET', 'false')).lower() in ('1', 'true', 'yes')
             or bool(getattr(settings, 'binance_use_testnet', True) if settings else True)
         )
+        self._use_testnet = _use_testnet
         self._fapi_base = FAPI_BASE_TESTNET if _use_testnet else FAPI_BASE
+        self._sapi_base = SAPI_BASE_TESTNET if _use_testnet else SAPI_BASE
+        self._cross_wallet_transfer_enabled = bool(
+            getattr(settings, "portfolio_cross_wallet_transfer_enabled", False)
+        )
         # Active trading caps are read from settings; module constants are only safety upper bounds.
         from config_helpers import get_param
         self._active_leverage = min(
@@ -471,8 +479,10 @@ class FuturesClient:
             exit_price = pos.exit_price if pos.exit_price is not None and pos.exit_price > 0 else pos.entry_price
             if pos.side == 'SHORT':
                 gross_pnl = (pos.entry_price - exit_price) * pos.qty
+                pnl_pct   = round((pos.entry_price - exit_price) / pos.entry_price * 100, 4)
             else:
                 gross_pnl = (exit_price - pos.entry_price) * pos.qty
+                pnl_pct   = round((exit_price - pos.entry_price) / pos.entry_price * 100, 4)
             # Commission accounting — use centralized Binance commission module
             from binance_commission import entry_commission, exit_commission, total_commission
             _settings = getattr(self, '_cached_settings', None)
@@ -515,14 +525,6 @@ class FuturesClient:
             pos._smart_meta['entry_commission'] = _entry_comm
             pos._smart_meta['exit_commission'] = _exit_comm
             pos._smart_meta['total_commission'] = _total_comm
-            # Real PnL % is against margin, not price movement.
-            _margin_usdt = float(pos._smart_meta.get('actual_margin_usdt') or 0)
-            if _margin_usdt <= 0:
-                _leverage = int((pos._smart_meta.get('selected_contract') or {}).get('leverage', 2) or 2)
-                _margin_usdt = (float(pos.qty) * float(pos.entry_price)) / max(1, _leverage)
-            pos._smart_meta['actual_margin_usdt'] = _margin_usdt
-            pnl_pct = round(pnl / _margin_usdt * 100, 4) if _margin_usdt > 0 else 0.0
-            pos._smart_meta['pnl_margin_pct'] = pnl_pct
             _cgid = close_group_id or str(uuid.uuid4())
             meta_payload = {
                 'trade_type': 'futures',
@@ -985,41 +987,6 @@ class FuturesClient:
             except Exception as estimate_error:
                 print(f"[Futures] {symbol}: PnL estimate fallback failed: {estimate_error}")
         return {"exit_price": 0, "pnl": 0, "reason": "binance_safety_close", "pnl_estimated": True}
-
-    def _reconstruct_exit_price_from_realized(
-        self,
-        pos: Optional['FuturesPosition'],
-        realized_profit: float,
-    ) -> float:
-        """Reconstruct the real average exit price from Binance realized PnL (gross)."""
-        if pos is None:
-            return 0.0
-        qty = float(getattr(pos, 'qty', 0) or 0.0)
-        entry = float(getattr(pos, 'entry_price', 0) or 0.0)
-        if qty <= 0 or entry <= 0 or realized_profit == 0:
-            return 0.0
-        if str(pos.side).upper() == 'SHORT':
-            return float(entry - realized_profit / qty)
-        return float(entry + realized_profit / qty)
-
-    def _exit_price_matches_realized(
-        self,
-        pos: Optional['FuturesPosition'],
-        candidate_exit: float,
-        realized_profit: float,
-        tolerance_usd: float = 2.0,
-    ) -> bool:
-        if pos is None or not candidate_exit or candidate_exit <= 0:
-            return False
-        qty = float(getattr(pos, 'qty', 0) or 0.0)
-        entry = float(getattr(pos, 'entry_price', 0) or 0.0)
-        if qty <= 0 or entry <= 0:
-            return False
-        if str(pos.side).upper() == 'SHORT':
-            implied_gross = (entry - candidate_exit) * qty
-        else:
-            implied_gross = (candidate_exit - entry) * qty
-        return abs(implied_gross - realized_profit) <= max(tolerance_usd, abs(realized_profit) * 0.15)
 
     def _get_position_qty_real(self, symbol: str, side: str) -> float:
         """Return absolute positionAmt for symbol/side from Binance positionRisk."""
@@ -2170,31 +2137,14 @@ class FuturesClient:
 
                 # Reuse the already-tested reconciliation for authoritative PnL/commission.
                 real = self._get_realized_pnl_from_trades(symbol, position_side, pos.opened_at, fallback_reason=reason, pos=pos)
-                # `realized_profit` (rp) is the gross realized PnL before commission/funding.
-                gross_pnl = float(real.get('realized_pnl')) if real.get('realized_pnl') is not None else realized_profit
+                exit_price = real.get('exit_price') or avg_price or pos.sl_price
                 pnl = real.get('pnl')
                 if pnl is None:
                     pnl = realized_profit
                 close_reason = real.get('reason') or reason
 
-                # Prefer an exit price that is consistent with the gross realized PnL.
-                # The websocket's `ap` (average price) is the most direct fill price.
-                exit_price = None
-                for candidate in (avg_price if avg_price > 0 else None, real.get('exit_price')):
-                    if candidate and self._exit_price_matches_realized(pos, candidate, gross_pnl):
-                        exit_price = float(candidate)
-                        break
-                if not exit_price:
-                    exit_price = self._reconstruct_exit_price_from_realized(pos, gross_pnl)
-                if not exit_price:
-                    exit_price = real.get('exit_price') or avg_price or pos.sl_price
-
                 pos.exit_price = exit_price
                 pos.pnl = pnl
-                pos._smart_meta['pnl_accounting_mode'] = str(real.get('pnl_accounting_mode') or 'binance_user_trade_verified')
-                pos._smart_meta['binance_realized_pnl'] = float(gross_pnl)
-                pos._smart_meta['binance_close_commission'] = float(real.get('commission', 0) or 0)
-                pos._smart_meta['binance_funding'] = float(real.get('funding', 0) or 0)
                 saved = self._save_futures_closed(pos, close_reason)
                 if saved:
                     pos.closed = True
@@ -2284,12 +2234,15 @@ class FuturesClient:
     def transfer_to_futures(self, amount: float, spot_api_key: str = None, spot_api_secret: str = None) -> bool:
         """
         Transfer USDT from Spot wallet to Futures wallet.
-        Uses /sapi/v1/futures/transfer (type=1 = SPOT→USDT-M Futures).
+        Uses Universal Transfer (MAIN_UMFUTURE = SPOT→USDT-M Futures).
         Requires 'Universal Transfer' permission on the API key.
         Returns True on success.
         """
         _key    = spot_api_key    or self.api_key
         _secret = spot_api_secret or self.api_secret
+        if getattr(self, "_use_testnet", True) or not getattr(self, "_cross_wallet_transfer_enabled", False):
+            print("[Futures] Cross-wallet transfer unsupported in this environment")
+            return False
         if self.dry_run:
             print(f"[Futures DRY] Transfer ${amount:.2f} USDT spot→futures")
             return True
@@ -2297,12 +2250,12 @@ class FuturesClient:
             params = {
                 "asset":     "USDT",
                 "amount":    str(round(amount, 4)),
-                "type":      "1",           # 1 = SPOT → USDT-M Futures
+                "type":      "MAIN_UMFUTURE",
                 "timestamp": int(time.time() * 1000),
             }
             query = urllib.parse.urlencode(params)
             sig   = hmac.new(_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-            url   = f"https://api.binance.com/sapi/v1/futures/transfer?{query}&signature={sig}"
+            url   = f"{self._sapi_base}/sapi/v1/asset/transfer?{query}&signature={sig}"
             req   = urllib.request.Request(
                 url, data=b"", method="POST",
                 headers={"X-MBX-APIKEY": _key, "Content-Type": "application/x-www-form-urlencoded"}
@@ -2322,12 +2275,15 @@ class FuturesClient:
                           safety_buffer_usdt: float = 10.0) -> bool:
         """
         Transfer USDT from Futures wallet back to Spot wallet.
-        Uses /sapi/v1/futures/transfer (type=2 = USDT-M Futures→SPOT).
+        Uses Universal Transfer (UMFUTURE_MAIN = USDT-M Futures→SPOT).
         Only transfers if the futures wallet has enough available balance after keeping a safety buffer.
         Returns True on success.
         """
         _key    = spot_api_key    or self.api_key
         _secret = spot_api_secret or self.api_secret
+        if getattr(self, "_use_testnet", True) or not getattr(self, "_cross_wallet_transfer_enabled", False):
+            print("[Futures] Cross-wallet transfer unsupported in this environment")
+            return False
         if self.dry_run:
             print(f"[Futures DRY] Transfer ${amount:.2f} USDT futures→spot")
             return True
@@ -2348,12 +2304,12 @@ class FuturesClient:
             params = {
                 "asset":     "USDT",
                 "amount":    str(round(amount, 4)),
-                "type":      "2",           # 2 = USDT-M Futures → SPOT
+                "type":      "UMFUTURE_MAIN",
                 "timestamp": int(time.time() * 1000),
             }
             query = urllib.parse.urlencode(params)
             sig   = hmac.new(_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-            url   = f"https://api.binance.com/sapi/v1/futures/transfer?{query}&signature={sig}"
+            url   = f"{self._sapi_base}/sapi/v1/asset/transfer?{query}&signature={sig}"
             req   = urllib.request.Request(
                 url, data=b"", method="POST",
                 headers={"X-MBX-APIKEY": _key, "Content-Type": "application/x-www-form-urlencoded"}
@@ -2387,28 +2343,134 @@ class FuturesClient:
         print(f"[Futures] Returning ${transferable:.2f} USDT futures→spot (keeping ${reserve_usdt:.2f} reserve)")
         return self.transfer_to_spot(transferable, spot_api_key, spot_api_secret)
 
-    def check_and_fund(self, required_usdt: float, spot_api_key: str = None, spot_api_secret: str = None) -> bool:
+    def check_and_fund(
+        self,
+        required_usdt: float,
+        spot_api_key: str = None,
+        spot_api_secret: str = None,
+        decision_id: str = "",
+        position_manager=None,
+    ) -> bool:
         """
-        Check futures balance and auto-transfer from spot if needed.
-        Only transfers if futures balance < required_usdt.
-        Transfers shortfall + 10% buffer (not 2×) to avoid over-draining spot.
+        Fund an already-approved Futures entry without consuming protected BNB reserves.
+        Spot balance and reserve data must both be readable before any transfer.
         Returns True if futures wallet has sufficient funds after check.
         """
-        available = self.get_available_usdt()
-        if available >= required_usdt:
-            print(f"[Futures] Wallet funded: ${available:.2f} USDT available (need ${required_usdt:.2f})")
+        required_usdt = max(0.0, float(required_usdt or 0.0))
+        settings = self.settings or self._cached_settings
+        try:
+            from binance_commission import get_bnb_reserve_usdt
+            from binance_client import BinanceClient
+
+            reserves = get_bnb_reserve_usdt(settings)
+            futures_reserve = max(0.0, float(reserves["futures_reserve_usdt"]))
+            spot_reserve = max(0.0, float(reserves["spot_reserve_usdt"]))
+            api_key = spot_api_key or getattr(settings, "binance_api_key", None) or self.api_key
+            api_secret = spot_api_secret or getattr(settings, "binance_api_secret", None) or self.api_secret
+            if not api_key or not api_secret:
+                raise RuntimeError("Spot credentials unavailable")
+            spot_client = BinanceClient(
+                api_key,
+                api_secret,
+                testnet=self._use_testnet,
+                dry_run=self.dry_run,
+            )
+            spot_free = float(spot_client.get_account_balance().get("USDT", 0.0))
+        except Exception as exc:
+            print(f"[Futures] Funding deferred: Spot balance/reserves unavailable ({exc})")
+            return False
+
+        available = max(0.0, float(self.get_available_usdt()))
+        futures_spendable = max(0.0, available - futures_reserve)
+        if futures_spendable >= required_usdt:
+            print(f"[Futures] Wallet funded: spendable=${futures_spendable:.2f} (need ${required_usdt:.2f}; BNB reserve=${futures_reserve:.2f})")
             return True
-        shortfall = required_usdt - available
-        # Transfer shortfall + 10% buffer (enough for this position, not more)
-        transfer_amount = round(shortfall * 1.1, 2)
-        print(f"[Futures] Insufficient balance: ${available:.2f} < ${required_usdt:.2f} — transferring ${transfer_amount:.2f} from spot (shortfall=${shortfall:.2f})")
+
+        shortfall = math.ceil((required_usdt - futures_spendable - 1e-9) * 100.0) / 100.0
+        spot_spendable = max(0.0, spot_free - spot_reserve)
+        if shortfall > spot_spendable and self.db_client is not None:
+            try:
+                from portfolio_manager import PortfolioManager
+
+                spot_portfolio = PortfolioManager(
+                    spot_client,
+                    settings,
+                    position_manager=position_manager,
+                )
+                spot_portfolio.ensure_usdt_liquidity(
+                    shortfall,
+                    decision_id=decision_id,
+                    db_client=self.db_client,
+                )
+                spot_free = float(spot_client.get_account_balance().get("USDT", 0.0))
+                spot_spendable = max(0.0, spot_free - spot_reserve)
+            except Exception as exc:
+                print(f"[Futures] Spot asset conversion deferred: {exc}")
+        if shortfall <= 0 or shortfall > spot_spendable:
+            print(
+                f"[Futures] Funding deferred: shortfall=${shortfall:.2f}, "
+                f"Spot spendable=${spot_spendable:.2f} after BNB reserve=${spot_reserve:.2f}"
+            )
+            return False
+        transfer_amount = shortfall
+        if self.db_client is None:
+            print("[Futures] Funding deferred: audit database unavailable")
+            return False
+        try:
+            self.db_client.execute_update(
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                "VALUES (%s, %s, %s, %s, false)",
+                ("PORTFOLIO", "system", "capital_transfer_authorized", json.dumps({
+                    "decision_id": decision_id,
+                    "direction": "SPOT_TO_FUTURES",
+                    "amount_usdt": transfer_amount,
+                    "required_usdt": required_usdt,
+                    "spot_bnb_reserve_usdt": spot_reserve,
+                    "futures_bnb_reserve_usdt": futures_reserve,
+                })),
+            )
+        except Exception as exc:
+            print(f"[Futures] Funding deferred: authorization audit failed ({exc})")
+            return False
+        print(
+            f"[Futures] Transferring exact approved-entry shortfall ${transfer_amount:.2f} "
+            f"(Spot spendable=${spot_spendable:.2f}, Futures reserve=${futures_reserve:.2f})"
+        )
         ok = self.transfer_to_futures(transfer_amount, spot_api_key, spot_api_secret)
         if ok:
             # Small delay for balance to reflect
             time.sleep(1.5)
-            new_balance = self.get_available_usdt()
-            print(f"[Futures] Post-transfer balance: ${new_balance:.2f} USDT")
-            return new_balance >= required_usdt
+            new_balance = max(0.0, float(self.get_available_usdt()))
+            new_spendable = max(0.0, new_balance - futures_reserve)
+            print(f"[Futures] Post-transfer spendable balance: ${new_spendable:.2f} USDT")
+            try:
+                self.db_client.execute_update(
+                    "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    ("PORTFOLIO", "system", "capital_transfer_result", json.dumps({
+                        "decision_id": decision_id,
+                        "direction": "SPOT_TO_FUTURES",
+                        "amount_usdt": transfer_amount,
+                        "status": "succeeded" if new_spendable >= required_usdt else "balance_unverified",
+                        "futures_spendable_after_usdt": new_spendable,
+                    }), new_spendable >= required_usdt),
+                )
+            except Exception as exc:
+                print(f"[Futures] Transfer result audit failed for decision={decision_id}: {exc}")
+            return new_spendable >= required_usdt
+        try:
+            self.db_client.execute_update(
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                "VALUES (%s, %s, %s, %s, false)",
+                ("PORTFOLIO", "system", "capital_transfer_result", json.dumps({
+                    "decision_id": decision_id,
+                    "direction": "SPOT_TO_FUTURES",
+                    "amount_usdt": transfer_amount,
+                    "status": "failed",
+                })),
+            )
+        except Exception:
+            pass
         return False
 
     def smart_rebalance_capital(
@@ -2424,6 +2486,7 @@ class FuturesClient:
         spot_api_secret: str = None,
         min_transfer: float = 10.0,
         futures_arbiter_active: bool = False,
+        execute_transfers: bool = False,
     ) -> dict:
         """
         Bidirectional autonomous capital bridge: spot ↔ futures.
@@ -2433,7 +2496,18 @@ class FuturesClient:
         Returns dict with keys: direction ('spot->futures'|'futures->spot'|'none'),
         amount, reason, success (bool), error (str|None).
         """
-        result = {"direction": "none", "amount": 0.0, "reason": "", "success": True, "error": None}
+        result = {
+            "direction": "none", "amount": 0.0, "reason": "", "success": True,
+            "error": None, "planned_only": not execute_transfers, "executed": False,
+        }
+        if execute_transfers:
+            result.update({
+                "planned_only": True,
+                "success": False,
+                "error": "capital transfers require an accepted entry decision; use JIT funding",
+            })
+            print(f"[CapBridge] transfer authorization denied: {result['error']}")
+            return result
         try:
             # s77b: distinguish available (free margin) from total wallet balance.
             # Case 1 (spot→futures shortfall) uses available; Cases 2/3 (futures→spot)
@@ -2472,7 +2546,12 @@ class FuturesClient:
                                       f"= need ${needed_futures:.0f}, have ${futures_usdt:.0f} "
                                       f"→ transfer ${transfer_amount:.2f} spot→futures")
                             print(f"[CapBridge] {reason}")
-                            ok = self.transfer_to_futures(transfer_amount, spot_api_key, spot_api_secret)
+                            if execute_transfers:
+                                ok = self.transfer_to_futures(transfer_amount, spot_api_key, spot_api_secret)
+                                result["executed"] = bool(ok)
+                            else:
+                                ok = True
+                                print("[CapBridge] observe-only: planned transfer, not executed")
                             result["direction"] = "spot->futures"
                             result["amount"] = transfer_amount
                             result["reason"] = reason
@@ -2507,7 +2586,12 @@ class FuturesClient:
                                   f"for 1 position, have ${futures_usdt:.0f} "
                                   f"→ transfer ${transfer_amount:.2f} spot→futures")
                         print(f"[CapBridge] {reason}")
-                        ok = self.transfer_to_futures(transfer_amount, spot_api_key, spot_api_secret)
+                        if execute_transfers:
+                            ok = self.transfer_to_futures(transfer_amount, spot_api_key, spot_api_secret)
+                            result["executed"] = bool(ok)
+                        else:
+                            ok = True
+                            print("[CapBridge] observe-only: planned transfer, not executed")
                         result["direction"] = "spot->futures"
                         result["amount"] = transfer_amount
                         result["reason"] = reason
@@ -2545,7 +2629,12 @@ class FuturesClient:
                                       f"futures_reserve=${_arbiter_reserve:.0f} "
                                       f"→ transfer ${transfer_amount:.2f} futures→spot")
                             print(f"[CapBridge] {reason}")
-                            ok = self.transfer_to_spot(transfer_amount, spot_api_key, spot_api_secret)
+                            if execute_transfers:
+                                ok = self.transfer_to_spot(transfer_amount, spot_api_key, spot_api_secret)
+                                result["executed"] = bool(ok)
+                            else:
+                                ok = True
+                                print("[CapBridge] observe-only: planned transfer, not executed")
                             result["direction"] = "futures->spot"
                             result["amount"] = transfer_amount
                             result["reason"] = reason
@@ -2581,7 +2670,12 @@ class FuturesClient:
                                       f"= need ${needed_spot:.0f}, have ${spot_usdt:.0f} "
                                       f"→ transfer ${transfer_amount:.2f} futures→spot")
                             print(f"[CapBridge] {reason}")
-                            ok = self.transfer_to_spot(transfer_amount, spot_api_key, spot_api_secret)
+                            if execute_transfers:
+                                ok = self.transfer_to_spot(transfer_amount, spot_api_key, spot_api_secret)
+                                result["executed"] = bool(ok)
+                            else:
+                                ok = True
+                                print("[CapBridge] observe-only: planned transfer, not executed")
                             result["direction"] = "futures->spot"
                             result["amount"] = transfer_amount
                             result["reason"] = reason
@@ -2604,7 +2698,12 @@ class FuturesClient:
                 if excess >= min_transfer:
                     reason = f"Idle futures capital ${excess:.2f} (no open shorts, regime={regime}) → returning to spot"
                     print(f"[CapBridge] {reason}")
-                    ok = self.transfer_to_spot(round(excess, 2), spot_api_key, spot_api_secret)
+                    if execute_transfers:
+                        ok = self.transfer_to_spot(round(excess, 2), spot_api_key, spot_api_secret)
+                        result["executed"] = bool(ok)
+                    else:
+                        ok = True
+                        print("[CapBridge] observe-only: planned transfer, not executed")
                     result["direction"] = "futures->spot"
                     result["amount"] = round(excess, 2)
                     result["reason"] = reason
@@ -2851,13 +2950,6 @@ class FuturesClient:
         tick = self._get_tick_size(symbol)
         sl_price = self._align_price(price * (1 + sl_pct / 100), tick)
         tp_price = self._align_price(price * (1 - tp_pct / 100), tick)
-
-        if sl_price <= price or tp_price >= price:
-            print(
-                f"[Futures] SHORT {symbol} rejected: tick={tick} too coarse for "
-                f"entry={price} SL={sl_price} TP={tp_price} (no usable risk/reward distance)"
-            )
-            return None
 
         print(f"[Futures] Opening SHORT {symbol}: qty={qty}, entry~{price:.4f}, "
               f"SL={sl_price:.4f} (+{sl_pct}%), TP={tp_price:.4f} (-{tp_pct}%), "
@@ -3114,13 +3206,6 @@ class FuturesClient:
         tick     = self._get_tick_size(symbol)
         sl_price = self._align_price(price * (1 - sl_pct / 100), tick)  # below entry
         tp_price = self._align_price(price * (1 + tp_pct / 100), tick)  # above entry
-
-        if sl_price >= price or tp_price <= price:
-            print(
-                f"[Futures] LONG {symbol} rejected: tick={tick} too coarse for "
-                f"entry={price} SL={sl_price} TP={tp_price} (no usable risk/reward distance)"
-            )
-            return None
 
         print(f"[Futures] Opening LONG {symbol}: qty={qty}, entry~{price:.4f}, "
               f"SL={sl_price:.4f} (-{sl_pct}%), TP={tp_price:.4f} (+{tp_pct}%), "

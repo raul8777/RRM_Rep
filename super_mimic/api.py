@@ -36,14 +36,27 @@ class CreateExperimentRequest(BaseModel):
     engine: str = Field(default="mimic_sweep")
     strategy: str = Field(default="full")
     max_cycles: Optional[int] = Field(default=None)
-    max_workers: int = Field(default=1)
+    max_workers: int = Field(default=8, ge=1, le=10)
     profiles: Optional[List[str]] = Field(default=None)
     param_grid: Optional[Dict[str, List[Any]]] = Field(default=None)
     param_grid_file: Optional[str] = Field(default=None)
     forced_regime: Optional[str] = Field(default=None)
     lifecycle: bool = Field(default=False)
+    e2e_lifecycle_enabled: bool = Field(default=False)
     max_drawdown_stop_pct: Optional[float] = Field(default=15.0)
     output_dir: Optional[str] = Field(default=None)
+    experiment_stage: str = Field(default="e2e")
+    certification_mode: bool = Field(default=True)
+    max_jobs: int = Field(default=100, ge=1, le=5000)
+    seed: int = Field(default=20260913)
+    apply_allowed: bool = Field(default=False)
+    auto_start: bool = Field(default=True)
+    memory_per_worker_mb: int = Field(default=1536, ge=256)
+    entry_cohort_path: Optional[str] = Field(default=None)
+    window_manifest_dir: Optional[str] = Field(default=None)
+    stratified_jobs: bool = Field(default=False)
+    max_symbols: Optional[int] = Field(default=None, ge=2)
+    stage_overrides: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
 
 class ExperimentResponse(BaseModel):
@@ -81,11 +94,50 @@ async def create_experiment(request: Request, req: CreateExperimentRequest) -> D
             param_grid_file=req.param_grid_file,
             forced_regime=req.forced_regime,
             lifecycle=req.lifecycle,
+            e2e_lifecycle_enabled=req.e2e_lifecycle_enabled,
             max_drawdown_stop_pct=req.max_drawdown_stop_pct,
             output_dir=req.output_dir,
+            experiment_stage=req.experiment_stage,
+            certification_mode=req.certification_mode,
+            max_jobs=req.max_jobs,
+            seed=req.seed,
+            apply_allowed=req.apply_allowed,
+            auto_start=req.auto_start,
+            memory_per_worker_mb=req.memory_per_worker_mb,
+            entry_cohort_path=req.entry_cohort_path,
+            window_manifest_dir=req.window_manifest_dir,
+            stratified_jobs=req.stratified_jobs,
+            max_symbols=req.max_symbols,
         )
-        experiment = _get_runner().create_experiment(design.to_dict())
+        runner = _get_runner()
+        experiment = runner.create_experiment(design.to_dict())
+        if design.auto_start:
+            runner.start_experiment(experiment.experiment_id)
         return {"ok": True, "experiment_id": experiment.experiment_id}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/certification-suite")
+async def create_certification_suite(req: CreateExperimentRequest) -> Dict[str, Any]:
+    try:
+        design = req.model_dump()
+        design.update({"certification_mode": True, "apply_allowed": False, "auto_start": False})
+        suite = _get_runner().create_certification_suite(design)
+        return {"ok": True, "suite": suite}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.get("/certification-suite/{suite_id}")
+async def get_certification_suite(suite_id: str) -> Dict[str, Any]:
+    try:
+        suite = _get_runner().get_certification_suite_status(suite_id)
+        if not suite:
+            raise HTTPException(status_code=404, detail="Certification suite not found")
+        return {"ok": True, "suite": suite}
+    except HTTPException:
+        raise
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -101,10 +153,10 @@ async def start_experiment(experiment_id: str) -> Dict[str, Any]:
 
 
 @router.get("/experiment/{experiment_id}", response_model=ExperimentStatusResponse)
-async def get_experiment(experiment_id: str) -> Dict[str, Any]:
+async def get_experiment(experiment_id: str, include_results: bool = False) -> Dict[str, Any]:
     """Get current status and artifact for an experiment."""
     try:
-        status = _get_runner().get_status(experiment_id)
+        status = _get_runner().get_status(experiment_id, include_results=include_results)
         if not status:
             raise HTTPException(status_code=404, detail="Experiment not found")
         return {"ok": True, "experiment": status}
@@ -150,6 +202,25 @@ async def list_windows() -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
+@router.post("/windows/certify")
+async def certify_windows(stage: str = "e2e") -> Dict[str, Any]:
+    try:
+        repo_root = os.path.dirname(os.path.dirname(__file__))
+        windows_dir = os.path.join(repo_root, "Dev", "benchmarks", "windows")
+        manifests = []
+        for name in sorted(os.listdir(windows_dir)):
+            if not name.endswith(".json"):
+                continue
+            with open(os.path.join(windows_dir, name), "r", encoding="utf-8") as handle:
+                manifests.append(json.load(handle))
+        from super_mimic.window_certification import certify_manifests
+        output_path = os.path.join(repo_root, "Dev", "benchmarks", "super_mimic", f"window_certificate_{stage}.json")
+        report = certify_manifests(manifests, os.path.join(repo_root, "historical_data"), stage, output_path)
+        return {"ok": report["rejected"] == 0, "report": report, "path": output_path}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @router.post("/experiment/{experiment_id}/cancel", response_model=ExperimentResponse)
 async def cancel_experiment(experiment_id: str) -> Dict[str, Any]:
     """Cancel a running experiment."""
@@ -171,11 +242,24 @@ class DeployRequest(BaseModel):
 async def deploy_experiment(experiment_id: str, req: DeployRequest) -> Dict[str, Any]:
     """Deploy a completed experiment's recommended config if the gate passes."""
     try:
+        if not str(req.operator or "").strip():
+            return {
+                "ok": False,
+                "experiment_id": experiment_id,
+                "error": "Manual operator identity is required for deployment",
+            }
         runner = _get_runner()
         exp = runner.get_status(experiment_id)
         if not exp:
             raise HTTPException(status_code=404, detail="Experiment not found")
         artifact = exp.get("artifact") or {}
+        design = artifact.get("design") or {}
+        if design.get("certification_mode", False) or not design.get("apply_allowed", False):
+            return {
+                "ok": False,
+                "experiment_id": experiment_id,
+                "error": "Deployment is disabled for certification experiments",
+            }
         if artifact.get("status") != "completed":
             return {"ok": False, "experiment_id": experiment_id, "error": "Experiment not completed"}
         recommended = artifact.get("recommended_config") or {}
@@ -194,6 +278,8 @@ async def deploy_experiment(experiment_id: str, req: DeployRequest) -> Dict[str,
                 "gate": gate_result.to_dict(),
             }
 
+        rollback_payload = gate.capture_rollback_payload(req.target)
+
         # Apply config merge using existing governance helper (whitelist + runtime_state + audit)
         try:
             from app import _apply_kelly_config_patch
@@ -209,14 +295,28 @@ async def deploy_experiment(experiment_id: str, req: DeployRequest) -> Dict[str,
             }
 
         # Record deployment audit
-        apply_result = gate.apply_recommended_config(
-            experiment_id=experiment_id,
-            recommended_config=recommended,
-            target=req.target,
-            operator=req.operator,
-            mode=exp.get("mode", ""),
-            profile=exp.get("profile", ""),
-        )
+        try:
+            apply_result = gate.apply_recommended_config(
+                experiment_id=experiment_id,
+                recommended_config=recommended,
+                target=req.target,
+                operator=req.operator,
+                mode=design.get("mode", ""),
+                profile=design.get("profile", ""),
+                rollback_payload=rollback_payload,
+            )
+        except Exception as audit_error:
+            try:
+                from app import _apply_kelly_config_patch
+                compensation = _apply_kelly_config_patch(dict(rollback_payload))
+            except Exception as compensation_error:
+                compensation = {"ok": False, "error": str(compensation_error)}
+            return {
+                "ok": False,
+                "experiment_id": experiment_id,
+                "error": f"Deployment audit failed: {audit_error}",
+                "compensation": compensation,
+            }
 
         return {
             "ok": True,

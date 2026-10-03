@@ -120,6 +120,32 @@ class TestFuturesUSDEmergencyGapStop:
         assert not any("emergency_gap_stop" in c.get("reason", "") for c in closed)
 
 
+def test_open_long_persists_after_confirmed_fill(monkeypatch):
+    settings = _make_settings(current_regime_mode="RANGE_SCALP")
+    fc = FuturesClient("test", "test", dry_run=False, settings=settings)
+    fc._hedge_mode = True
+    monkeypatch.setattr(fc, "_pre_entry_checks", lambda *args, **kwargs: (True, ""))
+    monkeypatch.setattr(fc, "set_isolated_margin", lambda *args, **kwargs: True)
+    monkeypatch.setattr(fc, "set_leverage", lambda *args, **kwargs: True)
+    monkeypatch.setattr(fc, "get_price", lambda symbol: 100.0)
+    monkeypatch.setattr(fc, "_get_step_size", lambda symbol: 0.001)
+    monkeypatch.setattr(fc, "_get_tick_size", lambda symbol: 0.01)
+    monkeypatch.setattr(fc, "get_total_wallet_usdt", lambda: 1000.0)
+    monkeypatch.setattr(fc, "_verify_entry_filled", lambda *args, **kwargs: True)
+    monkeypatch.setattr(fc, "_persist_truth_transition", lambda *args, **kwargs: None)
+    monkeypatch.setattr(fc, "_save_futures_open", lambda *args, **kwargs: None)
+    monkeypatch.setattr(fc, "_post", lambda path, payload: (
+        {"status": "FILLED", "orderId": 123, "avgPrice": "100", "executedQty": payload.get("quantity", "2")}
+        if path == "/fapi/v1/order" else {"algoId": 456}
+    ))
+
+    pos = fc.open_long("INJUSDT", 100.0, leverage=2, entry_context={"thesis_type": "LONG_RESISTANCE_BREAKOUT"})
+
+    assert pos is not None
+    assert pos._smart_meta["regime_at_entry"] == "RANGE_SCALP"
+    assert pos._smart_meta["thesis_type"] == "LONG_RESISTANCE_BREAKOUT"
+
+
 class TestDryRunPortfolioSizing:
     def test_caps_position_notional(self):
         settings = _make_settings(

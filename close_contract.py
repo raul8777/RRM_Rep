@@ -30,7 +30,12 @@ def infer_reconciliation_state(
     source = str(close_source or "").strip().lower()
     if synthetic or source == "reconciliation" or reason.startswith("truth_reconcile"):
         return "synthetic_imported" if source == "reconciliation" and synthetic else "reconciled"
-    if reason in {"ghost_balance_mismatch", "reconcile_missing_balance", "binance_closed_untracked"}:
+    if reason in {
+        "ghost_balance_mismatch",
+        "reconcile_missing_balance",
+        "binance_closed_untracked",
+        "pretrade_ghost_auto_close",
+    }:
         return "reconciled"
     if reason in {"manual", "manual_close"} or source == "manual":
         return "manual_confirmed"

@@ -12,9 +12,11 @@ from trade_utils import get_binance_sell_qty, get_symbol_filters, is_quantity_va
 from position_intelligence import (
     PIMAction,
     evaluate_position_intelligence,
+    evaluate_thesis_path,
     has_behavior_changed,
     invalidate_sr_cache,
     refresh_sr_levels,
+    should_evaluate_thesis_path,
     update_sr_behavior,
     compute_sr_aware_trail_distance,
 )
@@ -132,10 +134,69 @@ def _evaluate_pim_spot(client, manager, pos_list, symbol, price, settings, db_cl
         sr_behavior = update_sr_behavior(smart_meta, price, sr_levels, "LONG")
 
         old_behavior = smart_meta.get('sr_behavior')
-        if not has_behavior_changed(old_behavior, sr_behavior):
-            continue
+        behavior_changed = has_behavior_changed(old_behavior, sr_behavior)
+        if behavior_changed:
+            smart_meta['sr_behavior'] = sr_behavior
 
-        smart_meta['sr_behavior'] = sr_behavior
+        # ── sr_path_v1: thesis-anchored structural evaluation (candle-close gated) ──
+        # Evaluates progress along the ENTRY THESIS's own levels, only at the
+        # close of the primary timeframe candle — never per 2s tick.
+        path_evaluated = False
+        thesis = meta.get('thesis_snapshot_v1') or {}
+        thesis_path = thesis.get('sr_path_v1') if isinstance(thesis, dict) else None
+        if thesis_path and should_evaluate_thesis_path(smart_meta, thesis_path.get('primary_timeframe')):
+            try:
+                from datetime import datetime, timezone as _tz
+                from position_intelligence import _tf_seconds as _tf_secs
+                entry_time = getattr(pos, 'entry_time', None)
+                candles_consumed = 0.0
+                tf_s = _tf_secs(thesis_path.get('primary_timeframe'))
+                if entry_time and tf_s:
+                    _et = entry_time if hasattr(entry_time, 'timestamp') else datetime.fromisoformat(str(entry_time).replace('Z', '+00:00'))
+                    if _et.tzinfo is None:
+                        _et = _et.replace(tzinfo=_tz.utc)
+                    candles_consumed = max(0.0, (datetime.now(_tz.utc) - _et).total_seconds()) / tf_s
+                _vol_spike = None
+                _ind = getattr(pos, 'indicators_at_entry', None) or {}
+                if isinstance(_ind, dict):
+                    _vol_spike = _ind.get('vol_spike') or _ind.get('volume_ratio')
+                path_eval = evaluate_thesis_path(
+                    thesis_path=thesis_path,
+                    entry_price=entry,
+                    current_price=price,
+                    sr_behavior=sr_behavior,
+                    candles_consumed=candles_consumed,
+                    vol_spike=_vol_spike,
+                    settings=settings,
+                )
+                if tf_s:
+                    smart_meta['sr_path_last_eval_bucket'] = int(datetime.now(_tz.utc).timestamp() // tf_s)
+                prev_state = (smart_meta.get('sr_path_state') or {}).get('state')
+                smart_meta['sr_path_state'] = {
+                    **path_eval,
+                    "evaluated_at": datetime.now(_tz.utc).isoformat(),
+                    "mode": str(get_param(settings, "sr_path_evaluator_mode", "shadow")),
+                }
+                path_evaluated = True
+                if db_client and path_eval.get('state') != prev_state:
+                    try:
+                        db_client.execute_update(
+                            "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+                            (symbol, "spot", "sr_path_state_change", json.dumps({
+                                "position_id": str(pos.position_id),
+                                "from": prev_state, "to": path_eval.get('state'),
+                                "reason": path_eval.get('reason'),
+                                "progress_pct": path_eval.get('progress_pct'),
+                                "mode": smart_meta['sr_path_state']['mode'],
+                            }), False),
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass  # thesis-path evaluation must never break the safety-net loop
+
+        if not behavior_changed and not path_evaluated:
+            continue
 
         # Evaluate PIM
         action = evaluate_position_intelligence(
@@ -201,6 +262,7 @@ def monitor_spot_hard_stops_once(components: Any) -> List[Dict[str, Any]]:
             except TypeError:
                 price = float(client.get_symbol_price(symbol))
             breached = []
+            breached_positions = []
             for pos in pos_list:
                 entry = float(pos.entry_price or 0.0)
                 qty = float(pos.quantity or 0.0)
@@ -215,6 +277,7 @@ def monitor_spot_hard_stops_once(components: Any) -> List[Dict[str, Any]]:
                 effective_sl = max(saved_sl, usd_sl)
                 if effective_sl > 0 and price <= effective_sl:
                     breached.append({"position_id": str(pos.position_id), "effective_sl": effective_sl})
+                    breached_positions.append(pos)
             if not breached:
                 # ── PIS: evaluate position intelligence for SPOT (no SL breached) ──
                 if bool(get_param(settings, "position_intelligence_enabled", True)):
@@ -225,9 +288,16 @@ def monitor_spot_hard_stops_once(components: Any) -> List[Dict[str, Any]]:
                 continue
             _symbols_in_progress.add(symbol)
             try:
-                full_qty = sum(float(pos.quantity or 0.0) for pos in pos_list)
+                full_qty = sum(float(pos.quantity or 0.0) for pos in breached_positions)
                 sell_check = get_binance_sell_qty(client, symbol, full_qty, price)
                 qty = float(sell_check.get("qty_to_sell", 0.0) or 0.0)
+                if sell_check.get("balance_status") != "ok":
+                    logger.error(
+                        "Hard-risk close deferred for %s: Spot balance unavailable (%s)",
+                        symbol,
+                        sell_check.get("error", "unknown balance error"),
+                    )
+                    continue
                 if sell_check.get("is_ghost") or sell_check.get("is_dust") or qty <= 0:
                     continue
                 filters = get_symbol_filters(client, symbol)
@@ -242,30 +312,78 @@ def monitor_spot_hard_stops_once(components: Any) -> List[Dict[str, Any]]:
                     _shadow_metrics["stop_closes"] += len(breached)
                 sold_qty = float(fill.get("qty", qty))
                 fill_price = float(fill.get("avg_price", price))
-                manager.close_all_positions_for_symbol(
-                    symbol,
-                    fill_price,
-                    "hard_risk_stop",
-                    commission_rate,
-                    exit_context={
-                        "close_source": "lifecycle",
-                        "close_intent": "hard_risk_stop",
-                        "reconciliation_state": "exchange_confirmed",
-                        "exit_order_id": str(fill.get("order_id", "")),
-                        "exit_filled_qty": sold_qty,
-                        "exit_avg_price": fill_price,
-                        "exit_commission": float(fill.get("commission", 0.0)),
-                        "binance_exit_confirmed": True,
-                    },
-                    qty_closed=sold_qty,
-                    exit_fill=fill,
-                )
+                total_commission = float(fill.get("commission_usdt", fill.get("commission", 0.0)) or 0.0)
+                remaining_qty = sold_qty
+                persistence_failures = []
+                for pos in breached_positions:
+                    if remaining_qty <= 0:
+                        break
+                    position_qty = float(pos.quantity or 0.0)
+                    closed_qty = min(position_qty, remaining_qty)
+                    if closed_qty <= 0:
+                        continue
+                    commission_share = total_commission * (closed_qty / sold_qty) if sold_qty > 0 else 0.0
+                    position_fill = dict(fill)
+                    position_fill["qty"] = closed_qty
+                    position_fill["commission_usdt"] = commission_share
+                    close_result = manager.close_position(
+                        symbol,
+                        fill_price,
+                        "hard_risk_stop",
+                        commission_rate,
+                        position_id=str(pos.position_id),
+                        exit_context={
+                            "close_source": "lifecycle",
+                            "close_intent": "hard_risk_stop",
+                            "reconciliation_state": "exchange_confirmed",
+                            "exit_order_id": str(fill.get("order_id", "")),
+                            "exit_filled_qty": closed_qty,
+                            "exit_avg_price": fill_price,
+                            "exit_commission": commission_share,
+                            "binance_exit_confirmed": True,
+                        },
+                        qty_closed=closed_qty,
+                        exit_fill=position_fill,
+                    )
+                    if close_result is None:
+                        failure = {
+                            "position_id": str(pos.position_id),
+                            "db_id": getattr(pos, "db_id", None),
+                            "quantity": closed_qty,
+                        }
+                        persistence_failures.append(failure)
+                        logger.error(
+                            "Hard-risk SELL filled but canonical close failed for %s position_id=%s db_id=%s order_id=%s",
+                            symbol, failure["position_id"], failure["db_id"], fill.get("order_id"),
+                        )
+                        if db_client:
+                            try:
+                                db_client.execute_update(
+                                    "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                                    "VALUES (%s, %s, %s, %s, true)",
+                                    (symbol, "spot", "hard_risk_close_persistence_failed", json.dumps({
+                                        **failure,
+                                        "entry_order_id": (getattr(pos, "metadata", {}) or {}).get("entry_order_id"),
+                                        "exit_order_id": str(fill.get("order_id", "")),
+                                        "exit_filled_qty": closed_qty,
+                                        "exit_avg_price": fill_price,
+                                        "exit_commission_usdt": commission_share,
+                                        "close_reason": "hard_risk_stop",
+                                    })),
+                                )
+                            except Exception as audit_exc:
+                                logger.error("Hard-risk close failure audit failed for %s: %s", symbol, audit_exc)
+                        continue
+                    remaining_qty -= float(close_result.quantity)
                 detail = {
                     "symbol": symbol,
                     "price": price,
                     "fill_price": fill_price,
                     "sold_qty": sold_qty,
+                    "order_id": str(fill.get("order_id", "")),
+                    "commission_usdt": total_commission,
                     "breached": breached,
+                    "position_close_persistence_failures": persistence_failures,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
                 if db_client:
@@ -317,7 +435,8 @@ def _evaluate_pim_futures(futures_client, pos, price, settings, min_conf, emerg_
 
     # Only persist when meaningful state changes (avoid noisy DB writes)
     old_behavior = smart_meta.get('sr_behavior')
-    if has_behavior_changed(old_behavior, sr_behavior):
+    behavior_changed = has_behavior_changed(old_behavior, sr_behavior)
+    if behavior_changed:
         if not hasattr(pos, '_smart_meta') or pos._smart_meta is None:
             pos._smart_meta = {}
         pos._smart_meta['sr_behavior'] = sr_behavior
@@ -325,6 +444,82 @@ def _evaluate_pim_futures(futures_client, pos, price, settings, min_conf, emerg_
             futures_client._persist_smart_meta(pos)
         except Exception:
             pass
+
+    # ── sr_path_v1: thesis-anchored structural evaluation (candle-close gated) ──
+    # Futures: build the path from runtime data (pnl_prediction target/stop +
+    # indicators_at_entry future maps + sr_entry_context) since the persisted
+    # DB thesis is not loaded into the runtime FuturesPosition object.
+    try:
+        from position_thesis import build_sr_path_v1 as _build_path
+        from position_intelligence import (
+            evaluate_thesis_path as _eval_path,
+            should_evaluate_thesis_path as _should_eval_path,
+            _tf_seconds as _tf_secs,
+        )
+        _entry_ctx = smart_meta.get('sr_entry_context') or {}
+        _thesis_path = _build_path(
+            side=pos.side,
+            metadata=smart_meta,
+            indicators_at_entry=getattr(pos, 'indicators_at_entry', None),
+            support_level=_entry_ctx.get('support_at_entry'),
+            resistance_level=_entry_ctx.get('resistance_at_entry'),
+            target_price=(getattr(pos, 'pnl_prediction', None) or {}).get('target_price'),
+            stop_price=(getattr(pos, 'pnl_prediction', None) or {}).get('stop_price'),
+        )
+        if _thesis_path and _should_eval_path(smart_meta, _thesis_path.get('primary_timeframe')):
+            from datetime import datetime, timezone as _tz
+            candles_consumed = 0.0
+            tf_s = _tf_secs(_thesis_path.get('primary_timeframe'))
+            _opened = getattr(pos, 'opened_at', None)
+            if _opened and tf_s:
+                if _opened.tzinfo is None:
+                    _opened = _opened.replace(tzinfo=_tz.utc)
+                candles_consumed = max(0.0, (datetime.now(_tz.utc) - _opened).total_seconds()) / tf_s
+            _vol_spike = None
+            _ind = getattr(pos, 'indicators_at_entry', None) or {}
+            if isinstance(_ind, dict):
+                _vol_spike = _ind.get('vol_spike') or _ind.get('volume_ratio')
+            _path_eval = _eval_path(
+                thesis_path=_thesis_path,
+                entry_price=float(pos.entry_price or 0),
+                current_price=price,
+                sr_behavior=sr_behavior,
+                candles_consumed=candles_consumed,
+                vol_spike=_vol_spike,
+                settings=settings,
+            )
+            if tf_s:
+                smart_meta['sr_path_last_eval_bucket'] = int(datetime.now(_tz.utc).timestamp() // tf_s)
+            _prev_state = (smart_meta.get('sr_path_state') or {}).get('state')
+            smart_meta['sr_path_state'] = {
+                **_path_eval,
+                "evaluated_at": datetime.now(_tz.utc).isoformat(),
+                "mode": str(get_param(settings, "sr_path_evaluator_mode", "shadow")),
+            }
+            if not hasattr(pos, '_smart_meta') or pos._smart_meta is None:
+                pos._smart_meta = {}
+            pos._smart_meta['sr_path_state'] = smart_meta['sr_path_state']
+            pos._smart_meta['sr_path_last_eval_bucket'] = smart_meta.get('sr_path_last_eval_bucket')
+            try:
+                futures_client._persist_smart_meta(pos)
+            except Exception:
+                pass
+            if db_client and _path_eval.get('state') != _prev_state:
+                try:
+                    db_client.execute_update(
+                        "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
+                        (symbol, "futures", "sr_path_state_change", json.dumps({
+                            "position_id": str(getattr(pos, 'order_id', '') or ''),
+                            "from": _prev_state, "to": _path_eval.get('state'),
+                            "reason": _path_eval.get('reason'),
+                            "progress_pct": _path_eval.get('progress_pct'),
+                            "mode": smart_meta['sr_path_state']['mode'],
+                        }), False),
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass  # thesis-path evaluation must never break the safety-net loop
 
     # Evaluate position intelligence
     action = evaluate_position_intelligence(

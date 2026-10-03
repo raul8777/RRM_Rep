@@ -11,6 +11,15 @@ from typing import Any, Dict, List, Optional
 from config import get_settings
 
 
+_CERTIFIABLE_REGIMES = {
+    "SPOT_BULL",
+    "RANGE_SCALP",
+    "PRESERVATION",
+    "FUTURES_SHORT",
+}
+_CERTIFIABLE_PROFILES = {"A", "B", "C"}
+
+
 @dataclass
 class DesignSpec:
     """User-supplied design of a Super MIMIC experiment."""
@@ -20,14 +29,62 @@ class DesignSpec:
     engine: str = "mimic_sweep"
     strategy: str = "full"
     max_cycles: Optional[int] = None
-    max_workers: int = 1
+    max_workers: int = 8
     profiles: Optional[List[str]] = None
     param_grid: Optional[Dict[str, List[Any]]] = None
     param_grid_file: Optional[str] = None
     forced_regime: Optional[str] = None
     lifecycle: bool = False
+    e2e_lifecycle_enabled: bool = False
     max_drawdown_stop_pct: Optional[float] = 15.0
     output_dir: Optional[str] = None
+    experiment_stage: str = "e2e"
+    certification_mode: bool = True
+    max_jobs: int = 100
+    seed: int = 20260913
+    apply_allowed: bool = False
+    auto_start: bool = True
+    memory_per_worker_mb: int = 1536
+    entry_cohort_path: Optional[str] = None
+    window_manifest_dir: Optional[str] = None
+    stratified_jobs: bool = False
+    max_symbols: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        self.mode = str(self.mode or "").upper()
+        if self.mode not in _CERTIFIABLE_REGIMES:
+            raise ValueError(f"Unsupported mode: {self.mode}")
+        requested_regime = str(self.forced_regime or self.mode).upper()
+        if requested_regime != self.mode:
+            raise ValueError(
+                f"mode and forced_regime must match: {self.mode} != {requested_regime}"
+            )
+        self.forced_regime = requested_regime
+        self.profile = str(self.profile or "").upper()
+        if self.profile not in _CERTIFIABLE_PROFILES:
+            raise ValueError(f"Unsupported profile: {self.profile}")
+        if self.profiles is not None:
+            self.profiles = list(dict.fromkeys(str(profile).upper() for profile in self.profiles))
+            invalid_profiles = sorted(set(self.profiles) - _CERTIFIABLE_PROFILES)
+            if invalid_profiles:
+                raise ValueError(f"Unsupported profiles: {invalid_profiles}")
+            if self.profile not in self.profiles:
+                raise ValueError(
+                    f"Requested profile {self.profile} is absent from profiles: {self.profiles}"
+                )
+        self.experiment_stage = str(self.experiment_stage or "e2e").lower()
+        if self.experiment_stage not in {"entry", "kelly", "lifecycle", "aic", "e2e"}:
+            raise ValueError(f"Unsupported experiment_stage: {self.experiment_stage}")
+        self.max_workers = max(1, min(int(self.max_workers or 8), 10))
+        self.max_jobs = max(1, min(int(self.max_jobs or 100), 5000))
+        self.seed = int(self.seed)
+        self.memory_per_worker_mb = max(256, int(self.memory_per_worker_mb or 1536))
+        if self.max_symbols is not None:
+            self.max_symbols = max(2, int(self.max_symbols))
+        if self.certification_mode:
+            self.apply_allowed = False
+            if self.max_cycles is None:
+                self.max_cycles = 5
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

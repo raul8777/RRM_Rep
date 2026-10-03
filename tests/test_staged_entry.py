@@ -56,9 +56,14 @@ class FakeDBClient:
         if q.startswith("SELECT id FROM ready_candidates") or q.startswith(
             "SELECT * FROM ready_candidates WHERE symbol=%s AND trade_type=%s AND regime_mode=%s"
         ):
-            sym, tt, reg = params[:3]
+            sym, identity, reg = params[:3]
             for r in self.ready:
-                if r["symbol"] == sym and r["trade_type"] == tt and r["regime_mode"] == reg and r["status"] in ("ready", "validated"):
+                identity_matches = (
+                    r.get("execution_mode") == identity
+                    if "execution_mode=%s" in q
+                    else r["trade_type"] == identity
+                )
+                if r["symbol"] == sym and identity_matches and r["regime_mode"] == reg and r["status"] in ("ready", "validated"):
                     return [copy.deepcopy(r)]
             return []
 
@@ -360,6 +365,31 @@ def _make_signal(symbol: str, side: str = "LONG"):
     }
 
 
+def test_validation_predictor_does_not_reuse_persisted_indicators(monkeypatch):
+    import pnl_service
+
+    monkeypatch.undo()
+    calls = []
+
+    def predict_for_symbol(*args, **kwargs):
+        calls.append(kwargs)
+        return {"expected_pnl": 1.0, "success_probability": 0.7}, {}
+
+    monkeypatch.setattr(pnl_service, "predict_for_symbol", predict_for_symbol)
+
+    prediction = staged_entry._run_predictor_for_validation(
+        object(),
+        "BTCUSDT",
+        FakeSettings(),
+        {"trade_type": "futures", "expected_side": "SHORT", "indicators": {"rsi": 20}},
+        current_price=100.0,
+    )
+
+    assert prediction["success_probability"] == 0.7
+    assert calls[0]["precomputed_signal"] is None
+    assert calls[0]["current_price"] == 100.0
+
+
 def _direction_cfg(**overrides):
     cfg = {
         "direction_confirmation_mode": "enforced",
@@ -598,6 +628,27 @@ def test_build_initial_direction_uses_arbiter_short_prediction():
     assert d["base_price"] == 100.0
 
 
+def test_build_initial_direction_prefers_atr_adjusted_selected_contract():
+    meta = {
+        "expected_side": "SHORT",
+        "directional_arbitration": {
+            "selected_mode": "FUTURES_SHORT",
+            "selected_contract": {
+                "effective_target_price": 96.0,
+                "effective_stop_price": 104.5,
+            },
+            "short_prediction": {"target_price": 96.0, "stop_price": 102.0},
+        },
+    }
+
+    direction = staged_entry._build_initial_direction(
+        100.0, meta, {"target_price": 97.0, "stop_price": 102.0}, "RANGE_SCALP",
+    )
+
+    assert direction["target_price"] == 96.0
+    assert direction["stop_price"] == 104.5
+
+
 def test_build_initial_direction_uses_arbiter_long_prediction():
     """When arbiter decides FUTURES_LONG, direction target/stop come from
     futures_long_prediction price_range (target=max, stop=min)."""
@@ -816,12 +867,7 @@ def test_direction_stamps_first_confirmed_price_once(monkeypatch):
     assert snapshot2["direction"]["first_confirmed_at"] == first_confirmed_at
 
 
-def test_watcher_discards_ready_candidate_on_adverse_break(fake_db, settings):
-    """s108/Opcion H: direction analysis now runs during `ready` (not only after
-    `validated`), so a candidate that already broke decisively against the
-    setup can be discarded immediately instead of waiting for the quality/EV
-    gate to keep re-checking it every cycle until it eventually reaches
-    `validated` (or times out)."""
+def test_watcher_does_not_apply_retired_temporal_direction_gate(fake_db, settings):
     meta = {"BTCUSDT": _make_signal("BTCUSDT", side="SHORT")}
     top = [meta["BTCUSDT"]]
     staged_entry.stage_ready_candidates(top, {}, meta, "FUTURES_SHORT", fake_db, settings=settings)
@@ -833,16 +879,11 @@ def test_watcher_discards_ready_candidate_on_adverse_break(fake_db, settings):
     cfg = staged_entry.get_staged_entry_regime_config(settings, "FUTURES_SHORT")
     staged_entry._watcher_process_row(fake_db, row, 108.0, cfg, [])
     updated = fake_db.ready[0]
-    assert updated["status"] == "discarded"
-    assert updated["discard_reason"] == "DIRECTION_STOP_BREACHED"
+    assert updated["status"] == "ready"
+    assert updated.get("discard_reason") is None
 
 
-def test_watcher_confirms_ready_candidate_direction_without_promoting(fake_db, settings):
-    """A favorable direction confirmation detected during `ready` must be
-    persisted (so the row reaches `validated` already confirmed and the
-    fast-path does not re-earn it from scratch) but must NOT by itself promote
-    the row to `validated` or add it to the validated list — that stays
-    governed exclusively by the quality/EV gate in `evaluate_inter_cycle`."""
+def test_watcher_bypasses_retired_direction_confirmation_without_promoting(fake_db, settings):
     meta = {"BTCUSDT": _make_signal("BTCUSDT", side="SHORT")}
     top = [meta["BTCUSDT"]]
     staged_entry.stage_ready_candidates(top, {}, meta, "FUTURES_SHORT", fake_db, settings=settings)
@@ -858,7 +899,7 @@ def test_watcher_confirms_ready_candidate_direction_without_promoting(fake_db, s
     updated = fake_db.ready[0]
     assert updated["status"] == "ready"
     assert validated_list == []
-    assert updated["data"]["direction"]["state"] == "confirmed"
+    assert updated["data"]["direction"].get("state") != "confirmed"
 
 
 def test_stage_ready_candidates_creates_record(fake_db, settings):
@@ -893,7 +934,34 @@ def test_stage_existing_is_skipped(fake_db, settings):
     staged2 = staged_entry.stage_ready_candidates(top, {}, meta, "SPOT_BULL", fake_db, settings=settings)
     assert staged2 == []
     assert len(fake_db.ready) == 1
-    assert len(fake_db.checks) == 1
+
+
+def test_stage_allows_bilateral_modes_for_same_symbol(fake_db, settings):
+    long_signal = {
+        **_make_signal("BTCUSDT", side="LONG"),
+        "selected_mode": "FUTURES_LONG",
+        "trade_type": "futures",
+    }
+    short_signal = {
+        **_make_signal("BTCUSDT", side="SHORT"),
+        "selected_mode": "FUTURES_SHORT",
+        "trade_type": "futures",
+    }
+    long_meta = {"BTCUSDT": long_signal}
+    short_meta = {"BTCUSDT": short_signal}
+
+    staged_entry.stage_ready_candidates(
+        [long_signal], {}, long_meta, "RANGE_SCALP", fake_db, settings=settings,
+    )
+    staged_entry.stage_ready_candidates(
+        [short_signal], {}, short_meta, "RANGE_SCALP", fake_db, settings=settings,
+    )
+
+    assert {(row["execution_mode"], row["side"]) for row in fake_db.ready} == {
+        ("FUTURES_LONG", "LONG"),
+        ("FUTURES_SHORT", "SHORT"),
+    }
+    assert len(fake_db.checks) == 2
 
 
 def test_evaluate_inter_cycle_validates_after_required(fake_db, settings):
@@ -931,7 +999,7 @@ def test_evaluate_inter_cycle_discards_on_negative(fake_db, settings, monkeypatc
     assert fake_db.ready[0]["discard_reason"] == "QUALITY_BELOW_C"
 
 
-def test_get_openable_candidates_returns_best_validated_ev_globally(fake_db, settings):
+def test_get_openable_candidates_filters_to_current_qubo_universe(fake_db, settings):
     meta = {
         "BTCUSDT": _make_signal("BTCUSDT"),
         "ETHUSDT": _make_signal("ETHUSDT"),
@@ -947,13 +1015,59 @@ def test_get_openable_candidates_returns_best_validated_ev_globally(fake_db, set
         row["data"]["policy"].update({"expected_pnl": expected_pnl, "quality_score": quality_score, "success_probability": probability})
         row["data"]["direction"].update({"state": "confirmed", "directional_confirmations": 2})
 
-    openable = staged_entry.get_openable_candidates(fake_db, "SPOT_BULL", ["BTCUSDT"], settings=settings)
-    assert len(openable) == 2
-    assert openable[0]["symbol"] == "ETHUSDT"  # higher expected_pnl first
-    assert openable[1]["symbol"] == "BTCUSDT"
-    assert eth_row["data"]["global_validated_rank"] == 1
-    assert btc_row["data"]["global_validated_rank"] == 2
-    assert eth_row["data"]["global_validated_universe_size"] == 2
+    qubo_symbols = ["BTCUSDT"]
+    qubo_authority_symbols = ["BTCUSDT", "ETHUSDT"]
+    openable = staged_entry.get_openable_candidates(
+        fake_db,
+        "SPOT_BULL",
+        qubo_symbols,
+        settings=settings,
+        qubo_cycle_id="qubo-cycle-current",
+        qubo_symbols_hash=staged_entry.qubo_symbols_hash_for(qubo_authority_symbols),
+        qubo_authority_symbols=qubo_authority_symbols,
+    )
+    assert [row["symbol"] for row in openable] == ["BTCUSDT"]
+    assert btc_row["data"]["global_validated_rank"] == 1
+    assert btc_row["data"]["global_validated_universe_size"] == 1
+    assert "global_validated_rank" not in eth_row["data"]
+    unauthorized_subset = staged_entry.get_openable_candidates(
+        fake_db,
+        "SPOT_BULL",
+        ["DOGEUSDT"],
+        settings=settings,
+        qubo_cycle_id="qubo-cycle-current",
+        qubo_symbols_hash=staged_entry.qubo_symbols_hash_for(qubo_authority_symbols),
+        qubo_authority_symbols=qubo_authority_symbols,
+    )
+    assert unauthorized_subset == []
+
+
+def test_qubo_authority_snapshot_requires_fresh_cycle_and_valid_symbol_hash():
+    from datetime import datetime, timezone
+
+    symbols = ["BTCUSDT", "ETHUSDT"]
+
+    class _AuthorityDb:
+        def __init__(self, value):
+            self.value = value
+
+        def execute_query(self, _query, _params=None):
+            return [{"value": self.value, "updated_at": datetime.now(timezone.utc)}]
+
+    valid = {
+        "cycle_id": "cycle-7",
+        "regime_mode": "SPOT_BULL",
+        "symbols": symbols,
+        "symbols_hash": staged_entry.qubo_symbols_hash_for(symbols),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    invalid = {**valid, "symbols_hash": "bad-hash"}
+
+    snapshot = staged_entry.get_qubo_authority_snapshot(_AuthorityDb(valid), "SPOT_BULL")
+    assert snapshot["cycle_id"] == "cycle-7"
+    assert snapshot["symbols"] == symbols
+    assert staged_entry.get_qubo_authority_snapshot(_AuthorityDb(invalid), "SPOT_BULL") is None
+    assert staged_entry.get_qubo_authority_snapshot(_AuthorityDb(valid), "FUTURES_SHORT") is None
 
 
 def test_get_openable_candidates_does_not_clobber_concurrent_discard(fake_db, settings, monkeypatch):
@@ -1080,7 +1194,7 @@ def test_get_openable_candidates_deprioritizes_recent_execution_failure(fake_db,
     assert selected[0]["symbol"] == "LOWEV_BUT_VIABLE"
 
 
-def test_get_openable_candidates_blocks_short_far_from_resistance_when_guard_enforced(fake_db, settings):
+def test_get_openable_candidates_defers_sr_side_validation_to_bilateral_preflight(fake_db, settings):
     settings.staged_entry_regime_config["FUTURES_SHORT"]["required_positive_checks"] = 1
     settings.staged_entry_regime_config["FUTURES_SHORT"]["sr_side_guard_mode"] = "enforced"
     settings.staged_entry_regime_config["FUTURES_SHORT"]["sr_side_guard_max_dist_pct"] = 1.0
@@ -1109,8 +1223,8 @@ def test_get_openable_candidates_blocks_short_far_from_resistance_when_guard_enf
 
     openable = staged_entry.get_openable_candidates(fake_db, "FUTURES_SHORT", settings=settings)
 
-    assert openable == []
-    assert any(c["reason"] == "SR_SIDE_GUARD_BLOCKED" for c in fake_db.checks)
+    assert len(openable) == 1
+    assert openable[0]["_selection_shadow"]["sr_side_guard"]["reason"] == "BILATERAL_ATOMIC_PREFLIGHT_OWNS_SR_SIDE"
 
 
 def test_get_openable_candidates_allows_short_breakdown_exception(fake_db, settings):
@@ -1149,7 +1263,7 @@ def test_get_openable_candidates_allows_short_breakdown_exception(fake_db, setti
     assert openable[0]["symbol"] == "BTCUSDT"
 
 
-def test_get_openable_candidates_blocks_long_far_from_support_when_guard_enforced(fake_db, settings):
+def test_get_openable_candidates_allows_long_for_atomic_bilateral_recheck(fake_db, settings):
     settings.staged_entry_regime_config["SPOT_BULL"]["sr_side_guard_mode"] = "enforced"
     settings.staged_entry_regime_config["SPOT_BULL"]["sr_side_guard_max_dist_pct"] = 1.0
 
@@ -1177,7 +1291,8 @@ def test_get_openable_candidates_blocks_long_far_from_support_when_guard_enforce
 
     openable = staged_entry.get_openable_candidates(fake_db, "SPOT_BULL", settings=settings)
 
-    assert openable == []
+    assert len(openable) == 1
+    assert openable[0]["_selection_shadow"]["sr_side_guard"]["reason"] == "BILATERAL_ATOMIC_PREFLIGHT_OWNS_SR_SIDE"
 
 
 def test_mark_opened_records_lifecycle_check(fake_db, settings):
@@ -1474,6 +1589,8 @@ def _make_sr_signal(symbol="BTCUSDT", side="LONG", sr_zone_position=0.3):
 
 
 def test_stage_ready_candidates_persist_sr_features(fake_db, settings):
+    settings.range_scalp_quality_model_mode = "shadow"
+    settings.range_reversion_predictor_mode = "disabled"
     settings.staged_entry_regime_config["RANGE_SCALP"] = {
         "enabled": True,
         "required_positive_checks": 1,

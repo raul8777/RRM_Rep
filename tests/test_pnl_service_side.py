@@ -62,3 +62,21 @@ def test_explicit_trade_side_overrides_inference(monkeypatch):
     assert pred is not None
     assert fake.calls
     assert fake.calls[-1]["trade_side"] == "LONG"
+
+
+def test_validate_rejects_explicitly_invalid_prediction():
+    settings = SimpleNamespace(min_expected_pnl=0.0, min_success_probability=0.5, max_risk_percentage=10.0)
+
+    accepted, reason = pnl_service.validate(
+        {
+            "valid": False,
+            "prediction_status": "error",
+            "error_code": "probability_calculation_failed",
+            "expected_pnl": 0.0,
+            "success_probability": 0.0,
+        },
+        settings,
+    )
+
+    assert accepted is False
+    assert reason == "INVALID_PREDICTION:probability_calculation_failed"

@@ -82,6 +82,8 @@ class ExitEngine:
 
             if top_candidates[0].action == Action.CLOSE_ALL:
                 decisions.append(top_candidates[0])
+            elif top_candidates[0].action == Action.CLOSE_PCT and not policy.allow_partial_exits:
+                decisions.append(ExitDecision.hold(pos.symbol, "partial_exit_blocked"))
             elif top_candidates[0].action == Action.CLOSE_PCT:
                 merged_pct = max(d.pct for d in top_candidates if d.action == Action.CLOSE_PCT)
                 merged_reason = " + ".join(d.reason for d in top_candidates if d.action == Action.CLOSE_PCT)

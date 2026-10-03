@@ -427,6 +427,13 @@ class PeakCaptureEngine:
         margin = base * size_factor * conviction_factor * fng_factor * regime_factor
         return min(max(margin, 0.55), 1.50)
 
+    def compute_prob_higher_peak(self, ctx: PeakCaptureContext) -> float:
+        """Standalone accessor for the probability-of-higher-peak component of
+        `_compute_ev_wait`, for callers (e.g. position_belief.py) that only
+        need this EV signal without running a full `evaluate()` decision."""
+        _, prob_higher_peak = self._compute_ev_wait(ctx)
+        return prob_higher_peak
+
     def _compute_ev_wait(self, ctx: PeakCaptureContext) -> Tuple[float, float]:
         """
         Estimate the expected value of waiting for a larger peak.
@@ -451,8 +458,13 @@ class PeakCaptureEngine:
         if entry_price <= 0:
             return 0.0, 0.0
 
-        expected_max_pct = (max_price - entry_price) / entry_price
-        expected_min_pct = (min_price - entry_price) / entry_price
+        is_short = str(ctx.side or "").strip().upper() in ("SHORT", "SELL")
+        if is_short:
+            expected_max_pct = (entry_price - min_price) / entry_price
+            expected_min_pct = (entry_price - max_price) / entry_price
+        else:
+            expected_max_pct = (max_price - entry_price) / entry_price
+            expected_min_pct = (min_price - entry_price) / entry_price
 
         if expected_max_pct > current_pct:
             distance = (expected_max_pct - current_pct) / max(expected_max_pct, 1e-9)

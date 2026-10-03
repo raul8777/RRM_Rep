@@ -59,6 +59,43 @@ def test_futures_snapshot_uses_contract_qty_and_stable_position_id():
     assert snapshot["unrealized_pnl_usdt"] == -10.0
 
 
+def test_belief_prefers_persisted_thesis_snapshot(monkeypatch):
+    persisted = {
+        "side": "LONG",
+        "stop_price": 95.0,
+        "target_price": 112.0,
+        "entry_success_probability": 0.68,
+    }
+    captured = {}
+
+    def fake_evaluate_belief(**kwargs):
+        captured.update(kwargs)
+        return {"belief_state": "intact"}
+
+    monkeypatch.setattr(ptw, "evaluate_belief", fake_evaluate_belief)
+    monkeypatch.setattr(ptw, "_update_drawdown_buffer", lambda *args: [])
+    monkeypatch.setattr(ptw, "_analyze_drawdown_trend", lambda *args: {})
+    monkeypatch.setattr(ptw, "_should_persist_belief", lambda *args: False)
+
+    result, should_persist = ptw._evaluate_position_belief(
+        position_id="position-1",
+        symbol="ALTUSDT",
+        side="LONG",
+        pnl_usdt=-1.0,
+        current_price=99.0,
+        metadata={
+            "thesis_snapshot_v1": persisted,
+            "entry_decision_prediction": {"stop_price": 80.0, "target_price": 130.0},
+        },
+        pnl_prediction={"stop_price": 70.0, "target_price": 140.0},
+        settings=_Settings(position_belief_enabled=True),
+    )
+
+    assert result == {"belief_state": "intact"}
+    assert should_persist is False
+    assert captured["thesis_snapshot"] == persisted
+
+
 def test_drawdown_velocity_is_price_normalized():
     buffer = [
         {"ts": float(second), "price": 0.01 * (1.0 + second * 0.001), "pnl_usdt": -float(second)}

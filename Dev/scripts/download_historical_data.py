@@ -33,15 +33,25 @@ def _load_existing(path: str) -> pd.DataFrame:
     ])
 
 
+def _timestamp_ms(values: pd.Series) -> pd.Series:
+    if pd.api.types.is_datetime64_any_dtype(values):
+        timestamps = pd.to_datetime(values, utc=True, errors="coerce")
+    else:
+        numeric = pd.to_numeric(values, errors="coerce")
+        finite = numeric.dropna()
+        unit = "ms" if not finite.empty and float(finite.abs().median()) >= 100_000_000_000 else "s"
+        timestamps = pd.to_datetime(numeric, unit=unit, utc=True, errors="coerce")
+    return timestamps.map(lambda value: int(value.timestamp() * 1000) if not pd.isna(value) else None)
+
+
 def _merge_and_save(df_old: pd.DataFrame, new_klines: List[Dict[str, Any]], path: str) -> int:
     if not new_klines:
         return len(df_old)
     df_new = pd.DataFrame(new_klines)
-    # Normalize open_time to ms timestamp
     df_new["open_time"] = pd.to_datetime(df_new["open_time"], unit="ms", utc=True)
-    df_new["open_time_ms"] = df_new["open_time"].astype("int64") // 1_000_000
+    df_new["open_time_ms"] = _timestamp_ms(df_new["open_time"])
     if "open_time_ms" not in df_old.columns:
-        df_old["open_time_ms"] = df_old["open_time"].astype("int64") // 1_000_000
+        df_old["open_time_ms"] = _timestamp_ms(df_old["open_time"])
     df_combined = pd.concat([df_old, df_new], ignore_index=True)
     df_combined = df_combined.drop_duplicates(subset=["open_time_ms"], keep="last")
     df_combined = df_combined.sort_values("open_time_ms").reset_index(drop=True)
@@ -50,6 +60,37 @@ def _merge_and_save(df_old: pd.DataFrame, new_klines: List[Dict[str, Any]], path
     df_combined = df_combined[[c for c in keep if c in df_combined.columns]]
     df_combined.to_parquet(path, index=False)
     return len(df_combined)
+
+
+def _fetch_klines_range(client, symbol: str, interval: str, start: datetime, end: datetime) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    cursor = int(start.timestamp() * 1000)
+    end_ms = int(end.timestamp() * 1000)
+    while cursor <= end_ms:
+        raw = client.client.get_klines(
+            symbol=symbol,
+            interval=interval,
+            startTime=cursor,
+            endTime=end_ms,
+            limit=1000,
+        )
+        if not raw:
+            break
+        rows.extend({
+            "open_time": row[0],
+            "open": float(row[1]),
+            "high": float(row[2]),
+            "low": float(row[3]),
+            "close": float(row[4]),
+            "volume": float(row[5]),
+        } for row in raw)
+        next_cursor = int(raw[-1][0]) + 1
+        if next_cursor <= cursor:
+            break
+        cursor = next_cursor
+        if len(raw) < 1000:
+            break
+    return rows
 
 
 def download_symbol(
@@ -84,12 +125,10 @@ def download_symbol(
             if start and end:
                 days = max((end - start).days, 7)
 
-        klines = _fetch_all_klines(client, symbol, interval, days=days)
         if start and end:
-            # Trim by timestamp
-            start_ms = int(start.timestamp() * 1000)
-            end_ms = int(end.timestamp() * 1000)
-            klines = [k for k in klines if start_ms <= k["open_time"] <= end_ms]
+            klines = _fetch_klines_range(client, symbol, interval, start, end)
+        else:
+            klines = _fetch_all_klines(client, symbol, interval, days=days)
 
         total = _merge_and_save(df_old, klines, path)
         result["downloaded"] = len(klines)

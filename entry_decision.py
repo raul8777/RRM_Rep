@@ -121,21 +121,44 @@ def evaluate(
     if meta.get("degenerate_output") or prediction.get("degenerate_output"):
         return _decision(False, "PREDICTOR_INVALID", settings, regime, profile, quality_score, model, expected_pnl, expected_pnl_pct, probability, target_price, stop_price)
     if regime == "RANGE_SCALP":
+        arbitration = meta.get("directional_arbitration") if isinstance(meta.get("directional_arbitration"), dict) else {}
+        thesis_type = str(
+            meta.get("thesis_type")
+            or arbitration.get("selected_thesis_type")
+            or prediction.get("thesis_type")
+            or ""
+        ).strip().upper()
+        reversal_theses = {"LONG_SUPPORT_BOUNCE", "SHORT_RESISTANCE_REJECTION"}
+        continuation_theses = {
+            "LONG_RESISTANCE_BREAKOUT", "SHORT_SUPPORT_BREAKDOWN",
+            "LONG_DIRECTIONAL_EDGE", "SHORT_DIRECTIONAL_EDGE",
+        }
         range_prediction = meta.get("range_reversion_prediction")
-        range_mode = str(getattr(settings, "range_reversion_predictor_mode", "shadow")).lower()
-        if isinstance(range_prediction, dict) and range_prediction.get("valid"):
+        range_mode = str(getattr(settings, "range_reversion_predictor_mode", "enforced")).lower()
+        if thesis_type in continuation_theses:
+            reference_price = _number(current_price if current_price is not None else prediction.get("current_price"))
+            side = str(meta.get("expected_side") or prediction.get("trade_side") or "LONG").strip().upper()
+            if reference_price is None or target_price is None or stop_price is None:
+                return _decision(False, "CONTINUATION_TARGET_STOP_MISSING", settings, regime, profile, quality_score, model, expected_pnl, expected_pnl_pct, probability, target_price, stop_price)
+            target_valid = target_price > reference_price if side == "LONG" else target_price < reference_price
+            stop_valid = stop_price < reference_price if side == "LONG" else stop_price > reference_price
+            if not target_valid or not stop_valid:
+                return _decision(False, "CONTINUATION_TARGET_STOP_INVALID", settings, regime, profile, quality_score, model, expected_pnl, expected_pnl_pct, probability, target_price, stop_price)
+            model = prediction.get("model") or "directional_continuation"
+        elif isinstance(range_prediction, dict) and range_prediction.get("valid"):
             expected_pnl = _number(range_prediction.get("expected_pnl"))
             expected_pnl_pct = _number(range_prediction.get("expected_pnl_percentage"))
             probability = _number(range_prediction.get("success_probability"))
             model = range_prediction.get("model")
             target_price = _number(range_prediction.get("target_price"))
             stop_price = _number(range_prediction.get("stop_price"))
-        elif range_mode in ("blocking", "enforced"):
-            return _decision(False, "RANGE_MODEL_INVALID", settings, regime, profile, quality_score, model, expected_pnl, expected_pnl_pct, probability, target_price, stop_price)
+        elif thesis_type in reversal_theses:
+            if range_mode in ("blocking", "enforced"):
+                return _decision(False, "RANGE_MODEL_INVALID", settings, regime, profile, quality_score, model, expected_pnl, expected_pnl_pct, probability, target_price, stop_price)
+        elif not thesis_type:
+            model = prediction.get("model") or "pre_arbitration_pending"
         else:
-            # shadow mode: keep the generic long predictor already resolved above.
-            # The reason tracks that the range-reversion model was skipped for observability.
-            range_prediction = {"valid": False, "reason": "shadow_skipped"}
+            return _decision(False, "UNKNOWN_RANGE_THESIS", settings, regime, profile, quality_score, model, expected_pnl, expected_pnl_pct, probability, target_price, stop_price)
     if expected_pnl is None or probability is None:
         return _decision(False, "MISSING_PREDICTION", settings, regime, profile, quality_score, model, expected_pnl, expected_pnl_pct, probability, target_price, stop_price)
     min_ev = float(

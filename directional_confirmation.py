@@ -39,7 +39,7 @@ def _align_target_stop_with_side(
     return target_price, stop_price
 
 
-def evaluate_shadow(
+def evaluate_direction(
     row: Dict[str, Any],
     policy: Dict[str, Any],
     current_price: Optional[float],
@@ -135,3 +135,6 @@ def evaluate_shadow(
         "next_confirmations": 0,
     })
     return snapshot
+
+
+evaluate_shadow = evaluate_direction

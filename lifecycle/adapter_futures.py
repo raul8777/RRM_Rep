@@ -130,6 +130,16 @@ class BinanceFuturesAdapter:
         symbol = decision.symbol
         price = self.price_resolver(symbol) or 0.0
 
+        if decision.action.value == "CLOSE_PCT" and not config.exit_policy.allow_partial_exits:
+            result = {
+                "filled": False,
+                "blocked": True,
+                "reason": "partial_exit_blocked",
+                "requested_pct": float(decision.pct or 0.0),
+            }
+            self.audit(decision, result, config)
+            return result
+
         if decision.action.value == "CLOSE_ALL":
             result = self.futures_client.close_short(symbol, qty=position.quantity, reason=decision.reason)
             return {"filled": result is not None, "price": price, "raw": result}

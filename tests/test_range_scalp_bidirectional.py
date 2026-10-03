@@ -1,7 +1,7 @@
 """Tests for RANGE_SCALP bidirectional re-classification."""
 import copy
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from config import Settings
@@ -18,11 +18,28 @@ def test_range_scalp_bidirectional_flags_exist():
     assert hasattr(s, "range_scalp_short_usdt_per_trade")
 
 
-def test_range_scalp_relaxed_direction_config():
+def test_staging_canonical_entry_and_lifecycle_modes_are_active():
+    settings = Settings()
+
+    assert settings.range_scalp_quality_model_mode == "shadow"
+    assert settings.range_reversion_predictor_mode == "enforced"
+    assert settings.directional_policy_mode == "active"
+    assert settings.direction_volume_gate_rollout == "respect_regime_config"
+    assert settings.realtime_open_rerank_mode == "active"
+    assert settings.anti_monopoly_decay_mode == "active"
+    assert settings.opportunity_shadow_mode == "active"
+    assert settings.ug_loss_policy_mode == "active"
+    assert settings.sr_pool_enabled is True
+    assert settings.sr_pool_trade_enabled is False
+    assert settings.sr_pool_intra_cycle_enabled is True
+    assert settings.sr_invalidation_shadow_mode is False
+
+
+def test_range_scalp_uses_immediate_entry_without_temporal_confirmation():
     s = Settings()
     cfg = get_staged_entry_regime_config(s, "RANGE_SCALP")
-    assert cfg["direction_required_confirmations"] == 1
-    assert cfg["direction_min_progress_bps"] == 1.0
+    assert cfg["direction_confirmation_mode"] == "disabled"
+    assert cfg["direction_required_confirmations"] == 0
     assert cfg["required_positive_checks"] == 1
     # s105: max_cycles decoupled from a short cycle-count ceiling; max_age_min
     # (8h) is now the single source of truth for how long a breakout candidate
@@ -31,10 +48,60 @@ def test_range_scalp_relaxed_direction_config():
     assert cfg["max_age_min"] == 480
 
 
-def test_non_range_scalp_keeps_two_confirmations():
+def test_non_range_scalp_also_removes_temporal_confirmations():
     s = Settings()
     cfg = get_staged_entry_regime_config(s, "SPOT_BULL")
-    assert cfg["direction_required_confirmations"] == 2
+    assert cfg["direction_confirmation_mode"] == "disabled"
+    assert cfg["direction_required_confirmations"] == 0
+
+
+@pytest.mark.parametrize(
+    ("dry_run", "binance_use_testnet"),
+    [(True, False), (False, True)],
+)
+def test_legacy_override_cannot_reenable_temporal_confirmation(dry_run, binance_use_testnet):
+    settings = Settings(
+        dry_run=dry_run,
+        binance_use_testnet=binance_use_testnet,
+        staged_entry_regime_config={
+            "FUTURES_SHORT": {
+                "enabled": True,
+                "direction_confirmation_mode": "enforced",
+            },
+        },
+    )
+
+    cfg = get_staged_entry_regime_config(settings, "FUTURES_SHORT")
+
+    assert cfg["direction_confirmation_mode"] == "disabled"
+    assert cfg["direction_required_confirmations"] == 0
+
+
+def test_circuit_breaker_clears_orphaned_failure_count_without_active_pause(monkeypatch):
+    settings = Settings(circuit_breaker_enabled=True)
+    monkeypatch.setattr(run_trades, "_db_client_ref", None)
+    monkeypatch.setattr(run_trades, "_consecutive_failures", 611)
+    monkeypatch.setattr(run_trades, "_circuit_breaker_until", None)
+
+    assert run_trades._circuit_breaker_check(settings) is False
+    assert run_trades._consecutive_failures == 0
+
+
+def test_circuit_breaker_clears_count_when_pause_expires(monkeypatch):
+    settings = Settings(circuit_breaker_enabled=True)
+    monkeypatch.setattr(run_trades, "_db_client_ref", None)
+    monkeypatch.setattr(run_trades, "_consecutive_failures", 7)
+    monkeypatch.setattr(run_trades, "_circuit_breaker_until", datetime.now(timezone.utc) - timedelta(seconds=1))
+
+    assert run_trades._circuit_breaker_check(settings) is False
+    assert run_trades._consecutive_failures == 0
+    assert run_trades._circuit_breaker_until is None
+
+
+def test_only_technical_order_errors_increment_circuit_breaker():
+    assert run_trades._is_technical_order_failure(TimeoutError("exchange timeout")) is True
+    assert run_trades._is_technical_order_failure(RuntimeError("MAX_SHORTS reached (4/4)")) is False
+    assert run_trades._is_technical_order_failure(RuntimeError("Account has insufficient balance")) is False
 
 
 def test_maybe_open_range_scalp_shorts_function_exists():
@@ -113,6 +180,7 @@ class FakeFuturesClient:
 
 def _make_settings(**overrides):
     s = Settings()
+    s.directional_policy_mode = overrides.get("directional_policy_mode", "disabled")
     for k, v in overrides.items():
         setattr(s, k, v)
     # Ensure defaults used by the opener are present.
@@ -242,6 +310,19 @@ def test_sr_pool_short_skips_symbol_with_spot_position():
         OccupiedPositionManager(),
     )
     assert orders == []
+
+
+def test_sr_pool_shadow_accepts_missing_score(capsys):
+    settings = _make_settings(sr_pool_trade_enabled=False)
+
+    orders = run_trades._maybe_open_sr_pool_shorts(
+        settings,
+        None,
+        [{"symbol": "BTCUSDT", "sr_pool_profile": "B", "sr_pool_score": None}],
+    )
+
+    assert orders == []
+    assert "score=0.0000" in capsys.readouterr().out
 
 
 def test_selection_candidate_assigns_side_aware_decision_id(monkeypatch):

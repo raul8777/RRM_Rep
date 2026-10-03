@@ -82,11 +82,12 @@ class TestExitEngine:
 
     def test_partial_take(self):
         engine = ExitEngine(price_resolver=lambda s: 103.0, atr_resolver=lambda s: 2.0)
-        # pnl = 3%, atr distance for tp1 = 1.5*2/100 = 3% => fires.
+        # pnl = 3%, atr distance for tp1 = 1.5*2/100 = 3%, but the default
+        # lifecycle policy preserves the entire thesis rather than scaling out.
         pos = _pos("SOLUSDT", Side.LONG, 100.0)
         decisions = engine.evaluate([pos], _ctx(), _policy(), now=3600)
-        assert decisions[0].action.value == "CLOSE_PCT"
-        assert decisions[0].pct == 0.25
+        assert decisions[0].action.value == "HOLD"
+        assert decisions[0].reason == "partial_exit_blocked"
 
     def test_momentum_exit_overbought(self):
         engine = ExitEngine(price_resolver=lambda s: 102.0, atr_resolver=lambda s: 2.0, rsi_resolver=lambda s: 75.0)

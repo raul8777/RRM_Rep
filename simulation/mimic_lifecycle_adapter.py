@@ -7,6 +7,7 @@ orders against SimulationBinanceClient / SimulationFuturesClient.
 
 from __future__ import annotations
 
+import bisect
 import json
 import time
 from collections import defaultdict
@@ -261,10 +262,81 @@ def _predicted_pnl_pct(bars: List[Dict[str, Any]], atr: float, horizon: int = 4)
     return expected_move * 100 - 0.4
 
 
+def _signal_thresholds(
+    params: Optional[Dict[str, Any]],
+    regime: str,
+) -> Dict[str, float]:
+    """Return configurable signal-generation thresholds with regime-aware defaults."""
+    defaults = {
+        "SPOT_BULL": {
+            "long_range_pos_threshold": 0.20,
+            "long_rsi_threshold": 35.0,
+            "short_range_pos_threshold": 0.55,
+            "short_rsi_threshold": 50.0,
+        },
+        "RANGE_SCALP": {
+            "long_range_pos_threshold": 0.15,
+            "long_rsi_threshold": 25.0,
+            "short_range_pos_threshold": 0.55,
+            "short_rsi_threshold": 50.0,
+        },
+    }
+    d = dict(defaults.get(regime, defaults["SPOT_BULL"]))
+    if params:
+        for k in d:
+            d[k] = float(params.get(k, d[k]))
+    return d
+
+
+def _slice_feed_to_time(feed: Dict[str, List[Dict[str, Any]]], current_ts: float) -> Dict[str, List[Dict[str, Any]]]:
+    """Slice feed to only include bars with open_time <= current_ts.
+
+    Uses bisect for O(log n) per symbol. Returns a view (list slices) without copying bar dicts.
+    """
+    sliced = {}
+    for symbol, bars in feed.items():
+        if not bars:
+            sliced[symbol] = []
+            continue
+        # bars are sorted by open_time; find insertion point for current_ts
+        # We want all bars where open_time <= current_ts
+        idx = bisect.bisect_right(bars, current_ts, key=lambda b: b["open_time"])
+        sliced[symbol] = bars[:idx]
+    return sliced
+
+
+def _detect_regime(feed: Dict[str, List[Dict[str, Any]]]) -> str:
+    """Detect regime from BTC price action (7-day % change).
+
+    Returns:
+      - "PRESERVATION" if BTC 7d% < -5%
+      - "RANGE_SCALP" if BTC 7d% between -5% and -2%
+      - "SPOT_BULL" otherwise
+    """
+    btc_bars = None
+    for key in ("BTCUSDT", "BTC"):
+        if key in feed and len(feed[key]) >= 168:
+            btc_bars = feed[key]
+            break
+    if btc_bars is None:
+        return "SPOT_BULL"  # default if no BTC data
+    current = float(btc_bars[-1].get("close", 0))
+    past_7d = float(btc_bars[-168].get("close", 0)) if len(btc_bars) >= 168 else current
+    if past_7d <= 0 or current <= 0:
+        return "SPOT_BULL"
+    pct_7d = (current - past_7d) / past_7d * 100.0
+    if pct_7d < -5.0:
+        return "PRESERVATION"
+    elif pct_7d < -2.0:
+        return "RANGE_SCALP"
+    return "SPOT_BULL"
+
+
 def _build_analyses(
     symbols: List[str],
     feed: Dict[str, List[Dict[str, Any]]],
     regime: str = "SPOT_BULL",
+    params: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Generate analyses for the lifecycle kernel using price-action indicators.
 
@@ -272,6 +344,8 @@ def _build_analyses(
       - SPOT_BULL: buy pullbacks to support (20-40% range) with volume + RSI 35-55.
       - RANGE_SCALP: buy near range support / oversold bounce with mean-reversion.
     """
+    _params = params or {}
+    thresholds = _signal_thresholds(params, regime)
     analyses = []
     for symbol in symbols:
         bars = feed.get(symbol, [])
@@ -291,15 +365,22 @@ def _build_analyses(
         success_probability = 0.0
 
         if regime == "RANGE_SCALP":
-            # Mean-reversion / range-support score
+            lrt = thresholds["long_range_pos_threshold"]
+            lrsi = thresholds["long_rsi_threshold"]
+            srt = thresholds["short_range_pos_threshold"]
+            srsi = thresholds["short_rsi_threshold"]
+
+            # Mean-reversion / range-support score (BUY side)
             range_score = 0.0
             if range_pos is not None:
-                if 0.15 <= range_pos <= 0.35:
-                    range_score = 1.0 - abs(range_pos - 0.25) / 0.10
-                elif 0.35 < range_pos <= 0.50:
+                if range_pos <= lrt:
+                    range_score = 0.80  # deep oversold zone
+                elif lrt < range_pos <= lrt + 0.20:
+                    range_score = 1.0 - abs(range_pos - (lrt + 0.10)) / 0.10
+                elif lrt + 0.20 < range_pos <= lrt + 0.35:
                     range_score = 0.35
-                elif range_pos >= 0.75:
-                    range_score = -1.0
+                elif range_pos >= lrt + 0.55:
+                    range_score = -1.0  # top of range, avoid buy
 
             vol_score = 0.0
             if vol_spike is not None:
@@ -312,12 +393,14 @@ def _build_analyses(
 
             rsi_score = 0.0
             if rsi is not None:
-                if 30.0 <= rsi <= 50.0:
-                    rsi_score = 1.0 - abs(rsi - 40.0) / 10.0
-                elif 50.0 < rsi <= 60.0:
-                    rsi_score = 0.35
-                elif rsi > 70.0 or rsi < 25.0:
-                    rsi_score = -1.0
+                if rsi < lrsi:
+                    rsi_score = 0.80  # deeply oversold = bullish for mean-reversion
+                elif lrsi <= rsi <= lrsi + 25.0:
+                    rsi_score = 1.0 - abs(rsi - (lrsi + 12.0)) / 12.0
+                elif lrsi + 25.0 < rsi <= lrsi + 35.0:
+                    rsi_score = 0.20
+                elif rsi > lrsi + 40.0:
+                    rsi_score = -1.0  # overbought, avoid buy
 
             # Mean reversion is favourable when recent momentum is negative.
             pnl_score = 0.0
@@ -335,13 +418,56 @@ def _build_analyses(
                 normalized = min(confluence / 3.5, 1.0)
                 strength = 0.50 + normalized * 0.40
                 success_probability = 0.50 + normalized * 0.25
+            else:
+                # SHORT side: mean-reversion from range resistance / overbought
+                short_range_score = 0.0
+                if range_pos is not None:
+                    if range_pos >= srt + 0.30:
+                        short_range_score = 1.0  # deep overbought zone
+                    elif range_pos >= srt + 0.20:
+                        short_range_score = 0.75
+                    elif range_pos >= srt + 0.10:
+                        short_range_score = 0.50
+                    elif range_pos >= srt:
+                        short_range_score = 0.25
+                short_rsi_score = 0.0
+                if rsi is not None:
+                    if rsi >= srsi + 30.0:
+                        short_rsi_score = 1.0  # strongly overbought
+                    elif rsi >= srsi + 20.0:
+                        short_rsi_score = 0.75
+                    elif rsi >= srsi + 10.0:
+                        short_rsi_score = 0.50
+                    elif rsi >= srsi:
+                        short_rsi_score = 0.25
+                    elif rsi < srsi - 15.0:
+                        short_rsi_score = -1.0  # oversold, don't short
+                short_pnl_score = 0.0
+                if predicted_pnl < -0.3:
+                    short_pnl_score = 1.0
+                elif predicted_pnl < 0.5:
+                    short_pnl_score = 0.35
+                short_confluence = short_range_score + vol_score + short_rsi_score + short_pnl_score
+                avoid_short = short_range_score <= 0 or short_rsi_score < 0
+                if not avoid_short and short_confluence >= 1.0:
+                    side = "SELL"
+                    range_score = short_range_score
+                    rsi_score = short_rsi_score
+                    pnl_score = short_pnl_score
+                    confluence = short_confluence
+                    normalized = min(short_confluence / 3.5, 1.0)
+                    strength = 0.50 + normalized * 0.40
+                    success_probability = 0.50 + normalized * 0.25
         else:
             # SPOT_BULL default
+            lrt = thresholds["long_range_pos_threshold"]
+            lrsi = thresholds["long_rsi_threshold"]
+
             range_score = 0.0
             if range_pos is not None:
-                if 0.20 <= range_pos <= 0.40:
-                    range_score = 1.0 - abs(range_pos - 0.30) / 0.10
-                elif 0.15 <= range_pos < 0.20:
+                if lrt <= range_pos <= lrt + 0.20:
+                    range_score = 1.0 - abs(range_pos - (lrt + 0.10)) / 0.10
+                elif lrt - 0.05 <= range_pos < lrt:
                     range_score = 0.25
                 elif range_pos >= 0.75:
                     range_score = -1.0
@@ -357,11 +483,11 @@ def _build_analyses(
 
             rsi_score = 0.0
             if rsi is not None:
-                if 35.0 <= rsi <= 55.0:
-                    rsi_score = 1.0 - abs(rsi - 45.0) / 10.0
-                elif 30.0 <= rsi < 35.0 or 55.0 < rsi <= 60.0:
+                if lrsi <= rsi <= lrsi + 20.0:
+                    rsi_score = 1.0 - abs(rsi - (lrsi + 10.0)) / 10.0
+                elif lrsi - 5.0 <= rsi < lrsi or lrsi + 20.0 < rsi <= lrsi + 25.0:
                     rsi_score = 0.35
-                elif rsi > 65.0:
+                elif rsi > lrsi + 30.0:
                     rsi_score = -1.0
 
             pnl_score = 0.0
@@ -377,12 +503,57 @@ def _build_analyses(
                 normalized = confluence / 4.0
                 strength = 0.50 + min(normalized * 0.45, 0.45)
                 success_probability = 0.50 + min(normalized * 0.30, 0.30)
+            elif _params.get("shorts_enabled", True):
+                # SHORT side in SPOT_BULL: defensive shorts when overbought / top of range
+                srt = thresholds["short_range_pos_threshold"]
+                srsi = thresholds["short_rsi_threshold"]
+                short_range_score = 0.0
+                if range_pos is not None:
+                    if range_pos >= srt + 0.30:
+                        short_range_score = 1.0
+                    elif range_pos >= srt + 0.20:
+                        short_range_score = 0.75
+                    elif range_pos >= srt + 0.10:
+                        short_range_score = 0.50
+                    elif range_pos >= srt:
+                        short_range_score = 0.25
+                short_rsi_score = 0.0
+                if rsi is not None:
+                    if rsi >= srsi + 30.0:
+                        short_rsi_score = 1.0
+                    elif rsi >= srsi + 20.0:
+                        short_rsi_score = 0.75
+                    elif rsi >= srsi + 10.0:
+                        short_rsi_score = 0.50
+                    elif rsi >= srsi:
+                        short_rsi_score = 0.25
+                    elif rsi < srsi - 15.0:
+                        short_rsi_score = -1.0
+                short_pnl_score = 0.0
+                if predicted_pnl < -0.3:
+                    short_pnl_score = 1.0
+                elif predicted_pnl < 0.5:
+                    short_pnl_score = 0.35
+                short_confluence = short_range_score + vol_score + short_rsi_score + short_pnl_score
+                avoid_short = short_range_score <= 0 or short_rsi_score < 0
+                if not avoid_short and short_confluence >= 1.5:
+                    side = "SELL"
+                    range_score = short_range_score
+                    rsi_score = short_rsi_score
+                    pnl_score = short_pnl_score
+                    confluence = short_confluence
+                    normalized = min(short_confluence / 3.5, 1.0)
+                    strength = 0.50 + normalized * 0.40
+                    success_probability = 0.50 + normalized * 0.25
 
-        short_term_score = (
-            confluence
-            * max(0.0, predicted_pnl)
-            * (success_probability if side == "BUY" else 0.5)
-        )
+        if side == "SELL":
+            short_term_score = confluence * max(0.0, -predicted_pnl) * success_probability
+        else:
+            short_term_score = (
+                confluence
+                * max(0.0, predicted_pnl)
+                * (success_probability if side == "BUY" else 0.5)
+            )
         current_price = float(bars[-1].get("close", 0)) if bars else 0.0
         atr_pct = atr / current_price if current_price > 0 else 0.0
         peak_quality_features = {
@@ -404,7 +575,7 @@ def _build_analyses(
             "symbol": symbol,
             "signal": side,
             "strength": min(strength, 0.95),
-            "expected_pnl": predicted_pnl,
+            "expected_pnl": -predicted_pnl if side == "SELL" else predicted_pnl,
             "success_probability": min(success_probability, 0.80),
             "liquidity_usdt_24h": max(quote_volume, 1_000_000.0),
             "vol_spike": vol_spike or 1.0,
@@ -421,6 +592,66 @@ def _build_analyses(
             "peak_quality": peak_quality,
             "regime": regime,
         })
+    # Apply entry quality gate — default vol threshold 0.70 for SPOT_BULL.
+    if regime == "SPOT_BULL":
+        _params = params or {}
+        _min_vol_base = float(_params.get("entry_quality_vol_spike_min_spot_bull", 0.70))
+        _vol_floor = float(_params.get("entry_quality_vol_spike_floor_spot_bull", 0.70))
+        _breakout_min_vol = float(_params.get("entry_quality_breakout_min_vol_spot_bull", 999.0))
+        _breakout_rsi_max = float(_params.get("entry_quality_breakout_rsi_max_spot_bull", 78.0))
+        _breakout_min_strength = float(_params.get("entry_quality_breakout_min_strength_spot_bull", 0.58))
+        if _min_vol_base > 0 or _vol_floor > 0:
+            _min_vol = max(_vol_floor, _min_vol_base)
+            filtered = []
+            for a in analyses:
+                if a["signal"] != "BUY":
+                    filtered.append(a)
+                    continue
+                _vs = a.get("vol_spike", 1.0)
+                _rsi = a.get("rsi_4h", 50.0)
+                _str = a.get("strength", 0.0)
+                _breakout_ok = (
+                    _rsi > 68.0
+                    and _rsi <= _breakout_rsi_max
+                    and _vs >= _breakout_min_vol
+                    and _str >= _breakout_min_strength
+                )
+                if _vs < _min_vol and not _breakout_ok:
+                    continue  # rejected by quality gate
+                filtered.append(a)
+            analyses = filtered
+
+    # Paso 4: RSI gate — reject BUY if RSI > 68 (without breakout bypass)
+    if regime == "SPOT_BULL" and _params.get("gates_enhanced", True):
+        gate_filtered = []
+        for a in analyses:
+            if a["signal"] == "BUY":
+                _rsi = a.get("rsi_4h", 50.0)
+                _str = a.get("strength", 0.0)
+                if _rsi > 68.0 and _str < 0.75:
+                    continue  # RSI overbought gate — only strong breakouts pass
+            gate_filtered.append(a)
+        analyses = gate_filtered
+
+    # Paso 4: BTC trend gate — reduce BUY strength if BTC momentum is negative
+    btc_bars = feed.get("BTCUSDT") or feed.get("BTC")
+    if _params.get("gates_enhanced", True) and btc_bars and len(btc_bars) >= 5:
+        btc_current = float(btc_bars[-1].get("close", 0))
+        btc_4h_ago = float(btc_bars[-4].get("close", 0)) if len(btc_bars) >= 4 else btc_current
+        btc_momentum_pct = ((btc_current - btc_4h_ago) / btc_4h_ago * 100) if btc_4h_ago > 0 else 0.0
+        if btc_momentum_pct < -2.0:
+            for a in analyses:
+                if a["signal"] == "BUY":
+                    a["strength"] = max(0.0, a["strength"] - 0.15)
+
+    # Paso 4: Quality proxy — heuristic score for entry quality discrimination
+    for a in analyses:
+        _conf = a.get("confluence", 0.0)
+        _vs = a.get("vol_score", 0.0)
+        _rsi_val = a.get("rsi_4h", 50.0)
+        _rsi_factor = max(0.0, 1.0 - abs(_rsi_val - 45.0) / 45.0)
+        a["quality_proxy"] = _conf * _vs * _rsi_factor
+
     return analyses
 
 
@@ -445,6 +676,42 @@ class SimulationLifecycleAdapter:
         self.db_client = db_client
         self.category_resolver = category_resolver or (lambda s: _DEFAULT_CATEGORIES.get(s, "MIDCAP_ALT"))
         self.entry_metadata: Dict[str, Dict[str, Any]] = {}
+        # Synthetic short positions: {symbol: {qty, entry_price, entry_time, ...}}
+        self._short_positions: Dict[str, Dict[str, Any]] = {}
+
+    def _bar_timestamp(self, bar: Dict[str, Any]) -> float:
+        ts = bar.get("timestamp") or bar.get("open_time") or bar.get("close_time") or 0
+        if isinstance(ts, (int, float)):
+            return float(ts)
+        if isinstance(ts, str):
+            try:
+                return float(ts)
+            except Exception:
+                return 0.0
+        return 0.0
+
+    def _peak_since_entry(
+        self, symbol: str, entry_price: float, entry_ts: float
+    ) -> float:
+        """Return the highest unrealized PnL % for a long position since entry."""
+        if entry_price <= 0:
+            return 0.0
+        now_ts = self.clock.now().timestamp()
+        bars = self.feed.get(symbol, [])
+        max_price = entry_price
+        for bar in bars:
+            ts = self._bar_timestamp(bar)
+            if ts < entry_ts or ts > now_ts:
+                continue
+            # Use high for long peak PnL; close as fallback.
+            high = float(bar.get("high", bar.get("close", 0)) or 0)
+            if high > max_price:
+                max_price = high
+        if max_price <= entry_price:
+            # No new highs observed; current price may still be above entry.
+            current = self._current_price(symbol) or entry_price
+            max_price = max(entry_price, current)
+        return (max_price - entry_price) / entry_price
 
     def _current_price(self, symbol: str) -> Optional[float]:
         try:
@@ -501,11 +768,11 @@ class SimulationLifecycleAdapter:
         )
 
     def get_positions(self, config: LifecycleConfig) -> List[Position]:
-        """Return open SPOT positions as lifecycle Positions."""
+        """Return open SPOT + synthetic SHORT positions as lifecycle Positions."""
         try:
             balances = self.spot_client.get_account_balance()
         except Exception:
-            return []
+            balances = {}
         positions: List[Position] = []
         for asset, qty in balances.items():
             if asset == "USDT" or float(qty) <= 0:
@@ -513,17 +780,46 @@ class SimulationLifecycleAdapter:
             symbol = f"{asset}USDT"
             price = self._current_price(symbol) or 0.0
             entry_price = self._avg_entry_price(symbol) or price
+            meta = self.entry_metadata.get(symbol, {})
+            entry_ts = meta.get("entry_time") or self.clock.now().timestamp()
+            peak_pnl_pct = self._peak_since_entry(symbol, entry_price, entry_ts)
             positions.append(Position(
                 symbol=symbol,
                 side=Side.LONG,
                 quantity=float(qty),
                 entry_price=entry_price,
-                entry_time=self.clock.now().timestamp(),
+                entry_time=entry_ts,
+                peak_pnl_pct=peak_pnl_pct,
                 position_usdt=float(qty) * price,
                 category=self.category_resolver(symbol),
                 regime_at_entry=config.regime,
                 profile_at_entry=config.profile,
-                metadata={"trade_type": "spot", **self.entry_metadata.get(symbol, {})},
+                metadata={"trade_type": "spot", **meta},
+            ))
+        # Synthetic short positions
+        for symbol, sp in list(self._short_positions.items()):
+            price = self._current_price(symbol) or 0.0
+            entry_price = sp["entry_price"]
+            entry_ts = sp["entry_time"]
+            # For shorts: peak PnL is when price dropped the most from entry
+            peak_pnl_pct = sp.get("peak_pnl_pct", 0.0)
+            if price > 0 and entry_price > 0:
+                current_pnl_pct = (entry_price - price) / entry_price
+                if current_pnl_pct > peak_pnl_pct:
+                    sp["peak_pnl_pct"] = current_pnl_pct
+                    peak_pnl_pct = current_pnl_pct
+            positions.append(Position(
+                symbol=symbol,
+                side=Side.SHORT,
+                quantity=sp["qty"],
+                entry_price=entry_price,
+                entry_time=entry_ts,
+                peak_pnl_pct=peak_pnl_pct,
+                position_usdt=sp["qty"] * price,
+                category=self.category_resolver(symbol),
+                regime_at_entry=config.regime,
+                profile_at_entry=config.profile,
+                metadata={"trade_type": "futures_short", **sp.get("meta", {})},
             ))
         return positions
 
@@ -531,23 +827,83 @@ class SimulationLifecycleAdapter:
         entry = trade.entry_decision
         symbol = entry.signal.symbol
         price = self._current_price(symbol) or entry.entry_price or 0.0
-        side = "BUY" if entry.signal.side == Side.LONG else "SELL"
         qty = trade.quantity
-        result = self.spot_client.create_market_order(symbol=symbol, side=side, quantity=qty)
         expected_peak_return = entry.signal.features.get("peak_quality", entry.signal.expected_pnl / 100.0 if entry.signal.expected_pnl else 0.0)
-        self.entry_metadata[symbol] = {
-            "expected_peak_return": float(expected_peak_return) if expected_peak_return is not None else 0.0,
-        }
-        return {"filled": True, "price": price, "raw": result}
+        if entry.signal.side == Side.SHORT:
+            # Synthetic short: track internally, deduct margin from USDT
+            margin_usdt = qty * price
+            balances = self.spot_client.get_account_balance()
+            usdt_avail = float(balances.get("USDT", 0.0))
+            if margin_usdt > usdt_avail:
+                return {"filled": False, "price": price, "raw": {"error": "insufficient margin"}}
+            self.spot_client.balances["USDT"] = usdt_avail - margin_usdt
+            self._short_positions[symbol] = {
+                "qty": qty,
+                "entry_price": price,
+                "entry_time": self.clock.now().timestamp(),
+                "margin_usdt": margin_usdt,
+                "peak_pnl_pct": 0.0,
+                "meta": {"expected_peak_return": float(expected_peak_return) if expected_peak_return else 0.0},
+            }
+            self.entry_metadata[symbol] = {
+                "expected_peak_return": float(expected_peak_return) if expected_peak_return is not None else 0.0,
+                "entry_time": self.clock.now().timestamp(),
+                "side": "SHORT",
+            }
+            result = {"fills": [{"qty": qty, "price": price, "commission": margin_usdt * 0.0004, "commissionAsset": "USDT"}]}
+            return {"filled": True, "price": price, "raw": result}
+        else:
+            # LONG: use spot client as before
+            result = self.spot_client.create_market_order(symbol=symbol, side="BUY", quantity=qty)
+            self.entry_metadata[symbol] = {
+                "expected_peak_return": float(expected_peak_return) if expected_peak_return is not None else 0.0,
+                "entry_time": self.clock.now().timestamp(),
+                "side": "LONG",
+            }
+            return {"filled": True, "price": price, "raw": result}
 
     def execute_exit(self, decision: ExitDecision, position: Position, config: LifecycleConfig) -> Dict:
         symbol = decision.symbol
         price = self._current_price(symbol) or 0.0
-        side = "SELL" if position.side == Side.LONG else "BUY"
         qty = position.quantity * decision.pct
         if decision.action.value == "CLOSE_ALL":
             qty = position.quantity
-        result = self.spot_client.create_market_order(symbol=symbol, side=side, quantity=qty)
+
+        if position.side == Side.SHORT:
+            # Close synthetic short: return margin + PnL to USDT
+            sp = self._short_positions.get(symbol)
+            if sp is None:
+                return {"filled": False, "price": price, "raw": {}}
+            entry_price = sp["entry_price"]
+            pnl_per_unit = entry_price - price  # short profit = entry - exit
+            realized_pnl = pnl_per_unit * qty
+            commission = qty * price * 0.0004
+            realized_pnl -= commission
+            # Return margin proportional to closed qty
+            margin_return = (qty / sp["qty"]) * sp["margin_usdt"]
+            balances = self.spot_client.get_account_balance()
+            self.spot_client.balances["USDT"] = float(balances.get("USDT", 0.0)) + margin_return + realized_pnl
+            # Update or remove short position
+            remaining = sp["qty"] - qty
+            if remaining <= 1e-10:
+                del self._short_positions[symbol]
+                self.entry_metadata.pop(symbol, None)
+            else:
+                sp["qty"] = remaining
+                sp["margin_usdt"] = sp["margin_usdt"] * (remaining / (remaining + qty))
+            result = {"fills": [{"qty": qty, "price": price, "commission": commission, "commissionAsset": "USDT"}]}
+            return {
+                "filled": True,
+                "price": price,
+                "avg_exit_price": price,
+                "quantity": qty,
+                "realized_pnl_usdt": realized_pnl,
+                "commission_usdt": commission,
+                "raw": result,
+            }
+
+        # LONG exit via spot client
+        result = self.spot_client.create_market_order(symbol=symbol, side="SELL", quantity=qty)
 
         # Compute realized PnL from simulated fills.
         realized_pnl_usdt = 0.0
@@ -630,6 +986,8 @@ def run_lifecycle_simulation(
     max_cycles: Optional[int] = None,
     lifecycle_config: Optional[LifecycleConfig] = None,
     peak_entry_schedule: Optional[List[Dict[str, Any]]] = None,
+    params: Optional[Dict[str, Any]] = None,
+    dynamic_regime: bool = False,
 ) -> Dict[str, Any]:
     """Run a single MIMIC simulation using the lifecycle kernel."""
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
@@ -667,9 +1025,11 @@ def run_lifecycle_simulation(
         feed=runner.price_feed,
         db_client=runner.db_client,
     )
+    # Allow short signals for RANGE_SCALP and SPOT_BULL (defensive shorts)
+    _short_eligible = set(f"{s}" for s in symbols) if config.regime in ("RANGE_SCALP", "SPOT_BULL") else set()
     lifecycle_runner = LifecycleRunner(
         adapter=adapter,
-        signal_pipeline=SignalPipeline(),
+        signal_pipeline=SignalPipeline(short_eligible=_short_eligible),
         entry_gate=EntryGate(
             price_resolver=adapter.price_resolver,
             atr_resolver=adapter.atr_resolver,
@@ -694,7 +1054,18 @@ def run_lifecycle_simulation(
         runner._invalidate_caches()
         runner.news_client.update_for_date(current)
         try:
-            analyses = _build_analyses(runner.symbols, runner.price_feed, regime=config.regime)
+            # Slice feed to current simulation time so indicators use correct data
+            current_ts = current.timestamp()
+            sliced_feed = _slice_feed_to_time(runner.price_feed, current_ts)
+            # Dynamic regime detection: re-evaluate regime each cycle based on BTC
+            if dynamic_regime and lifecycle_config is None:
+                detected = _detect_regime(sliced_feed)
+                if detected != config.regime:
+                    config = _config_for_regime(detected)
+                    # Update short eligibility for new regime
+                    _short_eligible = set(f"{s}" for s in symbols) if config.regime in ("RANGE_SCALP", "SPOT_BULL") else set()
+                    lifecycle_runner.signal_pipeline = SignalPipeline(short_eligible=_short_eligible)
+            analyses = _build_analyses(runner.symbols, sliced_feed, regime=config.regime, params=params)
             # Inyectar señales peak cuyo peak_start_ts cae en este ciclo o antes
             while (
                 peak_schedule_idx < len(peak_entry_schedule)
@@ -788,7 +1159,7 @@ def _spot_bull_config_a() -> LifecycleConfig:
         exit_policy=ExitPolicy(
             regime="SPOT_BULL",
             profile="A",
-            hard_sl_atr_mult=4.5,
+            hard_sl_atr_mult=5.5,
             hard_tp_atr_mult=3.5,
             trailing_activation_pct=0.02,
             trailing_atr_mult=1.5,
@@ -834,7 +1205,7 @@ def _spot_bull_config_b() -> LifecycleConfig:
         exit_policy=ExitPolicy(
             regime="SPOT_BULL",
             profile="B",
-            hard_sl_atr_mult=4.5,
+            hard_sl_atr_mult=5.5,
             hard_tp_atr_mult=3.5,
             trailing_activation_pct=0.02,
             trailing_atr_mult=1.5,
@@ -880,7 +1251,7 @@ def _spot_bull_config_c() -> LifecycleConfig:
         exit_policy=ExitPolicy(
             regime="SPOT_BULL",
             profile="C",
-            hard_sl_atr_mult=4.5,
+            hard_sl_atr_mult=5.5,
             hard_tp_atr_mult=3.5,
             trailing_activation_pct=0.02,
             trailing_atr_mult=1.5,
@@ -892,6 +1263,107 @@ def _spot_bull_config_c() -> LifecycleConfig:
     )
 
 
+def _preservation_config() -> LifecycleConfig:
+    """PRESERVATION: no new entries, manage existing positions with wide SL."""
+    from lifecycle import LifecycleConfig, SignalPolicy, EntryPolicy, SizingPolicy, ExitPolicy, PartialTake, MomentumExitRule, StagnationRule
+    return LifecycleConfig(
+        regime="PRESERVATION",
+        profile="A",
+        signal_policy=SignalPolicy(
+            min_signal_strength=0.99,
+            min_success_probability=0.99,
+            min_expected_pnl=99.0,
+            min_liquidity_usdt=0.0,
+            categories_enabled=("LARGE_CAP", "MIDCAP_ALT", "NARRATIVE"),
+            max_candidates=0,
+            diversification_mode="category",
+        ),
+        entry_policy=EntryPolicy(
+            min_composite_score=0.99,
+            min_expected_pnl=99.0,
+            min_success_probability=0.99,
+            min_liquidity_usdt=0.0,
+            max_total_positions=0,
+            max_category_positions={"LARGE_CAP": 0, "MIDCAP_ALT": 0, "NARRATIVE": 0},
+        ),
+        sizing_policy=SizingPolicy(
+            regime_allocation_pct=0.0,
+            max_per_trade_usdt=0.0,
+            kelly_base_pct=0.0,
+            kelly_max_pct=0.0,
+            conviction_max_pct=0.0,
+            category_caps={"LARGE_CAP": 0.0, "MIDCAP_ALT": 0.0, "NARRATIVE": 0.0},
+        ),
+        exit_policy=ExitPolicy(
+            regime="PRESERVATION",
+            profile="A",
+            hard_sl_atr_mult=8.0,
+            hard_tp_atr_mult=2.0,
+            trailing_activation_pct=0.01,
+            trailing_atr_mult=1.0,
+            breakeven_activation_pct=0.01,
+            partial_takes=(PartialTake(0.50, 1.0, "tp1"),),
+            momentum_exit=MomentumExitRule(65, 35, 75, 25),
+            stagnation_rule=StagnationRule(4, 0.03, 0.4),
+        ),
+    )
+
+
+def _range_scalp_config() -> LifecycleConfig:
+    """RANGE_SCALP: mean-reversion with both LONG and SHORT signals."""
+    from lifecycle import LifecycleConfig, SignalPolicy, EntryPolicy, SizingPolicy, ExitPolicy, PartialTake, MomentumExitRule, StagnationRule
+    return LifecycleConfig(
+        regime="RANGE_SCALP",
+        profile="A",
+        signal_policy=SignalPolicy(
+            min_signal_strength=0.50,
+            min_success_probability=0.50,
+            min_expected_pnl=0.0,
+            min_liquidity_usdt=0.0,
+            categories_enabled=("LARGE_CAP", "MIDCAP_ALT", "NARRATIVE"),
+            max_candidates=8,
+            diversification_mode="category",
+        ),
+        entry_policy=EntryPolicy(
+            min_composite_score=0.50,
+            min_expected_pnl=0.0,
+            min_success_probability=0.50,
+            min_liquidity_usdt=0.0,
+            max_total_positions=6,
+            max_category_positions={"LARGE_CAP": 2, "MIDCAP_ALT": 3, "NARRATIVE": 1},
+        ),
+        sizing_policy=SizingPolicy(
+            regime_allocation_pct=0.6,
+            max_per_trade_usdt=1200.0,
+            kelly_base_pct=0.15,
+            kelly_max_pct=0.20,
+            conviction_max_pct=0.20,
+            category_caps={"LARGE_CAP": 0.25, "MIDCAP_ALT": 0.35, "NARRATIVE": 0.15},
+        ),
+        exit_policy=ExitPolicy(
+            regime="RANGE_SCALP",
+            profile="A",
+            hard_sl_atr_mult=4.0,
+            hard_tp_atr_mult=2.5,
+            trailing_activation_pct=0.015,
+            trailing_atr_mult=1.0,
+            breakeven_activation_pct=0.01,
+            partial_takes=(PartialTake(0.30, 1.2, "tp1"),),
+            momentum_exit=MomentumExitRule(68, 32, 78, 22),
+            stagnation_rule=StagnationRule(4, 0.04, 0.5),
+        ),
+    )
+
+
+def _config_for_regime(regime: str) -> LifecycleConfig:
+    """Return the appropriate LifecycleConfig for the detected regime."""
+    if regime == "PRESERVATION":
+        return _preservation_config()
+    if regime == "RANGE_SCALP":
+        return _range_scalp_config()
+    return _spot_bull_config("A")
+
+
 def spot_bull_config_from_params(params: Dict[str, Any], profile: str = "A") -> LifecycleConfig:
     """Build a SPOT_BULL lifecycle config from a flat parameter dict for sweeping.
 
@@ -900,6 +1372,12 @@ def spot_bull_config_from_params(params: Dict[str, Any], profile: str = "A") -> 
       - min_composite_score, max_total_positions
       - max_per_trade_usdt, kelly_base_pct, kelly_max_pct, conviction_max_pct
       - hard_sl_atr_mult, hard_tp_atr_mult
+      - trailing_activation_pct, trailing_atr_mult
+      - breakeven_activation_pct
+      - partial_take_N_pct, partial_take_N_trigger_atr (N = 1, 2, ...)
+      - stagnation_min_hours, stagnation_max_drawdown_peak
+      - momentum_rsi_overbought, momentum_rsi_oversold
+      - time_stop_hours
     """
     from lifecycle import LifecycleConfig, SignalPolicy, EntryPolicy, SizingPolicy, ExitPolicy, PartialTake, MomentumExitRule, StagnationRule
     _cats = ("LARGE_CAP", "MIDCAP_ALT", "NARRATIVE")
@@ -907,6 +1385,37 @@ def spot_bull_config_from_params(params: Dict[str, Any], profile: str = "A") -> 
     _large = max(1, _max_total // 4)
     _mid = max(1, _max_total // 2)
     _narr = max(1, _max_total - _large - _mid)
+
+    # Build partial takes from flat keys if present, otherwise keep one default level.
+    partial_takes = []
+    for i in range(1, 5):
+        pct_key = f"partial_take_{i}_pct"
+        trig_key = f"partial_take_{i}_trigger_atr"
+        if pct_key in params and trig_key in params:
+            pct = float(params[pct_key])
+            if pct > 0.0:
+                partial_takes.append(PartialTake(pct, float(params[trig_key]), f"tp{i}"))
+    if not partial_takes:
+        partial_takes = [PartialTake(0.25, 1.5, "tp1")]
+    else:
+        # Trailing stop uses the highest partial trigger for its reference.
+        partial_takes.sort(key=lambda pt: pt.trigger_atr_mult)
+
+    time_stop = params.get("time_stop_hours")
+    time_stop_hours = float(time_stop) if time_stop is not None else None
+
+    momentum = MomentumExitRule(
+        rsi_overbought=float(params.get("momentum_rsi_overbought", 70)),
+        rsi_oversold=float(params.get("momentum_rsi_oversold", 30)),
+        fng_extreme_greed=float(params.get("momentum_fng_extreme_greed", 80)),
+        fng_extreme_fear=float(params.get("momentum_fng_extreme_fear", 20)),
+    )
+    stagnation = StagnationRule(
+        min_hours=float(params.get("stagnation_min_hours", 6)),
+        max_drawdown_from_peak_pct=float(params.get("stagnation_max_drawdown_peak", 0.05)),
+        decay_score_threshold=float(params.get("stagnation_decay_score_threshold", 0.5)),
+    )
+
     return LifecycleConfig(
         regime="SPOT_BULL",
         profile=profile,
@@ -938,14 +1447,15 @@ def spot_bull_config_from_params(params: Dict[str, Any], profile: str = "A") -> 
         exit_policy=ExitPolicy(
             regime="SPOT_BULL",
             profile=profile,
-            hard_sl_atr_mult=float(params.get("hard_sl_atr_mult", 4.5)),
+            hard_sl_atr_mult=float(params.get("hard_sl_atr_mult", 5.5)),
             hard_tp_atr_mult=float(params.get("hard_tp_atr_mult", 3.5)),
-            trailing_activation_pct=0.02,
-            trailing_atr_mult=1.5,
-            breakeven_activation_pct=0.015,
-            partial_takes=(PartialTake(0.25, 1.5, "tp1"),),
-            momentum_exit=MomentumExitRule(70, 30, 80, 20),
-            stagnation_rule=StagnationRule(6, 0.05, 0.5),
+            trailing_activation_pct=float(params.get("trailing_activation_pct", 0.02)),
+            trailing_atr_mult=float(params.get("trailing_atr_mult", 1.5)),
+            breakeven_activation_pct=float(params.get("breakeven_activation_pct", 0.015)),
+            partial_takes=tuple(partial_takes),
+            momentum_exit=momentum,
+            stagnation_rule=stagnation,
+            time_stop_hours=time_stop_hours,
         ),
     )
 
@@ -1035,22 +1545,15 @@ def predictive_spot_bull_config_from_params(
             max_category_positions=dict(entry.max_category_positions),
         ),
         sizing_policy=base.sizing_policy,
-        exit_policy=ExitPolicy(
-            regime="SPOT_BULL",
-            profile=profile,
-            hard_sl_atr_mult=float(params.get("hard_sl_atr_mult", exitp.hard_sl_atr_mult)),
-            hard_tp_atr_mult=float(params.get("hard_tp_atr_mult", exitp.hard_tp_atr_mult)),
-            trailing_activation_pct=exitp.trailing_activation_pct,
-            trailing_atr_mult=exitp.trailing_atr_mult,
-            breakeven_activation_pct=exitp.breakeven_activation_pct,
-            partial_takes=exitp.partial_takes,
-            momentum_exit=exitp.momentum_exit,
-            stagnation_rule=exitp.stagnation_rule,
-        ),
+        exit_policy=_build_exit_policy_from_params(params, exitp, profile),
         profile_order=("A", "B", "C"),
         profile_thresholds=thresholds,
         profile_sizing_policies=sizing,
-        profile_exit_policies=_load_best_exit_policies("SPOT_BULL", profile) or base.profile_exit_policies,
+        # Use sweep params for ALL profiles so the sweep actually tests them.
+        profile_exit_policies={
+            prof: _build_exit_policy_from_params(params, exitp, prof)
+            for prof in ("A", "B", "C")
+        },
     )
 
 
@@ -1238,6 +1741,65 @@ def predictive_spot_bull_config() -> LifecycleConfig:
     )
 
 
+def _build_exit_policy_from_params(params: Dict[str, Any], base_exit, profile: str):
+    """Build an ExitPolicy reading ALL sweep params (trailing, breakeven, partials, etc.).
+
+    Falls back to `base_exit` for any key not present in `params`.
+    """
+    from lifecycle import ExitPolicy, PartialTake, MomentumExitRule, StagnationRule
+
+    # Partial takes from flat keys (partial_take_N_pct / partial_take_N_trigger_atr)
+    partial_takes = []
+    for i in range(1, 5):
+        pct_key = f"partial_take_{i}_pct"
+        trig_key = f"partial_take_{i}_trigger_atr"
+        if pct_key in params and trig_key in params:
+            pct = float(params[pct_key])
+            if pct > 0.0:
+                partial_takes.append(PartialTake(pct, float(params[trig_key]), f"tp{i}"))
+    if not partial_takes:
+        # Check if any partial_take key was in params but all had pct=0 (intentional disable)
+        has_partial_keys = any(f"partial_take_{i}_pct" in params for i in range(1, 5))
+        if not has_partial_keys:
+            partial_takes = list(base_exit.partial_takes) if base_exit.partial_takes else []
+        # else: intentionally empty (all partials disabled)
+    else:
+        partial_takes.sort(key=lambda pt: pt.trigger_atr_mult)
+
+    # Momentum exit
+    momentum = MomentumExitRule(
+        rsi_overbought=float(params.get("momentum_rsi_overbought", base_exit.momentum_exit.rsi_overbought if base_exit.momentum_exit else 70)),
+        rsi_oversold=float(params.get("momentum_rsi_oversold", base_exit.momentum_exit.rsi_oversold if base_exit.momentum_exit else 30)),
+        fng_extreme_greed=float(params.get("momentum_fng_extreme_greed", base_exit.momentum_exit.fng_extreme_greed if base_exit.momentum_exit else 80)),
+        fng_extreme_fear=float(params.get("momentum_fng_extreme_fear", base_exit.momentum_exit.fng_extreme_fear if base_exit.momentum_exit else 20)),
+    )
+
+    # Stagnation rule
+    stagnation = StagnationRule(
+        min_hours=float(params.get("stagnation_min_hours", base_exit.stagnation_rule.min_hours if base_exit.stagnation_rule else 6)),
+        max_drawdown_from_peak_pct=float(params.get("stagnation_max_drawdown_peak", base_exit.stagnation_rule.max_drawdown_from_peak_pct if base_exit.stagnation_rule else 0.05)),
+        decay_score_threshold=float(params.get("stagnation_decay_score_threshold", base_exit.stagnation_rule.decay_score_threshold if base_exit.stagnation_rule else 0.5)),
+    )
+
+    # Time stop
+    time_stop = params.get("time_stop_hours")
+    time_stop_hours = float(time_stop) if time_stop is not None else getattr(base_exit, "time_stop_hours", None)
+
+    return ExitPolicy(
+        regime=getattr(base_exit, "regime", "RANGE_SCALP"),
+        profile=profile,
+        hard_sl_atr_mult=float(params.get("hard_sl_atr_mult", base_exit.hard_sl_atr_mult)),
+        hard_tp_atr_mult=float(params.get("hard_tp_atr_mult", base_exit.hard_tp_atr_mult)),
+        trailing_activation_pct=float(params.get("trailing_activation_pct", base_exit.trailing_activation_pct)),
+        trailing_atr_mult=float(params.get("trailing_atr_mult", base_exit.trailing_atr_mult)),
+        breakeven_activation_pct=float(params.get("breakeven_activation_pct", base_exit.breakeven_activation_pct)),
+        partial_takes=tuple(partial_takes),
+        momentum_exit=momentum,
+        stagnation_rule=stagnation,
+        time_stop_hours=time_stop_hours,
+    )
+
+
 def predictive_range_scalp_config_from_params(
     params: Dict[str, Any], profile: str = "PREDICTIVE"
 ) -> LifecycleConfig:
@@ -1326,22 +1888,16 @@ def predictive_range_scalp_config_from_params(
             category_caps={"LARGE_CAP": 0.35, "MIDCAP_ALT": 0.35, "NARRATIVE": 0.15},
             max_total_positions=8,
         ),
-        exit_policy=ExitPolicy(
-            regime="RANGE_SCALP",
-            profile=profile,
-            hard_sl_atr_mult=float(params.get("hard_sl_atr_mult", exitp.hard_sl_atr_mult)),
-            hard_tp_atr_mult=float(params.get("hard_tp_atr_mult", exitp.hard_tp_atr_mult)),
-            trailing_activation_pct=exitp.trailing_activation_pct,
-            trailing_atr_mult=exitp.trailing_atr_mult,
-            breakeven_activation_pct=exitp.breakeven_activation_pct,
-            partial_takes=exitp.partial_takes,
-            momentum_exit=exitp.momentum_exit,
-            stagnation_rule=exitp.stagnation_rule,
-        ),
+        exit_policy=_build_exit_policy_from_params(params, exitp, profile),
         profile_order=("A", "B", "C"),
         profile_thresholds=thresholds,
         profile_sizing_policies=sizing,
-        profile_exit_policies=_load_best_exit_policies("RANGE_SCALP", profile) or base.profile_exit_policies,
+        # Use sweep params for ALL profiles so the sweep actually tests them.
+        # _load_best_exit_policies returns static policies from disk — useless for sweeps.
+        profile_exit_policies={
+            prof: _build_exit_policy_from_params(params, exitp, prof)
+            for prof in ("A", "B", "C")
+        },
     )
 
 

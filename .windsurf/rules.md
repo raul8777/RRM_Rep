@@ -18,13 +18,34 @@ Son contexto arquitectónico y guía de diagnóstico, no valores hardcodeados.
 5. ¿Cómo se mide contra baseline/changepoint (3y/60000)?
 6. ¿Qué endpoint/dashboard mostrará la salud del cambio?
 
-**Estado operativo canónico (sep 12 2026, s135/s136/s138):** Staging recreado y saludable; suite `592 passed, 3 skipped, 0 failed`. Todo candidato pasa por arbitraje bilateral fresco en soporte/resistencia y el régimen no preasigna lado. La selección maximiza retorno neto esperado sobre riesgo, sin margen fijo, score probability+edge ni preferencia SHORT. La confirmación temporal está retirada (`direction_confirmation_mode=disabled`, `direction_required_confirmations=0`); fast-path y ciclo normal re-arbitran justo antes del submit. `range_scalp_quality_model_mode=shadow` mientras no exista el artefacto entrenado. `exit_fractionation_mode=disabled` bloquea cierres parciales; hard-risk y tesis estructural rota/estancada cierran 100%. Staging usa `close_execution_mode=active`: FOK full-size para cierres no urgentes con profundidad suficiente y MARKET inmediato/fallback para riesgo urgente o FOK incompleto. Cada cierre persiste evidencia expected-vs-real y el dashboard expone `close_execution_active`. Este documento y `SYSTEM_REFERENCE.md` son la fuente de verdad para Devin y cualquier agente del workspace.
+**Estado operativo canónico (28 sep 2026, s140):** la política activa compara, por candidato/símbolo, el mejor LONG y el mejor SHORT entre sus venues elegibles; `portfolio_selector` sigue siendo la capa que prioriza símbolos. En Staging se elige por `expected_net_pnl_usdt` positivo (`ev_net`), con ROR solo como desempate. No hay confirmación direccional temporal; ciclo normal y FastPath re-arbitran con datos frescos antes de ejecutar. Cada candidato `ready`/`validated` renueva precio, features y predictor; `fresh_signal_meta`/`fresh_prediction` son la autoridad de ejecución y el snapshot histórico solo sirve para linaje. El contrato seleccionado gobierna side, venue, tamaño y stop/target. CapBridge y el manager BNB son observe-only; movimiento de capital solo JIT tras aprobación, con reservas BNB protegidas y auditoría `decision_id`. Staging fue reiniciado solo en `crypto-agent-app_STG`, quedó `RUNNING_FULL` en Binance testnet y producción no se modificó. Suite focal ampliada `171 passed, 1 skipped`, Pylance sin errores. Cierres full-size y `exit_fractionation_mode=disabled` siguen sin cambios. Ver `canonical/calibracion_entradas-a20ab8-v3.md` para el contrato completo.
 
 **Precedencia:** las secciones históricas que describen `direction_confirmed`, confirmaciones por bps, `short_priority`, márgenes direccionales o quality model `enforced` se conservan solo como trazabilidad y están supersedidas por s135.
 
 **Estado s136 (sep 12 2026):** reparado circuit breaker fast-path (`611 -> 0`): solo pausa técnica activa bloquea y éxitos confirmados reinician estado. `entry_decision` valida por `thesis_type`: reversión para bounce/rejection, continuación para breakout/breakdown; `RANGE_MODEL_INVALID` no veta continuación y target/stop orientados siguen obligatorios.
 
 **Estado s137 (sep 12 2026):** arbitraje y ejecución comparten `ExecutableOpportunity`: mismo entry, target/stop, 2x, max-loss económico y costes observados. Sizing solo reduce desde `locked_position_size_usdt`; el contrato se actualiza con fill/qty reales. Rejection SHORT exige evidencia explícita y no breakout. SR Pool directo está desactivado (`sr_pool_trade_enabled=False`) para eliminar executor paralelo.
+
+## s139 — contrato de entrada y capital decisión-gated (27 sep 2026)
+
+## s140 — frescura obligatoria de candidatos reutilizados (28 sep 2026)
+
+- `ready`/`validated` identifica una oportunidad persistida, no congela la evidencia que autorizó el intento anterior.
+- Cada revalidación vuelve a analizar el símbolo y obtiene precio/predicción actuales; no puede pasar los indicadores persistidos como `precomputed_signal`.
+- `fresh_signal_meta` y `fresh_prediction` se consumen en FastPath y ciclo normal antes de arbitraje, sizing y submit.
+- Si el contrato actual no es completo o deja de ser ejecutable, se registra el bloqueo; no se usa el snapshot viejo ni se cambia silenciosamente de lado/venue.
+- Tras cualquier fix de evaluación, revisar la cola `ready`/`validated`, `last_execution_gate`, `data.direction` y los checks de ejecución, tal como exige la guía de limpieza de candidatos.
+
+- **Comparación por candidato:** no confundir la priorización de símbolos del portfolio selector con la arbitraje de dirección/venue. Para cada candidato ejecutable se obtiene el mejor contrato LONG (Spot/Futures habilitados) y el mejor SHORT (Futures y Spot Margin solo cuando Margin está habilitado); después se comparan esos finalistas. Un `routing_intent`, perfil A/B/C o régimen no puede imponer lado/venue.
+- **Tesis:** soporte: `LONG_SUPPORT_BOUNCE` vs `SHORT_SUPPORT_BREAKDOWN`; resistencia: `SHORT_RESISTANCE_REJECTION` vs `LONG_RESISTANCE_BREAKOUT`. S/R activa tesis, no autoriza dirección. Rejection no compite como válida si carece de evidencia explícita o existe breakout pressure.
+- **EV/riesgo:** cada venue debe producir contrato con precio fresco, geometría target/stop, cantidad, notional/margen/leverage, max-loss económico, fees, slippage/funding y probabilidad. Con `range_scalp_ranking_mode=ev_net`, la clave es EV neta positiva; ROR desempata. ATR ausente bloquea cuando `range_scalp_min_stop_atr_multiple > 0`. Si ningún contrato es ejecutable o su EV neta no es positiva, abstenerse.
+- **Lifecycle/preflight:** `ready`/`validated` no son confirmación direccional ni congelan el lado. El ciclo normal y FastPath re-arbitran justo antes de submit. Si falla el ganador, no se cambia silenciosamente a otro venue; se requiere decisión fresca. `direction_confirmation_mode=disabled` retira espera temporal, no los gates de entry policy, precio fresco, geometría, riesgo, slots, capital ni fill.
+- **Rutas paralelas:** con `directional_policy_mode=active`, los helpers legacy de apertura SHORT y las aperturas Futures LONG heurísticas están bloqueados; SR Pool descubre candidatos para el flujo común. `directional_policy_mode=disabled` es rollback explícito. CapBridge no transfiere nunca, incluso si se solicita `execute_transfers=True`.
+- **Capital/BNB:** balance/planes pueden observarse en cualquier momento; Spot↔Futures transfer y compra/top-up de BNB antes de candidato aceptado están prohibidos. Tras contrato seleccionado y gates no-capitales aprobados, JIT mueve solo el shortfall, descuenta reservas BNB independientes de ambos wallets, requiere balances verificables y evento previo `capital_transfer_authorized`, y refresca balances. Incertidumbre/audit fail = no move/no order. No hay reverse transfer automático tras fallo de orden.
+- **Fill y trazabilidad:** solo exchange fill confirmado permite persistir apertura. Enlazar `decision_id`, `ready_candidate_id`, contratos finalistas/ganador, capital autorizado/transfer result y fill en metadata y `trades_audit`; rechazo también conserva razón canónica.
+- **Validación de cambio relevante:** responder los seis requisitos de este archivo. A/B/C no pueden saltarse gates ni cambiar prioridad de lado. Aceptación: cero movimientos antes de decisión, reservas BNB nunca invadidas, mismo contrato hasta fill. Rollback: desactivar routing activo/restaurar legacy según política sin habilitar CapBridge. Comparación causal con candidate tape/config/model/universo/costes fijos; además baseline 3y/60000 y OOS/changepoint por generación. Exponer pausa/salud en `/control/status`, outcomes y arbitrajes en las métricas/auditoría existentes.
+
+Registro histórico del 29-sep: Staging apareció `RUNNING_ENTRIES_PAUSED` por 180 minutos (`allocator_deploy_and_balance_error_investigation`), tras logs de DNS `demo-api.binance.com` y saldo insuficiente en Testnet. No tratar ese snapshot como estado actual; comprobar `/status` y `/control/status` antes de cada piloto. El contrato operativo vigente, confirmado el 30-sep, es Staging activo con órdenes en Spot Demo/Futures Testnet; no es un modo `shadow` ni `DRY_RUN`. Producción no se modificó.
 
 Si una propuesta no responde estos 6 puntos, no está lista para rollout.
 
@@ -37,6 +58,8 @@ Si una propuesta no responde estos 6 puntos, no está lista para rollout.
 **�🟡 Guía — limpieza de candidatos activos tras un fix de evaluación/priorización:** todo cambio que altere cómo se evalúan, confirman o priorizan candidatos (`staged_entry.py::_direction_transition`, `get_openable_candidates`, gates de ejecución en `run_trades.py`) debe cerrar con una revisión de `ready_candidates` en estado `ready`/`validated`: consultar `data.last_execution_gate`, `data.direction`, y el conteo de `risk_queue_selected`/`execution_attempt_blocked` en `ready_candidate_checks` por candidato, para detectar y descartar (`_discard_ready`) cualquiera que haya quedado en un estado inconsistente con la lógica nueva o arrastrando el patrón que motivó el fix (ver s110/s111, HEIUSDT/RIFUSDT monopolizando la cola). No dar el fix por cerrado sin este chequeo, aunque el resultado sea "nada que limpiar".
 
 ## s131 — salidas gobernadas por estructura + hueco de datos futures cerrado (sep 7 2026)
+
+> **Precedencia s139:** los estados y defaults de entrada de los bloques históricos siguientes no sustituyen el contrato vigente de entrada declarado al inicio. Cualquier requisito de `direction_confirmed` o progreso direccional temporal está retirado; los checks positivos del lifecycle siguen dependiendo de su configuración.
 
 - **Regla de diseño (explícita del usuario):** con tantos procesos monitoreando cada posición (hard_risk 2s, PIM, belief, UG, watcher 1s), la fragmentación es fricción y no gestión de riesgo. Una posición vigilada captura el 100% si la estructura confirma continuación, o se liquida entera si deja de moverse como se quiere. En Staging no existe excepción automática de parcialización.
 - **Gobierno estructural en UG (ACTIVO):** `sr_path_state` (del evaluador anclado, candle-close gated) llega al `UnifiedGovernanceContext` en spot y futures. En modo activo: `invalidated`/`stalled` → cierre 100% (prioridad 97); `extended_to_next_level`/`on_track`/`target_reached` → supresión de cierres parciales (incl. la rama `lifecycle_structure_partial_profit`). Hard SL precedence preservada — el guard `near_sl` de la rama de pérdida nunca se sobrescribe.
@@ -221,7 +244,7 @@ unified_governance_supervisor.py → UG: árbitro final — consolida advisories
 4. `pnl_service.validate()` / predictor gate según `predictor_gate_mode` → QUBO selector → `staged_entry` persiste `ready`; re-chequeos inter/intra-ciclo lo convierten en `validated` tras los `required_positive_checks`.
 5. **Regla dura de latencia:** una validación intra-ciclo activa `trade_cycle_wake_event`; el scheduler no envía órdenes. El único trade cycle despierta y recorre la ruta canónica `execute_once()` → `get_openable_candidates()` → `_buy_top_symbols()` sin esperar el siguiente intervalo.
 6. La apertura sigue siendo fail-closed: ranking EV-first y `max_open_per_cycle`, régimen activo, ausencia de posición duplicada, capital, preflight, Kelly sizing y `_verify_entry_filled()` siguen siendo obligatorios. Las validaciones concurrentes se coalescen en un solo ciclo; nunca autorizan una orden directa por candidata.
-7. **🔴 Confirmación direccional staged:** `direction_confirmation_mode="enforced"` es obligatorio en `SPOT_BULL`, `RANGE_SCALP`, `FUTURES_SHORT` y `PRESERVATION`. El stage registra el setup y `base_price`, pero no es una confirmación. La apertura requiere `EntryDecision` elegible y dos avances consecutivos de al menos `direction_min_progress_bps`.
+7. **Histórico supersedido s135/s139 — no es regla vigente:** `direction_confirmation_mode="enforced"` y dos avances consecutivos ya no autorizan entradas. La autoridad vigente es entry policy más re-arbitraje fresco best-of-venue inmediatamente antes del submit.
 8. LONG debe avanzar; SHORT debe descender; RANGE_SCALP además debe reducir distancia a un target válido. Perfil A/B/C, QUBO, EV y predictor no reemplazan esta condición.
 9. Un único retroceso limitado cambia a `recovery_pending` sin sumar checks positivos ni autorizar una orden. Solo se recupera al recapturar el setup y completar otro avance consecutivo. Un segundo retroceso, stop/drawdown, precio/referencia ausente, target inválido o expiración descarta terminalmente.
 10. Todo check persiste `ready_candidate_checks.input_features.direction`. Un descarte terminal tiene `decision="negative"`, razón `DIRECTION_*` y copia su contexto en `ready_candidates.data.last_rejection`; `recovery_pending` se registra como `decision="pending"`.
@@ -382,14 +405,14 @@ Fix: `auto_reconcile_spot()` / `auto_reconcile_futures()` o endpoint `/reconcile
 1. Dashboard: pestaña "Acciones sensibles" → botón **"▶ Reanudar"** → confirmar.
 2. API: `DELETE /control/pause-new-entries` (elimina solo la pausa) o `POST /control/resume-all` (limpia pausa + capital_routing_guard + operator_alerts + inicia orchestrator si estaba detenido).
 3. Verificar en logs: el mensaje `[execute_once] pause_new_entries=True (operator request)` debe desaparecer y el ciclo debe generar señales autónomas.
-4. Si el CapBridge no transfiere capital a spot tras la reanudación (spot < $50 y futures > $1000 en SPOT_BULL), verificar que `futures_capital_bridge_enabled=True` y que el fix s119 está desplegado.
+4. CapBridge debe permanecer `PLAN ONLY` después de reanudar. Si una entrada aprobada requiere fondos cross-wallet, verificar `decision_id`, eventos `capital_transfer_authorized`/`capital_transfer_result`, reserva BNB del wallet de origen y balance refrescado. No habilitar transferencias periódicas para aumentar Spot/Futures disponibles.
 **Causa raíz del problema histórico (s119):** cuando `futures_arbiter_active=True` y el régimen es SPOT_BULL/RANGE_SCALP, el `smart_rebalance_capital` entraba en Case 1b (elif) que matcheaba el régimen pero no necesitaba transferir spot→futures — y al ser elif, nunca evaluaba Case 2 (futures→spot para spot). Fix: Case 1b ahora cae through a evaluar si spot necesita capital cuando futures no necesita más.
 **Checklist completo de reinicio tras detener:**
 - [ ] `pause_new_entries` limpio (via botón Reanudar o `DELETE /control/pause-new-entries`)
 - [ ] `capital_routing_guard` inactivo (se limpia con `/control/resume-all`)
 - [ ] No hay `operator_alerts` activas bloqueantes
 - [ ] Health status = ok (no `critical`)
-- [ ] CapBridge transfiere capital si spot < needed (visible en logs como `[CapBridge] ... → transfer $X futures→spot`)
+- [ ] CapBridge solo informa el plan. Cualquier transferencia real está ligada a una candidata aprobada y auditada por `decision_id`.
 
 **"Régimen oscila o cambia inesperadamente"**
 → Anti-whipsaw: necesita 2 ciclos consecutivos para confirmar cambio. Ver `_cache['pending_mode']` y `_cache['pending_count']` en `market_regime.py`. Con `regime.confirmed=False`, los parámetros se aplican pero el sizing puede reducirse.
@@ -1059,27 +1082,3 @@ Cierre de la revisión de entry calibration con énfasis en `range_reversion_pre
 - Para volver al comportamiento anterior de `RANGE_SCALP`: `PATCH /config/apply {"range_reversion_predictor_mode": "blocking"}`.
 - Para restaurar SPOT_BULL 3 bps: editar `SPOT_BULL.direction_min_progress_bps` en `config.py` y `config_helpers.py`, rebuild/restart.
 - Para reactivar `volspike_override_enabled`: `PATCH /config/apply {"volspike_override_enabled": true}` (no recomendado bajo entry-profile gate).
-
----
-
-## AIC-20260913-01 — `SEIUSDT` FUTURES SHORT: stop forzado, slippage y datos de cierre
-
-### Causa raíz
-El cierre adverso `-22.07 USDT` en `SEIUSDT` fue la conjunción de tres fallos:
-
-1. **Stop forzado por sizing incorrecto**: el contrato escaló el notional a `$1,915` con un cap de pérdida de `$18`, por lo que el stop efectivo quedó en `0.0447` (0.68 %), muy por debajo de la resistencia estructural `0.04496`.
-2. **Slippage subestimada**: para un precio de `$0.044` y `qty=43,138`, la salida de mercado se llenó a `~0.04488`, pero el contrato solo reservaba slippage para 5.2 bps.
-3. **Datos de cierre erróneos**: `trades_closed.exit_price` y `realized_gross_pnl` usaban el `triggerPrice` (`0.0447`) en lugar del fill real (`~0.04488`), ocultando el PnL real y la slippage.
-
-### Reglas/operativas derivadas
-
-- El contrato ejecutable debe **escalar notional** para que `economic_risk_usdt <= max_loss_usd`; **nunca** acercar el stop para respetar el cap.
-- El `exit_price` persistido en `trades_closed` y `trades_audit` es el **precio medio real del fill** (`avgPrice` o reconstruido desde `realizedPnl`), no el `triggerPrice` del algo order.
-- `pnl_percentage` se calcula como `pnl / actual_margin_usdt * 100`, no como cambio de precio.
-- `range_scalp_short_usdt_per_trade` y `position_size_usdt` se propagan a **ambos** lados del arbitraje (LONG Spot/Futures y SHORT) para comparaciones económicas reales.
-- `RANGE_SCALP` `ready_candidates` usan `max_age_min=15` minutos por defecto para evitar aperturas de setups enfriados.
-
-### Rollback
-
-- `PATCH /config/apply {"opportunity_contract_futures_exit_fee_rate": 0.0008}` restaura fee de salida anterior.
-- `PATCH /config/apply {"max_age_min": 25}` vuelve al TTL antiguo.

@@ -28,6 +28,7 @@ from lifecycle.base import (
     SizedTrade,
 )
 from lifecycle.signal import _DEFAULT_CATEGORIES
+from close_execution import build_close_plan
 
 
 class BinanceSpotAdapter:
@@ -149,15 +150,48 @@ class BinanceSpotAdapter:
         price = self.price_resolver(symbol) or 0.0
         side = "SELL" if position.side == Side.LONG else "BUY"
 
+        if decision.action.value == "CLOSE_PCT" and not config.exit_policy.allow_partial_exits:
+            result = {
+                "filled": False,
+                "blocked": True,
+                "reason": "partial_exit_blocked",
+                "requested_pct": float(decision.pct or 0.0),
+            }
+            self.audit(decision, result, config)
+            return result
+
         if decision.action.value == "CLOSE_ALL":
             qty = position.quantity
-            result = self.binance_client.create_market_order(symbol=symbol, side=side, quantity=qty)
+            execution = {"mode": "active", "order_type": "MARKET", "full_quantity": qty}
+            try:
+                book = self.binance_client.get_order_book(symbol, limit=20)
+                plan = build_close_plan(
+                    symbol, position.side.value, qty, "SOFT_PROFIT",
+                    bids=book.get("bids") or [], asks=book.get("asks") or [],
+                    max_slippage_bps=10.0, notional_usdt=qty * price,
+                )
+                execution = plan.to_dict()
+            except Exception as exc:
+                execution["reason"] = "depth_unavailable_fallback_market"
+                execution["depth_error"] = str(exc)
+            if execution.get("order_type") == "LIMIT_FOK":
+                result = self.binance_client.create_limit_fok_order(
+                    symbol=symbol, side=side, quantity=qty,
+                    price=float(execution["expected_vwap"]),
+                )
+                fill = self.binance_client.verify_and_fetch_fills(result, label=f"lifecycle_exit_{symbol}")
+                if not fill:
+                    execution["order_type"] = "MARKET"
+                    execution["escalation_reason"] = "fok_not_fully_filled"
+                    result = self.binance_client.create_market_order(symbol=symbol, side=side, quantity=qty)
+            else:
+                result = self.binance_client.create_market_order(symbol=symbol, side=side, quantity=qty)
             fill = self.binance_client.verify_and_fetch_fills(result, label=f"lifecycle_exit_{symbol}")
             if fill:
                 self.position_manager.close_all_positions_for_symbol(
                     symbol, price, reason=decision.reason, commission_rate=0.001
                 )
-            return {"filled": bool(fill), "price": price, "fill": fill, "raw": result}
+            return {"filled": bool(fill), "price": price, "fill": fill, "execution": execution, "raw": result}
 
         # Partial close
         qty = position.quantity * decision.pct

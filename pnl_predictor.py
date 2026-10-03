@@ -5,12 +5,56 @@ Calculates expected PnL and success probability before opening positions
 using technical indicators and market analysis.
 """
 
+import hashlib
+import json
 import logging
+import re
+import traceback
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+_PREDICTOR_ERROR_CODES = {
+    "input_contract": "invalid_input_contract",
+    "learned_weights": "invalid_or_unavailable_weights",
+    "probability": "probability_calculation_failed",
+    "micro_momentum": "micro_momentum_calculation_failed",
+    "price_range": "price_range_calculation_failed",
+    "expected_pnl": "expected_pnl_calculation_failed",
+    "cost_model": "cost_model_calculation_failed",
+    "bias_correction": "bias_correction_failed",
+    "risk_metrics": "risk_metrics_calculation_failed",
+}
+
+
+class PredictorInputError(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def _sanitize_exception_message(exc: Exception) -> str:
+    message = str(exc).replace("\r", " ").replace("\n", " ")[:500]
+    return re.sub(
+        r"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*[^\s,;]+",
+        r"\1=<redacted>",
+        message,
+    )
+
+
+def _exception_fingerprint(stage: str, exc: Exception) -> str:
+    frames = traceback.extract_tb(exc.__traceback__)
+    origin = frames[-1].name if frames else "unknown"
+    identity = f"{stage}|{type(exc).__name__}|{origin}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+
+
+def _weights_fingerprint(weights: Dict) -> str:
+    payload = json.dumps(weights or {}, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 # Default fixed weights (used when no learned weights are available)
@@ -40,6 +84,7 @@ class PnLPredictor:
     def __init__(self):
         """Initialize PnL Predictor."""
         self._weight_cache: Dict[str, Dict] = {}  # (symbol, regime) -> weights
+        self._weight_sources: Dict[Tuple[str, str], str] = {}
         logger.info("PnL Predictor initialized")
 
     def load_learned_weights(self, symbol: str, regime: str = '__any__') -> Dict:
@@ -54,8 +99,17 @@ class PnLPredictor:
         try:
             from learning_engine import get_learning_engine
             weights = get_learning_engine().get_weights(symbol, regime=regime)
-        except Exception:
+            self._weight_sources[_cache_key] = "learned"
+        except Exception as exc:
             weights = _DEFAULT_WEIGHTS.copy()
+            self._weight_sources[_cache_key] = "bootstrap_after_load_error"
+            logger.exception(
+                "predictor_weights_fallback code=weights_load_failed exception=%s fingerprint=%s symbol=%s regime=%s",
+                type(exc).__name__,
+                _exception_fingerprint("learned_weights", exc),
+                symbol,
+                regime,
+            )
         self._weight_cache[_cache_key] = weights
         return weights
 
@@ -64,8 +118,75 @@ class PnLPredictor:
         if symbol:
             _key = (symbol, regime or '__any__')
             self._weight_cache.pop(_key, None)
+            self._weight_sources.pop(_key, None)
         else:
             self._weight_cache.clear()
+            self._weight_sources.clear()
+
+    @staticmethod
+    def _validate_inputs(
+        symbol: str,
+        current_price: float,
+        indicators: Dict,
+        cycle_duration_minutes: int,
+        position_size_usdt: float,
+        trade_side: str,
+        candles: Optional[Dict],
+        interval_minutes: int,
+    ) -> None:
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise PredictorInputError("missing_required_field", "symbol is required")
+        if not isinstance(indicators, dict):
+            raise PredictorInputError("invalid_type", "indicators must be a dictionary")
+
+        numeric_fields = {
+            "current_price": current_price,
+            "position_size_usdt": position_size_usdt,
+            "cycle_duration_minutes": cycle_duration_minutes,
+            "interval_minutes": interval_minutes,
+        }
+        for field, value in numeric_fields.items():
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as exc:
+                raise PredictorInputError("invalid_type", f"{field} must be numeric") from exc
+            if not np.isfinite(number):
+                raise PredictorInputError("non_finite_value", f"{field} must be finite")
+            if number <= 0:
+                raise PredictorInputError("invalid_range", f"{field} must be positive")
+
+        side = str(trade_side or "").strip().upper()
+        if side not in ("LONG", "SHORT"):
+            raise PredictorInputError("unexpected_side", "trade_side must be LONG or SHORT")
+
+        if candles is None:
+            return
+        if not isinstance(candles, dict):
+            raise PredictorInputError("invalid_type", "candles must be a dictionary")
+
+        required_series = ("high", "low", "close")
+        if any(key not in candles for key in required_series):
+            raise PredictorInputError("missing_required_field", "candles require high, low and close")
+        try:
+            series = {key: np.asarray(candles[key], dtype=float) for key in required_series}
+            if "volume" in candles:
+                series["volume"] = np.asarray(candles["volume"], dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise PredictorInputError("invalid_type", "candle values must be numeric") from exc
+
+        lengths = {len(values) for values in series.values()}
+        if len(lengths) != 1:
+            raise PredictorInputError("unequal_array_lengths", "candle arrays must have equal lengths")
+        if not lengths or next(iter(lengths)) < 3:
+            raise PredictorInputError("empty_or_insufficient_window", "at least three candles are required")
+        if any(not np.all(np.isfinite(values)) for values in series.values()):
+            raise PredictorInputError("non_finite_value", "candle values must be finite")
+
+        highs, lows, closes = series["high"], series["low"], series["close"]
+        if np.any(highs <= 0) or np.any(lows <= 0) or np.any(closes <= 0):
+            raise PredictorInputError("invalid_range", "candle prices must be positive")
+        if np.any(lows > highs) or np.any(closes < lows) or np.any(closes > highs):
+            raise PredictorInputError("invalid_high_low_close", "candle OHLC geometry is invalid")
     
     def predict_pnl(
         self,
@@ -101,9 +222,23 @@ class PnLPredictor:
         Returns:
             Dictionary with prediction results
         """
+        error_stage = "input_contract"
         try:
+            self._validate_inputs(
+                symbol,
+                current_price,
+                indicators,
+                cycle_duration_minutes,
+                position_size_usdt,
+                trade_side,
+                candles,
+                interval_minutes,
+            )
             _regime_ctx = (settings and getattr(settings, 'current_regime_mode', '__any__')) or '__any__'
+            error_stage = "learned_weights"
             weights = self.load_learned_weights(symbol, regime=_regime_ctx)
+            weight_source = self._weight_sources.get((symbol, _regime_ctx), "unknown")
+            weights_hash = _weights_fingerprint(weights)
             # Detect bootstrap: if all weights match defaults, no learning has happened
             _default_items = {k: v for k, v in _DEFAULT_WEIGHTS.items()}
             _weight_items  = {k: weights.get(k) for k in _DEFAULT_WEIGHTS}
@@ -114,16 +249,19 @@ class PnLPredictor:
                 _side = 'LONG'
 
             # Calculate success probability based on indicators + learned weights
+            error_stage = "probability"
             success_probability = self._calculate_success_probability(indicators, weights, trade_side=_side, current_price=current_price)
 
             # Micro-momentum adjustment using real 1m/5m candles
             if candles and self._has_candles(candles):
+                error_stage = "micro_momentum"
                 micro_adj = self._micro_momentum_adjustment(
                     candles, interval_minutes, cycle_duration_minutes, _side
                 )
                 success_probability = max(0.0, min(1.0, success_probability + micro_adj))
 
             # Estimate price range for the cycle
+            error_stage = "price_range"
             if candles and self._has_candles(candles):
                 price_range = self._estimate_price_range_from_candles(
                     current_price,
@@ -137,6 +275,7 @@ class PnLPredictor:
                 price_range = self._estimate_price_range(current_price, indicators, cycle_duration_minutes, trade_side=_side)
 
             # Calculate expected PnL
+            error_stage = "expected_pnl"
             expected_pnl = self._calculate_expected_pnl(
                 current_price,
                 price_range,
@@ -148,14 +287,17 @@ class PnLPredictor:
             )
 
             # Subtract Binance round-trip commission so expected_pnl is net
+            error_stage = "cost_model"
             from binance_commission import expected_pnl_after_fees
             expected_pnl = expected_pnl_after_fees(expected_pnl, position_size_usdt, trade_type, settings)
 
             # Apply learned bias correction
+            error_stage = "bias_correction"
             bias = weights.get("bias_correction", 1.0)
             expected_pnl = expected_pnl * bias
 
             # Calculate risk metrics
+            error_stage = "risk_metrics"
             risk_metrics = self._calculate_risk_metrics(
                 current_price,
                 price_range,
@@ -179,6 +321,9 @@ class PnLPredictor:
                 'position_size_usdt': position_size_usdt,
                 'trade_side': _side,
                 'bootstrap_mode': is_default,
+                'weights_source': weight_source,
+                'weights_hash': weights_hash,
+                'weights_regime': _regime_ctx,
             }
             
             logger.info(
@@ -189,14 +334,29 @@ class PnLPredictor:
             
             return prediction
             
-        except Exception as e:
-            logger.error(f"Error predicting PnL for {symbol}: {e}")
+        except Exception as exc:
+            error_code = getattr(
+                exc,
+                "code",
+                _PREDICTOR_ERROR_CODES.get(error_stage, "unexpected_programming_error"),
+            )
+            exception_class = type(exc).__name__
+            sanitized_message = _sanitize_exception_message(exc)
+            stack_fingerprint = _exception_fingerprint(error_stage, exc)
+            logger.exception(
+                "predictor_failed stage=%s code=%s exception=%s fingerprint=%s symbol=%s",
+                error_stage,
+                error_code,
+                exception_class,
+                stack_fingerprint,
+                symbol,
+            )
             return {
                 'symbol': symbol,
                 'current_price': current_price,
                 'expected_pnl': 0.0,
                 'expected_pnl_percentage': 0.0,
-                'success_probability': 0.5,
+                'success_probability': 0.0,
                 'price_range': {'min': current_price * 0.95, 'max': current_price * 1.05},
                 'risk_metrics': {},
                 'indicators_used': indicators,
@@ -204,7 +364,13 @@ class PnLPredictor:
                 'cycle_duration_minutes': cycle_duration_minutes,
                 'position_size_usdt': position_size_usdt,
                 'trade_side': str(trade_side or 'LONG').strip().upper() or 'LONG',
-                'error': str(e)
+                'valid': False,
+                'prediction_status': 'error',
+                'error': sanitized_message,
+                'error_stage': error_stage,
+                'error_code': error_code,
+                'exception_class': exception_class,
+                'stack_fingerprint': stack_fingerprint,
             }
     
     def _calculate_success_probability(self, indicators: Dict, weights: Dict = None, trade_side: str = 'LONG', current_price: Optional[float] = None) -> float:
@@ -299,7 +465,7 @@ class PnLPredictor:
             if _num(ema.get('value', 0), 0.0) > _num(sma.get('value', 0), 0.0):
                 probability += (-w_ema if _is_short else w_ema)
             else:
-                probability += (w_ema if _is_short else -w_ema * 0.5)
+                probability += (w_ema if _is_short else -w_ema)
 
         # ── Bollinger Bands ─────────────────────────────────────────────────
         bollinger = indicators.get('bollinger_bands', {})
@@ -645,7 +811,7 @@ class PnLPredictor:
             sl_pct = float(getattr(settings, 'futures_long_sl_pct', 2.5) or 0.0)
             tp_pct = float(getattr(settings, 'futures_long_tp_pct', 5.0) or 0.0)
         else:
-            sl_pct = float(getattr(settings, 'stop_loss_pct', 3.36) or 0.0)
+            sl_pct = float(getattr(settings, 'stop_loss_pct', 2.5) or 0.0)
             tp_pct = float(getattr(settings, 'take_profit_pct', 4.14) or 0.0)
         return (sl_pct if sl_pct > 0 else None), (tp_pct if tp_pct > 0 else None)
 

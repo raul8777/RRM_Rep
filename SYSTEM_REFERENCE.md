@@ -1,11 +1,54 @@
 # SYSTEM_REFERENCE — crypto-agent
 
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
-> Última actualización: sep 12 2026 | Contrato activo: selector bilateral S/R por retorno neto esperado sobre riesgo, preflight atómico sin confirmación temporal y cero fraccionamiento (`exit_fractionation_mode=disabled`). Este documento es la fuente única de contexto para Devin y para cualquier agente del workspace.
+> Última actualización: 29 sep 2026 (s141) | Contrato de entrada activo en staging: arbitraje por candidato de best LONG/best SHORT entre venues elegibles, ranking `ev_net`, evidencia renovada para cada reintento, preflight fresco y liquidez proactiva por wallet más JIT tras aprobación. Este documento es la referencia de contexto para Devin y agentes del workspace.
 
 ---
 
-> **Precedencia:** el estado s135 siguiente sustituye cualquier sección histórica posterior que mencione `direction_confirmed`, márgenes `0.10/0.15`, `short_priority`, confirmaciones por bps o quality model RANGE_SCALP `enforced`. Esas secciones se conservan únicamente como historial de decisiones.
+> **Precedencia:** s139 sustituye cualquier sección histórica posterior que mencione `direction_confirmed`, márgenes `0.10/0.15`, `short_priority`, confirmaciones por bps, ROR como ranking primario, CapBridge autónomo o BNB top-up/transferencia pre-entry. Esas secciones se conservan únicamente como historial de decisiones.
+
+## Contrato de entrada vigente — s139 (27 sep 2026)
+
+El flujo detallado y su diagrama viven en `canonical/calibracion_entradas-a20ab8-v3.md`, “Lógica operativa de entrada s139”. Esta sección es el resumen de runtime:
+
+- **Dos niveles de selección:** `portfolio_selector` ordena símbolos/candidatos; el árbitro decide por candidato cuál es el contrato ganador. Para cada candidato obtiene best LONG entre Spot/Futures ejecutables y best SHORT entre Futures/Spot Margin solo cuando Margin está habilitado; compara ambos finalistas. No confundirlo con un ranking global entre símbolos.
+- **Tesis:** soporte compara `LONG_SUPPORT_BOUNCE` vs `SHORT_SUPPORT_BREAKDOWN`; resistencia compara `SHORT_RESISTANCE_REJECTION` vs `LONG_RESISTANCE_BREAKOUT`. S/R es contexto para formar tesis, nunca una orden de lado.
+- **Contrato:** cada venue lleva precio común fresco, target/stop orientados, qty/notional/margen/leverage, max-loss económico, fee, slippage/funding, probabilidad y `expected_net_pnl_usdt`. Staging usa `range_scalp_ranking_mode=ev_net`: EV neta positiva primero; `expected_return_on_risk` desempata. ATR noise floor, evidencia de rechazo/breakout, mínimo de probabilidad, riesgo, filtros de exchange y ejecutabilidad pueden invalidar contratos.
+- **Lifecycle no decide la dirección:** `ready`/`validated` conservan estado y checks de política; no reemplazan el arbitraje. FastPath y ciclo normal re-arbitran antes de ejecutar. Si el ganador falla, no hay fallback silencioso a otro lado/venue.
+- **Capital:** en Staging/Testnet, `PortfolioManager` prepara en Spot y Futures una entrada máxima realmente ejecutable más $10; convierte inventario Spot libre y BNB solo por encima de reserva, y transfiere excedente solo si el wallet donante conserva su propio objetivo. La acción se limita al startup sincronizado y al fin de ciclos confirmados. CapBridge y BNB top-up permanecen observe-only. Tras selección/aprobación, cualquier faltante adicional usa JIT por el shortfall exacto con reservas separadas y balances refrescados.
+- **Commit:** el fill real es autoridad de apertura y de qty/precio/comisión persistidos. `decision_id`, candidato, contrato, alternativa, capital transferido y fill deben enlazarse en metadata/`trades_audit`. No se persiste apertura por señal, intento o transferencia.
+- **Modo rollback:** `directional_policy_mode=disabled` recupera executors legacy. Con política activa, executors SHORT/LONG heurísticos paralelos se bloquean; SR Pool alimenta el flujo común. CapBridge no mueve fondos ni siquiera si un caller pide `execute_transfers=True`.
+
+### s140 — evidencia fresca en candidatos `ready`/`validated` (28 sep 2026)
+
+La reutilización de un candidato es válida solo como reutilización de identidad/oportunidad, no de datos. En cada revalidación, `staged_entry.py` obtiene precio actual y predictor desde análisis nuevo; `run_trades.py` consume `fresh_signal_meta`/`fresh_prediction` tanto en FastPath como en el camino normal. El snapshot histórico queda para linaje y auditoría, nunca para decidir side, tesis, venue, target, stop, EV o tamaño.
+
+La misma regla aplica al re-arbitraje bilateral: soporte y resistencia vuelven a competir como LONG/SHORT con contratos y costes actuales. Datos incompletos o contrato caducado producen bloqueo trazable, no fallback silencioso. El margen locked conserva precisión y el ticket no puede crecer por encima del contrato seleccionado.
+
+Verificación de despliegue: `crypto-agent-app_STG` reiniciado únicamente el 28 sep a las 23:58:15 UTC; hashes host/contenedor coincidentes para `run_trades.py` y `staged_entry.py`; `/status` identificó `staging` y Binance testnet; Spot/Futures no mostraron posiciones abiertas; logs posteriores sin traceback, excepción ni `actual margin exceeds locked_position_size_usdt`. Suite focal ampliada: `171 passed, 1 skipped`; prueba específica posterior: `80 passed`. El primer ciclo post-reinicio quedó ejecutándose/en observación al cierre de esta actualización.
+
+Diagnóstico de la hora previa a s140: cuatro ciclos completos seleccionaron candidatos pero ejecutaron cero; los bloqueos únicos fueron 14 por `STALE_ENTRY_REWARD_RISK_BELOW_MIN`, 1 por `PRICE_REFRESH_FAILED`, 3 por `BILATERAL_NO_POSITIVE_EXECUTABLE_RETURN` y 2 por `SPOT_CONTRACT_STALE`. No se deben interpretar los 164 checks stale como 164 oportunidades distintas.
+
+### Estado staging verificado — 27 sep 2026
+
+- La implementación está activa, no en shadow. Suite focalizada de entrada/capital/anti-ghost: **114 passed**; Pylance sin errores.
+- Solo `app_stg` fue reiniciado; DB/Redis siguieron saludables. `/control/status` reportó `RUNNING_ENTRIES_PAUSED`, TTL de 180 min, motivo `allocator_deploy_and_balance_error_investigation`. No había posiciones abiertas; NEAR figura cerrada por `stop_loss` a 5.426.
+- Los logs reportaron `NameResolutionError` para `demo-api.binance.com` y rechazos por balance insuficiente del testnet. Mantener la pausa hasta recuperar endpoint/DNS y reconciliar saldos. La pausa operativa no cambia el contrato de selección ni lo convierte en shadow.
+- Comparación causal pendiente: candidate tape, config/model hash, universo, balances iniciales, sizing y costes fijos; comparar solo allocator. Aparte, medir 3y/60000 y OOS/changepoint por generación. Los 114 tests no son evidencia de mejora de PnL.
+
+## Corrección de entradas — sep 27 2026 — noise floor, ranking por EV neto y penalty de breakout
+
+Diagnóstico Super MIMIC: los stops contractuales medianos eran 0.28% (=0.26×ATR 1h) — ruido puro (95–100% SL-hit). La versión previa del árbitro maximizaba `expected_return_on_risk`, lo que premiaba contratos con riesgo artificialmente pequeño, y el predictor de reversión sobreestimaba la probabilidad SHORT. Ambas direcciones mostraban señal invertida: tras señal SHORT el precio subía +1.67%/24h; tras señal LONG bajaba −1.37%/24h. El ranking activo de staging ahora usa EV neta primaria según s139.
+
+Config nuevas (todas reversibles, default-off en producción, activas en staging):
+
+- `range_scalp_min_stop_atr_multiple` (staging=1.5): un stop más cercano que N×ATR(1h) vuelve el contrato no ejecutable — **fail-closed** (ATR ausente ⇒ bloquea, no bypass). Aplica a los contratos que construye el árbitro; `stop_noise_gate()` protege `open_short` legacy solo bajo el modo rollback. En política activa esas aperturas paralelas se delegan al flujo arbitral. Rechazo: `STOP_INSIDE_NOISE_FLOOR`.
+- `range_scalp_ranking_mode` (`ev_net` en staging): el árbitro ordena por `expected_net_pnl_usdt` primero y `expected_return_on_risk` solo como desempate — el selector ya no premia stops sub-ruido.
+- `range_scalp_rejection_breakout_penalty` (staging=0.5): si `rejection_evidence.breakout_pressure`, la probabilidad del contrato SHORT se multiplica por el factor, dejando que `LONG_RESISTANCE_BREAKOUT` gane por mérito.
+
+Evidencia nueva en contratos: `validation_evidence.stop_above_noise_floor`, `stop_distance_pct`, `atr_frac`, `atr_available`. Resultados de sweep llevan `entry_flags{generation: baseline|v2_entry_fix}` para comparación A/B limpia en el mismo JSONL.
+
+El gate de ruido aplica a contratos de entrada con stop contractual; no equivale a la gestión lifecycle de posiciones SPOT sin ese contrato. Detalle estadístico original: `canonical/analisis-shorts-direccion-rota-20260927.md`.
 
 ## Estado de implementación — sep 12 2026 — selector bilateral, ejecución adaptativa y cero cierres parciales
 
@@ -20,7 +63,7 @@
 - Rollback operativo: `PATCH /config/kelly {"close_execution_mode":"disabled"}` vuelve los cierres blandos a `MARKET`; hard-risk permanece `MARKET`.
 
 - **Entrada S/R:** proximidad a soporte o resistencia solo activa el análisis. En soporte compiten `LONG_SUPPORT_BOUNCE` y `SHORT_SUPPORT_BREAKDOWN`; en resistencia compiten `SHORT_RESISTANCE_REJECTION` y `LONG_RESISTANCE_BREAKOUT`.
-- **Selección:** gana la oportunidad ejecutable con mayor `expected_net_pnl / risk_usdt` positivo. No existen margen fijo `0.10/0.15`, bonus de lado, preferencia SHORT, cuota LONG/SHORT ni modificador Fear & Greed en el arbitraje.
+- **Selección:** en el ranking activo de staging gana la oportunidad ejecutable con mayor `expected_net_pnl_usdt` positivo; `expected_return_on_risk` solo desempata. No existen margen fijo `0.10/0.15`, bonus de lado, preferencia SHORT, cuota LONG/SHORT ni modificador Fear & Greed en el arbitraje. Las afirmaciones históricas de ROR primario quedan supersedidas por s139.
 - **Predicción:** bounce/rejection usan la tesis de reversión; breakout/breakdown usan la predicción direccional de continuación. Ambas ramas comparten el mismo precio fresco del preflight.
 - **Ejecución:** la confirmación temporal por ticks/checks está retirada en los cuatro regímenes. La autoridad es un re-arbitraje síncrono inmediatamente antes de routing/submit; se conservan target/stop válidos, risk/capital/cooldown/duplicate gates y confirmación de fill.
 - **Instrumento:** se comparan LONG Spot, LONG Futures y SHORT Futures/Spot Margin por retorno esperado sobre riesgo; la ejecutabilidad decide qué alternativas participan.
@@ -4491,7 +4534,7 @@ Este es el criterio de prioridad absoluta para **todos** los análisis, mejoras,
 | Futuros SHORTs activos | **9/9** — FIL, DOT, ETH, SUI, XRP, LINK, BTC, SOL, BNB — slots llenos |
 | FUTURES_MAX_SHORTS | **9** (H-FIX A1 sesión 8 — subido de 7) |
 | FUTURES_MAX_LARGECAP_SHORTS | **5** (guard IMPLEMENTADO en código jun 20 sesión 3 — slots 6-7 forzados a MIDs/NARRATIVE) |
-| CapBridge | ✅ ACTIVO — transferencia autónoma bidireccional spot↔futuros (jun 18 2026) |
+| CapBridge (registro histórico) | LEGACY — solo plan/observación bajo s139; no ejecuta transferencias autónomas |
 | B2 auto-close spots bear | ✅ ACTIVO — cierra spot LONGs +0.3% PnL en FUTURES_SHORT regime |
 | Docker | live, sin errores |
 | FUTURES_COMMISSION_RATE | **0.00037** (0.037% taker) — jun29 run_0677 |
@@ -4787,9 +4830,9 @@ fees %    = 10.7% del PnL bruto
 ### Gestión autónoma de BNB (jun 29 2026)
 | Concepto | SPOT | FUTURES | Implementación |
 |----------|------|---------|----------------|
-| Compra BNB | ✅ En spot wallet | ❌ No se compra directamente | `binance_commission.py:auto_manage_bnb_discount()` compra BNBUSDT spot |
-| Transferencia BNB | Spot → Futures | ✅ Recibe BNB de spot | `universalTransfer(type='MAIN_UMFUTURE', asset='BNB')` |
-| Funding BNB | USDT debe estar en spot para comprar | Sistema transfiere USDT futures→spot cuando el régimen lo indica | `FuturesClient.transfer_to_spot()` ahora permite transferir con posiciones abiertas respetando buffer de 10 USD |
+| Compra BNB (registro histórico) | Legacy top-up pre-entry retirado | No se compra automáticamente pre-entry | El manager solo observa/audita hasta decisión aprobada |
+| Transferencia BNB (registro histórico) | Solo en operación explícitamente autorizada | Reserva independiente por wallet | No mover como parte del CapBridge periódico |
+| Funding BNB (registro histórico) | No hay funding automático por régimen antes de entry | Shortfall/reserva se reportan en observe-only | Cualquier movimiento requiere la autorización JIT s139 y no puede invadir reservas |
 | Buffer extra | `bnb_extra_buffer_usd` por wallet | `bnb_extra_buffer_usd` por wallet | Subido a **10 USD** por wallet |
 | Reserva PM | Resta `total_reserve_usdt` del USDT disponible para trading | Resta `total_reserve_usdt` del margin disponible | `portfolio_manager.py` expone `*_after_reserve` |
 | Trazabilidad | `trades_audit` eventos `bnb_*` y `usdt_futures_to_spot_*` | `trades_audit` eventos `bnb_*` y `usdt_futures_to_spot_*` | 100% audit trail incluyendo shortfalls |
@@ -7275,31 +7318,3 @@ for r in cur.fetchall(): print(r)
 - Solo visible para posiciones con `status === 'open'`.
 - Reutiliza backend existente `manual_position_closer` + endpoints `/positions/{symbol}/close[/preview]`.
 - El cierre se audita como `manual_close` y se excluye de análisis de learning por defecto.
-
----
-
-## s138-s140 — Correcciones post-AIC `SEIUSDT` (2026-09-13)
-
-### s138: precio real de cierre y PnL % sobre margen
-
-- `futures_client._reconstruct_exit_price_from_realized`: reconstruye el precio medio de salida a partir del `realizedPnl` bruto del evento Binance.
-- `_handle_user_stream_close`: usa `avgPrice` del fill si concuerda con `realizedPnl`; si no, reconstruye; persiste `binance_realized_pnl`, `binance_close_commission` y `binance_funding`.
-- `_save_futures_closed`: `pnl_percentage = pnl / actual_margin_usdt * 100`; `realized_gross_pnl` y `close_real_price` usan el fill real.
-
-### s139: notional escalado al stop y LONG Spot sizing
-
-- `opportunity_contract.build_executable_opportunity`:
-  - `max_notional = max_loss_usd / (price_distance_pct + total_cost_bps/10000)`.
-  - No acerca el stop; mantiene `effective_stop_price` del predictor/SR.
-  - `economic_risk_usdt = gross_risk + entry_fee + exit_reserve`.
-  - Fallback a SR estructurales (`support_level`/`resistance_level`) si el predictor no entrega target/stop.
-- `directional_arbiter._with_position_size`: inyecta `position_size_usdt` en `long_prediction` y `futures_long_prediction` cuando falta, para comparación bilateral real.
-- `tests/test_opportunity_contract.py` ajustado a notional escalado.
-
-### s140: TTL de RANGE_SCALP
-
-- `staged_entry.py`: `max_age_min` por defecto para `RANGE_SCALP` baja a `15` minutos (configurable vía `cand_cfg.max_age_min`).
-
-### Tests
-
-- `591 passed, 3 skipped, 59 warnings` en suite completa.

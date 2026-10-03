@@ -19,3 +19,24 @@ Dev/benchmarks/peaks_dataset/peak_quality_model/*.pkl
 Dev/benchmarks/peaks_dataset/sample_phase1.parquet
 Dev/benchmarks/mimic_sweep_peak_quality_full.log
 *.log.gz
+# Runtime/cache/generated artifacts
+Dev/benchmarks/mimic_cache.db
+Dev/benchmarks/*.log
+Dev/benchmarks/super_mimic/
+Dev/benchmarks/research_data/
+historical_data/external/
+*.log
+audit_getattr.txt
+orchestrator_console.log
+trade_type
+tmp_*.py
+tmp_*/
+tmp_staging_commit_helper.ps1
+run_*.py
+# Generated benchmark data directories
+Dev/benchmarks/universal_entry_selection/
+Dev/benchmarks/entry_profile_calibration/
+Dev/benchmarks/windows/
+Dev/benchmarks/windows_calibration/
+Dev/benchmarks/windows_homologated/
+Dev/benchmarks/*.json

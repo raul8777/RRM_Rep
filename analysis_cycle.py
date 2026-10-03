@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from typing import List, Dict
 
 import error_collector as ec
-from config import TRADE_CYCLE_MINUTES
 from analysis_cache import analysis_cache
 from signal_store import get_signals
 from strategy import normalize_symbol
@@ -304,7 +303,8 @@ def execute_once() -> None:
 
 def run_loop() -> None:
     """Infinite loop for periodic technical analysis."""
-    cycle_seconds = TRADE_CYCLE_MINUTES * 60 * 3  # Run every 3x trade cycle (15 min if trade is 5 min)
+    settings = _get_settings()
+    cycle_seconds = max(60.0, float(getattr(settings, "trade_cycle_minutes", 5.0) or 5.0) * 60.0 * 3.0)
     logger.info(f"Starting analysis loop - runs every {cycle_seconds} seconds ({cycle_seconds / 60:.0f} minutes)")
 
     while True:

@@ -143,8 +143,8 @@ def test_shadow_readiness_endpoint_reports_component_states(monkeypatch):
     payload = response.json()
     assert payload["ok"] is True
     states = {item["id"]: item["state"] for item in payload["components"]}
-    assert states["directional_v2"] == "COLLECTING"
-    assert states["ug_loss_v2"] == "COLLECTING"
+    assert states["directional_v2"] == "RETIRED"
+    assert states["ug_loss_v2"] == "ACTIVE"
     assert states["lifecycle_structure"] == "ACTIVE"
     assert states["staging_runner_profit_floor"] == "COLLECTING"
     assert states["range_reversion"] == "COLLECTING"

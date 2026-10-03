@@ -137,6 +137,7 @@ class DeployGate:
         operator: Optional[str] = None,
         mode: str = "",
         profile: str = "",
+        rollback_payload: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Record deployment audit for a recommended config.
 
@@ -146,19 +147,11 @@ class DeployGate:
         """
         db = self._get_db()
 
-        # Build rollback payload from current runtime override (best-effort)
-        rollback = {}
-        try:
-            rows = db.execute_query(
-                "SELECT value FROM trading_runtime_state WHERE key = %s LIMIT 1",
-                (target,),
-            )
-            if rows:
-                _raw = rows[0].get("value") or rows[0].get(0)
-                if _raw:
-                    rollback = json.loads(_raw) if isinstance(_raw, str) else dict(_raw)
-        except Exception:
-            pass
+        rollback = (
+            dict(rollback_payload)
+            if rollback_payload is not None
+            else self.capture_rollback_payload(target)
+        )
 
         # Record deployment audit (always)
         from super_mimic.core import ExperimentRegistry
@@ -177,8 +170,24 @@ class DeployGate:
             "ok": True,
             "target": target,
             "recorded": True,
-            "rollback_fields": list(rollback.keys()) if isinstance(rollback, dict) else [],
+            "rollback_fields": list(rollback.keys()),
         }
+
+    def capture_rollback_payload(self, target: str = "kelly_config_override") -> Dict[str, Any]:
+        """Read the complete runtime override before any deployment mutation."""
+        db = self._get_db()
+        try:
+            rows = db.execute_query(
+                "SELECT value FROM trading_runtime_state WHERE key = %s LIMIT 1",
+                (target,),
+            )
+            if rows:
+                _raw = rows[0].get("value") or rows[0].get(0)
+                if _raw:
+                    return json.loads(_raw) if isinstance(_raw, str) else dict(_raw)
+        except Exception:
+            return {}
+        return {}
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 

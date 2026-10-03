@@ -72,6 +72,88 @@ def _nearest_levels(
     return support_level, resistance_level
 
 
+def build_sr_future_path(
+    current_price: float,
+    supports: Sequence[Tuple[float, float]],
+    resistances: Sequence[Tuple[float, float]],
+    side: str,
+    *,
+    max_next_levels: int = 2,
+) -> Dict[str, Any]:
+    """Build the forward S/R map for one side of a trade thesis.
+
+    Unlike `_nearest_levels` (which collapses the pivot lists to the single
+    nearest level), this preserves the ORDERED map of future levels so the
+    lifecycle can track progress toward the target and extend to the next
+    level when a breakout/breakdown confirms continuation.
+
+    Args:
+        current_price: Price at signal/entry time.
+        supports: (price, weight) pivot supports, any order.
+        resistances: (price, weight) pivot resistances, any order.
+        side: 'LONG' (anchor=support, target=resistance) or 'SHORT' (mirror).
+        max_next_levels: How many levels beyond the target to keep.
+
+    Returns:
+        {
+          "side": "LONG"|"SHORT",
+          "anchor": float|None,          # level whose loss invalidates the thesis
+          "target": float|None,          # first objective (opposing level)
+          "next_levels": [float, ...],   # ordered objectives beyond the target
+          "anchor_strength": float,
+          "target_strength": float,
+        }
+    All prices are absolute; empty when the map cannot be built (caller treats
+    missing as "no evidence", never as invalidation).
+    """
+    try:
+        price = float(current_price)
+    except (TypeError, ValueError):
+        price = 0.0
+    if price <= 0:
+        return {"side": side, "anchor": None, "target": None, "next_levels": [],
+                "anchor_strength": 0.0, "target_strength": 0.0}
+
+    is_long = str(side or "").strip().upper() in ("LONG", "BUY")
+    sup_sorted = sorted([(p, w) for p, w in supports if p > 0], key=lambda x: x[0], reverse=True)
+    res_sorted = sorted([(p, w) for p, w in resistances if p > 0], key=lambda x: x[0])
+
+    def _strength_for(level: Optional[float], pool: Sequence[Tuple[float, float]]) -> float:
+        if level is None:
+            return 0.0
+        for p, w in pool:
+            if abs(p - level) <= max(level * 0.001, 1e-12):
+                return float(w or 0.0)
+        return 0.0
+
+    if is_long:
+        below = [p for p, _ in sup_sorted if p <= price]
+        above = [p for p, _ in res_sorted if p >= price]
+        anchor = below[0] if below else None
+        target = above[0] if above else None
+        beyond = [p for p in above if target is not None and p > target][:max_next_levels]
+        anchor_strength = _strength_for(anchor, sup_sorted)
+        target_strength = _strength_for(target, res_sorted)
+    else:
+        above = [p for p, _ in res_sorted if p >= price]
+        below = [p for p, _ in sup_sorted if p <= price]
+        anchor = above[0] if above else None
+        target = below[0] if below else None
+        beyond = [p for p in below if target is not None and p < target]
+        beyond = sorted(beyond, reverse=True)[:max_next_levels]
+        anchor_strength = _strength_for(anchor, res_sorted)
+        target_strength = _strength_for(target, sup_sorted)
+
+    return {
+        "side": "LONG" if is_long else "SHORT",
+        "anchor": anchor,
+        "target": target,
+        "next_levels": beyond,
+        "anchor_strength": anchor_strength,
+        "target_strength": target_strength,
+    }
+
+
 def compute_sr_features(
     closes: Sequence[float],
     highs: Sequence[float],
@@ -172,4 +254,7 @@ def compute_sr_features(
         "near_band_used": float(near_band),
         "near_band_atr_mult": float(max(0.0, _safe_float(near_band_atr_mult, 0.25))),
         "near_band_price_pct": float(max(0.0, _safe_float(near_band_price_pct, 0.0025))),
+        # Forward S/R path maps (ordered future levels) for thesis-anchored lifecycle.
+        "sr_path_long": build_sr_future_path(px, supports, resistances, "LONG"),
+        "sr_path_short": build_sr_future_path(px, supports, resistances, "SHORT"),
     }

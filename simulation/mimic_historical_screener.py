@@ -7,6 +7,7 @@ regime-aware ranked symbol lists used in production.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -28,7 +29,8 @@ class HistoricalScreener:
     def _load_day(self, date: datetime) -> pd.DataFrame:
         key = date.strftime("%Y%m%d")
         if key not in self._cache:
-            path = f"{self.ticker_dir}/ticker_24h_{key}.parquet"
+            historical_path = f"{self.ticker_dir}/ticker_24h_historical_{key}.parquet"
+            path = historical_path if os.path.exists(historical_path) else f"{self.ticker_dir}/ticker_24h_{key}.parquet"
             try:
                 self._cache[key] = pd.read_parquet(path)
             except Exception:

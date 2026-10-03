@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Depends, Q
 from fastapi import status as http_status
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional, Tuple
 from collections import Counter
@@ -270,6 +271,7 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 # ── API Key auth dependency (for mutating / control endpoints) ────────────────
@@ -546,8 +548,9 @@ _ENTRY_EVIDENCE_CACHE_TTL_SECONDS = 15
 # warm cache per `days` and refresh it in the background. Dashboard polling gets
 # the warm copy instantly; stale copies age out after TTL.
 _DASHBOARD_SUMMARY_CACHE: Dict[int, Dict[str, Any]] = {}
-_DASHBOARD_SUMMARY_TTL_SECONDS = 10
-_DASHBOARD_SUMMARY_MAX_STALE_SECONDS = 90
+_DASHBOARD_SUMMARY_TTL_SECONDS = 30
+_DASHBOARD_SUMMARY_MAX_STALE_SECONDS = 86400
+_DASHBOARD_SUMMARY_REFRESH_TASK: Optional[asyncio.Task] = None
 
 # Wire db_client into Signal Store
 if db_client:
@@ -634,6 +637,23 @@ def startup_event():
                 print(f"Balance sync: imported {len(synced)} orphan position(s): {synced}")
             else:
                 print("Balance sync: no orphan assets found (>$5 USDT)")
+        if (
+            settings.agent_mode == "auto"
+            and comp.portfolio_manager
+            and bool(getattr(settings, "portfolio_proactive_liquidity_enabled", False))
+        ):
+            from run_trades import _get_futures_client
+            _liquidity_futures = _get_futures_client(
+                settings,
+                db_client=comp.db_client,
+                injected_client=comp.futures_client,
+            ) if getattr(settings, "futures_enabled", True) else None
+            _liquidity_result = comp.portfolio_manager.reconcile_proactive_liquidity(
+                futures_client=_liquidity_futures,
+                db_client=comp.db_client,
+                trigger="startup_after_position_sync",
+            )
+            print(f"[PortfolioLiquidity] startup: {_liquidity_result}")
     except Exception as e:
         print(f"Balance sync error at startup: {e}")
     # Start background trade cycle only if agent is in auto mode
@@ -737,6 +757,9 @@ def startup_event():
         asyncio.create_task(_config_drift_loop())
     except Exception as e:
         print(f"[ConfigGovernance] failed to start drift loop: {e}")
+    global _DASHBOARD_SUMMARY_REFRESH_TASK
+    if _DASHBOARD_SUMMARY_REFRESH_TASK is None or _DASHBOARD_SUMMARY_REFRESH_TASK.done():
+        _DASHBOARD_SUMMARY_REFRESH_TASK = asyncio.create_task(_dashboard_summary_refresh_loop())
     # Start SMART result-based health recheck loop
     try:
         asyncio.create_task(_health_results_recheck_loop())
@@ -2066,6 +2089,250 @@ async def get_account_balance() -> Dict:
         raise HTTPException(status_code=500, detail=f"Failed to get account balance: {str(e)}")
 
 
+@app.get("/portfolio/capital")
+async def get_portfolio_capital(_auth: None = Depends(_require_api_key)) -> Dict[str, Any]:
+    """Read-only Spot/Futures wallet, reserve, and in-memory entry reservation snapshot."""
+    comp = get_components()
+    timestamp = datetime.now(timezone.utc).isoformat()
+    result: Dict[str, Any] = {
+        "ok": True,
+        "environment": APP_ENV_LABEL,
+        "timestamp": timestamp,
+        "spot": {
+            "status": "unknown", "balances": {}, "usdt": None, "bnb": None,
+            "wallet_value_usdt_equivalent": None,
+            "asset_values_usdt_equivalent": {},
+            "unpriced_assets": [],
+        },
+        "futures": {
+            "status": "unknown", "account": {}, "assets": {}, "open_positions": [],
+            "multi_assets_margin": None,
+            "wallet_value_usdt_equivalent": None,
+            "asset_values_usdt_equivalent": {},
+            "unpriced_assets": [],
+        },
+        "bnb_reserves_usdt": None,
+        "proactive_liquidity": None,
+        "capital_reservations": [],
+        "pause_new_entries": _get_pause_new_entries_status(),
+        "errors": {},
+    }
+
+    def _reported_number(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+            return number if number >= 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    async def _value_wallet_assets(rows: Any, quantity_key: str, price_getter: Any) -> Dict[str, Any]:
+        values: Dict[str, float] = {}
+        unpriced = []
+        total = 0.0
+        for row in rows or []:
+            asset = str(row.get("asset") or "").strip().upper()
+            quantity = _reported_number(row.get(quantity_key))
+            if not asset or quantity is None or quantity <= 0:
+                continue
+            if asset == "USDT":
+                value = quantity
+            else:
+                try:
+                    price = _reported_number(await asyncio.to_thread(price_getter, f"{asset}USDT"))
+                except Exception:
+                    price = None
+                if price is None or price <= 0:
+                    unpriced.append(asset)
+                    continue
+                value = quantity * price
+            values[asset] = value
+            total += value
+        return {
+            "wallet_value_usdt_equivalent": total if not unpriced else None,
+            "known_value_usdt_equivalent": total,
+            "asset_values_usdt_equivalent": values,
+            "unpriced_assets": sorted(set(unpriced)),
+        }
+
+    try:
+        spot_details = await asyncio.to_thread(comp.binance_client.get_account_balance_details)
+        normalized_spot = {}
+        for asset, row in (spot_details or {}).items():
+            normalized_spot[str(asset)] = {
+                "free": _reported_number(row.get("free")),
+                "locked": _reported_number(row.get("locked")),
+                "total": _reported_number(row.get("total")),
+            }
+        spot_valuation = await _value_wallet_assets(
+            [
+                {"asset": asset, "total": values.get("total")}
+                for asset, values in normalized_spot.items()
+            ],
+            "total",
+            comp.binance_client.get_symbol_price,
+        )
+        result["spot"] = {
+            "status": "ok",
+            "balances": normalized_spot,
+            "usdt": normalized_spot.get("USDT", {"free": 0.0, "locked": 0.0, "total": 0.0}),
+            "bnb": normalized_spot.get("BNB", {"free": 0.0, "locked": 0.0, "total": 0.0}),
+            **spot_valuation,
+        }
+    except Exception as exc:
+        result["ok"] = False
+        result["errors"]["spot"] = str(exc)
+        result["spot"]["status"] = "error"
+
+    try:
+        futures_client = run_trades._get_futures_client(
+            settings,
+            db_client=getattr(comp, "db_client", None),
+            injected_client=getattr(comp, "futures_client", None),
+        )
+        account = await asyncio.to_thread(futures_client.get_account_info)
+        asset_rows = account.get("assets") if isinstance(account, dict) else None
+        if not isinstance(asset_rows, list):
+            raise ValueError("Futures account response missing assets list")
+        futures_assets = {}
+        for row in asset_rows:
+            asset = str(row.get("asset") or "").strip()
+            if not asset:
+                continue
+            futures_assets[asset] = {
+                key: _reported_number(row.get(key))
+                for key in (
+                    "walletBalance", "availableBalance", "crossWalletBalance",
+                    "positionInitialMargin", "openOrderInitialMargin",
+                    "initialMargin", "maintMargin",
+                )
+            }
+            futures_assets[asset]["marginAvailable"] = row.get("marginAvailable")
+        futures_valuation = await _value_wallet_assets(
+            asset_rows,
+            "walletBalance",
+            futures_client.get_price,
+        )
+        open_positions = []
+        for position in account.get("positions", []) or []:
+            amount = _reported_number(abs(float(position.get("positionAmt", 0.0) or 0.0)))
+            if amount:
+                open_positions.append({
+                    "symbol": position.get("symbol"),
+                    "position_side": position.get("positionSide"),
+                    "position_amt": _reported_number(position.get("positionAmt")),
+                    "notional": _reported_number(position.get("notional")),
+                    "initial_margin": _reported_number(position.get("initialMargin")),
+                    "unrealized_profit": _reported_number(position.get("unrealizedProfit")),
+                })
+        account_keys = (
+            "totalWalletBalance", "totalMarginBalance", "availableBalance",
+            "totalInitialMargin", "totalMaintMargin", "totalOpenOrderInitialMargin",
+            "totalPositionInitialMargin", "maxWithdrawAmount",
+        )
+        result["futures"] = {
+            "status": "ok",
+            "account": {key: _reported_number(account.get(key)) for key in account_keys},
+            "multi_assets_margin": account.get("multiAssetsMargin") if isinstance(account.get("multiAssetsMargin"), bool) else None,
+            "assets": futures_assets,
+            "open_positions": open_positions,
+            **futures_valuation,
+        }
+    except Exception as exc:
+        result["ok"] = False
+        result["errors"]["futures"] = str(exc)
+        result["futures"]["status"] = "error"
+
+    try:
+        from binance_commission import get_bnb_reserve_usdt
+
+        result["bnb_reserves_usdt"] = get_bnb_reserve_usdt(settings)
+    except Exception as exc:
+        result["ok"] = False
+        result["errors"]["bnb_reserves"] = str(exc)
+
+    try:
+        from binance_commission import get_bnb_reserve_usdt
+
+        portfolio_manager = getattr(comp, "portfolio_manager", None)
+        if portfolio_manager is None:
+            raise RuntimeError("portfolio_manager_unavailable")
+        targets = portfolio_manager.proactive_liquidity_targets()
+        reserves = result.get("bnb_reserves_usdt") or get_bnb_reserve_usdt(settings)
+        spot_reserve = max(0.0, float(reserves.get("spot_reserve_usdt", 0.0) or 0.0))
+        futures_reserve = max(0.0, float(reserves.get("futures_reserve_usdt", 0.0) or 0.0))
+        spot_spendable = None
+        if result["spot"].get("status") == "ok":
+            spot_usdt = result["spot"].get("usdt", {})
+            spot_free = _reported_number(spot_usdt.get("free"))
+            spot_spendable = max(0.0, spot_free - spot_reserve) if spot_free is not None else None
+        futures_spendable = None
+        if result["futures"].get("status") == "ok":
+            futures_usdt = result["futures"].get("assets", {}).get("USDT", {})
+            futures_free = _reported_number(futures_usdt.get("availableBalance"))
+            futures_spendable = max(0.0, futures_free - futures_reserve) if futures_free is not None else None
+        _latest_reconcile = None
+        if comp.db_client:
+            _latest_rows = comp.db_client.execute_query(
+                "SELECT ts, detail FROM trades_audit "
+                "WHERE event='liquidity_reconcile_result' "
+                "ORDER BY id DESC LIMIT 1"
+            )
+            if _latest_rows:
+                _latest_reconcile = {
+                    "timestamp": _latest_rows[0].get("ts"),
+                    "result": _latest_rows[0].get("detail"),
+                }
+        result["proactive_liquidity"] = {
+            "enabled": bool(getattr(settings, "portfolio_proactive_liquidity_enabled", False)),
+            "buffer_usdt": targets["buffer_usdt"],
+            "targets": targets,
+            "spot": {
+                "spendable_usdt": spot_spendable,
+                "reserve_usdt": spot_reserve,
+                "shortfall_to_entry_usdt": max(0.0, targets["spot_min_ready_usdt"] - spot_spendable) if spot_spendable is not None else None,
+                "shortfall_to_target_usdt": max(0.0, targets["spot_target_usdt"] - spot_spendable) if spot_spendable is not None else None,
+            },
+            "futures": {
+                "spendable_usdt": futures_spendable,
+                "reserve_usdt": futures_reserve,
+                "shortfall_to_entry_usdt": max(0.0, targets["futures_min_ready_usdt"] - futures_spendable) if futures_spendable is not None else None,
+                "shortfall_to_target_usdt": max(0.0, targets["futures_target_usdt"] - futures_spendable) if futures_spendable is not None else None,
+            },
+            "last_reconcile": _latest_reconcile,
+        }
+    except Exception as exc:
+        result["ok"] = False
+        result["errors"]["proactive_liquidity"] = str(exc)
+
+    try:
+        now_monotonic = time.monotonic()
+        reservations = []
+        for key, reservation in list(run_trades._CAPITAL_RESERVATIONS.items()):
+            seconds_remaining = float(reservation.get("expires_at", 0.0) or 0.0) - now_monotonic
+            if seconds_remaining > 0:
+                reservations.append({
+                    "key": key,
+                    "symbol": reservation.get("symbol"),
+                    "bucket": reservation.get("bucket"),
+                    "amount_usdt": _reported_number(reservation.get("amount")),
+                    "ready_id": reservation.get("ready_id"),
+                    "reason_context": reservation.get("reason_context"),
+                    "seconds_remaining": round(seconds_remaining, 2),
+                })
+        result["capital_reservations"] = reservations
+    except Exception as exc:
+        result["ok"] = False
+        result["errors"]["capital_reservations"] = str(exc)
+
+    result["entry_policy"] = {
+        "directional_policy_mode": str(getattr(settings, "directional_policy_mode", "active") or "active"),
+        "ranking_mode": str(getattr(settings, "range_scalp_ranking_mode", "ror") or "ror"),
+        "capital_bridge_transfers_enabled": False,
+        "bnb_auto_funding_enabled_before_entry": False,
+    }
+    return result
+
+
 @app.get("/account/pnl-history")
 async def get_pnl_history() -> Dict:
     """Get PnL history for day, week, and year."""
@@ -2137,6 +2404,27 @@ async def get_open_positions() -> Dict:
                     peak_pnl_pct = round((float(trailing_peak) - entry_price) / entry_price * 100, 2)
                 positions_data.append({
                     "symbol": symbol,
+                    "base_asset": symbol.removesuffix("USDT"),
+                    "base_quantity": quantity,
+                    "balance_unit": symbol.removesuffix("USDT"),
+                    "invested_usdt": round(entry_price * quantity, 8),
+                    "current_value_usdt": round(float(cp or 0.0) * quantity, 8),
+                    "lineage_id": meta.get('lineage_id', str(position.position_id)),
+                    "position_source": meta.get('source', 'bot_fill'),
+                    "entry_context_status": meta.get('entry_context_status'),
+                    "cost_basis_status": meta.get(
+                        'cost_basis_status',
+                        'unknown' if meta.get('entry_context_status') == 'unknown_reconciled' else 'known',
+                    ),
+                    "entry_price_source": meta.get(
+                        'entry_price_source',
+                        'balance_sync_mark_not_acquisition_cost'
+                        if meta.get('entry_context_status') == 'unknown_reconciled'
+                        else 'position_record',
+                    ),
+                    "balance_free_qty": meta.get('balance_free_qty'),
+                    "balance_locked_qty": meta.get('balance_locked_qty'),
+                    "balance_total_qty": meta.get('balance_total_qty'),
                     "position_id": position.position_id,
                     "entry_number": entry_num,
                     "side": position.side,
@@ -2185,6 +2473,7 @@ async def get_open_positions() -> Dict:
 async def close_all_positions(_auth: None = Depends(_require_api_key)) -> Dict:
     """Sell all open positions on Binance and close them in DB."""
     from run_trades import get_symbol_filters, align_quantity_to_step, is_quantity_valid
+    from trade_utils import get_binance_sell_qty
     results = []
     all_positions = position_manager.get_all_positions()
     if not all_positions:
@@ -2193,16 +2482,48 @@ async def close_all_positions(_auth: None = Depends(_require_api_key)) -> Dict:
     for symbol, pos_list in all_positions.items():
         total_qty = sum(float(p.quantity) for p in pos_list)
         try:
+            price = float(_get_request_price(price_cache, symbol))
+            sell_check = get_binance_sell_qty(binance_client, symbol, total_qty, price)
+            if sell_check.get('balance_status') != 'ok' or sell_check.get('is_ghost') or sell_check.get('is_dust'):
+                results.append({
+                    "symbol": symbol,
+                    "status": "balance_unverified_or_not_sellable",
+                    "position_preserved": True,
+                    "balance_status": sell_check.get('balance_status'),
+                    "free_quantity": sell_check.get('free_balance_qty'),
+                    "locked_quantity": sell_check.get('locked_balance_qty'),
+                    "total_quantity": sell_check.get('balance_qty'),
+                })
+                continue
             try:
                 filters = get_symbol_filters(binance_client, symbol)
-                total_qty = align_quantity_to_step(total_qty, filters["step"])
-            except Exception:
-                pass
-            price = float(_get_request_price(price_cache, symbol))
+                total_qty = align_quantity_to_step(float(sell_check.get('qty_to_sell') or 0.0), filters["step"])
+            except Exception as filter_error:
+                results.append({"symbol": symbol, "status": "symbol_filters_unavailable", "error": str(filter_error), "position_preserved": True})
+                continue
+            valid_qty, invalid_reason = is_quantity_valid(total_qty, price, filters)
+            if not valid_qty:
+                results.append({"symbol": symbol, "status": "quantity_not_sellable", "reason": invalid_reason, "position_preserved": True})
+                continue
             order = binance_client.create_market_order(symbol=symbol, side="SELL", quantity=total_qty)
+            fill = binance_client.verify_and_fetch_fills(order, f"API CLOSE ALL SELL {symbol}")
+            if not fill:
+                results.append({"symbol": symbol, "qty": total_qty, "status": "fill_unconfirmed", "position_preserved": True})
+                continue
+            filled_qty = float(fill.get("qty", 0.0) or 0.0)
+            if filled_qty <= 0:
+                results.append({"symbol": symbol, "qty": total_qty, "status": "fill_quantity_invalid", "position_preserved": True})
+                continue
             commission_rate = config_helpers.get_param(settings, 'binance_commission_rate')
-            position_manager.close_all_positions_for_symbol(symbol, price, "manual_rebalance", commission_rate)
-            results.append({"symbol": symbol, "qty": total_qty, "price": price, "status": "sold", "entries_closed": len(pos_list)})
+            position_manager.close_all_positions_for_symbol(
+                symbol,
+                float(fill.get("avg_price") or price),
+                "manual_rebalance",
+                commission_rate,
+                qty_closed=min(filled_qty, total_qty),
+                exit_fill=fill,
+            )
+            results.append({"symbol": symbol, "qty": filled_qty, "price": float(fill.get("avg_price") or price), "status": "sold", "entries_closed": len(pos_list)})
         except Exception as e:
             results.append({"symbol": symbol, "status": "error", "error": str(e)})
     return {"closed": results, "count": len(results)}
@@ -2297,6 +2618,18 @@ async def get_closed_positions(limit: int = 20) -> Dict:
                 else 'SPOT_LONG'
             )
             _closed_position_id = getattr(pos, 'position_id', None) or f"{pos.symbol}:{pos.entry_time}:{pos.exit_time}:{_closed_position_mode}"
+            _recorded_exit_price = float(pos.exit_price or 0)
+            _display_exit_price = _recorded_exit_price
+            _display_pnl_percentage = float(pos.pnl_percentage or 0)
+            _smart_meta = _closed_meta.get('smart_meta') if isinstance(_closed_meta, dict) else {}
+            _smart_meta = _smart_meta if isinstance(_smart_meta, dict) else {}
+            _verified_realized = _smart_meta.get('binance_realized_pnl')
+            _verified_mode = _smart_meta.get('pnl_accounting_mode')
+            _entry_value = float(pos.entry_price or 0) * float(pos.quantity or 0)
+            if _closed_trade_type == 'futures' and _verified_mode == 'binance_user_trade_verified' and _verified_realized is not None and float(pos.quantity or 0) > 0:
+                _verified_move = float(_verified_realized) / float(pos.quantity)
+                _display_exit_price = float(pos.entry_price) - _verified_move if _closed_is_short else float(pos.entry_price) + _verified_move
+                _display_pnl_percentage = (float(pos.pnl or 0) / _entry_value * 100) if _entry_value > 0 else 0.0
             positions_data.append({
                 "symbol": pos.symbol,
                 "position_id": _closed_position_id,
@@ -2308,10 +2641,12 @@ async def get_closed_positions(limit: int = 20) -> Dict:
                 "position_mode": _closed_position_mode,
                 "quantity": pos.quantity,
                 "entry_price": pos.entry_price,
-                "exit_price": pos.exit_price,
+                "exit_price": round(_display_exit_price, 8),
+                "recorded_exit_price": _recorded_exit_price,
+                "exit_price_source": "binance_realized_pnl_derived" if _display_exit_price != _recorded_exit_price else "recorded",
                 "invested_usdt": round(float(pos.entry_price or 0) * float(pos.quantity or 0), 4),
                 "pnl": pos.pnl,
-                "pnl_percentage": pos.pnl_percentage,
+                "pnl_percentage": round(_display_pnl_percentage, 4),
                 "entry_time": to_mexico_time_str(pos.entry_time),
                 "exit_time": to_mexico_time_str(pos.exit_time),
                 "close_reason": pos.close_reason,
@@ -3414,15 +3749,48 @@ async def get_staging_comparison_metrics() -> Dict:
         return {"ok": False, "error": str(exc), "summary": _build_staging_compare_summary([])}
 
 
+def _load_materialized_dashboard_summary(days: int) -> Optional[Dict[str, Any]]:
+    if not db_client:
+        return None
+    try:
+        rows = db_client.execute_query(
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key=%s LIMIT 1",
+            (f"dashboard_summary_materialized_{days}d",),
+        ) or []
+        if not rows:
+            return None
+        payload = rows[0].get("value")
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _save_materialized_dashboard_summary(days: int, payload: Dict[str, Any]) -> None:
+    if not db_client:
+        return
+    serialized = json.dumps(payload, default=str)
+    db_client.execute_update(
+        """
+        INSERT INTO trading_runtime_state (key, value, updated_at)
+        VALUES (%s, %s::jsonb, NOW())
+        ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()
+        """,
+        (f"dashboard_summary_materialized_{days}d", serialized),
+    )
+
+
 async def _background_refresh_dashboard_summary(days: int) -> Dict:
     """Compute and store a fresh dashboard summary for a given `days`."""
     try:
-        payload = await _compute_dashboard_summary(days)
+        payload = await asyncio.to_thread(lambda: asyncio.run(_compute_dashboard_summary(days)))
         _DASHBOARD_SUMMARY_CACHE[days] = {
             "payload": payload,
             "last_success_at": time.monotonic(),
             "refreshing": False,
         }
+        await asyncio.to_thread(_save_materialized_dashboard_summary, days, payload)
         return payload
     except Exception as exc:
         entry = _DASHBOARD_SUMMARY_CACHE.get(days)
@@ -3438,6 +3806,14 @@ async def _background_refresh_dashboard_summary(days: int) -> Dict:
             entry["refreshing"] = False
 
 
+async def _dashboard_summary_refresh_loop() -> None:
+    """Keep the dashboard's common summary windows materialized."""
+    while True:
+        for days in (1, 7):
+            await _background_refresh_dashboard_summary(days)
+        await asyncio.sleep(_DASHBOARD_SUMMARY_TTL_SECONDS)
+
+
 @app.get("/dashboard/summary")
 async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
     """Return the dashboard summary, using a warm cache refreshed in the background."""
@@ -3448,15 +3824,18 @@ async def get_dashboard_summary(days: int = Query(7, ge=1, le=365)) -> Dict:
     })
     now = time.monotonic()
     payload = entry.get("payload")
+    if not payload:
+        payload = await asyncio.to_thread(_load_materialized_dashboard_summary, days)
+        if payload:
+            entry["payload"] = payload
+            entry["last_success_at"] = now - _DASHBOARD_SUMMARY_TTL_SECONDS
     last = entry.get("last_success_at") or 0
-    if payload and now - last < _DASHBOARD_SUMMARY_TTL_SECONDS:
+    if now - last >= _DASHBOARD_SUMMARY_TTL_SECONDS and not entry.get("refreshing"):
+        entry["refreshing"] = True
+        asyncio.create_task(_background_refresh_dashboard_summary(days))
+    if payload:
         return payload
-    if payload and now - last < _DASHBOARD_SUMMARY_MAX_STALE_SECONDS:
-        if not entry.get("refreshing"):
-            entry["refreshing"] = True
-            asyncio.create_task(_background_refresh_dashboard_summary(days))
-        return payload
-    return await _background_refresh_dashboard_summary(days)
+    raise HTTPException(status_code=503, detail="dashboard_summary_materialization_unavailable")
 
 
 async def _compute_dashboard_summary(days: int) -> Dict:
@@ -4530,21 +4909,33 @@ async def _compute_dashboard_summary(days: int) -> Dict:
         def _cr_to_list(d):
             return sorted([{"reason": k, "count": v["count"], "pnl": round(v["pnl"], 4)}
                            for k, v in d.items()], key=lambda x: x["pnl"], reverse=True)
+
+        def _is_reconciliation_reason(reason: str) -> bool:
+            from close_contract import infer_reconciliation_state
+            return infer_reconciliation_state(reason or "") == "reconciled"
+
+        def _split_strategy_recon(cr_dict, spot_pnl, spot_c, fut_pnl, fut_c):
+            recon_pnl = 0.0
+            recon_trades = 0
+            for k, v in cr_dict.items():
+                if _is_reconciliation_reason(k):
+                    recon_pnl += v["pnl"]
+                    recon_trades += v["count"]
+            return {
+                "by_reason": _cr_to_list(cr_dict),
+                "total_pnl": round(sum(v["pnl"] for v in cr_dict.values()), 4),
+                "total_trades": sum(v["count"] for v in cr_dict.values()),
+                "strategy_pnl": round(sum(v["pnl"] for v in cr_dict.values()) - recon_pnl, 4),
+                "strategy_trades": sum(v["count"] for v in cr_dict.values()) - recon_trades,
+                "reconciliation_pnl": round(recon_pnl, 4),
+                "reconciliation_trades": recon_trades,
+                "spot_pnl": round(spot_pnl, 4), "spot_count": spot_c,
+                "futures_pnl": round(fut_pnl, 4), "futures_count": fut_c,
+            }
+
         result["pnl_by_close_reason"] = {
-            "today": {
-                "by_reason": _cr_to_list(_cr_today),
-                "total_pnl": round(sum(v["pnl"] for v in _cr_today.values()), 4),
-                "total_trades": sum(v["count"] for v in _cr_today.values()),
-                "spot_pnl": round(_today_spot_pnl, 4), "spot_count": _today_spot_c,
-                "futures_pnl": round(_today_fut_pnl, 4), "futures_count": _today_fut_c,
-            },
-            "week": {
-                "by_reason": _cr_to_list(_cr_week),
-                "total_pnl": round(sum(v["pnl"] for v in _cr_week.values()), 4),
-                "total_trades": sum(v["count"] for v in _cr_week.values()),
-                "spot_pnl": round(_week_spot_pnl, 4), "spot_count": _week_spot_c,
-                "futures_pnl": round(_week_fut_pnl, 4), "futures_count": _week_fut_c,
-            },
+            "today": _split_strategy_recon(_cr_today, _today_spot_pnl, _today_spot_c, _today_fut_pnl, _today_fut_c),
+            "week": _split_strategy_recon(_cr_week, _week_spot_pnl, _week_spot_c, _week_fut_pnl, _week_fut_c),
             "daily_target": 40.0,
         }
     except Exception as e:
@@ -6325,6 +6716,7 @@ SR_STRATEGY_COMPONENT_IDS = {
     "sr_pool",
     "staged_immediate_entry",
     "sr_thesis_gate",
+    "sr_path_lifecycle",
     "sr_attempt_sequence",
     "sr_pool_attempt_memory",
     "sr_structure_invalidation_exit",
@@ -6759,6 +7151,31 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
             _shadow_readiness_gate("observation_sample", volume_gate_total, 200, volume_gate_total >= 200, "Recolectar checks de dirección con vol_spike antes de calibrar el multiplicador de anomalía."),
         ]
 
+        bilateral_rows = _query("sr_bilateral_active", """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE detail->>'selected_mode' IN ('SPOT_LONG', 'FUTURES_LONG')) AS longs,
+                COUNT(*) FILTER (WHERE detail->>'selected_mode' IN ('FUTURES_SHORT', 'SPOT_MARGIN_SHORT')) AS shorts,
+                COUNT(*) FILTER (WHERE detail->>'selected_mode' = 'ABSTAIN') AS abstains,
+                COUNT(*) FILTER (WHERE detail->>'selected_thesis_type' IS NOT NULL AND detail->>'selected_thesis_type' <> 'NONE') AS thesis_covered,
+                AVG((NULLIF(detail->>'long_expected_net_return', ''))::float) AS avg_long_return,
+                AVG((NULLIF(detail->>'short_expected_net_return', ''))::float) AS avg_short_return
+            FROM trades_audit
+            WHERE event = 'range_scalp_direction_arbitration'
+              AND ts >= NOW() - INTERVAL '7 days'
+              AND detail->>'policy' = 'sr_bilateral_expected_net_return_on_risk_v1'
+        """)
+        bilateral_data = bilateral_rows[0] if bilateral_rows else {}
+        bilateral_total = int(bilateral_data.get("total") or 0)
+        bilateral_longs = int(bilateral_data.get("longs") or 0)
+        bilateral_shorts = int(bilateral_data.get("shorts") or 0)
+        bilateral_abstains = int(bilateral_data.get("abstains") or 0)
+        bilateral_covered = int(bilateral_data.get("thesis_covered") or 0)
+        bilateral_gates = [
+            _shadow_readiness_gate("active_decision_sample", bilateral_total, 100, bilateral_total >= 100, "Recolectar 100 decisiones activas antes de recalibrar la política bilateral."),
+            _shadow_readiness_gate("thesis_coverage", bilateral_covered, bilateral_total or 1, bilateral_total > 0 and bilateral_covered == bilateral_total, "Persistir thesis_type en cada decisión ejecutable."),
+        ]
+
         immediate_entry_rows = _query("staged_immediate_entry_shadow", """
             SELECT COUNT(*) AS n FROM (
                 SELECT metadata FROM trades_open WHERE metadata->'smart_meta'->>'is_immediate_leg' = 'true'
@@ -6929,6 +7346,39 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
         sso_target_guard_metrics = get_range_scalp_sso4_shadow_metrics()
         ug_breakout_follow_metrics = get_ug_breakout_follow_shadow_metrics()
         hard_risk_metrics = get_hard_risk_shadow_metrics()
+
+        # sr_path_lifecycle: thesis-anchored path evaluation coverage + state transitions
+        # + horizon-gate shadow blocks. Reads thesis_snapshot_v1.sr_path_v1 persisted
+        # at open and sr_path_state_change / sr_path_horizon_shadow_block audit events.
+        sr_path_open_rows = _query("sr_path_lifecycle_open", """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE metadata->'thesis_snapshot_v1'->'sr_path_v1' IS NOT NULL) AS with_path,
+                COUNT(*) FILTER (WHERE metadata->'_smart_meta'->'sr_path_state'->>'state' IS NOT NULL
+                                   OR metadata->'sr_path_state'->>'state' IS NOT NULL) AS with_state
+            FROM trades_open
+        """)
+        sr_path_open = sr_path_open_rows[0] if sr_path_open_rows else {}
+        sr_path_open_total = int(sr_path_open.get("total") or 0)
+        sr_path_open_with_path = int(sr_path_open.get("with_path") or 0)
+        sr_path_open_with_state = int(sr_path_open.get("with_state") or 0)
+        sr_path_audit_rows = _query("sr_path_lifecycle_audit", """
+            SELECT
+                COUNT(*) FILTER (WHERE event = 'sr_path_state_change') AS state_changes,
+                COUNT(*) FILTER (WHERE event = 'sr_path_horizon_shadow_block') AS horizon_blocks
+            FROM trades_audit
+            WHERE ts >= NOW() - INTERVAL '7 days'
+        """)
+        sr_path_audit = sr_path_audit_rows[0] if sr_path_audit_rows else {}
+        sr_path_state_changes = int(sr_path_audit.get("state_changes") or 0)
+        sr_path_horizon_blocks = int(sr_path_audit.get("horizon_blocks") or 0)
+        sr_path_evaluator_mode = str(_cfg_param(live_settings, "sr_path_evaluator_mode", "shadow") or "shadow").lower()
+        sr_path_horizon_mode = str(_cfg_param(live_settings, "sr_path_horizon_gate_mode", "shadow") or "shadow").lower()
+        sr_path_lifecycle_gates = [
+            _shadow_readiness_gate("thesis_path_coverage", sr_path_open_with_path, max(1, sr_path_open_total), sr_path_open_total == 0 or sr_path_open_with_path >= max(1, sr_path_open_total), "Asegurar que toda apertura nueva persista sr_path_v1 en thesis_snapshot_v1."),
+            _shadow_readiness_gate("state_transition_sample", sr_path_state_changes, 20, sr_path_state_changes >= 20, "Recolectar al menos 20 transiciones de estado del path antes de activar el evaluador."),
+            _shadow_readiness_gate("horizon_shadow_sample", sr_path_horizon_blocks, 5, sr_path_horizon_blocks >= 5, "Recolectar al menos 5 bloqueos shadow del gate de horizonte para medir impacto del rango 1-4 velas."),
+        ]
         funding_snapshot = _build_funding_guard_shadow_snapshot(live_settings, components, source_errors)
         funding_mode = str(_cfg_param(live_settings, "funding_fee_guard_mode", "shadow") or "shadow").lower()
         staged_cfg = getattr(live_settings, "staged_entry_regime_config", {})
@@ -6969,14 +7419,46 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
             ),
         ]
 
+        close_execution_rows = _query("close_execution_observability", """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE metadata->>'close_expected_price' IS NOT NULL) AS expected_price,
+                COUNT(*) FILTER (WHERE metadata->>'close_real_price' IS NOT NULL) AS real_price,
+                COUNT(*) FILTER (WHERE metadata->>'expected_vwap' IS NOT NULL) AS expected_vwap,
+                COUNT(*) FILTER (WHERE metadata->>'realized_avg_price' IS NOT NULL) AS realized_avg_price,
+                COUNT(*) FILTER (WHERE metadata->>'realized_slippage_bps' IS NOT NULL) AS realized_slippage,
+                COUNT(*) FILTER (WHERE metadata->>'close_order_type' = 'LIMIT_FOK') AS fok,
+                COUNT(*) FILTER (WHERE metadata->>'close_escalation_reason' IS NOT NULL) AS escalated,
+                COUNT(*) FILTER (WHERE metadata->>'close_order_type' = 'MARKET') AS market
+            FROM trades_closed
+            WHERE exit_time >= NOW() - INTERVAL '14 days'
+              AND COALESCE(is_corrupted, FALSE) = FALSE
+              AND COALESCE(metadata->>'trade_type', '') IN ('futures', 'spot', 'spot_margin')
+        """)
+        close_execution = close_execution_rows[0] if close_execution_rows else {}
+        close_execution_total = int(close_execution.get("total") or 0)
+        close_execution_expected = int(close_execution.get("expected_price") or 0)
+        close_execution_real = int(close_execution.get("real_price") or 0)
+        close_execution_vwap = int(close_execution.get("expected_vwap") or 0)
+        close_execution_real_vwap = int(close_execution.get("realized_avg_price") or 0)
+        close_execution_slippage = int(close_execution.get("realized_slippage") or 0)
+        close_execution_fok = int(close_execution.get("fok") or 0)
+        close_execution_escalated = int(close_execution.get("escalated") or 0)
+        close_execution_market = int(close_execution.get("market") or 0)
+        close_execution_gates = [
+            _shadow_readiness_gate("expected_price_coverage", _pct(close_execution_expected, close_execution_total), 95.0, close_execution_total == 0 or _pct(close_execution_expected, close_execution_total) >= 95.0, "Persistir precio esperado en cada cierre Futures."),
+            _shadow_readiness_gate("real_price_coverage", _pct(close_execution_real, close_execution_total), 100.0, close_execution_total == 0 or _pct(close_execution_real, close_execution_total) == 100.0, "Persistir precio promedio real confirmado por Binance."),
+            _shadow_readiness_gate("vwap_coverage", _pct(close_execution_vwap, close_execution_total), 95.0, close_execution_total == 0 or _pct(close_execution_vwap, close_execution_total) >= 95.0, "Persistir VWAP esperado o razón explícita de libro no disponible."),
+        ]
+
         entries = [
             {
                 "id": "directional_v2",
-                "name": "Confirmación direccional v2",
-                "mode": _cfg_param(live_settings, "directional_policy_mode", "shadow"),
-                "state": _shadow_readiness_state(_cfg_param(live_settings, "directional_policy_mode", "shadow"), directional_gates),
-                "summary": f"Decisiones: {directional_observed}/{directional_total}; divergencias sin ejecución: {directional_divergent}.",
-                "gates": directional_gates,
+                "name": "Confirmación direccional temporal v2",
+                "mode": "retired",
+                "state": "RETIRED",
+                "summary": f"Retirada por la política bilateral atómica; histórico: {directional_observed}/{directional_total}, divergencias: {directional_divergent}.",
+                "gates": [],
             },
             {
                 "id": "ug_loss_v2",
@@ -7152,6 +7634,32 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
                 "gates": volume_gate_gates,
             },
             {
+                "id": "sr_bilateral_active",
+                "name": "Selector bilateral S/R activo",
+                "mode": "active" if str(_cfg_param(live_settings, "directional_policy_mode", "active")).lower() != "disabled" else "disabled",
+                "state": _shadow_readiness_state(
+                    "active" if str(_cfg_param(live_settings, "directional_policy_mode", "active")).lower() != "disabled" else "disabled",
+                    bilateral_gates,
+                ),
+                "summary": (
+                    f"Decisiones 7d: {bilateral_total}; LONG={bilateral_longs}; SHORT={bilateral_shorts}; "
+                    f"ABSTAIN={bilateral_abstains}; tesis persistidas={bilateral_covered}."
+                ),
+                "gates": bilateral_gates,
+            },
+            {
+                "id": "close_execution_active",
+                "name": "Ejecución de cierres: esperado contra real",
+                "mode": str(_cfg_param(live_settings, "close_execution_mode", "active") or "active").lower(),
+                "state": _shadow_readiness_state(str(_cfg_param(live_settings, "close_execution_mode", "active") or "active").lower(), close_execution_gates),
+                "summary": (
+                    f"Futures 14d: {close_execution_total}; precio esperado/real={close_execution_expected}/{close_execution_real}; "
+                    f"VWAP={close_execution_vwap}/{close_execution_real_vwap}; slippage real={close_execution_slippage}; "
+                    f"FOK={close_execution_fok}; MARKET={close_execution_market}; escalados={close_execution_escalated}."
+                ),
+                "gates": close_execution_gates,
+            },
+            {
                 "id": "staged_immediate_entry",
                 "name": "Entrada inmediata escalonada (pierna 1 en S/R)",
                 "mode": "active" if _cfg_param(live_settings, "staged_immediate_entry_enabled", False) else "shadow",
@@ -7238,6 +7746,20 @@ async def get_shadow_readiness(_auth=Depends(_require_api_key)) -> Dict:
                 "gates": [
                     _shadow_readiness_gate("shadow_decisions", sr_invalidation_metrics.get("would_exit_total", 0), 10, sr_invalidation_metrics.get("would_exit_total", 0) >= 10, "Recolectar al menos 10 decisiones shadow antes de activar."),
                 ],
+            },
+            {
+                "id": "sr_path_lifecycle",
+                "name": "Ciclo de vida anclado a tesis S/R (sr_path_v1)",
+                "mode": sr_path_evaluator_mode,
+                "state": _shadow_readiness_state(sr_path_evaluator_mode, sr_path_lifecycle_gates),
+                "summary": (
+                    f"Cobertura path en abiertas: {sr_path_open_with_path}/{sr_path_open_total}; "
+                    f"con estado persistido: {sr_path_open_with_state}; "
+                    f"transiciones de estado (7d): {sr_path_state_changes}; "
+                    f"bloqueos shadow de horizonte (7d): {sr_path_horizon_blocks}; "
+                    f"gate horizonte: {sr_path_horizon_mode}."
+                ),
+                "gates": sr_path_lifecycle_gates,
             },
             {
                 "id": "position_telemetry_watcher",
@@ -9133,7 +9655,17 @@ async def get_health_status() -> Dict:
     if last_cycle:
         _now_utc = datetime.now(timezone.utc)
         _last_cycle_aware = last_cycle if last_cycle.tzinfo else last_cycle.replace(tzinfo=timezone.utc)
-        age_min = (_now_utc - _last_cycle_aware).total_seconds() / 60
+        _cycle_in_progress = bool(_cycle_diagnostics.get("in_progress"))
+        _cycle_started_at = _cycle_diagnostics.get("started_at")
+        if _cycle_in_progress and _cycle_started_at:
+            _started_aware = (
+                _cycle_started_at
+                if _cycle_started_at.tzinfo
+                else _cycle_started_at.replace(tzinfo=timezone.utc)
+            )
+            age_min = (_now_utc - _started_aware).total_seconds() / 60
+        else:
+            age_min = (_now_utc - _last_cycle_aware).total_seconds() / 60
         _stale_threshold = float(_cycle_diagnostics["stale_threshold_minutes"])
         stale = age_min > _stale_threshold
         _cycle_status = "warning" if stale else "ok"
@@ -9204,7 +9736,12 @@ async def get_health_status() -> Dict:
         all_pos = position_manager.get_all_positions()
         db_count = sum(len(v) for v in all_pos.values())
         import asyncio as _asyncio
-        balances = {} if bool(getattr(settings, 'dry_run', False)) else await _asyncio.to_thread(binance_client.get_account_balance)
+        if bool(getattr(settings, 'dry_run', False)):
+            balances = {}
+        elif hasattr(binance_client, 'get_wallet_balance'):
+            balances = await _asyncio.to_thread(binance_client.get_wallet_balance)
+        else:
+            balances = await _asyncio.to_thread(binance_client.get_account_balance)
         # Only check SPOT positions — futures positions (trade_type='futures') have no spot balance
         def _is_futures_pos(pos_list):
             return any(
@@ -9992,6 +10529,9 @@ _KELLY_EDITABLE_FIELDS = {
     "rebalance_max_abs_pnl_pct",
     "min_hold_minutes_spot_bull", "min_hold_for_prediction_exit",
     "lifecycle_structure_mode", "lifecycle_structure_partial_close_pct",
+    "exit_fractionation_mode",
+    "directional_unconfirmed_countertrend_margin",
+    "range_scalp_structure_override_margin",
     "position_intelligence_enabled", "position_intelligence_sr_refresh_seconds",
     "position_intelligence_min_confidence", "position_intelligence_emergency_confidence",
     "profit_predexit_early_protection_mode", "profit_predexit_early_active_regimes", "profit_predexit_early_min_peak_pct", "profit_predexit_early_min_giveback_pct",
@@ -10006,6 +10546,8 @@ _KELLY_EDITABLE_FIELDS = {
     "futures_adverse_exit_enabled", "futures_adverse_exit_loss_pct", "futures_adverse_exit_min_hours", "futures_adverse_exit_min_strength",
     "sr_invalidation_exit_enabled", "sr_invalidation_shadow_mode", "sr_invalidation_loss_pct",
     "sr_invalidation_confirmation_bars", "sr_invalidation_min_strength", "sr_invalidation_only_with_loss", "sr_invalidation_lookback_minutes",
+    "sr_path_evaluator_mode", "sr_path_stall_multiplier", "sr_path_extension_min_vol",
+    "sr_path_horizon_gate_mode", "sr_path_horizon_min_candles", "sr_path_horizon_max_candles",
     "profit_realization_enabled", "profit_realization_spot_enabled", "profit_realization_spot_min_profit_pct",
     "profit_realization_spot_partial_minutes", "profit_realization_spot_full_minutes", "profit_realization_spot_drawback_pct",
     "profit_realization_spot_partial_close_pct", "profit_realization_spot_max_extensions",
@@ -10040,11 +10582,16 @@ _KELLY_EDITABLE_FIELDS = {
     "sso_flat_stagnation_timeout_pnl_pct",
     "sso_flat_stagnation_timeout_pnl_pct_range_scalp",
     "slippage_pct",
+    "close_execution_mode", "close_execution_depth_levels", "close_execution_max_slippage_bps",
+    "close_execution_fok_retries", "close_execution_stale_book_seconds",
+    "close_execution_hard_risk_deadline_ms", "close_execution_soft_deadline_ms",
     "use_bnb_for_commission",
     "hybrid_optimizer_enabled", "auto_apply_backtest", "backtest_safe_only",
     # s72: new per-regime fields — DB-governed, expected to differ from code defaults
     "range_scalp_max_rsi", "range_scalp_max_bb_position",
     "range_scalp_sl_pct", "range_scalp_tp_pct",
+    "range_scalp_contract_sl_multiplier", "range_scalp_contract_tp_multiplier",
+    "entry_contract_sl_multiplier", "entry_contract_tp_multiplier",
     "entry_quality_vol_spike_min_spot_bull", "entry_quality_vol_spike_floor_spot_bull",
     "entry_quality_vol_spike_min_range_scalp",
     "min_hold_for_prediction_exit_futures_short",
@@ -10839,6 +11386,7 @@ async def get_commission_status(_auth=Depends(_require_api_key)) -> Dict:
             futures_client=_get_futures_client(_s),
             db_client=db_client,
             regime_mode=getattr(_s, 'current_regime_mode', 'SPOT_BULL'),
+            allow_funding_actions=False,
         )
         return {
             "ok": True,
@@ -10874,6 +11422,7 @@ async def get_dashboard_commission(_auth=Depends(_require_api_key)) -> Dict:
             futures_client=_get_futures_client(_s),
             db_client=db_client,
             regime_mode=getattr(_s, 'current_regime_mode', 'SPOT_BULL'),
+            allow_funding_actions=False,
         )
 
         # Recent commission totals from trades_closed (today + 7d)
@@ -13538,6 +14087,8 @@ async def _mimic_autorun_loop() -> None:
                 ran_cycle = True
                 result = await asyncio.to_thread(scheduler.run_once)
                 print(f"[MIMIC AutoRun] cycle finished: ok={result.get('ok')} phase={result.get('phase')} error={result.get('error')}")
+                backoff = float(getattr(get_components().settings, "mimic_autorun_failure_backoff_seconds", 60.0) or 60.0)
+                await asyncio.sleep(5 if result.get("ok") else max(5.0, backoff))
                 continue
             else:
                 can_run = scheduler.can_run_now()
@@ -13546,7 +14097,8 @@ async def _mimic_autorun_loop() -> None:
                     print(f"[MIMIC AutoRun] starting cycle — reason={can_run.get('reason')}")
                     result = await asyncio.to_thread(scheduler.run_once)
                     print(f"[MIMIC AutoRun] cycle finished: ok={result.get('ok')} phase={result.get('phase')} error={result.get('error')}")
-                    # If still able to run, loop immediately without sleeping to maximize window usage
+                    backoff = float(getattr(get_components().settings, "mimic_autorun_failure_backoff_seconds", 60.0) or 60.0)
+                    await asyncio.sleep(5 if result.get("ok") else max(5.0, backoff))
                     continue
         except Exception as exc:
             print(f"[MIMIC AutoRun] ERROR: {exc}")
@@ -13559,6 +14111,8 @@ async def _mimic_autorun_loop() -> None:
 @app.on_event("startup")
 async def _start_mimic_autorun() -> None:
     global _mimic_worker_task
+    if not bool(getattr(get_components().settings, "mimic_autorun_enabled", False)):
+        return
     if _mimic_worker_task is None:
         _mimic_worker_task = asyncio.create_task(_mimic_autorun_loop())
 

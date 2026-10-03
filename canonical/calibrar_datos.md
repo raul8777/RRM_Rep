@@ -17,6 +17,22 @@ Este documento es la referencia única de datos para análisis, calibración, en
 - Este documento (`calibrar_datos.md`) no redefine flujo de módulos; solo define autoridad de datos, contratos de features, linaje y criterios de promoción.
 - Si hay conflicto entre flujo operativo y evidencia de datos, se conserva la separación: `calibracion_entradas` decide operación, `calibrar_datos` decide validez analítica.
 
+## 0.0 Actualización 2026-09-27 — contrato de evidencia de entrada corregido + deduplicación
+
+Nuevos campos de datos producidos por la corrección de entradas (`analisis-shorts-direccion-rota-20260927.md`):
+
+- **`contract_diagnostics` / `validation_evidence`:** `stop_above_noise_floor`, `stop_distance_pct`, `atr_frac`, `atr_available`, `rejection_breakout_pressure`, `rejection_breakout_penalty`, probabilidad pre/post penalty. Autoridad para decidir si un contrato fue ejecutable.
+- **`mimic_sweep_results.jsonl`:** campo `entry_flags{min_stop_atr_multiple, ranking_mode, rejection_breakout_penalty, generation}`. `generation` separa filas `baseline` (pre-fix) de `v2_entry_fix` (post-fix) en el mismo archivo — obligatorio filtrar por él en toda comparación.
+- **Rechazos nuevos:** `signal_decision` con razón `STOP_INSIDE_NOISE_FLOOR` — cuenta como candidato evaluado y vetado, no como ausencia de señal.
+
+Reglas de interpretación nuevas (lecciones aprendidas de este análisis):
+
+1. **Duplicación de señales:** un mismo punto de entrada puede generar N registros en `trades`/`entry_decisions` (re-apertura tras SL, jobs paralelos del sweep). La unidad de análisis correcta es la **entrada única** = `(symbol, floor(cycle_ts, minute))`, no la fila. En la muestra analizada: 1,154 filas = 161 entradas únicas (factor ~7.2× de inflación).
+2. **Stop sub-ruido no es evidencia de dirección:** un `close_reason=SL` a stop <0.5×ATR no informa sobre si la señal era buena — informa sobre geometría inválida. El hit-rate de SL debe desagregarse por `stop_distance_pct / atr` antes de concluir nada sobre la señal.
+3. **`expected_return_on_risk` como métrica agregada:** sospechar cuando el denominador puede ser artificialmente pequeño. Reportar siempre junto a `expected_net_pnl_usdt` y el denominador absoluto.
+4. **Flip-test contrafactual:** es diagnóstico de asimetría direccional, no estimación de PnL ejecutable. No usar como forecast — solo para detectar inversión de señal.
+5. **Atribución de fallo a lifecycle:** exige filtrar primero contratos con `stop_above_noise_floor=false` — el SL temprano de un contrato inválido no es evidencia sobre exits.
+
 ## 0.1 Actualización s129 — contrato de forensia de ganancia ahorcada
 
 - Artefacto operativo: `tmp_early_close_strangle_analysis_today.json`.

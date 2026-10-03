@@ -583,6 +583,7 @@ class Orchestrator:
                     time.sleep(max(1, _next_interval) * 60)
             first_run = False
             _cycle_ok = False
+            _cycle_executed = False
             _cycle_error = None
             _is_trade_worker = cycle_func == getattr(self, '_trade_cycle_func', None)
             if _is_trade_worker:
@@ -592,6 +593,7 @@ class Orchestrator:
                     self.trade_cycle_phase = "executing"
             try:
                 if self.can_execute_trades():
+                    _cycle_executed = True
                     result = cycle_func()
                     # Dynamic cycle: trade cycle may return next_cycle_minutes
                     if isinstance(result, dict) and 'next_cycle_minutes' in result:
@@ -638,6 +640,8 @@ class Orchestrator:
                             "regime_mode": self.current_regime_mode,
                         },
                     )
+                    if _cycle_executed:
+                        self._reconcile_proactive_liquidity("trade_cycle_completed")
             finally:
                 if _is_trade_worker:
                     with self._trade_cycle_lock:
@@ -670,6 +674,29 @@ class Orchestrator:
                             changed_by="system",
                             reason=f"consecutive_cycle_failures:{self.consecutive_cycle_failures}",
                         )
+
+    def _reconcile_proactive_liquidity(self, trigger: str) -> None:
+        portfolio_manager = self.portfolio_manager
+        settings = getattr(portfolio_manager, "settings", None) if portfolio_manager else None
+        if (
+            portfolio_manager is None
+            or settings is None
+            or not bool(getattr(settings, "portfolio_proactive_liquidity_enabled", False))
+        ):
+            return
+        try:
+            futures_client = None
+            if bool(getattr(settings, "futures_enabled", True)):
+                from run_trades import _get_futures_client
+                futures_client = _get_futures_client(settings, db_client=self.db_client)
+            result = portfolio_manager.reconcile_proactive_liquidity(
+                futures_client=futures_client,
+                db_client=self.db_client,
+                trigger=trigger,
+            )
+            logger.info("Proactive portfolio liquidity: %s", result)
+        except Exception as exc:
+            logger.error("Proactive portfolio liquidity failed: %s", exc)
     
     def _start_hard_risk_monitor(self) -> None:
         if self.hard_risk_monitor_thread and self.hard_risk_monitor_thread.is_alive():
@@ -832,6 +859,21 @@ class Orchestrator:
                 client = getattr(comp, 'binance_client', None)
                 news_client = getattr(comp, 'news_client', None)
 
+                # The persisted operator pause is authoritative for every
+                # entry route, including the intra-cycle FastPath.
+                try:
+                    from run_trades import _is_new_entries_paused
+                    if _is_new_entries_paused(db_client):
+                        logger.info("[FastPath] PAUSED_DB — skipping intra-cycle entry execution")
+                        if self.staged_entry_intra_stop.wait(5):
+                            break
+                        continue
+                except Exception as _pause_exc:
+                    logger.warning("[FastPath] pause-state check failed closed: %s", _pause_exc)
+                    if self.staged_entry_intra_stop.wait(5):
+                        break
+                    continue
+
                 # Determine current regime; prefer orchestrator state, then settings.
                 regime_mode = self.current_regime_mode or getattr(settings, 'current_regime_mode', 'SPOT_BULL')
                 cfg = staged_entry.get_staged_entry_regime_config(settings, regime_mode)
@@ -858,8 +900,19 @@ class Orchestrator:
                     _fp_executed = False
                     if _fp_enabled and client:
                         try:
+                            qubo_authority = staged_entry.get_qubo_authority_snapshot(
+                                db_client, regime_mode,
+                            )
+                            if not qubo_authority:
+                                logger.info("[FastPath] NO_QUBO_AUTHORITY — skipping intra-cycle entry execution")
+                                if self.staged_entry_intra_stop.wait(5):
+                                    break
+                                continue
                             openable = staged_entry.get_openable_candidates(
-                                db_client, regime_mode, settings=settings,
+                                db_client, regime_mode, qubo_authority["symbols"], settings=settings,
+                                qubo_cycle_id=qubo_authority["cycle_id"],
+                                qubo_symbols_hash=qubo_authority["symbols_hash"],
+                                qubo_authority_symbols=qubo_authority["symbols"],
                             )
                             if openable:
                                 from run_trades import _execute_validated_fast_path

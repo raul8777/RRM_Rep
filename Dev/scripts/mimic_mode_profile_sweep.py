@@ -1,4 +1,4 @@
-"""MIMIC Mode × Profile sweep over continuous market windows.
+﻿"""MIMIC Mode Ã— Profile sweep over continuous market windows.
 
 This sweep:
 - Reads simulation windows built by mimic_build_window.py.
@@ -12,11 +12,19 @@ import argparse
 import itertools
 import json
 import logging
+import multiprocessing as _mp
+
+try:
+    _mp.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
+
 try:
     import fcntl
 except ModuleNotFoundError:  # Windows does not have fcntl
     fcntl = None  # type: ignore
 import os
+import random
 import sys
 import traceback
 from copy import deepcopy
@@ -103,6 +111,8 @@ def _load_windows(window_ids: Optional[List[str]] = None) -> List[Dict[str, Any]
         try:
             with open(path, "r", encoding="utf-8") as f:
                 w = json.load(f)
+            if not isinstance(w, dict) or not all(w.get(key) for key in ("window_id", "start", "end")):
+                continue
             if window_ids is None or w.get("window_id") in window_ids:
                 windows.append(w)
         except Exception as e:
@@ -124,6 +134,14 @@ def _clear_global_caches() -> None:
     try:
         from pair_screener import invalidate_cache
         invalidate_cache()
+    except Exception:
+        pass
+    try:
+        run_trades_module = sys.modules.get("run_trades")
+        if run_trades_module is not None:
+            run_trades_module._CAPITAL_RESERVATIONS.clear()
+            run_trades_module._futures_client = None
+            run_trades_module._spot_margin_client = None
     except Exception:
         pass
 
@@ -163,6 +181,11 @@ def _base_settings(profile: str, symbols: List[str]) -> Any:
     settings.screener_enabled = False
     settings.screener_top_n_enabled = False
     settings.category_max_positions_enabled = True
+    # MIMIC must use the simulated client's actual balances; disable the fixed dry-run
+    # capital envelope and automatic BNB commission reserve purchases.
+    settings.dry_run_simulated_capital_usdt = 0.0
+    settings.auto_bnb_for_commission = False
+    settings.use_bnb_for_commission = False
     # s95: no global active profile; simulation uses forced_profile as per-entry peak_quality_profile via runner.
     settings.min_signal_strength = 0.55
     settings.min_success_probability = 0.55
@@ -186,7 +209,7 @@ def _derive_metrics(results: List[Dict[str, Any]], initial_usdt: float) -> Dict[
         "trades": 0, "buys": 0, "sells": 0, "sl_tp": 0, "cycles": 0,
         "pnl_per_day_usdt": 0.0, "regime_distribution": {},
         "sharpe": None, "sortino": None, "calmar": None,
-        "profit_factor": None, "win_rate": None,
+        "profit_factor": None, "win_rate": None, "peak_capture_ratio": None,
         "capital_deployed_ratio": None, "pnl_by_regime": {},
         "transition_cost_pct": None,
         "profile_entry_counts": {},
@@ -240,7 +263,11 @@ def _derive_metrics(results: List[Dict[str, Any]], initial_usdt: float) -> Dict[
     if max_dd > 0:
         calmar = round(pnl_pct / (max_dd * 100.0), 4)
 
-    # Trade counts + profit factor + win rate
+    peak_gain = max(equity) - initial_usdt
+    peak_capture_ratio = None
+    if peak_gain > 0:
+        peak_capture_ratio = round(max(0.0, min(1.0, pnl_usdt / peak_gain)), 4)
+
     buys = sells = sl_tp = 0
     gross_wins = gross_losses = 0.0
     winning_trades = total_pnl_trades = 0
@@ -274,16 +301,18 @@ def _derive_metrics(results: List[Dict[str, Any]], initial_usdt: float) -> Dict[
             continue
         bo = res.get("buy_orders", []) or []
         st = res.get("sl_tp_closes", []) or []
+        futures_closes = res.get("futures_closes", []) or []
         buys += len(bo)
         sl_tp += len(st)
-        sells = sl_tp
-        for order in st:
-            pnl = float(order.get("pnl_usdt", order.get("pnl", 0.0)) or 0.0)
+        sells += len(st) + len(futures_closes)
+        for order in [*st, *futures_closes]:
+            payload = order.get("result") if isinstance(order.get("result"), dict) else order
+            pnl = float(payload.get("pnl_usdt", payload.get("pnl", 0.0)) or 0.0)
             total_pnl_trades += 1
             if pnl > 0:
                 gross_wins += pnl
                 winning_trades += 1
-            else:
+            elif pnl < 0:
                 gross_losses += abs(pnl)
 
     profit_factor = round(gross_wins / gross_losses, 4) if gross_losses > 0 else None
@@ -326,7 +355,7 @@ def _derive_metrics(results: List[Dict[str, Any]], initial_usdt: float) -> Dict[
         "pnl_usdt": round(pnl_usdt, 2),
         "pnl_pct": round(pnl_pct, 4),
         "max_drawdown_pct": round(max_dd * 100, 4),
-        "trades": buys + sells + sl_tp,
+        "trades": max(buys, total_pnl_trades),
         "buys": buys,
         "sells": sells,
         "sl_tp": sl_tp,
@@ -338,6 +367,7 @@ def _derive_metrics(results: List[Dict[str, Any]], initial_usdt: float) -> Dict[
         "calmar": calmar,
         "profit_factor": profit_factor,
         "win_rate": win_rate,
+        "peak_capture_ratio": peak_capture_ratio,
         "capital_deployed_ratio": capital_deployed_ratio,
         "pnl_by_regime": pnl_by_regime,
         "transition_cost_pct": transition_cost_pct,
@@ -609,6 +639,7 @@ def _run_single_config(
     peak_entry_schedule: Optional[List[Dict[str, Any]]] = None,
     forced_regime: Optional[str] = None,
     shadow_log: bool = False,
+    e2e_lifecycle_enabled: bool = False,
 ) -> Dict[str, Any]:
     if _logger is None:
         _configure_logging(_DEFAULT_LOG_PATH)
@@ -646,10 +677,14 @@ def _run_single_config(
     if not symbols:
         symbols = _all_symbols
     settings = _base_settings(profile, symbols)
+    # Sweep-only knob consumed by the runner, not a Settings field.
+    entry_time_stop_hours = params.get("entry_time_stop_hours")
     for key, value in params.items():
+        if key == "entry_time_stop_hours":
+            continue
         # Lifecycle parameters are applied via spot_bull_config_from_params, not the
         # global Settings schema, so skip unknown fields there.
-        if lifecycle:
+        if lifecycle or e2e_lifecycle_enabled:
             if hasattr(settings, key):
                 setattr(settings, key, value)
             continue
@@ -668,6 +703,9 @@ def _run_single_config(
         lifecycle = True
         if lifecycle_config_factory is not None:
             lifecycle_config = lifecycle_config_factory(params, profile)
+        elif forced_regime == "RANGE_SCALP":
+            from simulation.mimic_lifecycle_adapter import predictive_range_scalp_config_from_params
+            lifecycle_config = predictive_range_scalp_config_from_params(params, profile)
         elif peak_signal_mode:
             from simulation.mimic_lifecycle_adapter import predictive_spot_bull_config_from_params
             lifecycle_config = predictive_spot_bull_config_from_params(params, profile)
@@ -688,6 +726,7 @@ def _run_single_config(
             max_cycles=max_cycles,
             lifecycle_config=lifecycle_config,
             peak_entry_schedule=peak_entry_schedule,
+            params=params,
         )
         metrics = _derive_metrics(raw_result.get("results", []), initial_usdt_val)
         if shadow_log:
@@ -710,6 +749,11 @@ def _run_single_config(
             "lifecycle_raw": raw_result.get("results", []),
         }
 
+    lifecycle_exit_policy = None
+    if e2e_lifecycle_enabled:
+        from simulation.mimic_lifecycle_adapter import spot_bull_config_from_params
+        lifecycle_exit_policy = spot_bull_config_from_params(params, profile).exit_policy
+
     runner = SimulationRunner(
         settings=settings,
         symbols=symbols,
@@ -721,6 +765,9 @@ def _run_single_config(
         data_dir=data_dir,
         forced_profile=profile,
         profile_overrides=profile_overrides,
+        lifecycle_exit_policy=lifecycle_exit_policy,
+        lifecycle_time_stop_reason=params.get("time_stop_reason"),
+        entry_time_stop_hours=entry_time_stop_hours,
     )
 
     # When a regime is forced, entry_profile_gate cannot be calibrated from local
@@ -767,6 +814,8 @@ def _run_single_config(
                     continue
                 _price = runner.spot_client.get_symbol_price(f"{_asset}USDT", use_cache=False)
                 _total += float(_qty) * _price
+            _total += float(runner.futures_client.get_total_wallet_usdt())
+            _total += float(runner.spot_margin_client.get_equity_delta_usdt())
             _mode = str(result.get("regime_mode", "SPOT_BULL")).upper()
             if runner._last_mode is not None and _mode != runner._last_mode:
                 runner._transition_log.append({
@@ -836,6 +885,22 @@ def _run_single_config(
             if _liquidation_closes and runner.results:
                 _last = runner.results[-1]
                 _last.setdefault('result', {}).setdefault('sl_tp_closes', []).extend(_liquidation_closes)
+        if runner.results:
+            _futures_liquidations = runner.futures_client.liquidate_all()
+            _margin_liquidations = runner.spot_margin_client.liquidate_all()
+            runner.results[-1].setdefault('result', {}).setdefault('futures_closes', []).extend(
+                _futures_liquidations + _margin_liquidations
+            )
+            _final_balance = runner.spot_client.get_account_balance()
+            _final_total = float(_final_balance.get("USDT", 0.0))
+            for _asset, _qty in _final_balance.items():
+                if _asset == "USDT":
+                    continue
+                _price = runner.spot_client.get_symbol_price(f"{_asset}USDT", use_cache=False)
+                _final_total += float(_qty) * _price
+            _final_total += float(runner.futures_client.get_total_wallet_usdt())
+            _final_total += float(runner.spot_margin_client.get_equity_delta_usdt())
+            runner.results[-1]["total_value"] = _final_total
     except Exception as _liq_err:
         _logger.warning("Window-end liquidation failed: %s", _liq_err)
 
@@ -863,8 +928,188 @@ def _run_single_config(
         "profile_overrides": profile_overrides,
         "early_stopped": early_stopped,
         "forced_regime": forced_regime,
+        # Marks rows produced under the corrected entry contract so post-fix
+        # results are distinguishable from the pre-fix baseline in the same JSONL.
+        "entry_flags": {
+            "min_stop_atr_multiple": float(getattr(settings, "range_scalp_min_stop_atr_multiple", 0.0) or 0.0),
+            "ranking_mode": str(getattr(settings, "range_scalp_ranking_mode", "ror") or "ror"),
+            "rejection_breakout_penalty": float(getattr(settings, "range_scalp_rejection_breakout_penalty", 1.0) or 1.0),
+            "generation": "v2_entry_fix" if float(getattr(settings, "range_scalp_min_stop_atr_multiple", 0.0) or 0.0) > 0 else "baseline",
+        },
         **metrics,
+        **_derive_entry_funnel(raw_result.get("results", [])),
+        **_derive_e2e_evidence(raw_result.get("results", [])),
+        **_derive_close_diagnostics(raw_result.get("results", [])),
+        **_derive_contract_diagnostics(runner.db_client),
         "transitions": raw_result.get("transitions", []),
+    }
+
+
+def _derive_close_diagnostics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    entries = {}
+    sides: Dict[str, Dict[str, float]] = {}
+    reasons: Dict[str, Dict[str, float]] = {}
+    projected_costs = 0.0
+    projected_net = 0.0
+    for row in results:
+        cycle = row.get("result", {}) or {}
+        for order in cycle.get("buy_orders", []) or []:
+            metadata = order.get("entry_metadata") or order.get("metadata") or {}
+            contract = metadata.get("selected_contract") or {}
+            key = order.get("position_id") or order.get("symbol")
+            entries[key] = contract
+            projected_net += float(contract.get("expected_net_pnl_usdt") or 0.0)
+            projected_costs += sum(float(contract.get(field) or 0.0) for field in (
+                "projected_entry_fee_usdt", "projected_exit_fee_usdt", "slippage_reserve_usdt", "funding_reserve_usdt"
+            ))
+        for close in [*(cycle.get("sl_tp_closes", []) or []), *(cycle.get("futures_closes", []) or [])]:
+            payload = close.get("result") if isinstance(close.get("result"), dict) else close
+            pnl = float(payload.get("pnl_usdt", payload.get("pnl", 0.0)) or 0.0)
+            key = close.get("position_id") or close.get("symbol")
+            contract = entries.get(key, {})
+            side = str(close.get("side") or contract.get("side") or "UNKNOWN").upper()
+            reason = str(close.get("reason") or close.get("close_reason") or payload.get("reason") or "UNKNOWN")
+            for bucket, label in ((sides, side), (reasons, reason)):
+                item = bucket.setdefault(label, {"count": 0, "pnl_usdt": 0.0, "wins": 0, "losses": 0})
+                item["count"] += 1
+                item["pnl_usdt"] += pnl
+                item["wins"] += int(pnl > 0)
+                item["losses"] += int(pnl < 0)
+    for bucket in (sides, reasons):
+        for item in bucket.values():
+            item["pnl_usdt"] = round(item["pnl_usdt"], 4)
+    return {"close_diagnostics": {
+        "by_side": sides,
+        "by_reason": reasons,
+        "projected_net_pnl_usdt": round(projected_net, 4),
+        "projected_costs_usdt": round(projected_costs, 4),
+    }}
+
+
+def _derive_contract_diagnostics(db_client: Any) -> Dict[str, Any]:
+    records = []
+    reasons: Dict[str, int] = {}
+    for audit in getattr(db_client, "audit_events", []) or []:
+        if audit.get("event") != "range_scalp_direction_arbitration" or not isinstance(audit.get("detail"), dict):
+            continue
+        arbitration = audit["detail"]
+        reason = str(arbitration.get("reason") or "UNKNOWN")
+        reasons[reason] = reasons.get(reason, 0) + 1
+        records.append({
+            "symbol": audit.get("symbol"),
+            "reason": reason,
+            "selected_mode": arbitration.get("selected_mode"),
+            "long_contract": arbitration.get("long_contract"),
+            "short_contract": arbitration.get("short_contract"),
+            "futures_long_contract": arbitration.get("futures_long_contract"),
+        })
+    for row in getattr(db_client, "ready", []) or []:
+        containers = [row, row.get("signal_meta") or {}, row.get("data") or {}]
+        arbitration = None
+        for container in containers:
+            if isinstance(container, dict) and isinstance(container.get("directional_arbitration"), dict):
+                arbitration = container["directional_arbitration"]
+                break
+        if not arbitration:
+            continue
+        reason = str(arbitration.get("reason") or "UNKNOWN")
+        reasons[reason] = reasons.get(reason, 0) + 1
+        records.append({
+            "symbol": row.get("symbol"),
+            "reason": reason,
+            "selected_mode": arbitration.get("selected_mode"),
+            "long_contract": arbitration.get("long_contract"),
+            "short_contract": arbitration.get("short_contract"),
+            "futures_long_contract": arbitration.get("futures_long_contract"),
+        })
+    return {
+        "contract_diagnostics": {
+            "records": len(records),
+            "reasons": reasons,
+            "samples": records[:20],
+        }
+    }
+
+
+def _derive_e2e_evidence(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    entries = []
+    closes = []
+    violations = []
+    for row in results:
+        cycle = row.get("result", {}) or {}
+        for order in cycle.get("buy_orders", []) or []:
+            metadata = order.get("entry_metadata") or order.get("metadata") or {}
+            arbitration = order.get("directional_arbitration") or metadata.get("directional_arbitration") or {}
+            contract = metadata.get("selected_contract") or arbitration.get("selected_contract") or {}
+            selected_side = metadata.get("expected_side") or contract.get("side")
+            executed_side = order.get("side") or metadata.get("side")
+            leverage = contract.get("leverage")
+            if leverage is not None and float(leverage) > 2.0:
+                violations.append("leverage_max_2x")
+            executed_qty = order.get("qty") or order.get("quantity")
+            contract_qty = contract.get("qty")
+            if executed_qty is not None and contract_qty is not None:
+                relative_error = abs(float(executed_qty) - float(contract_qty)) / max(abs(float(contract_qty)), 1e-12)
+                if relative_error > 0.001:
+                    violations.append("contract_quantity_alignment")
+            if selected_side and executed_side:
+                normalized = "LONG" if str(executed_side).upper() in {"BUY", "LONG", "LONG_FUTURES"} else "SHORT"
+                if str(selected_side).upper() != normalized:
+                    violations.append("selected_executed_side")
+            entries.append({
+                "symbol": order.get("symbol"),
+                "timestamp": row.get("timestamp"),
+                "selected_side": selected_side,
+                "executed_side": executed_side,
+                "trade_type": metadata.get("trade_type") or contract.get("trade_type") or arbitration.get("capital_intent"),
+                "leverage": leverage,
+                "entry_price": order.get("entry_price") or order.get("price"),
+                "quantity": order.get("qty") or order.get("quantity"),
+                "position_id": order.get("position_id"),
+                "selected_contract": contract,
+                "contract_present": bool(contract),
+            })
+        closes.extend(cycle.get("sl_tp_closes", []) or [])
+        closes.extend(cycle.get("futures_closes", []) or [])
+    contract_count = sum(1 for entry in entries if entry["contract_present"])
+    if entries and len(closes) != len(entries):
+        violations.append("entry_close_count_alignment")
+    if entries and contract_count != len(entries):
+        violations.append("entry_contract_count_alignment")
+    return {
+        "e2e_evidence": {
+            "entries": len(entries),
+            "closes": len(closes),
+            "contracts": contract_count,
+            "lineage": entries,
+            "violations": sorted(set(violations)),
+        }
+    }
+
+
+def _derive_entry_funnel(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    cycles_with_candidates = 0
+    candidates = 0
+    buy_orders = 0
+    sell_orders = 0
+    futures_closes = 0
+    for row in results:
+        cycle = row.get("result", {}) or {}
+        top = cycle.get("top_symbols", []) or []
+        if top:
+            cycles_with_candidates += 1
+        candidates += len(top)
+        buy_orders += len(cycle.get("buy_orders", []) or [])
+        sell_orders += len(cycle.get("sell_orders", []) or [])
+        futures_closes += len(cycle.get("futures_closes", []) or [])
+    return {
+        "entry_funnel": {
+            "cycles_with_candidates": cycles_with_candidates,
+            "candidates": candidates,
+            "buy_orders": buy_orders,
+            "sell_orders": sell_orders,
+            "futures_closes": futures_closes,
+        }
     }
 
 
@@ -892,21 +1137,21 @@ def _load_existing_results(results_path: str) -> List[Dict[str, Any]]:
     return results
 
 
+def _job_key(window_id: str, profile: str, params: Dict[str, Any]) -> Tuple[str, str, str]:
+    return window_id, profile, json.dumps(params, sort_keys=True, separators=(",", ":"))
+
+
 def _already_ran(
     existing: List[Dict[str, Any]],
     window_id: str,
     profile: str,
     params: Dict[str, Any],
 ) -> bool:
-    key = (window_id, profile, json.dumps(params, sort_keys=True))
-    for r in existing:
-        if (
-            r.get("window_id") == window_id
-            and r.get("profile") == profile
-            and json.dumps(r.get("params", {}), sort_keys=True) == key[2]
-        ):
-            return True
-    return False
+    key = _job_key(window_id, profile, params)
+    return any(
+        _job_key(str(row.get("window_id")), str(row.get("profile")), row.get("params", {})) == key
+        for row in existing
+    )
 
 
 @dataclass
@@ -928,6 +1173,61 @@ class SweepPaths:
         )
 
 
+def _rank_window_symbols(window: Dict[str, Any], max_symbols: int) -> Dict[str, Any]:
+    import pandas as pd
+
+    ranked = []
+    start = pd.Timestamp(window["start"])
+    end = pd.Timestamp(window["end"])
+    source = window.get("symbols", []) or window.get("baseline_symbols", [])
+    for symbol in source:
+        path = os.path.join(repo_root, "historical_data", f"{symbol}_1h.parquet")
+        if not os.path.exists(path):
+            continue
+        frame = pd.read_parquet(path, columns=["open_time", "close", "volume"])
+        open_time = pd.to_datetime(frame["open_time"], utc=True)
+        frame = frame[(open_time >= start) & (open_time <= end)]
+        liquidity = float((frame["close"] * frame["volume"]).median()) if not frame.empty else 0.0
+        ranked.append((liquidity, symbol))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    selected = [symbol for _, symbol in ranked[:max_symbols]]
+    if "BTCUSDT" in source and "BTCUSDT" not in selected:
+        selected = ["BTCUSDT", *selected[: max_symbols - 1]]
+    reduced = dict(window)
+    reduced["symbols"] = selected
+    reduced["symbol_selection"] = {
+        "method": "window_median_quote_volume",
+        "source_count": len(source),
+        "selected_count": len(selected),
+        "symbols": selected,
+    }
+    return reduced
+
+
+def _select_stratified_jobs(jobs: List[Dict[str, Any]], max_jobs: int, seed: int) -> List[Dict[str, Any]]:
+    rng = random.Random(seed)
+    by_window: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    for job in jobs:
+        window_id = str(job["window"].get("window_id"))
+        by_window.setdefault(window_id, {}).setdefault(job["profile"], []).append(job)
+    selected = []
+    window_ids = sorted(by_window)
+    window_base, window_extra = divmod(max_jobs, len(window_ids))
+    for window_index, window_id in enumerate(window_ids):
+        window_quota = window_base + (1 if window_index < window_extra else 0)
+        profiles = sorted(by_window[window_id])
+        profile_base, profile_extra = divmod(window_quota, len(profiles))
+        for profile_index, profile in enumerate(profiles):
+            profile_quota = profile_base + (1 if profile_index < profile_extra else 0)
+            cohort = by_window[window_id][profile]
+            selected.extend(rng.sample(cohort, min(profile_quota, len(cohort))))
+    return sorted(selected, key=lambda job: (
+        str(job["window"].get("window_id")),
+        str(job["profile"]),
+        json.dumps(job["params"], sort_keys=True, default=str),
+    ))
+
+
 def run_sweep(
     window_ids: Optional[List[str]] = None,
     strategy: str = "full",
@@ -945,6 +1245,11 @@ def run_sweep(
     profiles: Optional[List[str]] = None,
     peak_signal_mode: bool = False,
     forced_regime: Optional[str] = None,
+    max_jobs: Optional[int] = None,
+    seed: int = 20260913,
+    e2e_lifecycle_enabled: bool = False,
+    stratified_jobs: bool = False,
+    max_symbols: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run the profile sweep across all configured windows.
 
@@ -969,10 +1274,17 @@ def run_sweep(
         )
 
     logger = _configure_logging(paths.log_path)
+    max_workers = max(1, min(int(max_workers or 8), 10))
+    if max_jobs is not None:
+        max_jobs = max(1, min(int(max_jobs), 5000))
 
     windows = _load_windows(window_ids)
     if not windows:
         raise RuntimeError(f"No windows found in {WINDOWS_DIR}")
+    if max_symbols is not None:
+        max_symbols = max(2, int(max_symbols))
+        windows = [_rank_window_symbols(window, max_symbols) for window in windows]
+        logger.info("Reduced each window universe to at most %s symbols by median quote volume", max_symbols)
 
     if strategy == "quick":
         grid = {k: [v[0]] for k, v in PARAM_GRID.items()}
@@ -1013,7 +1325,7 @@ def run_sweep(
     else:
         active_profiles = profiles if profiles is not None else PROFILES
 
-    # Cargar schedule de señales peak una sola vez si estamos en modo peak
+    # Cargar schedule de seÃ±ales peak una sola vez si estamos en modo peak
     peak_signal_schedule: Optional[Dict[str, List[Dict[str, Any]]]] = None
     if peak_signal_mode:
         if max_workers != 1:
@@ -1036,13 +1348,36 @@ def run_sweep(
                     "params": params,
                 })
 
+    available_jobs = len(jobs)
+    if max_jobs is not None and available_jobs > max_jobs:
+        if stratified_jobs:
+            jobs = _select_stratified_jobs(jobs, max_jobs, seed)
+        else:
+            rng = random.Random(seed)
+            selected = sorted(rng.sample(range(available_jobs), max_jobs))
+            jobs = [jobs[i] for i in selected]
+        logger.info(
+            "Deterministic job cap selected %s/%s jobs with seed=%s stratified=%s",
+            len(jobs), available_jobs, seed, stratified_jobs,
+        )
+
     _cache = None
     if use_cache:
         try:
             _cache = _get_sweep_cache()
         except Exception as cache_exc:
             _logger.warning("Sweep cache disabled due to init error: %s", cache_exc)
-    existing = _load_existing_results(paths.results_path)
+    selected_keys = {
+        _job_key(str(job["window"].get("window_id")), job["profile"], job["params"])
+        for job in jobs
+    }
+    loaded_results = _load_existing_results(paths.results_path)
+    existing_by_key = {}
+    for row in loaded_results:
+        key = _job_key(str(row.get("window_id")), str(row.get("profile")), row.get("params", {}))
+        if key in selected_keys:
+            existing_by_key[key] = row
+    existing = list(existing_by_key.values())
     total = len(jobs)
     completed_initial = len(existing)
     status = {
@@ -1056,6 +1391,9 @@ def run_sweep(
         "current_job": None,
     }
     _save_status(status, paths.status_path)
+
+    # Keep parent caches in memory so worker processes can share them
+    # via copy-on-write after fork; the parent will not run jobs itself.
 
     results: List[Dict[str, Any]] = list(existing)
     started = datetime.now(timezone.utc)
@@ -1108,6 +1446,7 @@ def run_sweep(
                         peak_signal_mode=peak_signal_mode,
                         peak_entry_schedule=peak_entry_schedule,
                         forced_regime=forced_regime,
+                        e2e_lifecycle_enabled=e2e_lifecycle_enabled,
                     )
                     if _cache and _cache_key:
                         _cache.put(_cache_key, res)
@@ -1129,67 +1468,155 @@ def run_sweep(
 
             _update_eta(i)
     else:
-        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+        from concurrent.futures.process import BrokenProcessPool
 
+        completed_keys = {
+            _job_key(str(row.get("window_id")), str(row.get("profile")), row.get("params", {}))
+            for row in existing
+        }
+        pending = [
+            (i, job, 0)
+            for i, job in enumerate(jobs, 1)
+            if _job_key(str(job["window"].get("window_id")), job["profile"], job["params"]) not in completed_keys
+        ]
+        active_workers = max_workers
+        max_pending_futures = max_workers * 2
+        max_job_attempts = 3
         futures_to_job = {}
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            for i, job in enumerate(jobs, 1):
-                window = job["window"]
-                profile = job["profile"]
-                params = job["params"]
-                window_id = window.get("window_id")
+        executor = None
 
-                if _already_ran(existing, window_id, profile, params):
-                    _logger.info("Skipping already-run job %s/%s: %s %s %s", i, total, window_id, profile, params)
-                    continue
+        status["total_jobs"] = len(jobs)
+        status["effective_workers"] = active_workers
+        status["max_pending_futures"] = max_pending_futures
+        _save_status(status, paths.status_path)
 
-                profile_overrides = _build_profile_overrides(profile)
-                fut = executor.submit(
-                    _run_single_config,
-                    window,
-                    profile,
-                    params,
-                    profile_overrides,
-                    max_cycles_per_sim,
-                    max_drawdown_stop_pct,
-                    lifecycle,
-                    forced_regime=forced_regime,
-                )
-                futures_to_job[fut] = (i, window_id, profile, params)
+        try:
+            while pending or futures_to_job:
+                if executor is None:
+                    executor = ProcessPoolExecutor(max_workers=active_workers)
+                    max_pending_futures = active_workers * 2
+                    status["effective_workers"] = active_workers
+                    status["max_pending_futures"] = max_pending_futures
 
-            total = len(futures_to_job)
-            status["total_jobs"] = total
-            _save_status(status, paths.status_path)
+                while pending and len(futures_to_job) < max_pending_futures:
+                    i, job, attempts = pending.pop(0)
+                    window = job["window"]
+                    profile = job["profile"]
+                    params = job["params"]
+                    profile_overrides = _build_profile_overrides(profile)
+                    future = executor.submit(
+                        _run_single_config,
+                        window,
+                        profile,
+                        params,
+                        profile_overrides,
+                        max_cycles_per_sim,
+                        max_drawdown_stop_pct,
+                        lifecycle,
+                        forced_regime=forced_regime,
+                        e2e_lifecycle_enabled=e2e_lifecycle_enabled,
+                    )
+                    futures_to_job[future] = (i, job, attempts)
 
-            for fut in as_completed(futures_to_job):
-                i, window_id, profile, params = futures_to_job[fut]
-                try:
-                    res = fut.result()
-                    results.append(res)
-                    _append_result(res, paths.results_path)
-                    status["completed_jobs"] = len(results)
-                except Exception as e:
-                    status["failed_jobs"] += 1
-                    err = {
-                        "job_index": i,
+                done, _ = wait(futures_to_job, return_when=FIRST_COMPLETED)
+                pool_broken = False
+                for future in done:
+                    i, job, attempts = futures_to_job.pop(future)
+                    window_id = str(job["window"].get("window_id"))
+                    profile = job["profile"]
+                    params = job["params"]
+                    key = _job_key(window_id, profile, params)
+                    try:
+                        result = future.result()
+                        if key not in completed_keys:
+                            results.append(result)
+                            _append_result(result, paths.results_path)
+                            completed_keys.add(key)
+                    except BrokenProcessPool as exc:
+                        pending.append((i, job, attempts + 1))
+                        pool_broken = True
+                        _logger.warning("Worker pool failed; job %s will resume in a fresh pool: %s", i, exc)
+                    except Exception as exc:
+                        if attempts + 1 < max_job_attempts:
+                            pending.append((i, job, attempts + 1))
+                            _logger.warning("Job %s failed attempt %s/%s: %s", i, attempts + 1, max_job_attempts, exc)
+                        else:
+                            status["failed_jobs"] += 1
+                            status["errors"].append({
+                                "job_index": i,
+                                "window_id": window_id,
+                                "profile": profile,
+                                "params": params,
+                                "error": str(exc),
+                                "traceback": traceback.format_exc(),
+                            })
+                    status["current_job"] = {
+                        "index": i,
                         "window_id": window_id,
                         "profile": profile,
                         "params": params,
-                        "error": str(e),
-                        "traceback": traceback.format_exc(),
                     }
-                    status["errors"].append(err)
-                    _logger.exception("Job failed: %s", err)
 
-                status["current_job"] = {
-                    "index": i,
-                    "window_id": window_id,
-                    "profile": profile,
-                    "params": params,
-                }
+                if pool_broken:
+                    for future, (i, job, attempts) in list(futures_to_job.items()):
+                        future.cancel()
+                        pending.append((i, job, attempts + 1))
+                    futures_to_job.clear()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    executor = None
+                    active_workers = max(1, active_workers - 1)
+                    retryable = []
+                    for i, job, attempts in pending:
+                        if attempts < max_job_attempts:
+                            retryable.append((i, job, attempts))
+                            continue
+                        status["failed_jobs"] += 1
+                        status["errors"].append({
+                            "job_index": i,
+                            "window_id": str(job["window"].get("window_id")),
+                            "profile": job["profile"],
+                            "params": job["params"],
+                            "error": "worker pool failed on every attempt",
+                        })
+                    pending = retryable
+                    _logger.warning("Restarting worker pool with %s workers", active_workers)
+
+                status["completed_jobs"] = len(completed_keys)
                 _update_eta(status["completed_jobs"] + status["failed_jobs"])
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+
+    expected_jobs = len(jobs)
+    if status["failed_jobs"] or len(results) < expected_jobs:
+        status["state"] = "failed"
+        status["completed_at"] = datetime.now(timezone.utc).isoformat()
+        status["current_job"] = None
+        _save_status(status, paths.status_path)
+        raise RuntimeError(
+            f"Sweep incomplete: completed={len(results)} expected={expected_jobs} failed={status['failed_jobs']}"
+        )
 
     report = _build_report(results)
+    report["summary"]["available_jobs"] = available_jobs
+    report["summary"]["selected_jobs"] = len(jobs)
+    report["summary"]["seed"] = seed
+    report["summary"]["max_jobs"] = max_jobs
+    report["summary"]["stratified_jobs"] = stratified_jobs
+    report["summary"]["max_symbols"] = max_symbols
+    report["summary"]["jobs_by_window_profile"] = {
+        f"{window_id}|{profile}": sum(
+            1 for job in jobs
+            if str(job["window"].get("window_id")) == window_id and job["profile"] == profile
+        )
+        for window_id in sorted({str(job["window"].get("window_id")) for job in jobs})
+        for profile in sorted({job["profile"] for job in jobs})
+    }
+    report["summary"]["symbol_selection"] = {
+        str(window.get("window_id")): window.get("symbol_selection")
+        for window in windows if window.get("symbol_selection")
+    }
     with open(paths.report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 
@@ -1377,19 +1804,28 @@ def _build_report(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="MIMIC continuous-window profile sweep")
     parser.add_argument("--windows", default=None, help="Comma-separated window IDs")
+    parser.add_argument("--windows-dir", default=None, help="Directory containing homologated window manifests")
     parser.add_argument("--strategy", choices=["quick", "coarse", "full", "exhaustive", "lifecycle-quick", "custom_grid"], default="full")
     parser.add_argument("--profile", type=str, default=None, help="Profile label to sweep (A/B/C). If omitted, all profiles are run.")
     parser.add_argument("--param-grid-file", type=str, default=None, help="JSON file with custom parameter grid (required for custom_grid strategy)")
     parser.add_argument("--max-cycles", type=int, default=None)
-    parser.add_argument("--max-workers", type=int, default=1, help="Parallel workers for simulations (default 1)")
+    parser.add_argument("--max-workers", type=int, default=8, help="Parallel workers for simulations (capped at 10)")
+    parser.add_argument("--max-jobs", type=int, default=None, help="Deterministic cap on jobs selected from the grid")
+    parser.add_argument("--seed", type=int, default=20260913, help="Seed used for deterministic job selection")
+    parser.add_argument("--stratified-jobs", action="store_true", help="Balance capped jobs across windows and profiles")
+    parser.add_argument("--max-symbols", type=int, default=None, help="Select the most liquid symbols per window")
     parser.add_argument("--lifecycle", action="store_true", help="Use the lifecycle kernel instead of run_trades.execute_once")
+    parser.add_argument("--e2e-lifecycle", action="store_true", help="Apply lifecycle exit policies to positions in the E2E production flow")
     parser.add_argument("--peak-signal-mode", action="store_true", help="Use peak_signal_source to inject A/B/C signals into the lifecycle simulation")
     parser.add_argument("--max-dd-stop", type=float, default=15.0, help="Early-stop drawdown threshold %% (default 15.0, 0=disable)")
     parser.add_argument("--forced-regime", type=str, default=None, help="Force a single regime mode for the whole simulation run")
     parser.add_argument("--clear-results", action="store_true", help="Ignore previous results.jsonl")
+    parser.add_argument("--no-cache", action="store_true", help="Disable result cache for certification runs")
     parser.add_argument("--output-dir", type=str, default=None, help="Isolated output directory for this sweep")
     args = parser.parse_args()
 
+    if args.windows_dir:
+        globals()["WINDOWS_DIR"] = os.path.abspath(args.windows_dir)
     if args.peak_signal_mode:
         args.lifecycle = True
 
@@ -1411,13 +1847,18 @@ def main() -> int:
         max_cycles_per_sim=args.max_cycles,
         max_workers=args.max_workers,
         max_drawdown_stop_pct=args.max_dd_stop,
-        use_cache=not args.peak_signal_mode,
+        use_cache=not args.peak_signal_mode and not args.no_cache,
         lifecycle=args.lifecycle,
         param_grid_file=args.param_grid_file,
         output_dir=args.output_dir,
         profiles=_profiles,
         peak_signal_mode=args.peak_signal_mode,
         forced_regime=(args.forced_regime.upper() if args.forced_regime else None),
+        max_jobs=args.max_jobs,
+        seed=args.seed,
+        e2e_lifecycle_enabled=args.e2e_lifecycle,
+        stratified_jobs=args.stratified_jobs,
+        max_symbols=args.max_symbols,
     )
     logger.info("Sweep complete. Report saved to %s", _DEFAULT_REPORT_PATH)
     print(json.dumps(report["summary"], indent=2, ensure_ascii=False))

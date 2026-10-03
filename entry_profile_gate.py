@@ -535,17 +535,8 @@ def _extract_float(signal_meta: Dict[str, Any], keys: List[str], default: float 
     return default
 
 
-def _range_scalp_score(signal_meta: Dict[str, Any], symbol: str) -> float:
-    """Heuristic score tailored for RANGE_SCALP long entries (v2).
-
-    Rewards classic mean-reversion setups: price in the lower/middle part of the
-    Bollinger bandwidth, a healthy volume spike, RSI in the neutral zone,
-    and a non-down 4h trend.  It penalizes entries near the upper band or with
-    low volume.  The predictor expected-return is treated as a contrarian
-    signal: a negative short-term prediction often flags an oversold dip inside
-    the range, while an optimistic prediction suggests limited mean-reversion
-    upside.
-    """
+def _range_scalp_score(signal_meta: Dict[str, Any], symbol: str, direction: str = "LONG") -> float:
+    """Return a side-normalized RANGE_SCALP quality score."""
     score = 0.0
 
     # Bollinger position in [0, 1] (0 = lower band, 1 = upper band)
@@ -560,13 +551,15 @@ def _range_scalp_score(signal_meta: Dict[str, Any], symbol: str) -> float:
         bb_position = (price - bb_lower) / (bb_upper - bb_lower)
     if bb_position < 0.0:
         bb_position = 0.5
+    is_short = str(direction or "LONG").strip().upper() == "SHORT"
+    directional_bb_position = 1.0 - bb_position if is_short else bb_position
 
     # Optimal mean-reversion zone: 25-45% of BB width (lower half, not extreme)
-    if 0.25 <= bb_position <= 0.45:
+    if 0.25 <= directional_bb_position <= 0.45:
         score += 1.0
-    elif 0.15 <= bb_position < 0.25 or 0.45 < bb_position <= 0.60:
+    elif 0.15 <= directional_bb_position < 0.25 or 0.45 < directional_bb_position <= 0.60:
         score += 0.3
-    elif 0.60 < bb_position <= 0.80:
+    elif 0.60 < directional_bb_position <= 0.80:
         score += 0.0
     else:
         score -= 1.0
@@ -586,25 +579,27 @@ def _range_scalp_score(signal_meta: Dict[str, Any], symbol: str) -> float:
 
     # RSI: neutral-bullish 45-56 is ideal; avoid overbought > 65
     rsi = _extract_float(signal_meta, ["rsi", "rsi_at_entry", "rsi_4h"], default=50.0)
-    if 45 <= rsi <= 56:
+    directional_rsi = 100.0 - rsi if is_short else rsi
+    if 45 <= directional_rsi <= 56:
         score += 1.0
-    elif 35 <= rsi < 45 or 56 < rsi <= 65:
+    elif 35 <= directional_rsi < 45 or 56 < directional_rsi <= 65:
         score += 0.3
-    elif rsi > 65:
+    elif directional_rsi > 65:
         score -= 1.0
-    elif rsi < 30:
+    elif directional_rsi < 30:
         score -= 0.5
 
     # 4h trend: up is supportive, down is penalized for longs
     trend = str(signal_meta.get("higher_tf_trend") or signal_meta.get("trend_4h") or "").upper()
-    if trend == "UP":
+    favorable_trend = trend == ("DOWN" if is_short else "UP")
+    adverse_trend = trend == ("UP" if is_short else "DOWN")
+    if favorable_trend:
         score += 0.3
-    elif trend == "DOWN":
+    elif adverse_trend:
         score -= 0.3
 
-    # Expected PnL as contrarian input: negative predictor = oversold bounce
     expected_pnl_pct = _expected_return_pct(signal_meta) or 0.0
-    score -= 0.8 * max(-2.0, min(2.0, expected_pnl_pct))
+    score += 0.8 * max(-2.0, min(2.0, expected_pnl_pct))
 
     # Probability and strength add conviction but never dominate the setup
     prob = _extract_float(signal_meta, ["success_probability", "predictor_prob"], default=0.5)
@@ -630,13 +625,20 @@ def _range_scalp_score(signal_meta: Dict[str, Any], symbol: str) -> float:
 
     # SR event bonus: confirmed bounce/breakout at support or breakdown for shorts
     sr_zone = _extract_float(signal_meta, ["sr_zone_position"], default=0.5)
-    if signal_meta.get("support_bounce_buy") or signal_meta.get("sr_bounce"):
-        score += 1.0
-    if signal_meta.get("support_breakout_buy") or signal_meta.get("sr_breakout"):
-        score += 0.8
-    if sr_zone <= 0.25:
+    directional_zone = 1.0 - sr_zone if is_short else sr_zone
+    if is_short:
+        if signal_meta.get("resistance_bounce_sell") or signal_meta.get("sr_rejection"):
+            score += 1.0
+        if signal_meta.get("support_breakdown_sell") or signal_meta.get("sr_breakdown"):
+            score += 0.8
+    else:
+        if signal_meta.get("support_bounce_buy") or signal_meta.get("sr_bounce"):
+            score += 1.0
+        if signal_meta.get("support_breakout_buy") or signal_meta.get("sr_breakout"):
+            score += 0.8
+    if directional_zone <= 0.25:
         score += 0.5
-    elif sr_zone >= 0.75:
+    elif directional_zone >= 0.75:
         score -= 1.0
 
     return score
@@ -646,10 +648,11 @@ def _fallback_score(
     signal_meta: Dict[str, Any],
     regime: str,
     symbol: str,
+    direction: str = "LONG",
 ) -> float:
     """Heuristic score when no calibrated expected PnL is available."""
     if regime == "RANGE_SCALP":
-        return _range_scalp_score(signal_meta, symbol)
+        return _range_scalp_score(signal_meta, symbol, direction)
 
     expected_pnl = _expected_return_pct(signal_meta) or 0.0
     prob = _as_float(
@@ -725,12 +728,12 @@ def compute_quality_score(
     # realized PnL in the current windows, so we always use the feature-based fallback
     # score that blends vol_spike, success_probability, strength and price change.
     if regime == "RANGE_SCALP":
-        return _fallback_score(signal_meta, regime, symbol)
+        return _fallback_score(signal_meta, regime, symbol, direction)
 
     expected_pnl_pct = _expected_return_pct(signal_meta)
     if expected_pnl_pct is not None and not math.isnan(expected_pnl_pct):
         return expected_pnl_pct
-    return _fallback_score(signal_meta, regime, symbol)
+    return _fallback_score(signal_meta, regime, symbol, direction)
 
 
 def classify(
@@ -774,7 +777,14 @@ def classify(
     regime = str(regime or "SPOT_BULL").strip().upper() or "SPOT_BULL"
     category = _symbol_category(symbol)
     _thresholds_data = load_thresholds(thresholds_path)
-    _use_universal = _is_universal_thresholds(_thresholds_data)
+    _universal_configured = _is_universal_thresholds(_thresholds_data)
+    _universal_available = _load_universal_quality_model() is not None if _universal_configured else False
+    _use_universal = _universal_configured and _universal_available
+    if _universal_configured and not _universal_available:
+        _thresholds_data = _legacy_fallback_thresholds()
+        thresholds_source = "legacy_fallback_model_unavailable"
+    else:
+        thresholds_source = "universal" if _use_universal else "calibrated"
 
     # Select the most specific thresholds: regime+category, then regime,
     # then legacy nested layout (thresholds->regime), then default.
@@ -798,8 +808,6 @@ def classify(
         if adjustment != 0.0:
             thresholds["C"] = min(thresholds["B"] - 1e-6, thresholds["C"] + adjustment)
 
-    global _universal_missing_warned
-
     model_score: Optional[float] = None
     missing_features: List[str] = []
     model_version: Optional[str] = None
@@ -814,22 +822,17 @@ def classify(
             score = model_score
             score_source = "universal_model"
         else:
-            if not _universal_missing_warned:
-                logger.warning(
-                    "Universal thresholds are active but universal model is unavailable; "
-                    "switching to legacy fallback thresholds for this process to avoid "
-                    "score-scale mismatch rejections."
-                )
-                _universal_missing_warned = True
-            legacy = _legacy_fallback_thresholds()
-            thresholds = dict(legacy.get(regime, legacy["SPOT_BULL"]))
+            thresholds = dict(
+                _legacy_fallback_thresholds().get(regime, _legacy_fallback_thresholds()["SPOT_BULL"])
+            )
+            thresholds_source = "legacy_fallback_unscorable_signal"
             score = compute_quality_score(signal_meta, regime, direction, symbol)
-            score_source = "fallback_universal_model_missing"
+            score_source = "fallback"
     else:
         model_score, missing_features, model_version = _model_quality_score(
             signal_meta, regime, range_scalp_model_path if regime == "RANGE_SCALP" else None,
         )
-        baseline_score = _fallback_score(signal_meta, regime, symbol) if regime == "RANGE_SCALP" else None
+        baseline_score = _fallback_score(signal_meta, regime, symbol, direction) if regime == "RANGE_SCALP" else None
         model_mode = str(range_scalp_model_mode or "shadow").lower()
         use_range_model = regime == "RANGE_SCALP" and model_mode == "enforced" and model_score is not None
         score = model_score if (regime == "SPOT_BULL" or use_range_model) and model_score is not None else compute_quality_score(
@@ -848,6 +851,7 @@ def classify(
     return profile, {
         "score": score,
         "score_source": score_source,
+        "thresholds_source": thresholds_source,
         "thresholds": {k: v for k, v in thresholds.items() if k in ("A", "B", "C")},
         "regime": regime,
         "category": category,

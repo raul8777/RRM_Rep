@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     dry_run_simulated_capital_usdt: float = Field(default=0.0)
     dry_run_max_position_notional_usdt: float = Field(default=0.0)
     dry_run_futures_margin_fraction: float = Field(default=0.30)
+    # Binance Demo/Spot Testnet does not expose a supported cross-wallet SAPI transfer route.
+    # Live deployments may opt in explicitly after endpoint support is verified.
+    portfolio_cross_wallet_transfer_enabled: bool = Field(default=False)
     trade_cycle_minutes: int = Field(default=5)
     trade_horizon_minutes: int = Field(default=240)  # realistic hold time for PnL prediction (4h)
     # PnL predictor micro-candle calibration (1m/5m real candles instead of ATR extrapolation)
@@ -97,12 +100,12 @@ class Settings(BaseSettings):
     range_scalp_quality_model_path: str = Field(default="Dev/benchmarks/entry_profile_calibration/quality_score_model_range_scalp.pkl")
 
     # SR pool runtime switches
-    sr_pool_enabled: bool = Field(default=False)          # master switch
-    sr_pool_trade_enabled: bool = Field(default=False)   # if False, signals are logged only (shadow mode)
+    sr_pool_enabled: bool = Field(default=True)          # master switch
+    sr_pool_trade_enabled: bool = Field(default=False)
     sr_pool_full_scan_minutes: int = Field(default=5)     # min cycles between full universe scans
     sr_pool_lookback_minutes: int = Field(default=150)   # 1m candles kept for SR computation
     sr_pool_max_open_per_cycle: int = Field(default=2)   # avoid burst of pool trades per cycle
-    sr_pool_intra_cycle_enabled: bool = Field(default=False)
+    sr_pool_intra_cycle_enabled: bool = Field(default=True)
     # Calibrated thresholds from the shadow-log sweep (2026-07-18).
     evidence_gate_min_posterior_per_regime: Dict[str, float] = Field(default={
         "SPOT_BULL": 0.60,
@@ -134,6 +137,10 @@ class Settings(BaseSettings):
     # Instead UG keeps the largest requested partial close pct. This protects from killing a winner
     # when a profit-taking partial aligns with a temporary PRS close signal.
     ug_allow_partial_to_full_escalation: bool = Field(default=False)
+    # Exit policy: partial closes fragment a thesis and pay repeated execution cost.
+    # disabled converts every partial-exit advisory into HOLD; full hard-risk and
+    # structural closes remain available.
+    exit_fractionation_mode: str = Field(default="disabled")  # disabled|legacy
     # Peak protection in SPOT_BULL: fraction of peak PnL that must be preserved.
     # Higher = more patient, lets winners run in bull markets (0.70 is more permissive than 0.60).
     peak_protection_spot_bull_pct: float = Field(default=0.65)  # concentrated: proteger más pico
@@ -210,7 +217,7 @@ class Settings(BaseSettings):
     futures_adverse_exit_min_strength: float = Field(default=0.45)
     # SR structure invalidation early exit (shadow first)
     sr_invalidation_exit_enabled: bool = Field(default=True)
-    sr_invalidation_shadow_mode: bool = Field(default=True)
+    sr_invalidation_shadow_mode: bool = Field(default=False)
     sr_invalidation_loss_pct: float = Field(default=0.5)
     sr_invalidation_confirmation_bars: int = Field(default=3)
     sr_invalidation_min_strength: float = Field(default=0.50)
@@ -246,7 +253,10 @@ class Settings(BaseSettings):
     sso_multilevel_l1_close_pct: float = Field(default=0.30)
     sso_multilevel_l2_close_pct: float = Field(default=0.30)
     sso_multilevel_l3_close_pct: float = Field(default=0.25)
-    sso_target_contribution_enabled: bool = Field(default=True)  # Re-enabled with a 150 USD daily target; closes only when contribution is meaningful.
+    # SSO-4 retired (STAGING s130): target-contribution closes winners on an
+    # arbitrary daily-$ heuristic unrelated to the position's own structure;
+    # belief-driven exit (position_belief.py) supersedes it.
+    sso_target_contribution_enabled: bool = Field(default=False)
     sso_target_contribution_pct: float = Field(default=0.10)  # Recommendation: $150 target * 10% = $15 min contribution.
     sso_target_range_scalp_guard_mode: str = Field(default="active")  # shadow|active|disabled
     sso_target_range_scalp_guard_notional_min_usdt: float = Field(default=700.0)
@@ -256,6 +266,10 @@ class Settings(BaseSettings):
     sso_target_range_scalp_guard_min_vol_spike: float = Field(default=1.40)
     sso_target_daily_usd: float = Field(default=150.0)
     sso_target_min_hours: float = Field(default=1.0)
+    # SSO-5 retired (STAGING s130): reentry-upgrade closes a winner purely to
+    # free a slot for a "better" signal, ignoring the current position's own
+    # belief state; belief-driven exit supersedes it.
+    sso_reentry_upgrade_enabled: bool = Field(default=False)
     sso_reentry_min_strength_diff: float = Field(default=0.3)
     sso_reentry_min_ev_multiplier: float = Field(default=1.5)
     # SSO-6: Bounce Rescue Mode â€” close positions trapped in BTC bounce as soon as they approach breakeven
@@ -311,6 +325,16 @@ class Settings(BaseSettings):
     profit_realization_sr_accel_full_multiplier: float = Field(default=0.85)
     profit_realization_sr_accel_drawback_multiplier: float = Field(default=0.85)
     profit_realization_sr_resistance_zone_min: float = Field(default=0.68)
+    # Belief-driven exit lifecycle (STAGING s130): structural belief about an
+    # open position overrides PRS/SSO timers — see position_belief.py.
+    position_belief_enabled: bool = Field(default=True)
+    position_belief_persist_throttle_seconds: float = Field(default=30.0)
+    position_belief_max_age_seconds: float = Field(default=90.0)
+    # Exit Lifecycle Refactor (STAGING s130b): 1s-loop exit decision + evidence
+    # refresh cycles driven by position_telemetry_watcher.py.
+    position_exit_decision_loop_enabled: bool = Field(default=True)
+    position_exit_evidence_refresh_enabled: bool = Field(default=True)
+    position_exit_evidence_refresh_seconds: float = Field(default=15.0)
     # Unified governance supervisor (profit + loss)
     unified_governance_enabled: bool = Field(default=True)
     unified_governance_profit_enabled: bool = Field(default=True)
@@ -351,7 +375,7 @@ class Settings(BaseSettings):
     ug_fast_loss_cut_enabled: bool = Field(default=False)
     ug_peak_drawdown_cut_enabled: bool = Field(default=False)
     ug_soft_supervisor_loss_escalation_enabled: bool = Field(default=False)
-    ug_loss_policy_mode: str = Field(default="active_canary")  # shadow|active_canary|active|disabled
+    ug_loss_policy_mode: str = Field(default="active")  # shadow|active_canary|active|disabled
     ug_loss_policy_canary_fraction: float = Field(default=0.25)
     # WR Screener: block buys on pairs with N consecutive stop_loss closes
     wr_screener_enabled: bool = Field(default=True)
@@ -400,6 +424,11 @@ class Settings(BaseSettings):
     
     # Portfolio Manager configuration
     portfolio_allocation_pct: float = Field(default=100.0)
+    portfolio_spot_asset_auto_convert_enabled: bool = Field(default=True)
+    portfolio_proactive_liquidity_enabled: bool = Field(default=False)
+    portfolio_liquidity_buffer_usdt: float = Field(default=10.0)
+    portfolio_liquidity_max_conversion_slippage_bps: float = Field(default=25.0)
+    portfolio_liquidity_transfer_cooldown_minutes: float = Field(default=30.0)
     min_pair_confidence_score: float = Field(default=50.0)
     max_risk_per_pair_pct: float = Field(default=10.0)
     diversification_factor: float = Field(default=1.0)
@@ -549,6 +578,13 @@ class Settings(BaseSettings):
     slippage_pct: float = Field(default=0.00052)  # jun29: 0.0005â†’0.00052 (run_0677)
 
     # â”€â”€ Correlaciones: lÃ­mite de posiciones por categorÃ­a â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    close_execution_mode: str = Field(default="active")
+    close_execution_depth_levels: int = Field(default=20)
+    close_execution_max_slippage_bps: float = Field(default=10.0)
+    close_execution_fok_retries: int = Field(default=1)
+    close_execution_stale_book_seconds: float = Field(default=3.0)
+    close_execution_hard_risk_deadline_ms: int = Field(default=0)
+    close_execution_soft_deadline_ms: int = Field(default=1500)
     category_max_positions_enabled: bool = Field(default=False)  # SR strategy: slot-based global limits, not per-category
     category_max_positions: Dict[str, Any] = Field(default={
         "LARGE_CAP":  1,   # concentrated: máx 1 large cap
@@ -699,6 +735,25 @@ class Settings(BaseSettings):
     position_intelligence_sr_refresh_seconds: float = Field(default=30.0)
     position_intelligence_min_confidence: float = Field(default=0.3)
     position_intelligence_emergency_confidence: float = Field(default=0.7)
+    # ── SR path thesis-anchored lifecycle (sr_path_v1) ─────────────────────────
+    # Mode: shadow (persist/evaluate only) | active (evidence feeds belief/UG).
+    # ACTIVE in staging — staging is the shadow environment for this mechanism.
+    sr_path_evaluator_mode: str = Field(default="active")
+    # Stall detection is candle-based, never a wall-clock timer: a position is
+    # "stalled" when candles_consumed >= sr_path_stall_multiplier * expected_candles
+    # without reaching half the anchor→target distance.
+    sr_path_stall_multiplier: float = Field(default=2.0)
+    # Extension to next level requires target broken with volume >= this multiple
+    # of baseline (let winners run; nothing expires by time).
+    sr_path_extension_min_vol: float = Field(default=1.0)
+    # Entry filter by geometric horizon (derived from Fase A: 2-4h bucket was the
+    # only clearly profitable short bucket in staging 30d). Only open when
+    # expected_candles = distance(entry→target)/ATR_candle falls inside the band.
+    # Mode: disabled | shadow (log would-block) | active (block entry).
+    # ACTIVE in staging.
+    sr_path_horizon_gate_mode: str = Field(default="active")
+    sr_path_horizon_min_candles: float = Field(default=1.0)
+    sr_path_horizon_max_candles: float = Field(default=4.0)
 
     # ── Staged multi-cycle entry validation (ready state) ──────────────────────
     staged_entry_enabled: bool = Field(default=True)
@@ -721,6 +776,11 @@ class Settings(BaseSettings):
     hard_risk_monitor_enabled: bool = Field(default=True)
     hard_risk_monitor_interval_seconds: float = Field(default=2.0)
     hard_risk_breakeven_enabled: bool = Field(default=True)
+    basket_reset_auto_execute: bool = Field(default=False)
+    basket_reset_pnl_threshold_usd: float = Field(default=-10.0)
+    basket_reset_min_avg_age_hours: float = Field(default=4.0)
+    basket_reset_max_positive_momentum_positions: int = Field(default=1)
+    basket_reset_cooldown_seconds: float = Field(default=3600.0)
     # High-frequency telemetry watcher for open positions (behavior observation)
     position_telemetry_watcher_enabled: bool = Field(default=True)
     position_telemetry_watcher_interval_seconds: float = Field(default=1.0)
@@ -761,7 +821,7 @@ class Settings(BaseSettings):
     # streams connect and stop() no longer hangs (root-caused to the same
     # library/websockets incompatibility). Re-enabled by default.
     binance_event_stream_spot_enabled: bool = Field(default=True)
-    directional_policy_mode: str = Field(default="shadow")
+    directional_policy_mode: str = Field(default="active")
     # Funding fee guard rollout (s126): promoted from shadow to active canary.
     funding_fee_guard_mode: str = Field(default="active")  # shadow | active | enforced
     funding_fee_guard_canary_fraction: float = Field(default=0.35)
@@ -770,14 +830,14 @@ class Settings(BaseSettings):
     funding_guard_block_fee_usdt: float = Field(default=1.25)
     funding_guard_warning_rate_pct: float = Field(default=0.15)
     funding_guard_block_rate_pct: float = Field(default=0.35)
-    direction_volume_gate_rollout: str = Field(default="active_canary")  # active_canary | respect_regime_config
+    direction_volume_gate_rollout: str = Field(default="respect_regime_config")  # active_canary | respect_regime_config
     direction_volume_gate_canary_fraction: float = Field(default=0.35)
-    range_reversion_predictor_mode: str = Field(default="shadow")
+    range_reversion_predictor_mode: str = Field(default="enforced")
     # s120 phase controls: keep shadow-first to avoid choking execution.
-    sr_attempt_sequence_mode: str = Field(default="shadow")
-    realtime_open_rerank_mode: str = Field(default="shadow")
-    anti_monopoly_decay_mode: str = Field(default="shadow")
-    sr_pool_attempt_memory_mode: str = Field(default="shadow")
+    sr_attempt_sequence_mode: str = Field(default="active")
+    realtime_open_rerank_mode: str = Field(default="active")
+    anti_monopoly_decay_mode: str = Field(default="active")
+    sr_pool_attempt_memory_mode: str = Field(default="active")
     realtime_open_score_half_life_min: float = Field(default=45.0)
     realtime_open_score_sr_max_dist_pct: float = Field(default=5.0)
     preservation_upgrade_to_futures: bool = Field(default=False)
@@ -793,9 +853,29 @@ class Settings(BaseSettings):
     range_scalp_direction_mode: str = Field(default="ev_symmetric")  # short_priority | ev_symmetric
     range_scalp_direction_min_probability: float = Field(default=0.55)
     range_scalp_short_resistance_threshold: float = Field(default=0.65)
+    # Contract gate: a stop closer than ATR×this multiple is inside the noise
+    # band — the binary EV model cannot express its ~97% stop-out rate. 0=off.
+    range_scalp_min_stop_atr_multiple: float = Field(default=0.0)
+    # Reversal-vs-continuation: when breakout_pressure is detected, the SHORT
+    # rejection contract's probability is multiplied by this factor (1.0=off).
+    range_scalp_rejection_breakout_penalty: float = Field(default=1.0)
+    # Arbitration ranking: "ror" = expected_return_on_risk (legacy; inflates
+    # tight-stop contracts), "ev_net" = expected_net_pnl_usdt first, ror tiebreak.
+    range_scalp_ranking_mode: str = Field(default="ror")
+    directional_unconfirmed_countertrend_margin: float = Field(default=0.10)
+    # s133: min score advantage the opposite side needs to override a confirmed
+    # one-sided S/R structure (see directional_arbiter.py::_evaluate_range_scalp_symmetric).
+    range_scalp_structure_override_margin: float = Field(default=0.15)
+    opportunity_contract_futures_entry_fee_rate: float = Field(default=0.0002)
+    opportunity_contract_futures_exit_fee_rate: float = Field(default=0.0008)
+    opportunity_contract_spot_entry_fee_rate: float = Field(default=0.0005)
+    opportunity_contract_spot_exit_fee_rate: float = Field(default=0.001)
     range_scalp_short_max_per_cycle: int = Field(default=2)
     range_scalp_short_execution_enabled: bool = Field(default=True)
-    opportunity_shadow_mode: str = Field(default="active_canary")  # shadow|active_canary|active|disabled
+    spot_margin_short_enabled: bool = Field(default=True)
+    spot_margin_isolated_only: bool = Field(default=True)
+    range_scalp_short_instrument: str = Field(default="spot_margin")
+    opportunity_shadow_mode: str = Field(default="active")  # shadow|active_canary|active|disabled
     opportunity_shadow_canary_fraction: float = Field(default=0.20)
     opportunity_shadow_max_promotions_per_side: int = Field(default=1)
     opportunity_shadow_rank_slack: int = Field(default=2)
@@ -893,7 +973,7 @@ class Settings(BaseSettings):
             "require_predictor_valid": True,
             "policy_version": "v1",
             "max_open_per_cycle": 2,  # SR strategy: allow multiple SR-confirmed candidates per cycle
-            "direction_confirmation_mode": "enforced",
+            "direction_confirmation_mode": "disabled",
             "direction_min_progress_bps": 1.0,
             "direction_max_adverse_bps": 150.0,
             "direction_required_confirmations": 1,
@@ -948,7 +1028,7 @@ class Settings(BaseSettings):
             "min_expected_pnl": 0.0,
             "policy_version": "v1",
             "max_open_per_cycle": 2,  # SR strategy: allow multiple SR-confirmed candidates per cycle
-            "direction_confirmation_mode": "enforced",
+            "direction_confirmation_mode": "disabled",
             "direction_min_progress_bps": 3.0,
             "direction_max_adverse_bps": 50.0,
             "direction_required_confirmations": 2,
@@ -987,7 +1067,7 @@ class Settings(BaseSettings):
             "min_expected_pnl": 0.0,
             "policy_version": "v1",
             "max_open_per_cycle": 2,  # SR strategy: allow multiple SR-confirmed candidates per cycle
-            "direction_confirmation_mode": "enforced",
+            "direction_confirmation_mode": "disabled",
             "direction_min_progress_bps": 3.0,
             "direction_max_adverse_bps": 50.0,
             "direction_required_confirmations": 2,
@@ -1078,6 +1158,16 @@ class Settings(BaseSettings):
     spot_dust_cleanup_min_notional_usdt: float = Field(default=5.0)
     spot_reconcile_auto_fix_enabled: bool = Field(default=True)
     spot_reconcile_min_value_usdt: float = Field(default=5.0)
+    # Staging/testnet only: minimum age (minutes) before a DB position can be
+    # reported as SPOT_GHOST_IN_DB. 0 = disabled (production). >0 gives testnet
+    # balance snapshots time to reflect the entry. Controlled by override.
+    spot_ghost_min_age_minutes: float = Field(default=0.0)
+    # Staging/testnet only: extra confirmation cycles for reconcile_missing_balance.
+    # Production default stays 2; staging override can raise to 5.
+    spot_reconcile_missing_confirm_cycles: int = Field(default=2)
+    # Staging/testnet only: when False, SPOT_GHOST_IN_DB auto-fix is shadow-only
+    # (logs/audit but does not close). Production default True.
+    spot_truth_autofix_enabled: bool = Field(default=True)
 
     # â”€â”€ Dynamic pair screener â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     screener_enabled: bool = Field(default=True)
@@ -1113,6 +1203,10 @@ class Settings(BaseSettings):
     # RANGE_SCALP mode parameters
     range_scalp_sl_pct: float = Field(default=0.8)    # s70: 1.2→0.8 (R:R 2.25, EV>0 with WR>31%)
     range_scalp_tp_pct: float = Field(default=1.8)    # s70: 1.5→1.8
+    range_scalp_contract_sl_multiplier: float = Field(default=1.0)
+    range_scalp_contract_tp_multiplier: float = Field(default=1.0)
+    entry_contract_sl_multiplier: float = Field(default=1.0)
+    entry_contract_tp_multiplier: float = Field(default=1.0)
     range_scalp_kelly_mult: float = Field(default=0.7)
     range_scalp_max_rsi: float = Field(default=60.0)  # s72: 48→60 (lateral RSI normal = 45-65; old 48 was panic-dip only)
     range_scalp_min_rsi: float = Field(default=25.0)  # s70: new — avoid free-fall entries
@@ -1202,7 +1296,9 @@ class Settings(BaseSettings):
     sso7_opp_prob_min_delta: float = Field(default=0.06)    # prob candidato - prob posición actual
     sso7_opp_min_strength: float = Field(default=0.55)      # strength mínima del candidato
     sso7_opp_min_vol_spike: float = Field(default=1.2)      # vol_spike mínimo del candidato
-    
+    mimic_autorun_enabled: bool = Field(default=False)
+    mimic_autorun_failure_backoff_seconds: float = Field(default=60.0)
+
     # Currency conversion configuration
     usd_to_mxn_rate: float = Field(default=17.0)  # Default USD to MXN exchange rate
     

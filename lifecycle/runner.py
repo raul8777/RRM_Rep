@@ -128,6 +128,7 @@ class LifecycleRunner:
                 "profile": assigned_profile or config.profile,
                 "result": result,
                 "signal": {
+                    "side": entry.signal.side.value,
                     "category": entry.signal.category,
                     "composite_score": entry.signal.composite_score,
                     "expected_pnl": entry.signal.expected_pnl,

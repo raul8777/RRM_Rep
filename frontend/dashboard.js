@@ -2,19 +2,41 @@
 // For some environments (embedded browsers / port forwarding), forcing 127.0.0.1
 // can break connectivity even when localhost works.
 const API_BASE = window.location.origin;
+const PRIORITY_API_BASE = `${window.location.protocol}//${window.location.hostname}:8002`;
 console.log('[dashboard.js] loaded, API_BASE:', API_BASE);
 
 // API key loaded dynamically from backend at startup — never hardcoded in source
 let _API_KEY = '';
 let _resolveApiKey;
 const _apiKeyReady = new Promise(resolve => { _resolveApiKey = resolve; });
-(async () => {
-    try {
-        const r = await fetch(`${API_BASE}/dashboard/config`);
-        if (r.ok) { const d = await r.json(); _API_KEY = d.api_key || ''; }
-    } catch (e) { /* silent — no key = local dev mode */ }
-    if (_resolveApiKey) _resolveApiKey();
-})();
+let _apiKeyLoadInProgress = null;
+async function loadDashboardApiKey() {
+    if (_API_KEY) return true;
+    if (_apiKeyLoadInProgress) return _apiKeyLoadInProgress;
+    _apiKeyLoadInProgress = (async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 3000);
+        try {
+            const response = await fetch(`${API_BASE}/dashboard/config`, { signal: controller.signal });
+            if (response.ok) {
+                const config = await response.json();
+                _API_KEY = config.api_key || '';
+            }
+        } catch (error) {
+            console.warn('[dashboard] API key bootstrap unavailable; continuing read-only UI startup:', error);
+        } finally {
+            clearTimeout(timeout);
+            if (_resolveApiKey) {
+                _resolveApiKey();
+                _resolveApiKey = null;
+            }
+            _apiKeyLoadInProgress = null;
+        }
+        return Boolean(_API_KEY);
+    })();
+    return _apiKeyLoadInProgress;
+}
+loadDashboardApiKey();
 function _authHeaders() {
     const h = { 'Content-Type': 'application/json' };
     if (_API_KEY) h['X-API-Key'] = _API_KEY;
@@ -28,8 +50,9 @@ let _futuresUnrealPnl = 0;  // Updated by renderFuturesPositions each cycle
 let _cachedFuturesPositions = [];  // Updated by renderFuturesPositions each cycle
 let _cachedFuturesClosed = [];     // Updated by renderFuturesClosed each cycle
 const CACHE_TTL_MS = 5000;    // 5 s frontend cache for fresher mode/profile
-const POLL_INTERVAL_MS = 30000; // 30 s poll: /dashboard/summary is heavy (~25-40s)
+const POLL_INTERVAL_MS = 300000; // 5 min poll: priority panels use dedicated lightweight endpoints
 const OPEN_POSITIONS_POLL_MS = 15000; // 15 s for open positions priority panel
+const CLOSED_POSITIONS_POLL_MS = 30000;
 const BACKTEST_PROGRESS_POLL_MS = 5000;
 const FETCH_TIMEOUT_MS = 60000; // allow the heavy summary endpoint enough time
 let _fetchInProgress = false;
@@ -51,18 +74,22 @@ async function hydrateEnvironmentBadge() {
     const envPill = document.getElementById('envPill');
     const envText = document.getElementById('envPillText');
     if (!envPill || !envText) return;
+    const setEnvironmentLabel = (label) => {
+        envText.textContent = label;
+        envPill.classList.toggle('env-pill-staging', label === 'STAGING');
+    };
     try {
         const statusRes = await fetch(`${API_BASE}/status`, { headers: _authHeaders() });
         if (!statusRes.ok) throw new Error(`status failed: ${statusRes.status}`);
         const status = await statusRes.json();
-        const env = String(status.environment || status.environment_label || (window.location.port === '8001' ? 'staging' : 'production')).toUpperCase();
-        const label = env === 'STAGING' ? 'STAGING' : 'PRODUCTION';
-        envText.textContent = label;
-        envPill.classList.toggle('env-pill-staging', label === 'STAGING');
+        const env = String(status.environment || status.environment_label || '').trim().toUpperCase();
+        if (env === 'STAGING' || env === 'PRODUCTION') {
+            setEnvironmentLabel(env);
+        } else {
+            setEnvironmentLabel('DESCONOCIDO');
+        }
     } catch (_) {
-        const fallback = window.location.port === '8001' ? 'STAGING' : 'PRODUCTION';
-        envText.textContent = fallback;
-        envPill.classList.toggle('env-pill-staging', fallback === 'STAGING');
+        setEnvironmentLabel('DESCONOCIDO');
     }
 }
 
@@ -78,23 +105,34 @@ async function fetchDashboardData(force = false) {
     _fetchInProgress = true;
     _fetchStartedAt = now;
     try {
-        const [summaryRes, controlRes] = await Promise.allSettled([
-            _fetchWithTimeout(`${API_BASE}/dashboard/summary?days=${_dashboardDays}`),
-            _fetchWithTimeout(`${API_BASE}/control/status`, { headers: _authHeaders() }),
+        const [summaryRes, controlRes, capitalRes] = await Promise.allSettled([
+            _fetchWithTimeout(`${PRIORITY_API_BASE}/dashboard/summary?days=${_dashboardDays}`, {}, 5000),
+            _fetchWithTimeout(`${API_BASE}/control/status`, { headers: _authHeaders() }, 3000),
+            _fetchWithTimeout(`${API_BASE}/portfolio/capital`, { headers: _authHeaders() }, 10000),
         ]);
 
         const summaryResult = summaryRes.status === 'fulfilled' ? summaryRes.value : null;
+        const controlResult = controlRes.status === 'fulfilled' ? controlRes.value : null;
+        const capitalResult = capitalRes.status === 'fulfilled' ? capitalRes.value : null;
+        const controlData = controlResult?.ok ? await controlResult.json() : null;
+        const capitalData = capitalResult?.ok ? await capitalResult.json() : null;
         if (!summaryResult || !summaryResult.ok) {
             const err = summaryRes.status === 'rejected' ? summaryRes.reason : new Error(`HTTP ${summaryResult.status}`);
             console.warn('[dashboard] summary fetch failed, keeping prior data:', err);
             _lastFetchErrorAt = Date.now();
+            if (capitalData) {
+                _cachedData = _cachedData || {};
+                _cachedData.capital_snapshot = capitalData;
+                if (controlData) _cachedData.control_status = controlData;
+                renderBalance(_cachedData.balance || {}, capitalData, controlData || _cachedData.control_status);
+            }
             return _cachedData;
         }
 
         _cachedData = await summaryResult.json();
-        if (controlRes.status === 'fulfilled' && controlRes.value && controlRes.value.ok) {
-            _cachedData.control_status = await controlRes.value.json();
-        }
+        if (_lastOpenData) _cachedData.open_positions = _lastOpenData;
+        if (controlData) _cachedData.control_status = controlData;
+        _cachedData.capital_snapshot = capitalData;
         _lastFetch = Date.now();
         _lastSuccessfulFetch = _lastFetch;
         _lastFetchErrorAt = 0;
@@ -107,6 +145,48 @@ async function fetchDashboardData(force = false) {
         _fetchInProgress = false;
     }
 }
+
+let _capitalPanelRefreshInProgress = false;
+
+async function refreshCapitalPanel() {
+    if (_capitalPanelRefreshInProgress) return;
+    _capitalPanelRefreshInProgress = true;
+    try {
+        if (!_API_KEY) await loadDashboardApiKey();
+        const [capitalResult, controlResult] = await Promise.allSettled([
+            _fetchWithTimeout(`${API_BASE}/portfolio/capital`, { headers: _authHeaders() }, 10000),
+            _fetchWithTimeout(`${API_BASE}/control/status`, { headers: _authHeaders() }, 5000),
+        ]);
+        if (capitalResult.status !== 'fulfilled' || !capitalResult.value?.ok) {
+            throw capitalResult.status === 'rejected'
+                ? capitalResult.reason
+                : new Error(`capital snapshot failed: ${capitalResult.value?.status}`);
+        }
+        const capital = await capitalResult.value.json();
+        const control = controlResult.status === 'fulfilled' && controlResult.value?.ok
+            ? await controlResult.value.json()
+            : null;
+        _cachedData = _cachedData || {};
+        _cachedData.capital_snapshot = capital;
+        if (control) _cachedData.control_status = control;
+        renderBalance(_cachedData.balance || {}, capital, control || _cachedData.control_status);
+    } catch (error) {
+        console.warn('[dashboard] live capital panel refresh failed:', error);
+        if (!_cachedData?.capital_snapshot) {
+            const panel = document.getElementById('balanceData');
+            if (panel) panel.innerHTML = '<p class="loading">Snapshot de capital no disponible; reintentando…</p>';
+        }
+    } finally {
+        _capitalPanelRefreshInProgress = false;
+    }
+}
+
+function startCapitalPanelPolling() {
+    refreshCapitalPanel();
+    setInterval(refreshCapitalPanel, 30000);
+}
+
+setTimeout(startCapitalPanelPolling, 0);
 
 async function hydrateCriticalPanels() {
     try {
@@ -621,7 +701,7 @@ function renderExecutiveSummary(data) {
     const totalUsdt   = parseFloat(balance.total_usdt || 0);
     const liquidUsdt  = parseFloat(balance.usdt_available || balance.total_usdt || 0);
     const positions   = openPos.positions || [];
-    const invested    = positions.reduce((s, p) => s + parseFloat(p.trade_type === 'futures' ? (p.margin_usdt || p.invested_usdt || 0) : (p.invested_usdt || 0)), 0);
+    const invested    = positions.reduce((s, p) => s + parseFloat(p.trade_type === 'futures' ? (p.margin_usdt || getOpenPositionInvestedUsdt(p)) : getOpenPositionInvestedUsdt(p)), 0);
     const exposurePct = totalUsdt > 0 ? ((invested / totalUsdt) * 100).toFixed(1) : '0.0';
     const unrealPnl   = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
     const lockedPnl   = positions.reduce((s, p) => s + (p.scale_out_done ? parseFloat(p.scale_out_pnl || 0) : 0), 0);
@@ -802,7 +882,7 @@ function renderKPIRow(data) {
     const totalUsdt  = parseFloat(balance.total_usdt || 0);
     const liquidUsdt = parseFloat(balance.usdt_available || balance.total_usdt || 0);
     const positions  = openPos.positions || [];
-    const invested   = positions.reduce((s, p) => s + parseFloat(p.trade_type === 'futures' ? (p.margin_usdt || p.invested_usdt || 0) : (p.invested_usdt || 0)), 0);
+    const invested   = positions.reduce((s, p) => s + parseFloat(p.trade_type === 'futures' ? (p.margin_usdt || getOpenPositionInvestedUsdt(p)) : getOpenPositionInvestedUsdt(p)), 0);
     const expPct     = totalUsdt > 0 ? ((invested / totalUsdt) * 100) : 0;
     const maxExpPct  = 75;
     const unrealPnl  = positions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
@@ -981,6 +1061,7 @@ let _currentOpenFilter   = 'all';
 let _currentClosedFilter = 'all';
 let _lastOpenData   = null;
 let _lastClosedData = null;
+let _lastProfitTrackerData = null;
 let _opsMainTab = 'open';  // 'open' | 'closed'
 let _opsSubFilter = 'all'; // 'all' | 'spot' | 'fut'
 let _selectionObservabilityTab = 'under_review'; // 'under_review' | 'reviewed'
@@ -1215,19 +1296,81 @@ function renderHealth(d) {
     `;
 }
 
-function renderBalance(d) {
-    if (!d || d.error) return;
-    const spotPct    = parseFloat(d.spot_pct    || 100);
-    const futPct     = parseFloat(d.futures_pct || 0);
-    const spotUsdt   = parseFloat(d.spot_usdt   || d.total_usdt || 0);
-    const futUsdt    = parseFloat(d.futures_usdt || 0);
+function renderBalance(d, capitalSnapshot = null, controlStatus = null) {
+    if ((!d || d.error) && capitalSnapshot?.ok !== true) return;
+    d = d && !d.error ? d : {};
+    const summarySpotUsdt = parseFloat(d.spot_usdt || d.total_usdt || 0);
+    const summaryFuturesUsdt = parseFloat(d.futures_usdt || 0);
     const rate       = parseFloat(d.usd_to_mxn_rate || 17.8);
-    const walletHtml = futUsdt > 0 ? `
+    const capital = capitalSnapshot || {};
+    const spotBalances = capital.spot?.usdt || {};
+    const futuresAccount = capital.futures?.account || {};
+    const futuresAssets = capital.futures?.assets || {};
+    const liveSpotUsdt = capital.ok === true && capital.spot?.wallet_value_usdt_equivalent != null
+        ? Number(capital.spot.wallet_value_usdt_equivalent)
+        : NaN;
+    const liveFuturesUsdt = capital.ok === true
+        && capital.futures?.wallet_value_usdt_equivalent != null
+        ? Number(capital.futures.wallet_value_usdt_equivalent)
+        : NaN;
+    const liveWalletUsdt = liveSpotUsdt + liveFuturesUsdt;
+    const useLiveWallets = Number.isFinite(liveSpotUsdt)
+        && Number.isFinite(liveFuturesUsdt)
+        && liveWalletUsdt >= 0;
+    const walletSpotUsdt = useLiveWallets ? liveSpotUsdt : summarySpotUsdt;
+    const walletFuturesUsdt = useLiveWallets ? liveFuturesUsdt : summaryFuturesUsdt;
+    const displayedWalletUsdt = useLiveWallets ? liveWalletUsdt : parseFloat(d.total_usdt || 0);
+    const spotPct = useLiveWallets
+        ? (liveWalletUsdt > 0 ? liveSpotUsdt / liveWalletUsdt * 100 : 100)
+        : parseFloat(d.spot_pct || 100);
+    const futPct = useLiveWallets
+        ? (liveWalletUsdt > 0 ? liveFuturesUsdt / liveWalletUsdt * 100 : 0)
+        : parseFloat(d.futures_pct || 0);
+    const reserves = capital.bnb_reserves_usdt || {};
+    const pauseStatus = capital.pause_new_entries || controlStatus?.pause_new_entries || null;
+    const pendingReservations = capital.capital_reservations || [];
+    const formatCapitalValue = value => {
+        const number = value == null ? NaN : Number(value);
+        return Number.isFinite(number) ? `$${fmt(number)}` : 'N/D';
+    };
+    const spotReservation = pendingReservations
+        .filter(item => item.bucket === 'spot')
+        .reduce((total, item) => total + Number(item.amount_usdt || 0), 0);
+    const futuresReservation = pendingReservations
+        .filter(item => item.bucket === 'futures')
+        .reduce((total, item) => total + Number(item.amount_usdt || 0), 0);
+    const capitalFreshness = capital.timestamp
+        ? `${capital.ok ? 'actualizado' : 'parcial'} ${relativeTime(capital.timestamp)}`
+        : 'sin snapshot';
+    const entryAvailability = pauseStatus
+        ? (pauseStatus.active ? 'Pausadas' : 'Habilitadas')
+        : 'Estado desconocido';
+    const spotBnbQty = capital.spot?.bnb?.total;
+    const futuresBnbQty = futuresAssets.BNB?.walletBalance;
+    const spotBalancesToDisplay = useLiveWallets
+        ? (capital.spot?.asset_values_usdt_equivalent || {})
+        : (d.balances_usdt || {});
+    const capitalObservationHtml = `
+        <div class="balances-breakdown" style="margin-top:10px">
+            <h3>Capital disponible y reservas</h3>
+            <div class="balances-scroll">
+                <div class="data-item"><span class="data-label">Spot USDT (free / locked / total)</span><span class="data-value">${formatCapitalValue(spotBalances.free)} / ${formatCapitalValue(spotBalances.locked)} / ${formatCapitalValue(spotBalances.total)}</span></div>
+                <div class="data-item"><span class="data-label">Spot total (USDT-equivalent)</span><span class="data-value">${formatCapitalValue(capital.spot?.wallet_value_usdt_equivalent)}${capital.spot?.unpriced_assets?.length ? ' · valuación parcial' : ''}</span></div>
+                <div class="data-item"><span class="data-label">Futures USDT (wallet / disponible)</span><span class="data-value">${formatCapitalValue(futuresAccount.totalWalletBalance)} / ${formatCapitalValue(futuresAccount.availableBalance)}</span></div>
+                <div class="data-item"><span class="data-label">Futures total (USDT-equivalent)</span><span class="data-value">${formatCapitalValue(capital.futures?.wallet_value_usdt_equivalent)} · Multi-Assets ${capital.futures?.multi_assets_margin == null ? 'N/D' : (capital.futures.multi_assets_margin ? 'activo' : 'inactivo')}</span></div>
+                <div class="data-item"><span class="data-label">Futures margin (posición / órdenes / mantenimiento)</span><span class="data-value">${formatCapitalValue(futuresAccount.totalPositionInitialMargin)} / ${formatCapitalValue(futuresAccount.totalOpenOrderInitialMargin)} / ${formatCapitalValue(futuresAccount.totalMaintMargin)}</span></div>
+                <div class="data-item"><span class="data-label">Reserva BNB (Spot / Futures)</span><span class="data-value">${formatCapitalValue(reserves.spot_reserve_usdt)} / ${formatCapitalValue(reserves.futures_reserve_usdt)}</span></div>
+                <div class="data-item"><span class="data-label">BNB (Spot / Futures)</span><span class="data-value">${spotBnbQty == null ? 'N/D' : `${fmt(spotBnbQty, 6)} BNB`} / ${futuresBnbQty == null ? 'N/D' : `${fmt(futuresBnbQty, 6)} BNB`}</span></div>
+                <div class="data-item"><span class="data-label">Capital reservado para entradas</span><span class="data-value">Spot ${formatCapitalValue(spotReservation)} · Futures ${formatCapitalValue(futuresReservation)}</span></div>
+                <div class="data-item"><span class="data-label">Nuevas entradas</span><span class="data-value">${entryAvailability} · ${capitalFreshness}</span></div>
+            </div>
+        </div>`;
+    const walletHtml = walletFuturesUsdt > 0 ? `
         <div class="wallet-split">
             <div class="wallet-row">
                 <span class="wallet-icon">💼</span>
                 <span class="wallet-label">Spot</span>
-                <span class="wallet-amount">$${fmt(spotUsdt)} USDT</span>
+                <span class="wallet-amount">$${fmt(walletSpotUsdt)} USDT</span>
                 <span class="wallet-pct">${spotPct}%</span>
             </div>
             <div class="wallet-bar-wrap">
@@ -1237,22 +1380,23 @@ function renderBalance(d) {
             <div class="wallet-row">
                 <span class="wallet-icon">⚡</span>
                 <span class="wallet-label">Futuros</span>
-                <span class="wallet-amount">$${fmt(futUsdt)} USDT</span>
+                <span class="wallet-amount">$${fmt(walletFuturesUsdt)} USDT</span>
                 <span class="wallet-pct">${futPct}%</span>
             </div>
         </div>` : '';
     document.getElementById('balanceData').innerHTML = `
-        <div class="data-item"><span class="data-label">Total USDT</span><span class="data-value">$${fmt(d.total_usdt)}</span></div>
-        <div class="data-item"><span class="data-label">Total MXN</span><span class="data-value">$${fmt(d.total_mxn)}</span></div>
+        <div class="data-item"><span class="data-label">${useLiveWallets ? 'Valor total en wallets (USDT-equivalente)' : 'Total USDT (resumen)'}</span><span class="data-value">$${fmt(displayedWalletUsdt)}</span></div>
+        <div class="data-item"><span class="data-label">${useLiveWallets ? 'Equivalente MXN (incluye BNB)' : 'Total MXN (resumen)'}</span><span class="data-value">$${fmt(useLiveWallets ? displayedWalletUsdt * rate : d.total_mxn)}</span></div>
         <div class="data-item"><span class="data-label">USD/MXN</span><span class="data-value">${fmt(d.usd_to_mxn_rate)}</span></div>
         ${walletHtml}
+        ${capitalObservationHtml}
         <div class="balances-breakdown">
             <h3>💼 SPOT — Activos:</h3>
             <div class="balances-scroll">
-            ${Object.entries(d.balances_usdt || {}).filter(([a, v]) => parseFloat(v) >= 5).map(([a, v]) => `
+            ${Object.entries(spotBalancesToDisplay).filter(([a, v]) => parseFloat(v) >= 5).map(([a, v]) => `
                 <div class="data-item">
                     <span class="data-label">${a}</span>
-                    <span class="data-value">${fmt(v, 4)} USDT / ${fmt((d.balances_mxn || {})[a])} MXN</span>
+                    <span class="data-value">${fmt(v, 4)} ${useLiveWallets ? 'USDT-eq' : `USDT / ${fmt((d.balances_mxn || {})[a])} MXN`}</span>
                 </div>`).join('')}
             </div>
         </div>
@@ -1409,11 +1553,12 @@ function renderPnlHistory(d) {
 let _profitTrackerPeriod = 'today';
 function switchProfitTrackerPeriod(period) {
     _profitTrackerPeriod = period;
-    if (_cachedData && _cachedData.pnl_by_close_reason) renderProfitTracker(_cachedData.pnl_by_close_reason);
+    if (_lastProfitTrackerData) renderProfitTracker(_lastProfitTrackerData);
 }
 function renderProfitTracker(d) {
     const el = document.getElementById('profitTrackerData');
     if (!el || !d || d.error) return;
+    _lastProfitTrackerData = d;
 
     const period = _profitTrackerPeriod === 'week' ? d.week : d.today;
     if (!period) return;
@@ -1514,13 +1659,30 @@ function toggleEscRow(symbol) {
     if (_lastOpenData) renderOpenPositions(_lastOpenData);
 }
 
+function getOpenPositionInvestedUsdt(position) {
+    const reported = Number(position?.invested_usdt);
+    if (position?.invested_usdt != null && Number.isFinite(reported) && reported > 0) return reported;
+    const entryPrice = Number(position?.entry_price);
+    const quantity = Number(position?.quantity ?? position?.qty);
+    return Number.isFinite(entryPrice) && entryPrice > 0 && Number.isFinite(quantity) && quantity > 0
+        ? entryPrice * quantity
+        : 0;
+}
+
 function renderOpenPositions(d) {
     if (!d) return;
     _lastOpenData = d;  // FIX-L6c: cache for sub-tab re-render
     const el = document.getElementById('openPositionsData');
 
     // FIX-L6c: update card header with live counts
-    const _allPos = d.positions || [];
+    const _allPos = (d.positions || []).map(position => {
+        const quantity = position.quantity ?? position.qty;
+        return {
+            ...position,
+            quantity,
+            invested_usdt: getOpenPositionInvestedUsdt({ ...position, quantity }),
+        };
+    });
     const _spotC = d.spot_count    ?? _allPos.filter(p => p.trade_type !== 'futures').length;
     const _futC  = d.futures_count ?? _allPos.filter(p => p.trade_type === 'futures').length;
     const _titleEl = document.getElementById('unifiedPosCardTitle');
@@ -1558,7 +1720,7 @@ function renderOpenPositions(d) {
     }
 
     const totalUnreal = visiblePositions.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0);
-    const totalInvested = visiblePositions.reduce((s, p) => s + parseFloat(p.invested_usdt || 0), 0);
+    const totalInvested = visiblePositions.reduce((s, p) => s + getOpenPositionInvestedUsdt(p), 0);
 
     const predPositions = visiblePositions.filter(p => p.pnl_prediction && p.pnl_prediction.expected_pnl);
     const avgAccuracy = predPositions.length > 0
@@ -1660,7 +1822,12 @@ function renderOpenPositions(d) {
             ? fmtEntryTime(firstEntry.opened_at, realHrs)
             : fmtEntryTime(p.entry_time, realHrs);
 
-        const invVal = parseFloat(p.invested_usdt || 0);
+        const invVal = getOpenPositionInvestedUsdt(p);
+        const baseQty = Number(p.base_quantity ?? p.quantity ?? p.qty ?? 0);
+        const baseAsset = p.base_asset || p.balance_unit || String(p.symbol || '').replace(/USDT$/, '');
+        const unknownBasis = p.cost_basis_status === 'unknown' || p.entry_context_status === 'unknown_reconciled'
+            ? '<br><small title="El activo fue reconciliado desde el balance; el coste de adquisición no fue recuperable">base de coste desconocida</small>'
+            : '';
         const invMargin = p.trade_type === 'futures' && p.margin_usdt
             ? `<br><small class="inv-margin" title="Margin comprometido">mgn $${fmt(p.margin_usdt)}</small>`
             : '';
@@ -1673,7 +1840,7 @@ function renderOpenPositions(d) {
             <td class="mode-cell">${modeBadge}</td>
             <td>$${fmt(entryP, 5)}<br><small class="entry-time">${entryTimeStr}</small></td>
             <td>$${fmt(curP, 5)}</td>
-            <td class="inv-cell" title="${p.trade_type === 'futures' ? 'Notional invertido' : 'Costo total'}">$${fmt(invVal)} USDT${invMargin}</td>
+            <td class="inv-cell" title="${p.trade_type === 'futures' ? 'Notional en USDT; margen separado' : 'Valor de entrada estimado en USDT'}">$${fmt(invVal)} USDT<br><small>${fmt(baseQty, 8)} ${baseAsset}</small>${unknownBasis}${invMargin}</td>
             <td class="sl-tp-cell">${fmtSlTpCell(p)}</td>
             <td class="sl-tp-badges">${fmtSlTpBadges(p)}</td>
             <td class="peak-tuning-badges">${peakTuningBadges || '<span class="sl-badge none">—</span>'}</td>
@@ -5806,10 +5973,7 @@ function renderCommissionPanel(status) {
 
 async function updateDashboard() {
     const data = await fetchDashboardData();
-    if (!data) {
-        await hydrateCriticalPanels();
-        return;
-    }
+    if (!data) return;
 
     // Keep environment pill in sync even when /dashboard/config gating ran before runtime settled.
     hydrateEnvironmentBadge();
@@ -5818,10 +5982,10 @@ async function updateDashboard() {
     renderExecutiveSummary(data);
     renderKPIRow(data);
     renderSignals(data.signals);
-    renderBalance(data.balance);
+    renderBalance(data.balance, data.capital_snapshot, data.control_status);
     renderPnlHistory(data.pnl_history);
-    renderProfitTracker(data.pnl_by_close_reason);
-    let openPositionsData = data.open_positions;
+    if (!_lastProfitTrackerData) renderProfitTracker(data.pnl_by_close_reason);
+    let openPositionsData = _lastOpenData || data.open_positions;
     const summaryOpenPositions = Array.isArray(openPositionsData?.positions) ? openPositionsData.positions : [];
     if (!summaryOpenPositions.length) {
         // Fallback: summary can be stale/empty while dedicated endpoint already has live positions.
@@ -5838,13 +6002,13 @@ async function updateDashboard() {
         }
     }
 
-    renderOpenPositions(openPositionsData);
+    if (!_lastOpenData) renderOpenPositions(openPositionsData);
     renderExpectativaVsRealidad(data);
     renderSelectionObservability(data.selection_observability);
     updateEntryEvidence();
     renderVolSpikeAudit();  // Auditoría VolSpike Override
     _syncFuturesUnrealPnl();  // Keep _futuresUnrealPnl fresh for KPI (no separate card)
-    renderClosedPositions(data.closed_positions);
+    if (!_lastClosedData) renderClosedPositions(data.closed_positions);
     renderNextCycle(data.next_cycle);
     renderAnalysisSummary(data.performance, data.closed_positions);
     renderLearning(data.learning);
@@ -7589,6 +7753,82 @@ function renderPredVsRealChart(containerId, expectativaData) {
 }
 
 // ── Dedicated position polls (lightweight, independent of heavy summary) ───────
+const PRIORITY_CACHE_KEY = 'dashboard.priority.v1';
+let _priorityCache = {};
+
+function persistPriorityPanels() {
+    try {
+        localStorage.setItem(PRIORITY_CACHE_KEY, JSON.stringify({
+            open: _lastOpenData,
+            closed: _lastClosedData,
+            pnl: _lastProfitTrackerData,
+            saved_at: Date.now(),
+        }));
+    } catch (_) {}
+}
+
+function restorePriorityPanels() {
+    try {
+        _priorityCache = JSON.parse(localStorage.getItem(PRIORITY_CACHE_KEY) || '{}');
+        if (_priorityCache.open) renderOpenPositions(_priorityCache.open);
+        if (_priorityCache.closed) renderClosedPositions(_priorityCache.closed);
+        if (_priorityCache.pnl) renderProfitTracker(_priorityCache.pnl);
+    } catch (_) {
+        _priorityCache = {};
+    }
+}
+
+function profitTrackerFromClosed(data) {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const weekStart = todayStart - (6 * 24 * 60 * 60 * 1000);
+    const positions = Array.isArray(data?.positions) ? data.positions : [];
+    const aggregate = start => {
+        const recent = positions.filter(p => {
+            const timestamp = Date.parse(p.exit_time || '');
+            return Number.isFinite(timestamp) && timestamp >= start;
+        });
+        const byReason = new Map();
+        let spotPnl = 0;
+        let futuresPnl = 0;
+        let spotCount = 0;
+        let futuresCount = 0;
+        recent.forEach(p => {
+            const pnl = parseFloat(p.pnl || 0);
+            const reason = p.close_reason || 'unknown';
+            const current = byReason.get(reason) || { reason, count: 0, pnl: 0 };
+            current.count += 1;
+            current.pnl += pnl;
+            byReason.set(reason, current);
+            if (p.trade_type === 'futures') {
+                futuresPnl += pnl;
+                futuresCount += 1;
+            } else {
+                spotPnl += pnl;
+                spotCount += 1;
+            }
+        });
+        return {
+            by_reason: [...byReason.values()].map(row => ({ ...row, pnl: Number(row.pnl.toFixed(4)) })),
+            total_pnl: Number((spotPnl + futuresPnl).toFixed(4)),
+            total_trades: recent.length,
+            spot_pnl: Number(spotPnl.toFixed(4)),
+            spot_count: spotCount,
+            futures_pnl: Number(futuresPnl.toFixed(4)),
+            futures_count: futuresCount,
+        };
+    };
+    return { today: aggregate(todayStart), week: aggregate(weekStart), daily_target: 40.0 };
+}
+
+async function fetchPriority(path) {
+    try {
+        const response = await _fetchWithTimeout(`${PRIORITY_API_BASE}${path}`, { headers: _authHeaders() }, 5000);
+        if (response.ok) return response;
+    } catch (_) {}
+    return _fetchWithTimeout(`${API_BASE}${path}`, { headers: _authHeaders() }, 15000);
+}
+
 async function pollOpenPositions() {
     try {
         const res = await _fetchWithTimeout(`${API_BASE}/positions/open`, { headers: _authHeaders() }, 15000);
@@ -7596,6 +7836,12 @@ async function pollOpenPositions() {
             const data = await res.json();
             if (_cachedData) _cachedData.open_positions = data;
             renderOpenPositions(data);
+            if (_cachedData) {
+                _cachedData.open_positions = _lastOpenData;
+                renderExecutiveSummary(_cachedData);
+                renderKPIRow(_cachedData);
+            }
+            persistPriorityPanels();
         }
     } catch (e) {
         console.warn('[dashboard] open positions poll failed:', e);
@@ -7604,12 +7850,18 @@ async function pollOpenPositions() {
 
 async function pollClosedPositions() {
     try {
-        const res = await _fetchWithTimeout(`${API_BASE}/positions/closed?limit=100&days=${_dashboardDays}`, { headers: _authHeaders() }, 15000);
+        const res = await fetchPriority('/positions/closed?limit=100');
         if (res.ok) {
             const data = await res.json();
-            data.period_days = data.period_days || _dashboardDays;
-            if (_cachedData) _cachedData.closed_positions = data;
+            data.period_days = _dashboardDays;
+            const pnl = profitTrackerFromClosed(data);
+            if (_cachedData) {
+                _cachedData.closed_positions = data;
+                _cachedData.pnl_by_close_reason = pnl;
+            }
             renderClosedPositions(data);
+            renderProfitTracker(pnl);
+            persistPriorityPanels();
         }
     } catch (e) {
         console.warn('[dashboard] closed positions poll failed:', e);
@@ -7617,7 +7869,10 @@ async function pollClosedPositions() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+    restorePriorityPanels();
     await _apiKeyReady;
+    pollOpenPositions();
+    pollClosedPositions();
     try {
         const configRes = await fetch(`${API_BASE}/dashboard/config`);
         if (configRes.ok) {
@@ -7647,7 +7902,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.warn('Staging-only UI gating unavailable:', err);
     }
     hydrateEnvironmentBadge();
-    hydrateCriticalPanels();
     _restoreSmartRunId();
 
     // ── Tab navigation ────────────────────────────────────────────────────────
@@ -7852,14 +8106,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     updateDashboard();
-    updateStagingPanel();
-    updateHealthAndErrors();
-    updateReconciliation();
-    updateRangeScalpDual();
-    updateSRPoolPanel();
-    updateOperatorAlerts();
-    pollBacktestResults();
-    updateBacktestProgressWidget();
+    setTimeout(() => {
+        updateStagingPanel();
+        updateHealthAndErrors();
+        updateReconciliation();
+        updateRangeScalpDual();
+        updateSRPoolPanel();
+        updateOperatorAlerts();
+        pollBacktestResults();
+        updateBacktestProgressWidget();
+    }, 60000);
     // Self-rescheduling summary poll so long-running /dashboard/summary calls don't overlap.
     function scheduleSummaryPoll() {
         setTimeout(async () => {
@@ -7875,7 +8131,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Dedicated position polls: open fastest, closed/PnL less frequent.
     setInterval(pollOpenPositions, OPEN_POSITIONS_POLL_MS);
-    setInterval(pollClosedPositions, POLL_INTERVAL_MS);
+    setInterval(pollClosedPositions, CLOSED_POSITIONS_POLL_MS);
     setInterval(updateReconciliation, 60000);
     setInterval(updateHealthAndErrors, 60000);  // Health & errors refresh every 60s
     setInterval(updateSRPoolPanel, 30000);        // SR-pool panel every 30s
@@ -7884,13 +8140,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden) {
-            fetchDashboardData(true);
             pollOpenPositions();
+            pollClosedPositions();
         }
     });
     window.addEventListener('focus', () => {
-        fetchDashboardData(true);
         pollOpenPositions();
+        pollClosedPositions();
     });
 
     // Toggle MXN re-renders open positions

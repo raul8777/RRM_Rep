@@ -111,7 +111,10 @@ def run_baseline_window(
     runner = LifecycleRunner(
         adapter=adapter,
         signal_pipeline=SignalPipeline(),
-        entry_gate=EntryGate(),
+        entry_gate=EntryGate(
+            price_resolver=adapter.price_resolver,
+            atr_resolver=adapter.atr_resolver,
+        ),
         position_sizer=PositionSizer(),
         exit_engine=ExitEngine(
             price_resolver=adapter.price_resolver,
@@ -150,7 +153,7 @@ def sample_price_series() -> List[Dict[str, float]]:
         {"BTCUSDT": 50000.0, "SOLUSDT": 100.0, "FETUSDT": 2.00},
         {"BTCUSDT": 50500.0, "SOLUSDT": 101.0, "FETUSDT": 2.05},  # +1%
         {"BTCUSDT": 51200.0, "SOLUSDT": 103.0, "FETUSDT": 2.12},  # +2.4% BTC
-        {"BTCUSDT": 52000.0, "SOLUSDT": 105.0, "FETUSDT": 2.20},  # hard TP zone
+        {"BTCUSDT": 53500.0, "SOLUSDT": 107.0, "FETUSDT": 2.20},  # hard TP zone
         {"BTCUSDT": 51900.0, "SOLUSDT": 104.5, "FETUSDT": 2.18},  # slight retracement
         {"BTCUSDT": 51800.0, "SOLUSDT": 104.0, "FETUSDT": 2.15},  # trailing risk
     ]

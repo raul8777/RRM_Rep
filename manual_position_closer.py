@@ -73,7 +73,7 @@ def _audit(db_client, symbol: str, event: str, detail: Dict) -> None:
 
 def preview_spot(symbol: str, components) -> Dict:
     """Dry-run: return what would happen without mutating state."""
-    from trade_utils import get_symbol_filters, align_quantity_to_step, is_quantity_valid
+    from trade_utils import get_binance_asset_balance, get_symbol_filters, align_quantity_to_step, is_quantity_valid
 
     client = components.binance_client
     pm = components.position_manager
@@ -85,8 +85,17 @@ def preview_spot(symbol: str, components) -> Dict:
 
     price = float(client.get_symbol_price(symbol, use_cache=False))
     base = symbol.replace("USDT", "")
-    balances = client.get_account_balance()
-    qty_held = float(balances.get(base, 0.0))
+    balance = get_binance_asset_balance(client, base)
+    if not balance["ok"]:
+        return {"ok": False, "reason": "balance_unavailable", "symbol": symbol, "error": balance.get("error")}
+    qty_held = float(balance["free"])
+    total_held = float(balance["total"])
+    if total_held <= 0:
+        return {"ok": False, "reason": "exchange_balance_absent_keep_position", "symbol": symbol, "db_qty": sum(float(p.quantity) for p in pos_list)}
+    if qty_held <= 0:
+        return {"ok": False, "reason": "exchange_balance_locked_keep_position", "symbol": symbol, "locked_qty": balance["locked"], "total_qty": total_held}
+    if balance["locked"] > 0:
+        return {"ok": False, "reason": "partial_balance_locked_keep_position", "symbol": symbol, "free_qty": qty_held, "locked_qty": balance["locked"], "total_qty": total_held}
     notional_held = qty_held * price
 
     filters = get_symbol_filters(client, symbol)
@@ -151,8 +160,17 @@ def execute_spot(symbol: str, components, source: str = "api") -> Dict:
 
     price = float(client.get_symbol_price(symbol, use_cache=False))
     base = symbol.replace("USDT", "")
-    balances = client.get_account_balance()
-    qty_held = float(balances.get(base, 0.0))
+    balance = get_binance_asset_balance(client, base)
+    if not balance["ok"]:
+        return {"ok": False, "reason": "balance_unavailable", "symbol": symbol, "error": balance.get("error")}
+    qty_held = float(balance["free"])
+    total_held = float(balance["total"])
+    if total_held <= 0:
+        return {"ok": False, "reason": "exchange_balance_absent_keep_position", "symbol": symbol}
+    if qty_held <= 0:
+        return {"ok": False, "reason": "exchange_balance_locked_keep_position", "symbol": symbol, "locked_qty": balance["locked"], "total_qty": total_held}
+    if balance["locked"] > 0:
+        return {"ok": False, "reason": "partial_balance_locked_keep_position", "symbol": symbol, "free_qty": qty_held, "locked_qty": balance["locked"], "total_qty": total_held}
     notional_held = qty_held * price
 
     filters = get_symbol_filters(client, symbol)
@@ -188,9 +206,13 @@ def execute_spot(symbol: str, components, source: str = "api") -> Dict:
         topup_fill_price = _fill_price(topup_order, price)
 
         # Refresh balance and price after top-up
-        balances = client.get_account_balance()
+        balance = get_binance_asset_balance(client, base)
+        if not balance["ok"]:
+            return {"ok": False, "reason": "balance_unavailable_after_topup", "symbol": symbol, "error": balance.get("error"), "topup_order": topup_order}
         price = float(client.get_symbol_price(symbol, use_cache=False))
-        qty_held = float(balances.get(base, 0.0))
+        qty_held = float(balance["free"])
+        if qty_held <= 0:
+            return {"ok": False, "reason": "topup_balance_not_available", "symbol": symbol, "topup_order": topup_order}
 
     sell_qty = align_quantity_to_step(qty_held, step)
     ok_sell, sell_reason = is_quantity_valid(sell_qty, price, filters)
@@ -361,10 +383,10 @@ def execute_futures(symbol: str, side: str, components, source: str = "api") -> 
 
 def close_ghost_db(symbol: str, components, source: str = "api") -> Dict:
     """
-    Close a position that exists only in DB (no real Binance balance to sell).
-    Marks as manual_close + ghost_balance_mismatch.
+    Close a DB-only position only after two fresh Spot snapshots confirm zero total balance.
     """
     import config_helpers
+    from trade_utils import get_binance_asset_balance, has_recent_binance_sell_proof
 
     pm = components.position_manager
     db = getattr(components, "db_client", None)
@@ -375,6 +397,48 @@ def close_ghost_db(symbol: str, components, source: str = "api") -> Dict:
     pos_list = all_pos.get(symbol, [])
     if not pos_list:
         return {"ok": False, "reason": "no_open_position", "symbol": symbol}
+
+    asset = symbol.removesuffix("USDT")
+    first_balance = get_binance_asset_balance(client, asset)
+    second_balance = get_binance_asset_balance(client, asset)
+    snapshots = [first_balance, second_balance]
+    if any(not snapshot.get("ok") for snapshot in snapshots):
+        _audit(db, symbol, "manual_position_ghost_close_deferred", {
+            "source": source,
+            "reason": "balance_unavailable",
+            "snapshots": snapshots,
+        })
+        return {"ok": False, "reason": "balance_unavailable_keep_position", "symbol": symbol}
+    if any(float(snapshot.get("total") or 0.0) > 0 for snapshot in snapshots):
+        _audit(db, symbol, "manual_position_ghost_close_deferred", {
+            "source": source,
+            "reason": "asset_still_present_on_exchange",
+            "snapshots": snapshots,
+        })
+        return {
+            "ok": False,
+            "reason": "exchange_balance_present_keep_position",
+            "symbol": symbol,
+            "free_quantity": second_balance.get("free"),
+            "locked_quantity": second_balance.get("locked"),
+            "total_quantity": second_balance.get("total"),
+        }
+    db_quantity = sum(float(pos.quantity or 0.0) for pos in pos_list)
+    entry_time = min((getattr(pos, "entry_time", None) for pos in pos_list), key=lambda value: str(value or ""))
+    if not has_recent_binance_sell_proof(
+        client,
+        symbol,
+        hours=int(getattr(settings, "spot_ghost_sell_confirmation_hours", 24) or 24),
+        minimum_qty=db_quantity,
+        since_time=entry_time,
+    ):
+        _audit(db, symbol, "manual_position_ghost_close_deferred", {
+            "source": source,
+            "db_quantity": db_quantity,
+            "balance_snapshots": snapshots,
+            "reason": "missing_sell_proof_asset_may_be_in_other_wallet",
+        })
+        return {"ok": False, "reason": "sell_proof_missing_keep_position", "symbol": symbol}
 
     price = float(client.get_symbol_price(symbol, use_cache=False))
     commission_rate = config_helpers.get_param(settings, "binance_commission_rate")
@@ -393,6 +457,9 @@ def close_ghost_db(symbol: str, components, source: str = "api") -> Dict:
 
     _audit(db, symbol, "manual_position_ghost_closed", {
         "entries_closed": len(closed), "price": price, "source": source,
+        "db_quantity": sum(float(pos.quantity or 0.0) for pos in pos_list),
+        "balance_snapshots": snapshots,
+        "confirmation": "two_valid_zero_total_spot_snapshots",
     })
 
     return {

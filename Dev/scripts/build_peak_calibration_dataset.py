@@ -631,14 +631,24 @@ def load_btc_dominance(repo: Path) -> pd.DataFrame:
     for f in files:
         try:
             df = pd.read_parquet(f)
-            df["date"] = pd.to_datetime(df["snapshot_time"]).dt.tz_localize(None).dt.normalize()
-            frames.append(df[["date", "btc_dominance"]])
+            snapshot_time = pd.to_datetime(df["snapshot_time"], utc=True, errors="coerce").dt.tz_localize(None)
+            declared_date = pd.to_datetime(df["date"], errors="coerce").dt.normalize()
+            valid = snapshot_time.notna() & declared_date.eq(snapshot_time.dt.normalize())
+            frame = df.loc[valid, ["btc_dominance"]].copy()
+            frame["snapshot_time"] = snapshot_time.loc[valid]
+            frames.append(frame)
         except Exception as exc:
             print(f"[WARN] dom {f}: {exc}")
     if not frames:
         return pd.DataFrame()
-    df = pd.concat(frames, ignore_index=True).drop_duplicates("date")
-    return df.set_index("date")
+    df = pd.concat(frames, ignore_index=True).drop_duplicates("snapshot_time", keep="last")
+    return df.set_index("snapshot_time").sort_index()
+
+
+def align_btc_dominance(dom: pd.DataFrame, hourly_index: pd.DatetimeIndex) -> pd.Series:
+    snapshots = dom.index.to_series().reindex(hourly_index, method="ffill")
+    recent = (hourly_index.to_series() - snapshots) <= pd.Timedelta(hours=24)
+    return dom["btc_dominance"].reindex(hourly_index, method="ffill").where(recent)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -688,7 +698,7 @@ def main() -> None:
         regime_df["fear_greed_value"] = regime_df["date"].map(fg["value"])
         regime_df["fear_greed_classification"] = regime_df["date"].map(fg["classification"])
     if not dom.empty:
-        regime_df["btc_dominance"] = regime_df["date"].map(dom["btc_dominance"])
+        regime_df["btc_dominance"] = align_btc_dominance(dom, regime_df.index)
     regime_df = regime_df.drop(columns=["date"], errors="ignore")
 
     print("Computing market breadth...")

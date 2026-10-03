@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from orchestrator import Orchestrator, SystemState
 
@@ -66,3 +67,107 @@ def test_cycle_diagnostics_reports_stale_running_state():
     assert diagnostics['worker_state'] == 'stale_running'
     assert diagnostics['stale'] is True
     assert diagnostics['running_minutes'] is not None
+
+
+def test_proactive_liquidity_hook_runs_with_cycle_context_when_enabled():
+    calls = []
+
+    class _PortfolioManager:
+        settings = SimpleNamespace(
+            portfolio_proactive_liquidity_enabled=True,
+            futures_enabled=False,
+        )
+
+        def reconcile_proactive_liquidity(self, **kwargs):
+            calls.append(kwargs)
+            return {"status": "targets_met"}
+
+    orchestrator = Orchestrator()
+    orchestrator.portfolio_manager = _PortfolioManager()
+
+    orchestrator._reconcile_proactive_liquidity("trade_cycle_completed")
+
+    assert calls == [{"futures_client": None, "db_client": None, "trigger": "trade_cycle_completed"}]
+
+
+def test_watcher_pause_activated_after_candidate_read_blocks_fast_path(monkeypatch):
+    import run_trades
+    import staged_entry
+
+    class _StopAfterOnePass:
+        def is_set(self):
+            return False
+
+        def wait(self, _seconds):
+            return True
+
+    class _Db:
+        paused = False
+
+    class _Client:
+        def create_market_order(self, **_kwargs):
+            raise AssertionError("paused watcher must never submit an order")
+
+    settings = SimpleNamespace(
+        staged_entry_fast_path_enabled=True,
+        staged_entry_regime_config={
+            "RANGE_SCALP": {"enabled": True, "intra_mode": "watcher", "watcher_interval_seconds": 5},
+        },
+        directional_policy_mode="active",
+    )
+    db_client = _Db()
+    client = _Client()
+    comp = SimpleNamespace(
+        db_client=db_client,
+        settings=settings,
+        binance_client=client,
+        news_client=None,
+        portfolio_manager=None,
+        position_manager=None,
+        futures_client=None,
+    )
+    gate_events = []
+    authority = {
+        "cycle_id": "qubo-cycle-1",
+        "symbols_hash": "a" * 64,
+        "symbols": ["BTCUSDT"],
+    }
+
+    monkeypatch.setattr("init_components.get_components", lambda: comp)
+    monkeypatch.setattr(
+        staged_entry,
+        "get_staged_entry_regime_config",
+        lambda *_args, **_kwargs: settings.staged_entry_regime_config["RANGE_SCALP"],
+    )
+    monkeypatch.setattr(staged_entry, "perform_intra_cycle_check", lambda *_args, **_kwargs: ["BTCUSDT"])
+    monkeypatch.setattr(staged_entry, "get_qubo_authority_snapshot", lambda *_args, **_kwargs: authority)
+
+    def _read_candidates(*_args, **_kwargs):
+        db_client.paused = True
+        return [{
+            "id": 17,
+            "symbol": "BTCUSDT",
+            "qubo_cycle_id": authority["cycle_id"],
+            "qubo_symbols_hash": authority["symbols_hash"],
+        }]
+
+    monkeypatch.setattr(staged_entry, "get_openable_candidates", _read_candidates)
+    monkeypatch.setattr(run_trades, "_is_new_entries_paused", lambda db: db.paused)
+    monkeypatch.setattr(
+        run_trades,
+        "_update_fast_path_gate",
+        lambda _db, ready_id, passed, reason, _balance: gate_events.append((ready_id, passed, reason)),
+    )
+    monkeypatch.setattr("market_regime.get_regime", lambda *_args, **_kwargs: None)
+
+    orchestrator = Orchestrator(db_client=db_client)
+    orchestrator.state = SystemState.RUNNING
+    orchestrator.should_run = True
+    orchestrator.current_regime_mode = "RANGE_SCALP"
+    orchestrator.staged_entry_intra_stop = _StopAfterOnePass()
+    orchestrator.can_execute_trades = lambda: True
+
+    orchestrator._staged_entry_intra_loop()
+
+    assert db_client.paused is True
+    assert gate_events == [(17, False, "PAUSED_DB")]

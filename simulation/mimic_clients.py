@@ -4,9 +4,11 @@ These classes implement the same public interfaces as `BinanceClient` and
 `FuturesClient` but execute against an in-memory market replay.
 """
 from __future__ import annotations
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
+import uuid
 from simulation.mimic_protocols import SimulationClock
 
 
@@ -43,11 +45,16 @@ def _load_funding_rate_series(data_dir: str = "historical_data") -> Dict[str, Di
             df = pd.read_parquet(os.path.join(ext_dir, fname))
             for _, row in df.iterrows():
                 sym = str(row.get("symbol", ""))
-                ts_raw = row.get("fundingTime", 0)
-                rate = float(row.get("fundingRate", 0.0))
+                ts_raw = row.get("fundingTime", row.get("funding_time", 0))
+                rate = float(row.get("fundingRate", row.get("funding_rate", 0.0)))
                 # Convert ms epoch to ISO date-hour key (funding settles every 8h)
                 from datetime import timezone as _tz
-                dt = datetime.fromtimestamp(int(ts_raw) / 1000.0, tz=_tz.utc)
+                if isinstance(ts_raw, datetime):
+                    dt = ts_raw.astimezone(_tz.utc)
+                elif hasattr(ts_raw, "to_pydatetime"):
+                    dt = ts_raw.to_pydatetime().astimezone(_tz.utc)
+                else:
+                    dt = datetime.fromtimestamp(int(ts_raw) / 1000.0, tz=_tz.utc)
                 key = dt.strftime("%Y-%m-%dT%H")
                 if sym not in result:
                     result[sym] = {}
@@ -265,6 +272,7 @@ class SimulationBinanceClient:
         slippage_pct: Optional[float] = None,
     ):
         self.clock = clock
+        self.is_simulation = True
         self.balances: Dict[str, float] = dict(initial_balances or {"USDT": 2910.0})
         _spot_rate, _fut_rate, _slip = _get_commission_rates()
         self.commission_rate = commission_rate if commission_rate is not None else _spot_rate
@@ -426,6 +434,28 @@ class SimulationBinanceClient:
         self._price_cache[symbol] = (price, now)
         return price
 
+    def get_symbol_avg_price(self, symbol: str, use_cache: bool = True) -> float:
+        """Return a 5-bar VWAP as the simulated average price for the symbol."""
+        cache_key = f"{symbol}:avg"
+        now = self.clock.now().timestamp()
+        if use_cache and cache_key in self._price_cache:
+            price, ts = self._price_cache[cache_key]
+            if now - ts < self.PRICE_CACHE_TTL:
+                return price
+        bars = self._price_feed.get(symbol, [])
+        if not bars:
+            raise RuntimeError(f"No price data for {symbol} at {self.clock.now().isoformat()}")
+        recent = [b for b in bars if b.get("open_time", b.get("timestamp", 0)) <= now][-5:]
+        if not recent:
+            recent = bars[-5:]
+        total_vol = sum(float(b.get("volume", 0)) for b in recent)
+        if total_vol > 0:
+            price = sum(float(b.get("close", 0)) * float(b.get("volume", 0)) for b in recent) / total_vol
+        else:
+            price = float(recent[-1].get("close", 0))
+        self._price_cache[cache_key] = (price, now)
+        return price
+
     def get_symbol_filters(self, symbol: str) -> Dict[str, float]:
         """Return symbol filters with 1-hour cache."""
         now = self.clock.now().timestamp()
@@ -454,6 +484,38 @@ class SimulationBinanceClient:
         return self.client
 
 
+@dataclass
+class SimulationLeveragedPosition:
+    symbol: str
+    side: str
+    qty: float
+    entry_price: float
+    sl_price: float
+    tp_price: float
+    order_id: str
+    leverage: int = 2
+    margin_usdt: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    closed: bool = False
+    opened_at: float = 0.0
+    peak_pnl_pct: float = 0.0
+    position_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    thesis_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    close_group_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    @property
+    def quantity(self) -> float:
+        return self.qty
+
+    @property
+    def stop_price(self) -> float:
+        return self.sl_price
+
+    @property
+    def target_price(self) -> float:
+        return self.tp_price
+
+
 class SimulationFuturesClient:
     """Mock futures client backed by the same historical price feed."""
 
@@ -472,6 +534,8 @@ class SimulationFuturesClient:
         _spot_rate, _fut_rate, _slip = _get_commission_rates()
         commission_rate = commission_rate if commission_rate is not None else _fut_rate
         self.clock = clock
+        self.dry_run = True
+        self.is_simulation = True
         self._price_feed = price_feed
         self.commission_rate = commission_rate
         self.leverage = leverage
@@ -491,18 +555,21 @@ class SimulationFuturesClient:
         self._last_funding_hour: Optional[int] = None  # tracks last settlement hour applied
         self._total_funding_paid: float = 0.0
 
-    def _current_price(self, symbol: str) -> float:
+    def _current_bar(self, symbol: str) -> Dict[str, Any]:
         bars = self._price_feed.get(symbol, [])
         if not bars:
             raise RuntimeError(f"No futures price data for {symbol}")
         now = self.clock.now().timestamp()
         bar = None
-        for b in bars:
-            if b.get("open_time", b.get("timestamp", 0)) <= now:
-                bar = b
+        for candidate in bars:
+            if candidate.get("open_time", candidate.get("timestamp", 0)) <= now:
+                bar = candidate
         if bar is None:
             raise RuntimeError(f"No futures price data for {symbol} at {self.clock.now().isoformat()}")
-        return float(bar.get("close", 0))
+        return bar
+
+    def _current_price(self, symbol: str) -> float:
+        return float(self._current_bar(symbol).get("close", 0))
 
     def apply_funding_if_due(self) -> float:
         """D1: Debit/credit funding from open positions when clock crosses a settlement hour.
@@ -551,17 +618,94 @@ class SimulationFuturesClient:
     def get_available_usdt(self) -> float:
         return self._available_usdt
 
+    def _open_position(
+        self,
+        symbol: str,
+        side: str,
+        usdt_amount: float,
+        sl_pct: float,
+        tp_pct: float,
+        leverage: int,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Optional[SimulationLeveragedPosition]:
+        leverage = max(1, min(int(leverage or self.leverage), 2))
+        margin = min(max(0.0, float(usdt_amount)), self._available_usdt)
+        if margin < 10.0:
+            return None
+        price = self._current_price(symbol)
+        notional = margin * leverage
+        qty = notional / price
+        is_short = side == "SHORT"
+        sl_price = price * (1 + sl_pct / 100.0 if is_short else 1 - sl_pct / 100.0)
+        tp_price = price * (1 - tp_pct / 100.0 if is_short else 1 + tp_pct / 100.0)
+        position = SimulationLeveragedPosition(
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            entry_price=price,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            order_id=f"MIMIC_{uuid.uuid4().hex[:12]}",
+            leverage=leverage,
+            margin_usdt=margin,
+            metadata={**(metadata or {}), **kwargs},
+            opened_at=self.clock.now().timestamp(),
+        )
+        self._available_usdt -= margin
+        self._open_positions[f"{symbol}_{side}"] = position
+        return position
+
+    def open_short(
+        self,
+        symbol: str,
+        usdt_amount: float,
+        sl_pct: float = 2.0,
+        tp_pct: float = 4.0,
+        leverage: int = 2,
+        stop_loss_pct: Optional[float] = None,
+        take_profit_pct: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Optional[SimulationLeveragedPosition]:
+        return self._open_position(
+            symbol, "SHORT", usdt_amount,
+            float(stop_loss_pct if stop_loss_pct is not None else sl_pct),
+            float(take_profit_pct if take_profit_pct is not None else tp_pct),
+            leverage, metadata, **kwargs,
+        )
+
+    def open_long(
+        self,
+        symbol: str,
+        usdt_amount: float,
+        sl_pct: float = 2.0,
+        tp_pct: float = 4.0,
+        leverage: int = 2,
+        stop_loss_pct: Optional[float] = None,
+        take_profit_pct: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Optional[SimulationLeveragedPosition]:
+        return self._open_position(
+            symbol, "LONG", usdt_amount,
+            float(stop_loss_pct if stop_loss_pct is not None else sl_pct),
+            float(take_profit_pct if take_profit_pct is not None else tp_pct),
+            leverage, metadata, **kwargs,
+        )
+
     def get_total_wallet_usdt(self) -> float:
         """Return total USDT-equivalent futures wallet value (simulation-only)."""
-        # Include virtual BNB margin value if held, priced from the historical feed.
         total = self._available_usdt
-        for sym, pos in self._open_positions.items():
+        for pos in self._open_positions.values():
             if pos.closed:
                 continue
             try:
                 price = self._current_price(pos.symbol)
-                notional = abs(float(getattr(pos, 'quantity', 0))) * price
-                total += notional
+                unrealized = pos.qty * (
+                    pos.entry_price - price if pos.side == "SHORT" else price - pos.entry_price
+                )
+                total += pos.margin_usdt + unrealized
             except Exception:
                 pass
         return total
@@ -575,6 +719,8 @@ class SimulationFuturesClient:
         }
 
     def check_positions(self, settings: Any, monitor_only: bool = False) -> List[Dict[str, Any]]:
+        from simulation.entry_outcome_resolver import resolve_bar_exit
+
         # D1: Apply funding before evaluating SL/TP
         self.apply_funding_if_due()
         # Minimal simulation: close positions that hit SL or TP
@@ -582,35 +728,91 @@ class SimulationFuturesClient:
         for key, pos in list(self._open_positions.items()):
             if pos.closed:
                 continue
-            price = self._current_price(pos.symbol)
-            if pos.side == "SHORT":
-                if price >= pos.sl_price:
-                    closes.append({"symbol": pos.symbol, "reason": "SL", "side": "SHORT"})
-                    pos.closed = True
-                elif price <= pos.tp_price:
-                    closes.append({"symbol": pos.symbol, "reason": "TP", "side": "SHORT"})
-                    pos.closed = True
-            else:  # LONG
-                if price <= pos.sl_price:
-                    closes.append({"symbol": pos.symbol, "reason": "SL", "side": "LONG"})
-                    pos.closed = True
-                elif price >= pos.tp_price:
-                    closes.append({"symbol": pos.symbol, "reason": "TP", "side": "LONG"})
-                    pos.closed = True
+            bar = self._current_bar(pos.symbol)
+            exit_result = resolve_bar_exit(pos.side, bar, pos.sl_price, pos.tp_price)
+            if exit_result is not None:
+                reason = exit_result.reason
+                exit_price = float(exit_result.exit_price)
+                pnl = pos.qty * (
+                    pos.entry_price - exit_price if pos.side == "SHORT" else exit_price - pos.entry_price
+                )
+                fees = (pos.entry_price + exit_price) * pos.qty * self.commission_rate
+                net = pnl - fees
+                self._available_usdt += pos.margin_usdt + net
+                closes.append({
+                    "symbol": pos.symbol,
+                    "reason": reason,
+                    "side": pos.side,
+                    "exit_price": exit_price,
+                    "pnl_usdt": net,
+                    "realized_gross_pnl": pnl,
+                    "fees_usdt": fees,
+                    "ambiguous_intrabar": exit_result.ambiguous_intrabar,
+                    "gap_through": exit_result.gap_through,
+                    "position_id": pos.position_id,
+                    "close_group_id": pos.close_group_id,
+                })
+                pos.closed = True
+        return closes
+
+    def close_position(
+        self,
+        position: SimulationLeveragedPosition,
+        reason: str,
+        exit_price: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if position.closed:
+            return None
+        price = float(exit_price if exit_price is not None else self._current_price(position.symbol))
+        gross = position.qty * (
+            position.entry_price - price if position.side == "SHORT" else price - position.entry_price
+        )
+        fees = (position.entry_price + price) * position.qty * self.commission_rate
+        net = gross - fees
+        self._available_usdt += position.margin_usdt + net
+        position.closed = True
+        return {
+            "symbol": position.symbol,
+            "reason": reason,
+            "side": position.side,
+            "exit_price": price,
+            "pnl_usdt": net,
+            "realized_gross_pnl": gross,
+            "fees_usdt": fees,
+            "position_id": position.position_id,
+            "close_group_id": position.close_group_id,
+        }
+
+    def liquidate_all(self, reason: str = "window_end_liquidation") -> List[Dict[str, Any]]:
+        closes = []
+        for position in self._open_positions.values():
+            if position.closed:
+                continue
+            price = self._current_price(position.symbol)
+            gross = position.qty * (
+                position.entry_price - price if position.side == "SHORT" else price - position.entry_price
+            )
+            fees = (position.entry_price + price) * position.qty * self.commission_rate
+            net = gross - fees
+            self._available_usdt += position.margin_usdt + net
+            position.closed = True
+            closes.append({
+                "symbol": position.symbol,
+                "reason": reason,
+                "side": position.side,
+                "exit_price": price,
+                "pnl_usdt": net,
+                "realized_gross_pnl": gross,
+                "fees_usdt": fees,
+                "position_id": position.position_id,
+                "close_group_id": position.close_group_id,
+            })
         return closes
 
     def reevaluate_open_positions(
         self, settings: Any, regime: str, profile_label: str,
         switch_id: Optional[str] = None, transition_policy: Optional[Dict] = None,
     ) -> int:
-        # Minimal simulation: close shorts if regime no longer short-friendly
-        if regime not in ("PRESERVATION", "FUTURES_SHORT"):
-            closed = 0
-            for pos in self._open_positions.values():
-                if not pos.closed and pos.side == "SHORT":
-                    pos.closed = True
-                    closed += 1
-            return closed
         return 0
 
     def smart_rebalance_capital(
@@ -653,3 +855,27 @@ class SimulationFuturesClient:
     def get_open_positions_summary(self) -> List[Dict[str, Any]]:
         """Stub for dashboard compatibility."""
         return []
+
+
+class SimulationSpotMarginClient(SimulationFuturesClient):
+    def __init__(
+        self,
+        clock: SimulationClock,
+        price_feed: Dict[str, List[Dict[str, Any]]],
+        initial_usdt: float,
+        commission_rate: Optional[float] = None,
+        data_dir: str = "historical_data",
+    ):
+        super().__init__(
+            clock=clock,
+            price_feed=price_feed,
+            commission_rate=commission_rate,
+            leverage=2,
+            data_dir=data_dir,
+        )
+        self._available_usdt = float(initial_usdt)
+        self._initial_usdt = float(initial_usdt)
+        self.is_simulation = True
+
+    def get_equity_delta_usdt(self) -> float:
+        return self.get_total_wallet_usdt() - self._initial_usdt

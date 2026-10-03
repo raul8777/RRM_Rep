@@ -428,7 +428,7 @@ def get_max_k_for_regime(settings, regime_mode: str) -> int:
     if regime_mode == "RANGE_SCALP":
         return get_param(settings, "max_positions_range_scalp")
     if regime_mode == "FUTURES_SHORT":
-        return get_param(settings, "futures_max_shorts")
+        return get_param(settings, "max_positions_futures_short")
     if regime_mode == "PRESERVATION":
         return 0
     return get_param(settings, "max_positions")

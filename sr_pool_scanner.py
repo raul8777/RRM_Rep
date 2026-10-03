@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Sequence
 
 from config_helpers import get_param, get_staged_entry_regime_config
 from support_resistance import compute_sr_features
+from technical_indicators import TechnicalIndicators
 
 
 # Runtime-facing diagnostics consumed by /sr_pool/status in app.py
@@ -66,14 +67,38 @@ def _sr_snapshot(
     lows = [_safe_float(r[3]) for r in rows]
     vols = [_safe_float(r[5]) for r in rows]
     px = closes[-1] if closes else 0.0
-    atr = sum((h - l) for h, l in zip(highs[-20:], lows[-20:])) / max(1, min(20, len(highs)))
+    sr_atr = sum((h - l) for h, l in zip(highs[-20:], lows[-20:])) / max(1, min(20, len(highs)))
+    atr_values = TechnicalIndicators.atr(highs, lows, closes, period=14)
+    atr = atr_values[-1] if atr_values else sr_atr
+    upper_values, middle_values, lower_values = TechnicalIndicators.bollinger_bands(closes, period=20, std_dev=2.0)
+    rsi_values = TechnicalIndicators.rsi(closes, period=14)
+    upper = upper_values[-1] if upper_values else None
+    middle = middle_values[-1] if middle_values else None
+    lower = lower_values[-1] if lower_values else None
+    rsi = rsi_values[-1] if rsi_values else None
+    volume_baseline = sum(vols[-21:-1]) / max(1, len(vols[-21:-1]))
+    vol_spike = vols[-1] / volume_baseline if volume_baseline > 0 else None
+    bands = {"lower": lower, "middle": middle, "upper": upper}
+    indicators = {
+        "price": px,
+        "current_price": px,
+        "interval": interval,
+        "atr": atr,
+        "atr_pct": atr / px * 100.0 if px > 0 else None,
+        "lower_band": lower,
+        "middle_band": middle,
+        "upper_band": upper,
+        "bollinger_bands": bands,
+        "rsi": rsi,
+        "vol_spike": vol_spike,
+    }
     sr = compute_sr_features(
         closes,
         highs,
         lows,
         vols,
         current_price=px,
-        atr=atr,
+        atr=sr_atr,
         lookback=min(max(20, int(lookback or 96)), len(closes)),
         order=max(1, int(pivot_order or 3)),
         near_band_atr_mult=max(0.0, _safe_float(near_band_atr_mult, 0.25)),
@@ -84,6 +109,20 @@ def _sr_snapshot(
         "symbol": symbol,
         "interval": interval,
         "current_price": px,
+        "atr": atr,
+        "atr_pct": atr / px * 100.0 if px > 0 else None,
+        "indicators": indicators,
+        "bb_lower": lower,
+        "bb_middle": middle,
+        "bb_upper": upper,
+        "bb_position": (
+            (px - lower) / (upper - lower)
+            if lower is not None and upper is not None and upper > lower
+            else None
+        ),
+        "bollinger_bands": bands,
+        "rsi": rsi,
+        "vol_spike": vol_spike,
         **sr,
     }
 
@@ -170,7 +209,7 @@ def detect_sr_pool_breaks(
                 "timestamp": ts,
             })
             continue
-        bounce = bool(snap.get("support_bounce_buy"))
+        bounce = bool(snap.get("support_bounce_buy") or snap.get("sr_bounce"))
         breakout = bool(snap.get("support_breakout_buy") or snap.get("sr_breakout"))
         breakdown = bool(snap.get("support_breakdown_sell") or snap.get("sr_breakdown"))
         rejection = bool(snap.get("resistance_bounce_sell") or snap.get("sr_rejection"))
@@ -218,6 +257,36 @@ def detect_sr_pool_breaks(
                     "sr_pool_profile": "SR_POOL_BREAK",
                     "near_support": zone <= cfg["pool_zone_support_max"],
                     "near_resistance": zone >= cfg["pool_zone_resistance_min"],
+                    "current_price": snap.get("current_price"),
+                    "price": snap.get("current_price"),
+                    "interval": cfg["interval"],
+                    "signal_interval": cfg["interval"],
+                    "sr_primary_timeframe": cfg["interval"],
+                    "atr": snap.get("atr"),
+                    "atr_pct": snap.get("atr_pct"),
+                    "indicators": snap.get("indicators"),
+                    "bb_lower": snap.get("bb_lower"),
+                    "bb_middle": snap.get("bb_middle"),
+                    "bb_upper": snap.get("bb_upper"),
+                    "bb_position": snap.get("bb_position"),
+                    "bollinger_bands": snap.get("bollinger_bands"),
+                    "rsi": snap.get("rsi"),
+                    "vol_spike": snap.get("vol_spike"),
+                    "support_level": snap.get("support_level"),
+                    "resistance_level": snap.get("resistance_level"),
+                    "support_strength": snap.get("support_strength"),
+                    "resistance_strength": snap.get("resistance_strength"),
+                    "sr_zone_position": snap.get("sr_zone_position"),
+                    "sr_path_long": snap.get("sr_path_long"),
+                    "sr_path_short": snap.get("sr_path_short"),
+                    "support_bounce_buy": snap.get("support_bounce_buy"),
+                    "support_breakout_buy": snap.get("support_breakout_buy"),
+                    "support_breakdown_sell": snap.get("support_breakdown_sell"),
+                    "resistance_bounce_sell": snap.get("resistance_bounce_sell"),
+                    "sr_bounce": snap.get("sr_bounce"),
+                    "sr_breakout": snap.get("sr_breakout"),
+                    "sr_breakdown": snap.get("sr_breakdown"),
+                    "sr_rejection": snap.get("sr_rejection"),
                 }
             )
 

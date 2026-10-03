@@ -12,6 +12,10 @@ from profit_realization_supervisor import (
     ProfitRealizationContext,
     evaluate as evaluate_profit_realization,
 )
+from position_belief import (
+    EXHAUSTED as EXHAUSTED_BELIEF_STATE,
+    RUNNING_STRONG as RUNNING_STRONG_BELIEF_STATE,
+)
 
 
 LOSS_STATE_KEY = "unified_governance_loss_state"
@@ -121,6 +125,12 @@ class UnifiedGovernanceContext:
     peak_capture_expected_future_pnl: float = 0.0
     lifecycle_structure_mode: str = "shadow"
     lifecycle_structure_decision: Dict[str, Any] = field(default_factory=dict)
+    # sr_path_v1 thesis-anchored structural state (from position_intelligence.
+    # evaluate_thesis_path, persisted by hard_risk_monitor into _smart_meta).
+    # When sr_path_evaluator_mode=active, this governs the exit: a continuation
+    # state suppresses fragmentation (let the watched position capture 100% of
+    # a predicted move); a broken thesis forces full liquidation.
+    sr_path_state: Optional[Dict[str, Any]] = None
     # Fear & Greed index value (0-100) for exit modifier
     fear_greed_value: Optional[float] = None
 
@@ -210,6 +220,11 @@ def _signal_against_position(side: str, signal_direction: Optional[str]) -> bool
     return False
 
 
+def _fractionation_disabled(settings: Any) -> bool:
+    """Return whether partial exits must be converted to HOLD globally."""
+    return str(get_param(settings, "exit_fractionation_mode", "disabled") or "disabled").strip().lower() != "legacy"
+
+
 def _loss_regime_scale(regime_mode: Optional[str], trade_type: Optional[str]) -> tuple:
     """Return (min_age_multiplier, escalation_age_multiplier) for loss branch.
     FUTURES_SHORT and fast regimes get tighter patience; PRESERVATION gets more.
@@ -234,6 +249,84 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
     enabled = bool(get_param(settings, "unified_governance_enabled", True))
     if not enabled:
         return UnifiedGovernanceDecision()
+
+    # ── Belief-driven exit override (STAGING s130) ───────────────────────────
+    # Structural belief about the position (from position_belief.evaluate_belief(),
+    # persisted by position_telemetry_watcher into metadata['belief_last']) takes
+    # precedence over PRS/SSO timers and clocks: an EXHAUSTED belief forces an
+    # immediate close, a RUNNING_STRONG belief holds despite advisories wanting
+    # to close — except the existing monitor_only defensive-close safety net,
+    # which must still fire regardless of belief state.
+    if bool(get_param(settings, "position_belief_enabled", True)):
+        belief_last = meta.get("belief_last")
+        if isinstance(belief_last, dict):
+            belief_state = belief_last.get("belief_state")
+            belief_fresh = False
+            try:
+                belief_at = datetime.fromisoformat(str(belief_last.get("evaluated_at") or "").replace("Z", "+00:00"))
+                if belief_at.tzinfo is None:
+                    belief_at = belief_at.replace(tzinfo=timezone.utc)
+                max_age = float(get_param(settings, "position_belief_max_age_seconds", 90.0))
+                belief_fresh = 0.0 <= (now - belief_at).total_seconds() <= max_age
+            except (TypeError, ValueError):
+                belief_fresh = False
+            if belief_fresh and belief_state == EXHAUSTED_BELIEF_STATE and belief_last.get("thesis_complete") is True:
+                return UnifiedGovernanceDecision(
+                    action="close",
+                    should_close=True,
+                    close_pct=1.0,
+                    reason="belief_exhausted",
+                    detail=f"belief_reasons={belief_last.get('reasons')}",
+                    priority=99,
+                    diagnostics=f"belief_last={belief_last}",
+                )
+            if belief_fresh and belief_state == RUNNING_STRONG_BELIEF_STATE:
+                _monitor_forced = False
+                if context.monitor_only:
+                    _mf_loss = float(get_param(settings, "unified_governance_monitor_only_force_loss_pct", 2.0))
+                    _mf_age = float(get_param(settings, "unified_governance_monitor_only_force_age_minutes", 90.0))
+                    _held = _held_minutes(now, context.opened_at)
+                    if context.pnl_pct <= -(_mf_loss / 100.0) and _held >= _mf_age:
+                        _monitor_forced = True
+                if not _monitor_forced:
+                    return UnifiedGovernanceDecision(
+                        action="hold",
+                        should_close=False,
+                        reason="belief_running_strong",
+                        detail=f"belief_reasons={belief_last.get('reasons')}",
+                        diagnostics=f"belief_last={belief_last}",
+                    )
+
+    # ── SR-path structural governance (s130, ACTIVE in staging) ──────────────
+    # The thesis-anchored path evaluator (candle-close gated) is the system's
+    # read on whether the entry prediction is still valid. When active:
+    #   - invalidated / stalled  → the thesis no longer holds: liquidate 100%.
+    #     (ASTERUSDT 2026-09-07: invalidated at 47s, never read, died at SL -$15.)
+    #   - extended_to_next_level / on_track → structure confirms continuation:
+    #     suppress partial closes — fragmenting a valid thesis captured only
+    #     ~14% of the predicted move on XRPUSDT 2026-09-07 (+$0.33 on $150).
+    # Hard SL precedence is preserved: near_sl is evaluated in the loss branch
+    # below and never overridden by this block.
+    _sr_path = context.sr_path_state or {}
+    _sr_path_state_name = str(_sr_path.get("state") or "").strip().lower()
+    _sr_path_mode = str(_sr_path.get("mode") or "shadow").strip().lower()
+    if _sr_path_state_name and _sr_path_mode == "active":
+        if _sr_path_state_name in ("invalidated", "stalled"):
+            return UnifiedGovernanceDecision(
+                action="close",
+                should_close=True,
+                close_pct=1.0,
+                reason=f"sr_path_{_sr_path_state_name}",
+                detail=(
+                    f"structural thesis {_sr_path_state_name}: {_sr_path.get('reason')} | "
+                    f"progress={_sr_path.get('progress_pct')}"
+                ),
+                priority=97,
+                override_target="structural_thesis",
+                diagnostics=f"sr_path_state={_sr_path}",
+            )
+    # (the continuation-suppression below reads context.sr_path_state directly —
+    # no metadata mutation, so nothing transient leaks into persisted state.)
 
     # Profit branch: UG as single arbiter, using PRS + SSO as advisories.
     if context.pnl_pct > 0 and bool(get_param(settings, "unified_governance_profit_enabled", True)):
@@ -448,7 +541,36 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
             _detail = f"{_prs_detail} | F&G={_fng:.0f} modifier={_fng_exit_modifier:.2f}"
             _priority = _prs_priority
 
-        _structure_mode = str(context.lifecycle_structure_mode or "shadow").lower()
+        # s130: a thesis confirmed in continuation (extended/on_track/target
+        # reached) must not be fragmented into partial closes — the watched
+        # position captures 100% of a predicted move or gets liquidated whole.
+        _srp = context.sr_path_state or {}
+        _sr_path_continuation = (
+            str(_srp.get("mode") or "shadow").strip().lower() == "active"
+            and str(_srp.get("state") or "").strip().lower() in ("extended_to_next_level", "on_track", "target_reached")
+        )
+        if _sr_path_continuation and _should_close:
+            _prior_reason = _reason or _detail or "sr_path_continuation"
+            _should_close = False
+            _close_pct = 0.0
+            _reason = "sr_path_continuation_hold"
+            _detail = (
+                f"sr_path confirms continuation; no partial/full exit while thesis remains valid | "
+                f"prior={_prior_reason}"
+            )
+            _priority = 0
+            _structure_mode = "shadow"  # prevent the lifecycle partial branch below from re-firing
+            return UnifiedGovernanceDecision(
+                action="hold",
+                should_close=False,
+                close_pct=0.0,
+                reason=_reason,
+                detail=_detail,
+                priority=_priority,
+                diagnostics=f"sr_path_state={_srp}; prior={_prior_reason}",
+            )
+        else:
+            _structure_mode = str(context.lifecycle_structure_mode or "shadow").lower()
         _structure = context.lifecycle_structure_decision or {}
         _structure_action = str(_structure.get("action") or "allow_exit")
         if _structure_mode == "active":
@@ -466,11 +588,18 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
                     _detail = f"{_detail} | structure={_structure.get('reason', '')}"
                     _priority = min(_priority, 40)
             elif context.pnl_pct > 0 and _structure_action == "partial_profit" and not _should_close:
-                _should_close = True
-                _close_pct = min(0.5, max(0.05, float(get_param(settings, "lifecycle_structure_partial_close_pct", 0.35))))
-                _reason = "lifecycle_structure_partial_profit"
-                _detail = f"structure={_structure.get('reason', '')}"
-                _priority = 76
+                # s130: structure governs the exit — when the thesis-anchored path
+                # confirms continuation (extended/on_track/target_reached in active
+                # mode), do NOT fragment a valid thesis into a partial close.
+                if _sr_path_continuation:
+                    _reason = "sr_path_continuation_hold"
+                    _detail = f"partial suppressed: sr_path confirms continuation | structure={_structure.get('reason', '')}"
+                else:
+                    _should_close = True
+                    _close_pct = min(0.5, max(0.05, float(get_param(settings, "lifecycle_structure_partial_close_pct", 0.35))))
+                    _reason = "lifecycle_structure_partial_profit"
+                    _detail = f"structure={_structure.get('reason', '')}"
+                    _priority = 76
 
         # PIS: PIM flag_exit — fast monitor detected trade thesis exhaustion
         _pim_flag = _structure.get("pim_flag_exit") or {}
@@ -565,6 +694,16 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
             )
             _priority = min(_priority, 60)
 
+        if _sr_path_continuation and _should_close:
+            _should_close = False
+            _close_pct = 0.0
+            _reason = "sr_path_continuation_hold"
+            _detail = (
+                f"sr_path confirms continuation; minimum-profit-hold fallback blocked | "
+                f"prior={_reason or _detail or 'unknown'}"
+            )
+            _priority = 0
+
         if _should_close and _held_min < _profit_hold_minutes and _close_pct >= 1.0:
             _close_pct = 0.5
             _detail = (
@@ -584,6 +723,20 @@ def evaluate(context: UnifiedGovernanceContext, settings, now: Optional[datetime
             f"profit_hold={_held_min}m/{_profit_hold_minutes:.0f}m; "
             f"{pr_decision.diagnostics}"
         )
+
+        if _should_close and 0.0 < _close_pct < 1.0 and _fractionation_disabled(settings):
+            return UnifiedGovernanceDecision(
+                action="hold",
+                should_close=False,
+                close_pct=0.0,
+                reason="partial_exit_blocked",
+                detail=(
+                    f"partial exit suppressed by exit_fractionation_mode=disabled | "
+                    f"source={_reason or 'unknown'} requested_pct={_close_pct:.4f}"
+                ),
+                priority=0,
+                diagnostics=_ug_diagnostics,
+            )
 
         if _should_close:
             state_patch = dict(pr_decision.state_patch or {})

@@ -9,6 +9,7 @@ analysis can correlate validation decisions with realized PnL.
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import logging
 import math
@@ -515,19 +516,18 @@ def _run_predictor_for_validation(
     meta: Dict[str, Any],
     current_price: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Run pnl_service.predict_for_symbol using precomputed indicators and current price."""
+    """Run the predictor from a fresh symbol analysis and current price."""
     try:
         import pnl_service
         trade_type = meta.get("trade_type") or "spot"
         trade_side = meta.get("expected_side") or ("SHORT" if trade_type == "futures" else "LONG")
         position_size = _position_size_for_validation(meta)
-        precomputed = {"indicators": meta.get("indicators", {})}
         prediction, _ = pnl_service.predict_for_symbol(
             symbol,
             client,
             settings,
             position_size_usdt=position_size,
-            precomputed_signal=precomputed,
+            precomputed_signal=None,
             trade_type=trade_type,
             trade_side=trade_side,
             current_price=current_price,
@@ -547,6 +547,8 @@ def build_range_reversion_prediction(
         price = _number(current_price)
         if price is None:
             price = _number(meta.get("current_price") or meta.get("price"))
+        if price is None and isinstance(meta.get("indicators"), dict):
+            price = _number(meta["indicators"].get("price") or meta["indicators"].get("current_price"))
         if price is None or price <= 0:
             return {"valid": False, "reason": "missing_current_price"}
         source = dict(meta.get("indicators") or {})
@@ -1561,14 +1563,19 @@ def _build_initial_direction(
     arb = meta.get("directional_arbitration") or {}
     selected = arb.get("selected_mode")
     if selected:
+        selected_contract = arb.get("selected_contract")
+        _arb_target = _number(selected_contract.get("effective_target_price")) if isinstance(selected_contract, dict) else None
+        _arb_stop = _number(selected_contract.get("effective_stop_price")) if isinstance(selected_contract, dict) else None
         pred_key = {
             "FUTURES_SHORT": "short_prediction",
             "FUTURES_LONG": "futures_long_prediction",
             "SPOT_LONG": "long_prediction",
         }.get(selected)
         pred = arb.get(pred_key) or {} if pred_key else {}
-        _arb_target = _number(pred.get("target_price"))
-        _arb_stop = _number(pred.get("stop_price"))
+        if _arb_target is None:
+            _arb_target = _number(pred.get("target_price"))
+        if _arb_stop is None:
+            _arb_stop = _number(pred.get("stop_price"))
         if _arb_target is None or _arb_stop is None:
             pr = pred.get("price_range") or {}
             _pr_min = _number(pr.get("min"))
@@ -1642,6 +1649,15 @@ def stage_ready_candidates(
         trade_type = _trade_type_for_meta(meta, regime_mode)
         meta["trade_type"] = trade_type
         meta["expected_side"] = _side_for_meta(meta, regime_mode, trade_type)
+        execution_mode = _selected_mode_for_meta(meta)
+        if not execution_mode:
+            if trade_type == "spot_margin":
+                execution_mode = "SPOT_MARGIN_SHORT"
+            elif trade_type == "futures":
+                execution_mode = "FUTURES_SHORT" if meta["expected_side"] == "SHORT" else "FUTURES_LONG"
+            else:
+                execution_mode = "SPOT_LONG"
+        meta["selected_mode"] = execution_mode
         if str(regime_mode or "").upper() == "RANGE_SCALP":
             try:
                 from range_scalp_data_contract import attach_snapshot
@@ -1660,8 +1676,8 @@ def stage_ready_candidates(
 
         existing = _fetch_one(
             db_client,
-            "SELECT id FROM ready_candidates WHERE symbol=%s AND trade_type=%s AND regime_mode=%s AND status IN ('ready','validated')",
-            (symbol, trade_type, regime_mode),
+            "SELECT id FROM ready_candidates WHERE symbol=%s AND execution_mode=%s AND regime_mode=%s AND status IN ('ready','validated')",
+            (symbol, execution_mode, regime_mode),
         )
         if existing:
             # Inter-cycle evaluation owns existing rows.
@@ -1698,17 +1714,17 @@ def stage_ready_candidates(
             rows = db_client.execute_query(
                 """
                 INSERT INTO ready_candidates (
-                    symbol, trade_type, regime_mode, profile_label, signal_price, position_size_usdt,
+                    symbol, trade_type, execution_mode, side, regime_mode, profile_label, signal_price, position_size_usdt,
                     status, positive_checks, total_checks, required_positive_checks, checks_per_cycle,
                     max_cycles, max_age_min, ready_at, last_checked_at, signal_meta, config_snapshot, data
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s,
                     'ready', %s, 1, %s, %s,
                     %s, %s, NOW(), NOW(), %s::jsonb, %s::jsonb, %s::jsonb
                 ) RETURNING id
                 """,
                 (
-                    symbol, trade_type, regime_mode,
+                    symbol, trade_type, execution_mode, meta["expected_side"], regime_mode,
                     meta.get("peak_quality_profile"),
                     float(signal_price) if signal_price is not None else None,
                     float(position_size) if position_size is not None else None,
@@ -1721,6 +1737,10 @@ def stage_ready_candidates(
                         "cycles_active": 1,
                         "candidate_revision": 1,
                         "candidate_revision_updated_at": _now().isoformat(),
+                        "entry_generation": meta.get("entry_generation"),
+                        "entry_code_hash": meta.get("entry_code_hash"),
+                        "entry_config_hash": meta.get("entry_config_hash"),
+                        "entry_model_hash": meta.get("entry_model_hash"),
                         **initial_stage,
                         "policy": policy_data,
                         "priority": policy_data.get("priority"),
@@ -1891,6 +1911,17 @@ def evaluate_inter_cycle(
             "support_breakout_buy": meta.get("support_breakout_buy") or meta.get("sr_breakout"),
             "support_breakdown_sell": meta.get("support_breakdown_sell") or meta.get("sr_breakdown"),
             "directional_shadow_last": directional_shadow,
+            # Keep the latest evidence beside the durable candidate identity.
+            # Execution must consume this snapshot, never the original signal.
+            "fresh_signal_meta": meta,
+            "fresh_prediction": {
+                key: meta.get(key)
+                for key in (
+                    "expected_pnl", "expected_pnl_percentage", "position_size_usdt",
+                    "success_probability", "target_price", "stop_price", "current_price",
+                )
+                if meta.get(key) is not None
+            },
             **stage_update,
         }
         if direction_snapshot.get("direction"):
@@ -2488,18 +2519,41 @@ def get_openable_candidates(
     regime_mode: str,
     top_symbols_qubo: Optional[List[str]] = None,
     settings: Any = None,
+    qubo_cycle_id: Optional[str] = None,
+    qubo_symbols_hash: Optional[str] = None,
+    qubo_authority_symbols: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Return the highest-priority non-expired validated candidate in the active regime."""
     if not db_client:
         return []
     try:
-        rows = db_client.execute_query(
-            """
+        query = """
             SELECT * FROM ready_candidates
             WHERE status='validated' AND regime_mode=%s
-            ORDER BY ready_at ASC
-            """,
-            (regime_mode,),
+        """
+        params: List[Any] = [regime_mode]
+        if top_symbols_qubo is not None:
+            if not top_symbols_qubo:
+                return []
+            symbols = sorted({str(symbol) for symbol in top_symbols_qubo if symbol})
+            authority_symbols = sorted({
+                str(symbol) for symbol in (qubo_authority_symbols or []) if symbol
+            })
+            if (
+                not qubo_cycle_id
+                or not qubo_symbols_hash
+                or not authority_symbols
+                or qubo_symbols_hash != qubo_symbols_hash_for(authority_symbols)
+                or not set(symbols).issubset(authority_symbols)
+            ):
+                logger.warning("[QUBO] missing or mismatched authority provenance; refusing candidate execution")
+                return []
+            query += " AND symbol = ANY(%s)"
+            params.append(symbols)
+        query += " ORDER BY ready_at ASC"
+        rows = db_client.execute_query(
+            query,
+            tuple(params),
         )
         cfg = get_staged_entry_regime_config(settings, regime_mode)
         active_rows: List[Dict[str, Any]] = []
@@ -2639,6 +2693,17 @@ def get_openable_candidates(
         active_rows = sorted(active_rows, key=priority, reverse=True)
         selected = active_rows[:max(1, int(cfg.get("max_open_per_cycle", 1)))]
         for rank, row in enumerate(selected, start=1):
+            qbo_authority = None
+            if top_symbols_qubo is not None:
+                qbo_authority = {
+                    "cycle_id": qubo_cycle_id,
+                    "symbols_hash": qubo_symbols_hash,
+                    "symbols": authority_symbols,
+                    "regime_mode": str(regime_mode or "").upper(),
+                }
+                row["qubo_authority"] = qbo_authority
+                row["qubo_cycle_id"] = qubo_cycle_id
+                row["qubo_symbols_hash"] = qubo_symbols_hash
             _risk_stage = _stage_payload(
                 row.get("data") or {},
                 stage_kind="risk_authorized",
@@ -2654,6 +2719,7 @@ def get_openable_candidates(
                     "global_validated_universe_size": len(active_rows),
                     "selection_criterion": "REALTIME_OPEN_SCORE_DESC_EV_QUALITY_PROBABILITY_READY_AT",
                     "selection_shadow": row.get("_selection_shadow") or {},
+                    **({"qubo_authority": qbo_authority} if qbo_authority else {}),
                     **_risk_stage,
                 },
                 guard_status="validated",
@@ -2670,6 +2736,67 @@ def get_openable_candidates(
     except Exception as exc:
         logger.warning(f"[StagedEntry] get_openable_candidates failed: {exc}")
         return []
+
+
+def qubo_symbols_hash_for(symbols: List[str]) -> str:
+    normalized = sorted({str(symbol) for symbol in symbols if symbol})
+    return hashlib.sha256(json.dumps(normalized, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def get_qubo_authority_snapshot(
+    db_client: Any,
+    regime_mode: str,
+    max_age_seconds: int = 900,
+) -> Optional[Dict[str, Any]]:
+    """Return verified current QUBO provenance, or None when missing/stale."""
+    if not db_client:
+        return None
+    try:
+        rows = db_client.execute_query(
+            "SELECT value, updated_at FROM trading_runtime_state WHERE key=%s",
+            (f"entry_qubo_authority_{str(regime_mode or '').upper()}",),
+        ) or []
+        if not rows:
+            return None
+        value = rows[0].get("value") or {}
+        if isinstance(value, str):
+            value = json.loads(value)
+        if not isinstance(value, dict):
+            return None
+        if str(value.get("regime_mode") or "").upper() != str(regime_mode or "").upper():
+            return None
+        updated_at = value.get("updated_at") or rows[0].get("updated_at")
+        age = _minutes_since(updated_at)
+        if age is None or age * 60.0 > max(1, int(max_age_seconds)):
+            return None
+        symbols = value.get("symbols")
+        if not isinstance(symbols, list) or not symbols:
+            return None
+        symbols = sorted({str(symbol) for symbol in symbols if symbol})
+        cycle_id = str(value.get("cycle_id") or "")
+        symbols_hash = str(value.get("symbols_hash") or "")
+        if not cycle_id or not symbols_hash or symbols_hash != qubo_symbols_hash_for(symbols):
+            return None
+        return {
+            "cycle_id": cycle_id,
+            "regime_mode": str(regime_mode or "").upper(),
+            "symbols": symbols,
+            "symbols_hash": symbols_hash,
+            "updated_at": str(updated_at),
+        }
+    except Exception as exc:
+        logger.warning("[QUBO] authority read failed closed: %s", exc)
+        return None
+
+
+def get_qubo_authority_symbols(
+    db_client: Any,
+    regime_mode: str,
+    max_age_seconds: int = 900,
+) -> Optional[List[str]]:
+    """Compatibility wrapper returning symbols from a verified QUBO snapshot."""
+    snapshot = get_qubo_authority_snapshot(db_client, regime_mode, max_age_seconds)
+    return snapshot.get("symbols") if snapshot else None
 
 
 def mark_opened(

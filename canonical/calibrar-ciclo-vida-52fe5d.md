@@ -3,7 +3,7 @@ title: "Calibración del ciclo de vida de una operación"
 type: canonical-memory
 tags: ["lifecycle", "exit_pipeline", "SSO", "PRS", "UG", "peak_capture", "trailing", "breakeven", "spot", "futures", "profit_preservation", "loss_control", "drawdown_monitor", "erosion_detection"]
 created_at: 2026-07-23
-updated_at: 2026-08-08 (s129)
+updated_at: 2026-09-28 (s140)
 source_file: "C:\\Users\\raul8\\.windsurf\\plans\\calibrar-ciclo-vida-52fe5d.md"
 ---
 
@@ -11,11 +11,75 @@ source_file: "C:\\Users\\raul8\\.windsurf\\plans\\calibrar-ciclo-vida-52fe5d.md"
 
 Documento vivo que consolida el diseño actual del ciclo de vida de una posición (apertura → monitoreo → cierre) y controla las tareas para calibrar la preservación de ganancias y el control de pérdidas en SPOT y FUTURES.
 
+> **Precedencia s135:** los bloques históricos sobre confirmación temporal, cierres sin lock integral, belief sin TTL o trailing LONG-only están supersedidos por la actualización s135 inicial.
+
 ## Plano en el que estamos
 
 **Fase:** calibración del ciclo de vida de posiciones abiertas.
 **Objetivo:** documentar el pipeline actual de salida, diagnosticar por qué las últimas 48h generaron pérdidas grandes / ganancias mínimas, y proponer ajustes canónicos a los módulos de exit (SSO, PRS, UG, PredExit, trailing, breakeven, hard SL/TP) sin romper la arquitectura existente.
 **Alcance:** SPOT y FUTURES, con paridad de criterios salvo que la mecánica de mercado justifique una diferencia documentada.
+
+## Nota canónica s140 — la frescura de entrada precede al lifecycle
+
+La sesión del 28 sep confirmó que una candidata puede seguir siendo reutilizable como identidad S/R, pero no puede llevar al lifecycle una validación vieja. `staged_entry.py` renueva precio, indicadores y predictor antes de volver a autorizar; `run_trades.py` consume el snapshot fresco en FastPath y en el camino normal. Esto es una corrección de entrada, no un cambio de SSO, PRS, UG, trailing, breakeven o política de cierre.
+
+La evidencia de Staging previa a la corrección mostró cuatro ciclos completos con cero aperturas, principalmente por contratos stale/recompensa-riesgo stale en solo 14 candidatos únicos; no debe atribuirse ese resultado al lifecycle. El cierre IOTA registrado en la ventana fue `belief_exhausted`, `+$2.024133`, y no había posiciones abiertas al reiniciar la app. La referencia actual para Devin debe leer esta nota junto con `canonical/calibracion_entradas-a20ab8-v3.md` y `SYSTEM_REFERENCE.md`.
+
+## Nota canónica 2026-09-27 — el defecto dominante era de ENTRADA, no de ciclo de vida
+
+El análisis Super MIMIC de entradas (`analisis-shorts-direccion-rota-20260927.md`) estableció que la cohorte de pérdidas SHORT atribuible al lifecycle era en realidad defecto de entrada: stops contractuales de 0.28% (0.26×ATR) imposibles de sobrevivir, ranking por ROR inflado y reversión mal clasificada frente a ruptura.
+
+Consecuencias para este documento:
+
+- **Lifecycle queda EXPLÍCITAMENTE fuera del alcance de esta corrección** (el usuario lo delimitó: "en estos momentos nos estamos concentrando en los entrys no en el ciclo de vida").
+- **La métrica de fallo anterior está contaminada:** un SL-hit a los 15 min de una entrada con stop sub-ruido no mide eficacia de lifecycle — mide un contrato inválido a la entrada. El `close_reason=SL` histórico mezcla "entrada inválida" con "salida correcta"; análisis futuros de exits deben filtrar por `stop_above_noise_floor` o `stop_distance_pct < ATR` antes de atribuir a lifecycle.
+- **Interface nueva:** los contratos rechazados por `STOP_INSIDE_NOISE_FLOOR` nunca llegan a lifecycle — esto reduce el volumen de posiciones degradadas que el pipeline de salida tenía que administrar.
+- Los mecanismos de exit descritos aquí (SSO, PRS, UG, PredExit, trailing, hard SL/TP, break-even, monitor de drawdown) quedan **sin cambios** — su calibración sigue pendiente como tarea separada una vez Entry esté validado.
+
+## Limpieza integral s135 — sep 12 2026
+
+- `FuturesClient.close_long`, `close_short` y `check_positions` serializan el flujo completo de gestión/cierre con el mismo `RLock`, cubriendo orden exchange, verificación y persistencia; las llamadas reentrantes siguen permitidas.
+- Hard-risk SPOT vende y cierra únicamente las entradas cuyo stop efectivo fue vulnerado; la comisión del fill agregado se distribuye por cantidad cerrada.
+- `belief_last` incluye `evaluated_at`; UG ignora estados vencidos según `position_belief_max_age_seconds` para evitar cierres/holds por creencias antiguas.
+- Peak Capture calcula excursión favorable/adversa según side y SSO-7 coloca/tensa stops correctamente para SHORT y LONG.
+- `PositionManager.add_position` recupera y conserva `trades_open.id`; FUTURES LONG persiste `pnl_prediction` con paridad SHORT.
+- MIMIC autorun queda desactivado por defecto y con backoff explícito para evitar loops de CPU/DB cuando no existe universo.
+
+## Corrección s138 — ejecución de cierre y trazabilidad esperada contra real
+
+- La salida no urgente se planifica por cantidad completa con profundidad/VWAP: `LIMIT_FOK` si es ejecutable dentro del slippage permitido y `MARKET` como fallback por timeout, FOK incompleto o libro insuficiente.
+- Hard-risk y emergencia no esperan precio: usan MARKET/STOP_MARKET inmediato.
+- La decisión conserva la tesis completa y se enlaza por `close_group_id`; los múltiples fills de una orden no son cierres parciales ni operaciones separadas.
+- `trades_closed.metadata` y `trades_audit` registran precio esperado, precio real, VWAP, slippage y PnL esperado/real, tipo de orden, retries, escalamiento y profundidad.
+- Lifecycle SPOT/Futures bloquea cualquier `CLOSE_PCT` cuando `exit_fractionation_mode=disabled`; los cierres estructurales y de riesgo permanecen completos.
+- Staging está activo y validado, pero la muestra expected-vs-real post-recreate aún requiere nuevos cierres para evaluarse.
+
+## Estado operativo actual — sep 8 2026 — s131 final: tesis válida no se fragmenta
+
+## Actualización sep 10 2026 — veto global de cierres parciales
+
+- `exit_fractionation_mode=disabled` es la regla de ejecución para SPOT, FUTURES, SPOT_MARGIN y el kernel lifecycle.
+- SSO, PRS, Peak Capture, UG y SmartTP pueden seguir generando advisories para observabilidad, pero una solicitud parcial se convierte en `HOLD` y audita `partial_exit_blocked`; no reduce cantidad ni crea un fill.
+- Los cierres completos de hard SL/TP, emergencia, manual, `belief_exhausted`, `sr_path_invalidated` y `sr_path_stalled` conservan precedencia.
+- Principio operativo: una posición abierta representa una tesis única. Si sigue válida, se mantiene 100%; si se invalida, se estanca o alcanza un riesgo duro, se cierra 100%. No se intenta gestionar incertidumbre vendiendo una fracción.
+- El código quedó validado con las suites focalizadas. El estado operacional definitivo requiere comprobar en Staging cero cierres parciales posteriores al despliegue y eventos `partial_exit_blocked` para toda intención suprimida.
+
+### Política canónica vigente
+
+- El sistema actual ha dejado de aceptar la fragmentación de una tesis válida como mecanismo general de salida.
+- En `UnifiedGovernanceContext`, `sr_path_state` es la fuente de autoridad para la salida estructural.
+- La política activa es binaria:
+  - `on_track` / `target_reached` / `extended_to_next_level` => no fragmentar; mantener la tesis o cerrar 100% solo si la estructura se rompe.
+  - `invalidated` / `stalled` => liquidación total.
+- El objetivo de la vida del trade no es recortar la tesis por tramos; es protegerla mientras siga siendo válida y liquidarla entera si deja de serlo.
+- Este texto es la referencia de estado actual para Devin y cualquier agente del workspace.
+
+### Evidencia y validación
+
+- La lógica fue validada con la suite `tests/test_sr_path_governance_s130.py` (10 passed).
+- La regla fue incorporada a la arbitraje de UG para impedir que el fallback de minimum profit hold o lifecycle partial reabra el patrón de fragmentación.
+
+---
 
 ## Actualización s129 — mitigación bidireccional de ahorcamiento de ganadores (2026-08-08)
 
@@ -737,7 +801,7 @@ El usuario reportó que "nos ha pasado muchas veces que tenemos posiciones abier
 - `pnl_predictor.py` ajusta probabilidad de éxito y rango de precios usando `sr_zone_position`, `sr_bounce`, `sr_breakout`, `sr_breakdown` y distancias SR.
 - `entry_profile_gate.py` consume distancias/posición de zona SR en el modelo universal y bonifica el score heurístico por eventos SR.
 - `autonomous_signals.py` extrae, reenvía y genera señales BUY/SELL a partir de rebote de soporte, breakout y breakdown; el ranking por régimen bonifica eventos SR confirmados.
-- `staged_entry.py` reduce fricción para señales SR confirmadas: `required_positive_checks=1`, `direction_required_confirmations=1`, `direction_min_progress_bps=1.0`, `max_cycles>=4`. También filtra `get_openable_candidates` por `top_symbols_qubo`.
+- Históricamente `staged_entry.py` reducía confirmaciones para señales SR. Desde s135 solo conserva `required_positive_checks=1`; `direction_confirmation_mode=disabled` y `direction_required_confirmations=0`, con re-arbitraje bilateral atómico pre-submit.
 - `run_trades.py` reenvía SR features y evita el descarte inicial de perfil (`PEAK_QUALITY_DISCARDED`) para eventos SR confirmados.
 
 ### Relajación de gates y configuración agresiva
@@ -1234,3 +1298,99 @@ El event stream acelera la detección de fills/cierres (segundos en vez de minut
 
 - `python -m pytest tests/test_binance_event_stream.py -q` => `19 passed`.
 - Requiere reiniciar el contenedor para que Python cargue el módulo modificado.
+
+## 17. Ciclo de vida anclado a tesis S/R (sr_path_v1) — s130 (2026-09-06)
+
+### Contexto y evidencia
+
+Medición Fase A sobre la DB de staging (30 días, solo lectura) demostró que el ciclo de vida operaba sin ancla estructural persistida: **0/11 posiciones abiertas y 0/1.574 cerradas con `thesis_snapshot_v1`**. La distribución de PnL por duración confirmó la hipótesis del horizonte 1–4h:
+
+| Bucket duración | n | PnL neto | WR | Nota |
+|---|---|---|---|---|
+| 0–1h | 1.447 | -$2.153 | 27% | Destruye valor |
+| 1–2h | 41 | -$23 | 65.9% | Neutro |
+| **2–4h** | **27** | **+$153** | **66.7%** | **Único tramo corto rentable (+$5.68 avg)** |
+| 4–8h | 14 | -$32 | — | Neutro |
+| 8–24h | 17 | +$124 | — | Soporta dejar correr ganadores |
+| >24h | 28 | -$35 | — | Neutro |
+
+Banda derivada: ~2–4 velas de 1h. El objetivo NO es un contador que corte ganancias — si la estructura sigue creciendo se deja crecer (extensión a `next_levels` con confirmación de volumen); es predecir los SR futuros en <4h y saber si la predicción sigue siendo válida.
+
+### Arquitectura implementada
+
+**Contrato de datos (activo, instrumentación pura):**
+
+- `support_resistance.build_sr_future_path(px, supports, resistances, side)` — mapa forward ordenado: `anchor` (nivel cuya pérdida invalida la tesis), `target` (primer objetivo), `next_levels` (hasta 2 niveles más allá del target para extensión), strengths. `compute_sr_features` emite `sr_path_long`/`sr_path_short`.
+- `position_thesis.build_sr_path_v1` — persiste `sr_path_v1` dentro de `thesis_snapshot_v1` al abrir: anchor/target/next_levels, `primary_timeframe`, `atr_per_candle`, `expected_candles = |target-entry| / atr_por_vela`. Fuentes: `indicators_at_entry['sr_path_*']` (mapa ordenado de la señal) → fallback a niveles resueltos. Nunca fabrica geometría (None si no hay datos).
+
+**Evaluador (shadow por defecto — `sr_path_evaluator_mode`):**
+
+- `position_intelligence.evaluate_thesis_path` — estados:
+  - `invalidated`: cierre de vela primaria más allá del anchor (tesis rota).
+  - `target_reached`: precio alcanzó el objetivo.
+  - `extended_to_next_level`: target roto + `vol_spike >= sr_path_extension_min_vol` → extiende al siguiente nivel (dejar correr ganadores).
+  - `stalled`: `candles_consumed >= sr_path_stall_multiplier × expected_candles` con <50% de progreso, o 2+ tests del anchor sin sostenerse (absorción).
+  - `on_track`: progresando con estructura intacta.
+- Gating por cierre de vela: `should_evaluate_thesis_path` usa `sr_path_last_eval_bucket` (bucket = now // tf_seconds) — evalúa solo cuando cierra una vela del timeframe primario, nunca por tick del loop 2s.
+- `hard_risk_monitor` ejecuta la evaluación en spot y futures, persiste `smart_meta.sr_path_state` y audita `sr_path_state_change` en cada transición.
+- `position_belief` consume el estado SOLO si `mode=active` (invalidated → adverse+2; stalled → adverse+1; on_track/target/extended → favor+1). En shadow los estados se persisten pero no influyen.
+
+**Autoridad en capas (sin colisiones):** A1 (hard risk: SL/TP/emergency) > A2 (UG árbitro final) > evaluador de path (evidencia estructural vía belief/PIM). El evaluador nunca cierra por sí mismo — alimenta la creencia de la posición.
+
+### Obsolescencia diferida (NO retirado)
+
+SSO-7 stagnation trailing, `time_stop_hours` y `stagnation_min_hours` son candidatos a obsolescencia por contradicción con el modelo geométrico, pero permanecen activos hasta que la evidencia shadow acumulada demuestre cobertura suficiente (AIC: mejora neta incluyendo ganancias sacrificadas).
+
+### Parámetros nuevos (gobernables)
+
+`sr_path_evaluator_mode` (shadow), `sr_path_stall_multiplier` (2.0), `sr_path_extension_min_vol` (1.0), `sr_path_horizon_gate_mode` (shadow), `sr_path_horizon_min_candles` (1.0), `sr_path_horizon_max_candles` (4.0) — en `config.py` + `config_helpers._PARAM_DEFAULTS`.
+
+### Validación
+
+- `tests/test_sr_path_lifecycle.py` => `22 passed`.
+- Tarjeta `sr_path_lifecycle` en `/metrics/shadow-readiness`: cobertura de path en abiertas, transiciones de estado (7d), bloqueos shadow del gate de horizonte.
+
+### Rollback
+
+`sr_path_evaluator_mode=disabled` + `sr_path_horizon_gate_mode=disabled`. La persistencia de `sr_path_v1` no es decisional y no requiere retirada.
+
+## 18. Salidas gobernadas por estructura + hueco de datos futures — s131 (2026-09-07)
+
+### Evidencia forense (dos trades reales en staging)
+
+**ASTERUSDT SHORT (−$15.30, 42 min, 2026-09-07):** entrada 0.7972, SL original 0.8044. El precio cerró por encima del anchor estructural del propio setup (0.798) a los **47 segundos** y permaneció encima el 90% del trade. El `drawdown_monitor` interpretó el movimiento como "falling_but_decelerating" y apretó el SL *hacia la pérdida* (0.8042 → 0.8029) en 13 eventos mientras el precio subía. El trade no murió por el SL original — lo ejecutó el propio monitor a 0.02% del precio vivo. En DB: `thesis_snapshot_v1`=NULL, cero `sr_path_state_change`, cero eventos de belief. La invalidación estructural era visible a los 47s y nadie la leyó.
+
+**XRPUSDT SHORT (+$0.33, 60 min, 2026-09-07):** señal `SR_POOL_BREAK` (breakdown estructural confirmado), margen $150 (el máximo de la ruta). El precio SÍ se movió a favor (−0.65%, hasta 1.4024). Pero el sistema fragmentó en 4 tramos (35% vía `lifecycle_structure_partial_close_pct`), vendiendo el 90% a precios peores que el punto final. Capturó ~14% del movimiento predicho, pagando peaje completo en 5 fills. Cada auditoría durante el trade marcaba `structural_confirmed`/`short_support_hold` — la estructura decía "sigue" mientras el sistema vendía.
+
+**Asimetría resultante:** una falla costó 46× lo que ganaba un "éxito" fragmentado.
+
+### Causa raíz compartida
+
+La geometría SR no llegaba a `indicators_at_entry` en las rutas de apertura futures. `_open_arbitrated_range_scalp_short` pasaba `metadata.get("indicators")`, pero los candidatos staged llevan `sr_path_*` a nivel raíz, no anidado — llegaba vacío. Sin indicadores en runtime, el evaluador de path no podía construir el ancla, y sin ancla no hay invalidación, extensión ni gobierno estructural.
+
+### Implementación (modo ACTIVO — staging es el entorno de sombra)
+
+1. **Hueco de datos:** `run_trades._build_indicators_at_entry` fusiona la metadata raíz (`sr_path_long/short`, `atr`, `interval`, niveles, `current_price`) en `indicators_at_entry`. Cableado en las 4 rutas futures (arbitrated short/long, SR-pool, legacy FUTURES_SHORT). `futures_client.open_long` acepta y persiste el parámetro.
+2. **Sizing por convicción (SR-pool):** `SR_POOL_BREAK` mapeado explícitamente a base completa, modulado ±25% por `sr_pool_score`, registrado en `kelly_sizing_log`.
+3. **Estructura gobierna la salida:** `sr_path_state` llega al `UnifiedGovernanceContext` (spot y futures). En modo activo:
+   - `invalidated`/`stalled` → **cierre 100% inmediato** (prioridad 97, `sr_path_invalidated`/`sr_path_stalled`).
+   - `extended_to_next_level`/`on_track`/`target_reached` → **supresión de parciales** (incl. la rama `lifecycle_structure_partial_profit`) — la posición vigilada captura el 100% del movimiento predicho.
+   - Hard SL precedence preservada: el guard `near_sl` de la rama de pérdida nunca se sobrescribe.
+
+### Decisión de diseño (usuario)
+
+Con hard_risk (2s), PIM, belief, UG y watcher 1s monitoreando cada posición, la fragmentación es un impuesto, no un seguro. La regla vigente sustituye la excepción histórica: toda tesis se mantiene completa mientras sea válida y se liquida completa cuando se invalida, estanca o llega a un límite de riesgo duro.
+
+### Validación
+
+- `tests/test_sr_path_governance_s130.py` + `test_sr_path_lifecycle.py` => **31 passed**.
+- Sin regresiones en UG/belief/PIM/futures => **48 passed**.
+- Runtime: config activa confirmada, firmas nuevas presentes, pipeline operando.
+
+### Hallazgo pre-existente (anotado)
+
+`staged_entry.py::priority()` serializa `-float("inf")` → JSON inválido al persistir `_selection_shadow` ("Token -Infinity is invalid"). No afecta la selección; candidato a fix aparte.
+
+### Rollback
+
+`sr_path_evaluator_mode=disabled` / `sr_path_horizon_gate_mode=disabled` (hot-config). Sizing SR-pool revierte al `size_map` estático.

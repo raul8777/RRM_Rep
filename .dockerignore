@@ -1,0 +1,11 @@
+historical_data/
+Dev/
+__pycache__/
+*.pyc
+.git/
+.env
+.env.staging
+tmp_*
+tests/
+.pytest_cache/
+.vscode/

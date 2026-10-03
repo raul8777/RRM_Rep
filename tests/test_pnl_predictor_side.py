@@ -1,4 +1,148 @@
-from pnl_predictor import PnLPredictor
+import pytest
+
+import binance_commission
+from pnl_predictor import PnLPredictor, _weights_fingerprint
+
+
+def test_predictor_exception_is_non_actionable(monkeypatch):
+    predictor = PnLPredictor()
+    monkeypatch.setattr(
+        predictor,
+        "_calculate_success_probability",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("broken model")),
+    )
+
+    result = predictor.predict_pnl(
+        "BTCUSDT",
+        100.0,
+        {},
+        position_size_usdt=100.0,
+    )
+
+    assert result["valid"] is False
+    assert result["prediction_status"] == "error"
+    assert result["success_probability"] == 0.0
+    assert result["expected_pnl"] == 0.0
+    assert result["error_stage"] == "probability"
+    assert result["error_code"] == "probability_calculation_failed"
+    assert result["exception_class"] == "RuntimeError"
+    assert len(result["stack_fingerprint"]) == 16
+
+
+def test_predictor_weights_fingerprint_is_deterministic_and_content_sensitive():
+    weights_a = {"rsi": 0.1, "trend_4h": 0.2}
+    weights_b = {"rsi": 0.1, "trend_4h": 0.3}
+
+    assert _weights_fingerprint(weights_a) == _weights_fingerprint(dict(reversed(list(weights_a.items()))))
+    assert _weights_fingerprint(weights_a) != _weights_fingerprint(weights_b)
+    assert len(_weights_fingerprint(weights_a)) == 64
+
+
+@pytest.mark.parametrize(
+    ("stage", "target", "error_code"),
+    [
+        ("probability", "_calculate_success_probability", "probability_calculation_failed"),
+        ("price_range", "_estimate_price_range", "price_range_calculation_failed"),
+        ("expected_pnl", "_calculate_expected_pnl", "expected_pnl_calculation_failed"),
+        ("risk_metrics", "_calculate_risk_metrics", "risk_metrics_calculation_failed"),
+    ],
+)
+def test_predictor_failure_reports_owning_stage(monkeypatch, stage, target, error_code):
+    predictor = PnLPredictor()
+    monkeypatch.setattr(
+        predictor,
+        target,
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("invalid payload")),
+    )
+
+    result = predictor.predict_pnl("BTCUSDT", 100.0, {}, position_size_usdt=100.0)
+
+    assert result["valid"] is False
+    assert result["error_stage"] == stage
+    assert result["error_code"] == error_code
+    assert result["exception_class"] == "ValueError"
+
+
+def test_predictor_cost_failure_reports_cost_stage(monkeypatch):
+    monkeypatch.setattr(
+        binance_commission,
+        "expected_pnl_after_fees",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("fee service failed")),
+    )
+
+    result = PnLPredictor().predict_pnl(
+        "BTCUSDT",
+        100.0,
+        {},
+        position_size_usdt=100.0,
+    )
+
+    assert result["valid"] is False
+    assert result["error_stage"] == "cost_model"
+    assert result["error_code"] == "cost_model_calculation_failed"
+
+
+def test_predictor_error_message_redacts_secrets(monkeypatch):
+    predictor = PnLPredictor()
+    monkeypatch.setattr(
+        predictor,
+        "_calculate_success_probability",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("token=do-not-log-me")),
+    )
+
+    result = predictor.predict_pnl("BTCUSDT", 100.0, {}, position_size_usdt=100.0)
+
+    assert "do-not-log-me" not in result["error"]
+    assert "<redacted>" in result["error"]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error_code"),
+    [
+        ({"current_price": float("nan")}, "non_finite_value"),
+        ({"position_size_usdt": 0.0}, "invalid_range"),
+        ({"trade_side": "SIDEWAYS"}, "unexpected_side"),
+        ({"indicators": []}, "invalid_type"),
+    ],
+)
+def test_predictor_rejects_invalid_input_contract(overrides, error_code):
+    kwargs = {
+        "symbol": "BTCUSDT",
+        "current_price": 100.0,
+        "indicators": {},
+        "position_size_usdt": 100.0,
+        "trade_side": "LONG",
+    }
+    kwargs.update(overrides)
+
+    result = PnLPredictor().predict_pnl(**kwargs)
+
+    assert result["valid"] is False
+    assert result["error_stage"] == "input_contract"
+    assert result["error_code"] == error_code
+
+
+@pytest.mark.parametrize(
+    ("candles", "error_code"),
+    [
+        ({"high": [2, 2, 2], "low": [1, 1], "close": [1.5, 1.5, 1.5]}, "unequal_array_lengths"),
+        ({"high": [2, 2], "low": [1, 1], "close": [1.5, 1.5]}, "empty_or_insufficient_window"),
+        ({"high": [2, 2, 2], "low": [1, 1, 1], "close": [1.5, float("inf"), 1.5]}, "non_finite_value"),
+        ({"high": [2, 2, 2], "low": [1, 1, 1], "close": [3, 1.5, 1.5]}, "invalid_high_low_close"),
+    ],
+)
+def test_predictor_rejects_malformed_candles(candles, error_code):
+    result = PnLPredictor().predict_pnl(
+        "BTCUSDT",
+        100.0,
+        {},
+        position_size_usdt=100.0,
+        candles=candles,
+    )
+
+    assert result["valid"] is False
+    assert result["error_stage"] == "input_contract"
+    assert result["error_code"] == error_code
 
 
 def _bearish_indicators():

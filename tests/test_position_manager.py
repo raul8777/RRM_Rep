@@ -4,6 +4,7 @@ Integration tests for Position Manager
 
 import json
 from decimal import Decimal
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -55,6 +56,24 @@ class DriftBalanceClient:
 
     def get_my_trades(self, symbol, limit=5):
         return []
+
+
+class DetailedBalanceClient:
+    def __init__(self, details=None, error=None, trades=None):
+        self.details = details or {}
+        self.error = error
+        self.trades = trades or []
+
+    def get_account_balance_details(self):
+        if self.error:
+            raise self.error
+        return self.details
+
+    def get_symbol_price(self, symbol):
+        return 5.2
+
+    def get_my_trades(self, symbol, limit=5):
+        return self.trades[:limit]
 
 
 class TestPositionManager:
@@ -349,6 +368,183 @@ class TestPositionManager:
         closed = [c for c in pm.get_closed_positions(limit=10) if c.close_reason == "reconcile_qty_drift"]
         assert closed
         assert closed[0].quantity == pytest.approx(0.064)
+
+    def test_sync_keeps_position_when_balance_is_locked_not_missing(self):
+        pm = PositionManager()
+        position = Position(
+            symbol="NEARUSDT", side="BUY", quantity=13.9, entry_price=5.209,
+            entry_time="2026-09-27T17:24:41Z", metadata={"trade_type": "spot"},
+        )
+        pm.add_position(position)
+        settings = SimpleNamespace(
+            token_categories={}, category_thresholds={}, use_bnb_for_commission=False,
+            auto_bnb_for_commission=False, binance_commission_rate=0.001,
+            spot_reconcile_missing_confirm_cycles=2,
+        )
+        client = DetailedBalanceClient({"NEAR": {"free": 0.0, "locked": 13.9, "total": 13.9}})
+
+        pm.sync_with_exchange_balance(client, settings)
+
+        open_position = pm.get_position("NEARUSDT")
+        assert open_position is not None
+        assert open_position[0].quantity == pytest.approx(13.9)
+        assert pm.get_closed_positions(limit=10) == []
+
+    def test_sync_keeps_position_when_balance_api_fails(self):
+        pm = PositionManager()
+        position = Position(
+            symbol="NEARUSDT", side="BUY", quantity=13.9, entry_price=5.209,
+            entry_time="2026-09-27T17:24:41Z", metadata={"trade_type": "spot"},
+        )
+        pm.add_position(position)
+        settings = SimpleNamespace(
+            token_categories={}, category_thresholds={}, use_bnb_for_commission=False,
+            auto_bnb_for_commission=False, binance_commission_rate=0.001,
+            spot_reconcile_missing_confirm_cycles=2,
+        )
+        client = DetailedBalanceClient(error=RuntimeError("temporary API timeout"))
+
+        pm.sync_with_exchange_balance(client, settings)
+
+        open_position = pm.get_position("NEARUSDT")
+        assert open_position is not None
+        assert open_position[0].quantity == pytest.approx(13.9)
+        assert pm.get_closed_positions(limit=10) == []
+
+    def test_sync_requires_repeated_valid_zero_balance_before_reconcile_close(self):
+        pm = PositionManager()
+        pm.add_position(Position(
+            symbol="NEARUSDT", side="BUY", quantity=13.9, entry_price=5.209,
+            entry_time="2026-09-27T17:24:41Z", metadata={"trade_type": "spot"},
+        ))
+        settings = SimpleNamespace(
+            token_categories={}, category_thresholds={}, use_bnb_for_commission=False,
+            auto_bnb_for_commission=False, binance_commission_rate=0.001,
+            spot_reconcile_missing_confirm_cycles=2,
+        )
+        client = DetailedBalanceClient({}, trades=[{
+            "time": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "isBuyer": False,
+            "qty": "13.9",
+        }])
+
+        pm.sync_with_exchange_balance(client, settings)
+        assert pm.get_position("NEARUSDT") is not None
+        assert pm.get_closed_positions(limit=10) == []
+
+        pm.sync_with_exchange_balance(client, settings)
+        assert pm.get_position("NEARUSDT") is None
+        closed = pm.get_closed_positions(limit=10)
+        assert len(closed) == 1
+        assert closed[0].close_reason == "reconcile_missing_balance"
+
+    def test_sync_keeps_position_when_zero_spot_balance_has_no_sell_proof(self):
+        pm = PositionManager()
+        pm.add_position(Position(
+            symbol="NEARUSDT", side="BUY", quantity=13.9, entry_price=5.209,
+            entry_time="2026-09-27T17:24:41Z", metadata={"trade_type": "spot"},
+        ))
+        settings = SimpleNamespace(
+            token_categories={}, category_thresholds={}, use_bnb_for_commission=False,
+            auto_bnb_for_commission=False, binance_commission_rate=0.001,
+            spot_reconcile_missing_confirm_cycles=2,
+        )
+        client = DetailedBalanceClient({})
+
+        pm.sync_with_exchange_balance(client, settings)
+        pm.sync_with_exchange_balance(client, settings)
+
+        assert pm.get_position("NEARUSDT") is not None
+        assert pm.get_position("NEARUSDT")[0].quantity == pytest.approx(13.9)
+        assert pm.get_closed_positions(limit=10) == []
+
+    def test_sync_imports_only_untracked_surplus_with_unknown_basis(self):
+        pm = PositionManager()
+        pm.add_position(Position(
+            symbol="NEARUSDT", side="BUY", quantity=10.0, entry_price=5.0,
+            entry_time="2026-09-27T17:24:41Z", metadata={"trade_type": "spot"},
+        ))
+        settings = SimpleNamespace(
+            token_categories={}, category_thresholds={}, use_bnb_for_commission=False,
+            auto_bnb_for_commission=False, binance_commission_rate=0.001,
+            stop_loss_pct=2.0, take_profit_pct=4.0, spot_reconcile_missing_confirm_cycles=2,
+        )
+        client = DetailedBalanceClient({"NEAR": {"free": 10.0, "locked": 3.9, "total": 13.9}})
+
+        pm.sync_with_exchange_balance(client, settings)
+
+        positions = pm.get_position("NEARUSDT")
+        assert len(positions) == 2
+        imported = next(position for position in positions if position.quantity == pytest.approx(3.9))
+        assert sum(position.quantity for position in positions) == pytest.approx(13.9)
+        assert imported.metadata["entry_context_status"] == "unknown_reconciled"
+        assert imported.metadata["cost_basis_status"] == "unknown"
+        assert imported.metadata["entry_price_source"] == "balance_sync_mark_not_acquisition_cost"
+
+        pm.sync_with_exchange_balance(client, settings)
+        assert len(pm.get_position("NEARUSDT")) == 2
+
+    def test_reloaded_position_keeps_persisted_identity_for_confirmed_fill_close(self):
+        class ReloadingDb:
+            def __init__(self):
+                self.transactions = []
+                self.row = {
+                    "id": 347,
+                    "position_id": "sui-position-stable-id",
+                    "symbol": "SUIUSDT",
+                    "side": "BUY",
+                    "quantity": 34.0,
+                    "entry_price": 1.1612,
+                    "strategy_id": None,
+                    "entry_time": "2026-09-29T00:44:14+00:00",
+                    "stop_loss": 1.1231,
+                    "take_profit": 1.2006,
+                    "metadata": {"trade_type": "spot", "position_id": "sui-position-stable-id"},
+                    "entry_commission": 0.03,
+                    "pnl_prediction": None,
+                    "indicators_at_entry": None,
+                }
+
+            def execute_query(self, sql, params=None):
+                if "FROM trades_open" in sql and "COUNT(*)" not in sql:
+                    return [dict(self.row)]
+                return []
+
+            def execute_transaction(self, statements):
+                self.transactions.append(statements)
+                return True
+
+            def execute_update(self, sql, params=None):
+                return 1
+
+        db = ReloadingDb()
+        pm = PositionManager()
+        pm.db_client = db
+
+        first = pm.get_all_positions()["SUIUSDT"][0]
+        second = pm.get_all_positions()["SUIUSDT"][0]
+
+        assert first.position_id == second.position_id == "sui-position-stable-id"
+        assert second.db_id == 347
+        closed = pm.close_position(
+            "SUIUSDT",
+            1.1228,
+            "hard_risk_stop",
+            position_id="sui-position-stable-id",
+            exit_fill={
+                "binance_confirmed": True,
+                "order_id": "1121928740",
+                "qty": 34.0,
+                "avg_price": 1.1228,
+                "commission_usdt": 0.03,
+            },
+        )
+
+        assert closed is not None
+        assert closed.exit_order_id == "1121928740"
+        assert closed.exit_price == pytest.approx(1.1228)
+        assert closed.metadata["pnl_accounting_mode"] == "binance_fill_verified"
+        assert db.transactions
 
 
 if __name__ == "__main__":

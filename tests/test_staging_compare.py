@@ -16,6 +16,7 @@ def test_ensure_staging_runtime_ready_bootstraps_empty_staging_db(monkeypatch):
             return 1
 
     monkeypatch.setattr('app.db_client', FakeDB())
+    monkeypatch.setattr('app.APP_ENV', 'staging')
 
     result = ensure_staging_runtime_ready()
 

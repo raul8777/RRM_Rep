@@ -3,6 +3,7 @@ import os
 import time
 import types
 import uuid
+import hashlib
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -18,6 +19,7 @@ from strategy import rank_buy_signals, rank_with_technical, normalize_symbol, ra
 from analysis_cache import analysis_cache
 from autonomous_signals import AutonomousSignalGenerator
 from trade_utils import align_quantity_to_step, get_symbol_filters, is_quantity_valid, compute_commission, get_binance_sell_qty
+from exchange_filter_snapshot import describe_filter_snapshot
 from binance_commission import get_config as _get_commission_config
 import pnl_service
 import json
@@ -34,7 +36,7 @@ from loss_focus import build_loss_focus_snapshot, evaluate_loss_focus
 from entry_decision import evaluate as evaluate_entry_decision
 from directional_arbiter import evaluate_range_scalp as evaluate_range_scalp_direction
 from execution_modes import FUTURES_SHORT, SPOT_MARGIN_SHORT, range_scalp_short_mode
-from opportunity_contract import scale_contract
+from opportunity_contract import scale_contract, stop_noise_gate
 import staged_entry
 from profit_realization_supervisor import (
     ProfitRealizationContext,
@@ -137,24 +139,111 @@ _CAPITAL_ROUTING_MAX_RETRIES_DEFAULT: int = 960
 _asg_cycle_instance: "AutonomousSignalGenerator" = None
 
 
+def _entry_generation_payload(settings: Any) -> Dict[str, Any]:
+    """Return stable code/config identity for every Entry decision snapshot."""
+    source_hash = hashlib.sha256()
+    source_paths = [
+        os.path.join(os.path.dirname(__file__), name)
+        for name in (
+            "run_trades.py", "staged_entry.py", "directional_arbiter.py",
+            "opportunity_contract.py", "entry_decision.py", "entry_profile_gate.py",
+            "pnl_predictor.py", "portfolio_selector.py", "autonomous_signals.py",
+            "support_resistance.py", "directional_confirmation.py", "execution_modes.py",
+            "config_helpers.py", "learning_engine.py", "candidate_scoring.py",
+            "market_regime.py",
+        )
+    ]
+    for path in sorted(set(source_paths)):
+        if not path:
+            continue
+        try:
+            relative_path = os.path.relpath(path, os.path.dirname(__file__)).replace("\\", "/")
+            source_hash.update(relative_path.encode("utf-8"))
+            with open(path, "rb") as source_file:
+                source_hash.update(hashlib.sha256(source_file.read()).digest())
+        except OSError:
+            source_hash.update(str(path).encode("utf-8"))
+
+    try:
+        config_values = settings.model_dump() if hasattr(settings, "model_dump") else {}
+    except Exception:
+        config_values = {}
+    if not isinstance(config_values, dict) or not config_values:
+        config_keys = (
+            "directional_policy_mode", "range_scalp_ranking_mode",
+            "range_scalp_min_stop_atr_multiple", "range_scalp_rejection_breakout_penalty",
+            "range_scalp_direction_min_probability", "range_scalp_direction_mode",
+            "range_scalp_long_entries_enabled", "range_scalp_bidirectional_enabled",
+            "spot_margin_short_enabled", "futures_enabled", "max_loss_usd_per_trade",
+            "entry_decision_enabled", "entry_decision_policy_version",
+            "entry_decision_regime_mode", "entry_decision_min_expected_pnl",
+            "entry_decision_min_probability", "entry_profile_gate_enabled",
+            "entry_profile_gate_thresholds_path", "range_scalp_quality_model_path",
+            "opportunity_contract_futures_entry_fee_rate",
+            "opportunity_contract_futures_exit_fee_rate",
+            "opportunity_contract_spot_entry_fee_rate",
+            "opportunity_contract_spot_exit_fee_rate", "slippage_pct",
+            "qubo_enabled", "qubo_lambda_corr", "qubo_lambda_size", "qubo_lambda_risk",
+            "qubo_solver", "qubo_seed", "max_positions_range_scalp",
+        )
+        config_values = {key: getattr(settings, key, None) for key in config_keys}
+    config_values = {
+        str(key): value for key, value in config_values.items()
+        if not any(
+            marker in str(key).lower()
+            for marker in ("api_key", "api_secret", "password", "private_key", "access_token", "refresh_token")
+        )
+    }
+    config_hash = hashlib.sha256(
+        json.dumps(config_values, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+    model_paths = {
+        "range_scalp_quality_model": getattr(settings, "range_scalp_quality_model_path", None),
+        "entry_profile_thresholds": getattr(settings, "entry_profile_gate_thresholds_path", None),
+        "spot_bull_quality_model": "Dev/benchmarks/entry_profile_calibration/quality_score_model_spot_bull.pkl",
+        "universal_quality_model": "Dev/benchmarks/research_data/quality_score_model_universal_proposal.pkl",
+    }
+    model_fingerprints = {}
+    for name, raw_path in model_paths.items():
+        path = str(raw_path or "").strip()
+        if not path:
+            model_fingerprints[name] = "unconfigured"
+            continue
+        try:
+            with open(path, "rb") as model_file:
+                model_fingerprints[name] = hashlib.sha256(model_file.read()).hexdigest()
+        except OSError:
+            model_fingerprints[name] = f"missing:{os.path.normpath(path)}"
+    model_hash = hashlib.sha256(
+        json.dumps(model_fingerprints, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    code_hash = source_hash.hexdigest()
+    payload = {
+        "entry_generation": (
+            f"{getattr(settings, 'entry_generation', 'entry') or 'entry'}:"
+            f"{code_hash[:12]}:{config_hash[:12]}:{model_hash[:12]}"
+        ),
+        "entry_code_hash": code_hash,
+        "entry_config_hash": config_hash,
+        "entry_model_hash": model_hash,
+    }
+    return payload
+
+
 def _apply_dry_run_balance_envelope(client: BinanceClient, settings) -> None:
     """
     Force BinanceClient.get_account_balance() to return only the configured
-    simulated USDT capital so Kelly sizing does not blow up against a huge
-    unrealistic testnet balance. Applies whenever running against Binance
-    Testnet (real orders, fake money) OR in an explicit dry-run/simulation
-    mode — independent of each other, since staging places real testnet
-    orders (DRY_RUN=false) but still needs a realistic capital baseline.
+    simulated USDT capital in explicit dry-run mode. Testnet/Demo credentials
+    can still place real orders against a funded exchange wallet, so their
+    reported balance must remain authoritative for sizing and order preflight.
     """
     _env_dry_run = str(os.environ.get("DRY_RUN", "false")).lower() in ("1", "true", "yes")
     _client_dry_run = bool(getattr(client, 'dry_run', False))
-    _testnet = bool(getattr(settings, 'binance_use_testnet', False))
     _enabled = (
         bool(getattr(settings, 'dry_run', False))
-        or bool(getattr(settings, 'spot_margin_simulation_enabled', False))
         or _client_dry_run
         or _env_dry_run
-        or _testnet
     )
     _sim_cap = float(getattr(settings, 'dry_run_simulated_capital_usdt', 0.0) or 0.0)
     if not _enabled or _sim_cap <= 0:
@@ -335,6 +424,7 @@ def _selection_begin_cycle(db_client, regime_mode: str, profile_label: Optional[
     cycle_id = str(uuid.uuid4())
     _selection_context = {
         "cycle_id": cycle_id,
+        "cycle_started_at": datetime.now(timezone.utc).isoformat(),
         "db_client": db_client,
         "regime_mode": regime_mode,
         "profile_label": profile_label,
@@ -354,6 +444,7 @@ def _selection_begin_cycle(db_client, regime_mode: str, profile_label: Optional[
         "range_reversion_invalid_reasons": {},
         "selected_count": 0,
         "executed_count": 0,
+        "qubo_selected_symbols": [],
     }
     if db_client:
         try:
@@ -378,22 +469,115 @@ def _selection_capture_candidates(candidates: List[Any], predictions: Dict[str, 
         if not symbol:
             continue
         prediction = predictions.get(symbol, {}) or {}
+        indicators = signal.get("indicators") if isinstance(signal.get("indicators"), dict) else {}
+        bands = signal.get("bollinger_bands") or indicators.get("bollinger_bands") or {}
+        if not isinstance(bands, dict):
+            bands = {}
         trade_type = str(signal.get("trade_type") or ("futures" if context.get("regime_mode") == "FUTURES_SHORT" else "spot"))
         expected_side = str(signal.get("expected_side") or ("SHORT" if trade_type == "futures" else "LONG")).upper()
-        decision_id = str(signal.get("decision_id") or f"{cycle_id}:{symbol}:{trade_type}:{expected_side}")
+        arbitration = signal.get("directional_arbitration")
+        arbitration = arbitration if isinstance(arbitration, dict) else {}
+        decision_id = str(
+            signal.get("decision_id")
+            or arbitration.get("decision_id")
+            or f"{cycle_id}:{symbol}:{trade_type}:{expected_side}"
+        )
+        signal_id = signal.get("signal_id")
+        ready_candidate_id = signal.get("ready_candidate_id")
+        source_timestamp = next((
+            signal.get(key) for key in ("signal_timestamp", "timestamp", "close_time")
+            if signal.get(key) is not None
+        ), None)
+        dedupe_cluster_id = signal.get("dedupe_cluster_id")
+        dedupe_cluster_source = signal.get("dedupe_cluster_source")
+        if dedupe_cluster_id is None and signal_id:
+            dedupe_cluster_id = f"signal:{signal_id}"
+            dedupe_cluster_source = "signal_id"
+        elif dedupe_cluster_id is None and ready_candidate_id is not None:
+            dedupe_cluster_id = f"ready_candidate:{ready_candidate_id}"
+            dedupe_cluster_source = "ready_candidate_id"
+        elif dedupe_cluster_id is None and source_timestamp is not None:
+            _cluster_payload = {
+                "symbol": str(symbol).upper(),
+                "source_timestamp": str(source_timestamp),
+                "interval": str(signal.get("interval") or signal.get("signal_interval") or "unknown"),
+            }
+            _cluster_hash = hashlib.sha256(
+                json.dumps(_cluster_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()[:24]
+            dedupe_cluster_id = f"source_candle:{_cluster_hash}"
+            dedupe_cluster_source = "symbol_source_timestamp_interval"
+        opportunity_event_id = (
+            signal.get("opportunity_event_id")
+            or dedupe_cluster_id
+            or f"{cycle_id}:{symbol}"
+        )
         signal["decision_id"] = decision_id
         signal["trade_type"] = trade_type
         signal["expected_side"] = expected_side
+        all_venue_contracts = arbitration.get("all_venue_contracts")
+        if not isinstance(all_venue_contracts, list):
+            all_venue_contracts = []
+        ev_horizon_minutes = next((
+            prediction.get(key) for key in (
+                "ev_horizon_minutes", "horizon_minutes", "cycle_duration_minutes",
+            ) if prediction.get(key) is not None
+        ), None)
         reversion_input = {
-            "current_price": signal.get("current_price", signal.get("price")),
-            "bb_lower": signal.get("bb_lower"),
-            "bb_middle": signal.get("bb_middle"),
-            "bb_upper": signal.get("bb_upper"),
+            "current_price": signal.get("current_price") or signal.get("price") or indicators.get("current_price") or indicators.get("price"),
+            "bb_lower": signal.get("bb_lower") or indicators.get("lower_band") or bands.get("lower"),
+            "bb_middle": signal.get("bb_middle") or indicators.get("middle_band") or bands.get("middle"),
+            "bb_upper": signal.get("bb_upper") or indicators.get("upper_band") or bands.get("upper"),
         }
         reversion_input_complete = all(value is not None for value in reversion_input.values())
+        entry_model_features = {}
+        for key in (
+            "expected_pnl_pct", "expected_pnl_percentage", "expected_pnl", "position_size_usdt",
+            "peak_quality", "composite_score", "confluence", "short_term_score",
+            "success_probability", "signal_strength", "strength", "range_score", "vol_score",
+            "rsi_score", "pnl_score", "symbol_quality_score", "rsi_4h", "rsi",
+            "vol_spike", "range_position", "bb_position", "trend_4h", "higher_tf_trend", "atr",
+        ):
+            value = signal.get(key)
+            if value is None:
+                value = indicators.get(key)
+            if value is None:
+                value = prediction.get(key)
+            entry_model_features[key] = value
         payload = {
+            "cycle_id": cycle_id,
             "decision_id": decision_id,
+            "qubo_cycle_id": signal.get("qubo_cycle_id") or context.get("qubo_cycle_id"),
+            "qubo_symbols_hash": signal.get("qubo_symbols_hash") or context.get("qubo_symbols_hash"),
+            "opportunity_event_id": opportunity_event_id,
+            "dedupe_cluster_id": dedupe_cluster_id,
+            "dedupe_cluster_source": dedupe_cluster_source,
+            "source_signal_id": signal_id,
+            "source_timestamp": source_timestamp,
+            "ready_candidate_id": ready_candidate_id,
+            "cycle_started_at": context.get("cycle_started_at"),
+            "candidate_captured_at": datetime.now(timezone.utc).isoformat(),
+            "ev_horizon_minutes": ev_horizon_minutes,
+            "entry_generation": signal.get("entry_generation"),
+            "entry_code_hash": signal.get("entry_code_hash"),
+            "entry_config_hash": signal.get("entry_config_hash"),
+            "entry_model_hash": signal.get("entry_model_hash"),
+            "entry_signal_side": signal.get("entry_signal_side"),
             "expected_side": expected_side,
+            "directional_arbitration": arbitration or None,
+            "selected_mode": arbitration.get("selected_mode"),
+            "selected_thesis_type": arbitration.get("selected_thesis_type"),
+            "thesis_type": signal.get("thesis_type") or arbitration.get("selected_thesis_type"),
+            "arbitration_reason": arbitration.get("reason"),
+            "selected_contract": arbitration.get("selected_contract"),
+            "alternative_contract": arbitration.get("alternative_contract"),
+            "long_contract": arbitration.get("long_contract"),
+            "short_contract": arbitration.get("short_contract"),
+            "futures_long_contract": arbitration.get("futures_long_contract"),
+            "long_venue_contracts": arbitration.get("long_venue_contracts"),
+            "short_venue_contracts": arbitration.get("short_venue_contracts"),
+            "all_venue_contracts": all_venue_contracts,
+            "venue_executable_at_time": _venue_executability_by_mode(all_venue_contracts),
             "strength": signal.get("strength"),
             "score": signal.get("score"),
             "profit_score": signal.get("profit_score"),
@@ -403,6 +587,9 @@ def _selection_capture_candidates(candidates: List[Any], predictions: Dict[str, 
             "higher_tf_trend": signal.get("higher_tf_trend"),
             "expected_pnl": prediction.get("expected_pnl"),
             "success_probability": prediction.get("success_probability"),
+            "predictor_weights_hash": prediction.get("weights_hash"),
+            "predictor_weights_source": prediction.get("weights_source"),
+            "predictor_weights_regime": prediction.get("weights_regime"),
             "peak_quality_profile": signal.get("peak_quality_profile"),
             "current_price": reversion_input["current_price"],
             "bb_lower": reversion_input["bb_lower"],
@@ -410,16 +597,10 @@ def _selection_capture_candidates(candidates: List[Any], predictions: Dict[str, 
             "bb_upper": reversion_input["bb_upper"],
             "range_reversion_input": reversion_input,
             "range_reversion_input_complete": reversion_input_complete,
-            "entry_model_features": {
-                key: signal.get(key, prediction.get(key))
-                for key in (
-                    "expected_pnl_pct", "expected_pnl_percentage", "expected_pnl", "position_size_usdt",
-                    "peak_quality", "composite_score", "confluence", "short_term_score",
-                    "success_probability", "signal_strength", "strength", "range_score", "vol_score",
-                    "rsi_score", "pnl_score", "symbol_quality_score", "rsi_4h", "rsi",
-                    "vol_spike", "range_position", "bb_position", "trend_4h", "higher_tf_trend", "atr",
-                )
-            },
+            "entry_model_features": entry_model_features,
+            "atr": entry_model_features["atr"],
+            "atr_pct": signal.get("atr_pct") if signal.get("atr_pct") is not None else indicators.get("atr_pct"),
+            "interval": signal.get("interval") or signal.get("sr_primary_timeframe") or signal.get("signal_interval") or indicators.get("interval"),
         }
         if db_client:
             try:
@@ -433,6 +614,16 @@ def _selection_capture_candidates(candidates: List[Any], predictions: Dict[str, 
             except Exception as exc:
                 print(f"[Selection] candidate persistence failed for {symbol}: {exc}")
     context["candidate_count"] = max(context.get("candidate_count", 0), len(candidates))
+
+
+def _venue_executability_by_mode(contracts: List[Any]) -> Dict[str, Optional[bool]]:
+    result: Dict[str, Optional[bool]] = {}
+    for contract in contracts:
+        if not isinstance(contract, dict) or not contract.get("mode"):
+            continue
+        status = contract.get("venue_executable_at_time")
+        result[str(contract["mode"])] = status if isinstance(status, bool) else None
+    return result
 
 
 def _selection_merge_candidate_data(symbol: str, payload: Dict[str, Any]) -> None:
@@ -496,6 +687,56 @@ def _selection_record_decision(symbol: str, decision: str, reason: str, trade_ty
         print(f"[Selection] decision persistence failed for {symbol}: {exc}")
 
 
+def _selection_record_candidate_rejection(
+    candidate: Dict[str, Any],
+    *,
+    stage: str,
+    reason: str,
+    details: Optional[Dict[str, Any]] = None,
+    profile_rejected: bool = False,
+) -> None:
+    symbol = str(candidate.get("symbol") or "")
+    if not symbol:
+        return
+    arbitration = candidate.get("directional_arbitration")
+    arbitration = arbitration if isinstance(arbitration, dict) else {}
+    venue_contracts = arbitration.get("all_venue_contracts")
+    rejected_ev = {
+        str(contract.get("mode")): contract.get("expected_net_pnl_usdt")
+        for contract in venue_contracts or []
+        if isinstance(contract, dict)
+    }
+    _selection_merge_candidate_data(symbol, {
+        "selection_outcome": "abstained",
+        "decision_id": candidate.get("decision_id") or arbitration.get("decision_id"),
+        "directional_arbitration": arbitration or None,
+        "all_venue_contracts": venue_contracts,
+        "selected_contract": arbitration.get("selected_contract"),
+        "alternative_contract": arbitration.get("alternative_contract"),
+        "selected_mode": arbitration.get("selected_mode"),
+        "selected_thesis_type": arbitration.get("selected_thesis_type"),
+        "selection_rejection": {
+            "stage": stage,
+            "reason": reason,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "details": details or {},
+        },
+        "rejected_contract_expected_net_pnl_usdt": rejected_ev,
+        "entry_generation": candidate.get("entry_generation"),
+        "entry_code_hash": candidate.get("entry_code_hash"),
+        "entry_config_hash": candidate.get("entry_config_hash"),
+        "entry_model_hash": candidate.get("entry_model_hash"),
+    })
+    _selection_mark_stage(symbol, f"{stage}_rejected", reason)
+    _selection_record_decision(
+        symbol,
+        "rejected",
+        reason,
+        str(candidate.get("trade_type") or "unknown"),
+    )
+    _selection_record_filter_rejection(reason, profile_rejected=profile_rejected)
+
+
 def _selection_complete_cycle(summary: Optional[Dict[str, Any]] = None) -> None:
     global _selection_context
     context = _selection_context
@@ -530,6 +771,33 @@ def _selection_complete_cycle(summary: Optional[Dict[str, Any]] = None) -> None:
     _selection_context = {}
 
 
+def _persist_qubo_authority(db_client: Any, regime_mode: str, symbols: List[str]) -> None:
+    """Persist the active cycle's QUBO universe for intra-cycle execution."""
+    if not db_client:
+        return
+    cycle_id = _selection_context.get("cycle_id")
+    if not cycle_id:
+        return
+    payload = {
+        "cycle_id": cycle_id,
+        "regime_mode": str(regime_mode or "").upper(),
+        "symbols": sorted({str(symbol) for symbol in symbols if symbol}),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    payload["symbols_hash"] = staged_entry.qubo_symbols_hash_for(payload["symbols"])
+    try:
+        db_client.execute_update(
+            "INSERT INTO trading_runtime_state (key, value, updated_at) VALUES (%s, %s::jsonb, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+            (f"entry_qubo_authority_{str(regime_mode or '').upper()}", json.dumps(payload)),
+        )
+        _selection_context["qubo_cycle_id"] = cycle_id
+        _selection_context["qubo_symbols_hash"] = payload["symbols_hash"]
+        _selection_context["qubo_selected_symbols"] = list(payload["symbols"])
+    except Exception as exc:
+        print(f"[QUBO] authority persistence failed: {exc}")
+
+
 def _cleanup_capital_reservations(now_ts: Optional[float] = None) -> None:
     now_ts = now_ts if now_ts is not None else time.monotonic()
     expired = [key for key, value in _CAPITAL_RESERVATIONS.items() if now_ts >= float(value.get("expires_at", 0.0) or 0.0)]
@@ -544,27 +812,167 @@ def _capital_bucket_for_mode(selected_mode: str) -> str:
 
 
 def _capital_routing_state(balance: Dict[str, Any], selected_mode: str) -> Dict[str, float]:
-    spot_after_reserve = float(balance.get("usdt_available_after_reserve", balance.get("usdt_available", 0.0)) or 0.0)
+    spot_cash_after_reserve = float(balance.get("usdt_available_after_reserve", balance.get("usdt_available", 0.0)) or 0.0)
+    spot_after_reserve = float(balance.get("spot_deployable_usdt_after_reserve", spot_cash_after_reserve) or 0.0)
     futures_after_reserve = float(balance.get("futures_available_after_reserve", balance.get("futures_available", 0.0)) or 0.0)
     bucket = _capital_bucket_for_mode(selected_mode)
-    bucket_available = spot_after_reserve if bucket == "spot" else futures_after_reserve
+    shared_wallet_mode = str(selected_mode or "").upper() in {"SPOT_LONG", "FUTURES_SHORT", "FUTURES_LONG"}
+    bucket_available = spot_after_reserve + futures_after_reserve if shared_wallet_mode else (
+        spot_after_reserve if bucket == "spot" else futures_after_reserve
+    )
     bucket_reserved = sum(
         float(res.get("amount", 0.0) or 0.0)
         for res in _CAPITAL_RESERVATIONS.values()
-        if res.get("bucket") == bucket
+        if shared_wallet_mode or res.get("bucket") == bucket
     )
     return {
-        "spot_available_after_reserve": spot_after_reserve,
+        "spot_available_after_reserve": spot_cash_after_reserve,
+        "spot_deployable_after_reserve": spot_after_reserve,
         "futures_available_after_reserve": futures_after_reserve,
         "bucket_available_after_reserve": bucket_available,
         "bucket_free_after_reserve": max(0.0, bucket_available - bucket_reserved),
     }
 
 
+def _capital_balance_with_futures(balance: Dict[str, Any], settings: Any, futures_client: Any) -> Dict[str, Any]:
+    """Add live Futures spendable margin so Spot/Futures reservations share one pool."""
+    result = dict(balance or {})
+    try:
+        from binance_commission import get_bnb_reserve_usdt
+
+        fc = _get_futures_client(settings, injected_client=futures_client)
+        available = float(
+            fc.get_simulated_available_usdt() if fc.dry_run else fc.get_available_usdt()
+        )
+        reserves = get_bnb_reserve_usdt(settings)
+        futures_reserve = max(0.0, float(reserves["futures_reserve_usdt"]))
+        result["futures_available"] = available
+        result["futures_available_after_reserve"] = max(0.0, available - futures_reserve)
+        result["futures_bnb_reserve_usdt"] = futures_reserve
+    except Exception as exc:
+        print(f"[Portfolio] Futures spendable balance unavailable for shared routing ({exc})")
+    return result
+
+
 # s108/Opcion D: minimum trade size below which scaling a position down stops
 # being worth the commissions/slippage — mirrors the "$10 minimum" checks
 # already used throughout the fast-path open helpers.
 _CAPITAL_RESERVATION_MIN_VIABLE_USDT: float = 15.0
+
+
+def _fund_selected_spot_entry_from_futures(
+    spot_client: Any,
+    futures_client: Any,
+    settings: Any,
+    required_usdt: float,
+    decision_id: str,
+    db_client: Any = None,
+    position_manager: Any = None,
+) -> bool:
+    """Move only a selected Spot entry's verified shortfall, preserving BNB reserves."""
+    try:
+        from binance_commission import get_bnb_reserve_usdt
+
+        reserves = get_bnb_reserve_usdt(settings)
+        spot_reserve = max(0.0, float(reserves["spot_reserve_usdt"]))
+        futures_reserve = max(0.0, float(reserves["futures_reserve_usdt"]))
+        spot_usdt = float(spot_client.get_account_balance().get("USDT", 0.0))
+        spot_spendable = max(0.0, spot_usdt - spot_reserve)
+        required_usdt = max(0.0, float(required_usdt or 0.0))
+        if spot_spendable >= required_usdt:
+            return True
+
+        if db_client is not None:
+            try:
+                from portfolio_manager import PortfolioManager
+
+                spot_portfolio = PortfolioManager(
+                    spot_client,
+                    settings,
+                    position_manager=position_manager,
+                )
+                spot_portfolio.ensure_usdt_liquidity(
+                    required_usdt,
+                    decision_id=decision_id,
+                    db_client=db_client,
+                )
+                spot_usdt = float(spot_client.get_account_balance().get("USDT", 0.0))
+                spot_spendable = max(0.0, spot_usdt - spot_reserve)
+                if spot_spendable >= required_usdt:
+                    return True
+            except Exception as exc:
+                print(f"[Capital/JIT/SPOT] asset conversion deferred ({exc})")
+
+        futures_available = max(0.0, float(futures_client.get_available_usdt()))
+        futures_spendable = max(0.0, futures_available - futures_reserve)
+        shortfall = math.ceil((required_usdt - spot_spendable - 1e-9) * 100.0) / 100.0
+        if shortfall <= 0.0 or shortfall > futures_spendable:
+            print(
+                f"[Capital/JIT/SPOT] deferred: shortfall=${shortfall:.2f}, "
+                f"Futures spendable=${futures_spendable:.2f} after BNB reserve=${futures_reserve:.2f}"
+            )
+            return False
+        if db_client is None:
+            print("[Capital/JIT/SPOT] deferred: audit database unavailable")
+            return False
+        try:
+            db_client.execute_update(
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                "VALUES (%s, %s, %s, %s, false)",
+                ("PORTFOLIO", "system", "capital_transfer_authorized", json.dumps({
+                    "decision_id": decision_id,
+                    "direction": "FUTURES_TO_SPOT",
+                    "amount_usdt": shortfall,
+                    "required_usdt": required_usdt,
+                    "spot_bnb_reserve_usdt": spot_reserve,
+                    "futures_bnb_reserve_usdt": futures_reserve,
+                })),
+            )
+        except Exception as exc:
+            print(f"[Capital/JIT/SPOT] deferred: authorization audit failed ({exc})")
+            return False
+
+        transferred = futures_client.transfer_to_spot(
+            shortfall,
+            spot_api_key=getattr(settings, "binance_api_key", None),
+            spot_api_secret=getattr(settings, "binance_api_secret", None),
+            safety_buffer_usdt=futures_reserve,
+        )
+        if not transferred:
+            try:
+                db_client.execute_update(
+                    "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                    "VALUES (%s, %s, %s, %s, false)",
+                    ("PORTFOLIO", "system", "capital_transfer_result", json.dumps({
+                        "decision_id": decision_id, "direction": "FUTURES_TO_SPOT",
+                        "amount_usdt": shortfall, "status": "failed",
+                    })),
+                )
+            except Exception:
+                pass
+            return False
+        refreshed_spot = float(spot_client.get_account_balance().get("USDT", 0.0))
+        refreshed_spendable = max(0.0, refreshed_spot - spot_reserve)
+        print(
+            f"[Capital/JIT/SPOT] transferred=${shortfall:.2f}; "
+            f"verified spendable=${refreshed_spendable:.2f} required=${required_usdt:.2f}"
+        )
+        try:
+            db_client.execute_update(
+                "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                ("PORTFOLIO", "system", "capital_transfer_result", json.dumps({
+                    "decision_id": decision_id, "direction": "FUTURES_TO_SPOT",
+                    "amount_usdt": shortfall, "status": "succeeded" if refreshed_spendable >= required_usdt else "balance_unverified",
+                    "spot_spendable_after_usdt": refreshed_spendable,
+                }), refreshed_spendable >= required_usdt),
+            )
+        except Exception as exc:
+            print(f"[Capital/JIT/SPOT] result audit failed for decision={decision_id}: {exc}")
+        return refreshed_spendable >= required_usdt
+    except Exception as exc:
+        print(f"[Capital/JIT/SPOT] deferred: balance or reserve verification failed ({exc})")
+        return False
 
 
 def _reserve_capital_for_candidate(
@@ -692,6 +1100,20 @@ def _precheck_capital_routing_retry(row: Dict[str, Any], settings: Any) -> Tuple
     if retry_count >= max_retries:
         return False, "CAPITAL_ROUTING_BLOCKED_MAX_RETRIES", state, max_retries
     return True, "OK", state, max_retries
+
+
+def _fast_path_authority_block_reason(db_client: Any, regime_mode: str, row: Dict[str, Any]) -> Optional[str]:
+    if _is_new_entries_paused(db_client):
+        return "PAUSED_DB"
+    authority = staged_entry.get_qubo_authority_snapshot(db_client, regime_mode)
+    if (
+        not authority
+        or row.get("qubo_cycle_id") != authority.get("cycle_id")
+        or row.get("qubo_symbols_hash") != authority.get("symbols_hash")
+        or str(row.get("symbol") or "") not in authority.get("symbols", [])
+    ):
+        return "NO_QUBO_AUTHORITY"
+    return None
 
 
 def _release_capital_reservation(symbol: str, selected_mode: str) -> None:
@@ -837,6 +1259,8 @@ def _prepare_range_scalp_staging_candidates(
     client: BinanceClient,
     settings: Any,
     screened_pairs_cache: Optional[Dict[str, Any]],
+    *,
+    refresh_profile_for_selected_side: bool = False,
 ) -> Tuple[List[Any], Dict[str, Any], Dict[str, Any]]:
     # The direction contract applies in every regime. A market regime weights
     # the evidence but no longer preassigns a side before the S/R comparison.
@@ -850,6 +1274,8 @@ def _prepare_range_scalp_staging_candidates(
         if not symbol:
             continue
         metadata = dict((signal_meta or {}).get(symbol) or (candidate if isinstance(candidate, dict) else {}))
+        metadata.setdefault("entry_signal_side", metadata.get("expected_side"))
+        metadata.setdefault("entry_signal_profile", metadata.get("peak_quality_profile"))
         try:
             decision = _range_scalp_direction_decision(
                 symbol,
@@ -861,10 +1287,22 @@ def _prepare_range_scalp_staging_candidates(
             )
         except Exception as exc:
             print(f"[DirectionArbiter/Staging] {symbol}: fail-closed ({exc})")
+            _selection_record_candidate_rejection(
+                {**metadata, "symbol": symbol},
+                stage="bilateral_arbitration",
+                reason="DIRECTION_ARBITER_STAGING_ERROR",
+                details={"exception_type": type(exc).__name__},
+            )
             update_signal_decision(symbol, "rejected", "DIRECTION_ARBITER_STAGING_ERROR", signal_id=metadata.get("signal_id"))
             continue
         selected_mode = decision.get("selected_mode")
         if selected_mode == "ABSTAIN":
+            _selection_record_candidate_rejection(
+                {**metadata, "symbol": symbol, "directional_arbitration": decision},
+                stage="bilateral_arbitration",
+                reason=str(decision.get("reason") or "DIRECTION_ARBITER_ABSTAIN"),
+                details={"directional_arbitration": decision},
+            )
             update_signal_decision(symbol, "rejected", decision.get("reason", "DIRECTION_ARBITER_ABSTAIN"), signal_id=metadata.get("signal_id"))
             continue
         metadata["directional_arbitration"] = decision
@@ -873,19 +1311,234 @@ def _prepare_range_scalp_staging_candidates(
 
         metadata["expected_side"] = side_for_mode(selected_mode)
         metadata["trade_type"] = trade_type_for_mode(selected_mode)
-        prepared = dict(candidate) if isinstance(candidate, dict) else {"symbol": symbol}
-        prepared.update(metadata)
-        prepared["symbol"] = symbol
-        staged_signals.append(prepared)
-        staged_meta[symbol] = prepared
+        if (
+            refresh_profile_for_selected_side
+            and str(metadata.get("expected_side") or "").upper()
+            != str(metadata.get("entry_signal_side") or "").upper()
+        ):
+            for key in (
+                "peak_quality_profile", "peak_quality_score", "entry_profile_gate_info",
+                "entry_model_version", "entry_model_score", "entry_model_shadow_profile",
+                "entry_model_missing_features",
+            ):
+                metadata.pop(key, None)
         prediction_key = {
             "FUTURES_SHORT": "short_prediction",
             "SPOT_MARGIN_SHORT": "short_prediction",
             "FUTURES_LONG": "futures_long_prediction",
             "SPOT_LONG": "long_prediction",
         }.get(selected_mode)
-        staged_predictions[symbol] = decision.get(prediction_key) or predictions.get(symbol) or {}
+        selected_prediction = decision.get(prediction_key) or predictions.get(symbol) or {}
+        selected_prediction = dict(selected_prediction) if isinstance(selected_prediction, dict) else {}
+        selected_contract = decision.get("selected_contract")
+        if isinstance(selected_contract, dict):
+            contract_target = selected_contract.get("effective_target_price")
+            contract_stop = selected_contract.get("effective_stop_price")
+            if contract_target is not None:
+                selected_prediction["target_price"] = contract_target
+            if contract_stop is not None:
+                selected_prediction["stop_price"] = contract_stop
+        metadata["entry_decision_prediction"] = selected_prediction
+        metadata.update(_entry_generation_payload(settings))
+        for key in (
+            "expected_pnl", "expected_pnl_percentage", "expected_pnl_pct",
+            "success_probability", "target_price", "stop_price", "price_range",
+            "position_size_usdt",
+        ):
+            value = selected_prediction.get(key)
+            if value is None:
+                metadata.pop(key, None)
+            else:
+                metadata[key] = value
+        if metadata.get("thesis_type") in {"LONG_SUPPORT_BOUNCE", "SHORT_RESISTANCE_REJECTION"}:
+            metadata["range_reversion_prediction"] = (
+                selected_prediction
+                if selected_prediction.get("valid") is True
+                else {"valid": False, "reason": "selected_thesis_prediction_invalid"}
+            )
+        else:
+            metadata["range_reversion_prediction"] = {
+                "valid": False,
+                "reason": "not_applicable_to_selected_thesis",
+            }
+        prepared = dict(candidate) if isinstance(candidate, dict) else {"symbol": symbol}
+        prepared.update(metadata)
+        prepared["symbol"] = symbol
+        if (
+            refresh_profile_for_selected_side
+            and str(prepared.get("expected_side") or "").upper()
+            != str(prepared.get("entry_signal_side") or "").upper()
+        ):
+            for key in (
+                "peak_quality_profile", "peak_quality_score", "entry_profile_gate_info",
+                "entry_model_version", "entry_model_score", "entry_model_shadow_profile",
+                "entry_model_missing_features",
+            ):
+                prepared.pop(key, None)
+        prepared["selected_contract"] = decision.get("selected_contract")
+        prepared["alternative_contract"] = decision.get("alternative_contract")
+        staged_signals.append(prepared)
+        staged_meta[symbol] = prepared
+        staged_predictions[symbol] = selected_prediction
     return staged_signals, staged_predictions, staged_meta
+
+
+def _revalidate_entry_policy_after_arbitration_change(
+    symbol: str,
+    metadata: Dict[str, Any],
+    decision: Dict[str, Any],
+    regime_mode: str,
+    settings: Any,
+    fear_greed_value: Optional[float] = None,
+    previous_side: Optional[str] = None,
+    previous_thesis_type: Optional[str] = None,
+    force_profile_refresh: bool = False,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """Recheck side-dependent profile and entry policy after a fresh route change."""
+    selected_mode = str(decision.get("selected_mode") or "").upper()
+    prediction_key = {
+        "FUTURES_SHORT": "short_prediction",
+        "SPOT_MARGIN_SHORT": "short_prediction",
+        "FUTURES_LONG": "futures_long_prediction",
+        "SPOT_LONG": "long_prediction",
+    }.get(selected_mode)
+    prediction = decision.get(prediction_key) if prediction_key else None
+    contract = decision.get("selected_contract")
+    if not isinstance(prediction, dict) or not isinstance(contract, dict):
+        return False, "FRESH_ARBITRATION_CONTRACT_MISSING", dict(metadata or {})
+
+    from execution_modes import side_for_mode, trade_type_for_mode
+
+    meta = dict(metadata or {})
+    old_side = str(previous_side or meta.get("expected_side") or "").strip().upper()
+    old_thesis = str(previous_thesis_type or meta.get("thesis_type") or "").strip().upper()
+    new_side = side_for_mode(selected_mode)
+    thesis_type = str(decision.get("selected_thesis_type") or "").strip().upper()
+    selected_prediction = dict(prediction)
+    if contract.get("effective_target_price") is not None:
+        selected_prediction["target_price"] = contract["effective_target_price"]
+    if contract.get("effective_stop_price") is not None:
+        selected_prediction["stop_price"] = contract["effective_stop_price"]
+    if contract.get("entry_price") is not None:
+        selected_prediction["current_price"] = contract["entry_price"]
+
+    meta.update({
+        "directional_arbitration": decision,
+        "selected_mode": selected_mode,
+        "expected_side": new_side,
+        "trade_type": trade_type_for_mode(selected_mode),
+        "thesis_type": thesis_type,
+        "entry_decision_prediction": selected_prediction,
+        "selected_contract": contract,
+        "alternative_contract": decision.get("alternative_contract"),
+    })
+    for key in (
+        "expected_pnl", "expected_pnl_percentage", "expected_pnl_pct",
+        "success_probability", "position_size_usdt", "target_price", "stop_price",
+    ):
+        if selected_prediction.get(key) is not None:
+            meta[key] = selected_prediction[key]
+        else:
+            meta.pop(key, None)
+
+    reversal_theses = {"LONG_SUPPORT_BOUNCE", "SHORT_RESISTANCE_REJECTION"}
+    if str(regime_mode or "").upper() == "RANGE_SCALP":
+        if thesis_type in reversal_theses:
+            meta["range_reversion_prediction"] = (
+                selected_prediction
+                if selected_prediction.get("valid") is True
+                else {"valid": False, "reason": "selected_thesis_prediction_invalid"}
+            )
+        else:
+            meta["range_reversion_prediction"] = {
+                "valid": False,
+                "reason": "not_applicable_to_selected_thesis",
+            }
+
+    if (force_profile_refresh or old_side != new_side or old_thesis != thesis_type) and getattr(settings, "entry_profile_gate_enabled", True):
+        try:
+            import entry_profile_gate
+            profile, info = entry_profile_gate.classify(
+                meta,
+                regime_mode,
+                new_side,
+                symbol,
+                fear_greed_value=fear_greed_value,
+                range_scalp_model_mode=getattr(settings, "range_scalp_quality_model_mode", "shadow"),
+                range_scalp_model_path=getattr(settings, "range_scalp_quality_model_path", None),
+            )
+        except Exception as exc:
+            print(f"[DirectionArbiter] {symbol}: selected-side quality revalidation failed ({exc})")
+            return False, "SELECTED_SIDE_QUALITY_REVALIDATION_FAILED", meta
+        if profile not in ("A", "B", "C"):
+            sr_confirmed = bool(
+                meta.get("support_bounce_buy") or meta.get("sr_bounce")
+                or meta.get("support_breakout_buy") or meta.get("sr_breakout")
+                or meta.get("support_breakdown_sell") or meta.get("sr_breakdown")
+            )
+            if not sr_confirmed:
+                return False, "SELECTED_SIDE_QUALITY_BELOW_C", meta
+            profile = "C"
+            info = {**(info or {}), "sr_confirmed_bypass": True}
+        meta["peak_quality_profile"] = profile
+        meta["peak_quality_score"] = (info or {}).get("score")
+        meta["entry_profile_gate_info"] = info or {}
+
+    profile = str(meta.get("peak_quality_profile") or "").upper()
+    quality_score = float(meta.get("peak_quality_score", 0.0) or 0.0)
+    entry_decision = evaluate_entry_decision(
+        meta=meta,
+        regime=regime_mode,
+        profile=profile,
+        quality_score=quality_score,
+        settings=settings,
+        current_price=selected_prediction.get("current_price") or meta.get("current_price"),
+    ).to_dict()
+    meta["entry_decision"] = entry_decision
+    if not entry_decision.get("eligible"):
+        return False, str(entry_decision.get("reason") or "FRESH_ENTRY_POLICY_REJECTED"), meta
+    return True, "OK", meta
+
+
+def _fresh_arbitrate_and_revalidate(
+    symbol: str,
+    metadata: Dict[str, Any],
+    client: BinanceClient,
+    settings: Any,
+    screened_pairs_cache: Optional[Dict[str, Any]],
+    regime_mode: str,
+    fear_greed_value: Optional[float] = None,
+    previous_side: Optional[str] = None,
+    previous_thesis_type: Optional[str] = None,
+) -> Tuple[bool, str, Dict[str, Any], Dict[str, Any]]:
+    """Single fresh authority shared by normal and FastPath execution."""
+    try:
+        decision = _range_scalp_direction_decision(
+            symbol,
+            dict(metadata or {}),
+            client,
+            settings,
+            screened_pairs_cache,
+            None,
+        )
+    except Exception as exc:
+        return False, f"FRESH_ARBITRATION_ERROR:{type(exc).__name__}", {}, {}
+    if str(decision.get("selected_mode") or "").upper() == "ABSTAIN":
+        return False, str(decision.get("reason") or "BILATERAL_ABSTAIN"), {}, decision
+    ok, reason, refreshed = _revalidate_entry_policy_after_arbitration_change(
+        symbol,
+        dict(metadata or {}),
+        decision,
+        regime_mode,
+        settings,
+        fear_greed_value,
+        previous_side=previous_side,
+        previous_thesis_type=previous_thesis_type,
+        force_profile_refresh=True,
+    )
+    if not ok:
+        return False, reason, refreshed, decision
+    return True, "OK", refreshed, decision
 
 
 def _open_validated_staged_candidates(
@@ -910,7 +1563,17 @@ def _open_validated_staged_candidates(
             db_client, client, settings, regime_mode, [], {}, {},
             cycle_id=_selection_context.get("cycle_id"), news_client=news_client,
         )
-        rows = staged_entry.get_openable_candidates(db_client, regime_mode, settings=settings)
+        qubo_authority = staged_entry.get_qubo_authority_snapshot(db_client, regime_mode)
+        if not qubo_authority:
+            print(f"[StagedEntry] no current QUBO authority for {regime_mode} — no validated fallback execution")
+            return []
+        qubo_symbols = qubo_authority["symbols"]
+        rows = staged_entry.get_openable_candidates(
+            db_client, regime_mode, qubo_symbols, settings=settings,
+            qubo_cycle_id=qubo_authority["cycle_id"],
+            qubo_symbols_hash=qubo_authority["symbols_hash"],
+            qubo_authority_symbols=qubo_authority["symbols"],
+        )
         candidates = [(row, dict(row.get("signal_meta") or {})) for row in rows]
         candidates = [(row, signal) for row, signal in candidates if signal.get("symbol")]
         if not candidates:
@@ -920,7 +1583,12 @@ def _open_validated_staged_candidates(
         ready_ids = {}
         for row, signal in candidates:
             symbol = signal["symbol"]
+            fresh_meta = (row.get("data") or {}).get("fresh_signal_meta")
+            if isinstance(fresh_meta, dict):
+                signal.update(fresh_meta)
             signal["ready_candidate_id"] = row["id"]
+            signal["qubo_cycle_id"] = row.get("qubo_cycle_id")
+            signal["qubo_symbols_hash"] = row.get("qubo_symbols_hash")
             policy = ((row.get("data") or {}).get("policy") or {})
             predictions[symbol] = {
                 "expected_pnl": policy.get("expected_pnl"),
@@ -983,6 +1651,33 @@ def _execute_validated_fast_path(
         return []
     if not rows:
         return []
+    if any(not row.get("qubo_cycle_id") or not row.get("qubo_symbols_hash") for row in rows):
+        print("[FastPath] NO_QUBO_AUTHORITY — candidate lacks cycle/hash provenance")
+        for row in rows:
+            _update_fast_path_gate(db_client, row.get("id"), False, "NO_QUBO_AUTHORITY", 0.0)
+        return []
+    qubo_authority = staged_entry.get_qubo_authority_snapshot(db_client, regime_mode)
+    if not qubo_authority or any(
+        row.get("qubo_cycle_id") != qubo_authority.get("cycle_id")
+        or row.get("qubo_symbols_hash") != qubo_authority.get("symbols_hash")
+        or row.get("symbol") not in qubo_authority.get("symbols", [])
+        for row in rows
+    ):
+        print("[FastPath] NO_QUBO_AUTHORITY — candidate authority is stale or mismatched")
+        for row in rows:
+            _update_fast_path_gate(db_client, row.get("id"), False, "NO_QUBO_AUTHORITY", 0.0)
+        return []
+    if _is_new_entries_paused(db_client):
+        print("[FastPath] PAUSED_DB — refusing validated-candidate execution")
+        for row in rows:
+            _update_fast_path_gate(
+                db_client,
+                row.get("id"),
+                False,
+                "PAUSED_DB",
+                0.0,
+            )
+        return []
     # s117: computed once per batch — see _btc_momentum_blocks_new_shorts docstring.
     _btc_blocked, _btc_block_reason = _btc_momentum_blocks_new_shorts(client, settings)
 
@@ -1039,7 +1734,11 @@ def _execute_validated_fast_path(
                     balance = portfolio_manager.get_total_balance()
             else:
                 balance = portfolio_manager.get_total_balance()
-            usdt_liquid = float(balance.get("usdt_available_after_reserve", balance.get("usdt_available", 0.0)))
+            balance = _capital_balance_with_futures(balance, settings, futures_client)
+            usdt_liquid = float(balance.get(
+                "spot_deployable_usdt_after_reserve",
+                balance.get("usdt_available_after_reserve", balance.get("usdt_available", 0.0)),
+            ))
             futures_liquid = float(balance.get("futures_available_after_reserve", balance.get("futures_available", 0.0)))
             _total_portfolio = float(balance.get("total_usdt", usdt_liquid))
         else:
@@ -1047,6 +1746,13 @@ def _execute_validated_fast_path(
             usdt_liquid = float(balances.get("USDT", 0.0))
             futures_liquid = 0.0
             _total_portfolio = usdt_liquid
+            balance = {
+                "usdt_available": usdt_liquid,
+                "usdt_available_after_reserve": usdt_liquid,
+                "futures_available": futures_liquid,
+                "futures_available_after_reserve": futures_liquid,
+                "total_usdt": _total_portfolio,
+            }
     except Exception as _bal_err:
         print(f"[FastPath] balance error: {_bal_err}")
         return []
@@ -1070,9 +1776,15 @@ def _execute_validated_fast_path(
         if not symbol:
             continue
         signal_meta_row = dict(row.get("signal_meta") or {})
-        policy = (row.get("data") or {}).get("policy") or {}
+        row_data = row.get("data") or {}
+        fresh_meta = row_data.get("fresh_signal_meta")
+        if isinstance(fresh_meta, dict):
+            signal_meta_row.update(fresh_meta)
+        policy = row_data.get("policy") or {}
         ready_id = row.get("id")
         signal_meta_row["ready_candidate_id"] = ready_id
+        signal_meta_row["qubo_cycle_id"] = row.get("qubo_cycle_id")
+        signal_meta_row["qubo_symbols_hash"] = row.get("qubo_symbols_hash")
 
         print(f"[FastPath] Evaluating {symbol} (ready_id={ready_id})")
 
@@ -1104,19 +1816,27 @@ def _execute_validated_fast_path(
                 if _retry_reason == "CAPITAL_ROUTING_BLOCKED_MAX_RETRIES":
                     _finalize_capital_routing_exhausted(db_client, ready_id, _retry_reason)
                 continue
-            try:
-                _fast_decision = _range_scalp_direction_decision(
-                    symbol,
-                    signal_meta_row,
-                    client,
-                    settings,
-                    _fast_screened_pairs,
-                    None,
-                )
-            except Exception as exc:
-                print(f"[FastPath/DirectionArbiter] {symbol}: fail-closed ({exc})")
-                _update_fast_path_gate(db_client, ready_id, False, "DIRECTION_ARBITER_ERROR", usdt_liquid)
+            _previous_fast_arb = signal_meta_row.get("directional_arbitration")
+            _previous_fast_side = signal_meta_row.get("expected_side")
+            _previous_fast_thesis = signal_meta_row.get("thesis_type")
+            _fresh_ok, _fresh_reason, _fresh_meta, _fast_decision = _fresh_arbitrate_and_revalidate(
+                symbol,
+                signal_meta_row,
+                client,
+                settings,
+                _fast_screened_pairs,
+                regime_mode,
+                previous_side=_previous_fast_side,
+                previous_thesis_type=_previous_fast_thesis,
+            )
+            if not _fresh_ok:
+                print(f"[FastPath/DirectionArbiter] {symbol}: fresh revalidation blocked ({_fresh_reason})")
+                _update_fast_path_gate(db_client, ready_id, False, _fresh_reason, usdt_liquid)
                 continue
+            signal_meta_row = _fresh_meta
+            signal_meta_row["ready_candidate_id"] = ready_id
+            _fast_decision["qubo_cycle_id"] = row.get("qubo_cycle_id")
+            _fast_decision["qubo_symbols_hash"] = row.get("qubo_symbols_hash")
             signal_meta_row["directional_arbitration"] = _fast_decision
             signal_meta_row["thesis_type"] = _fast_decision.get("selected_thesis_type")
             if _fast_decision.get("selected_mode") in (FUTURES_SHORT, SPOT_MARGIN_SHORT):
@@ -1160,6 +1880,11 @@ def _execute_validated_fast_path(
                         settings=settings,
                     )
                     _update_fast_path_gate(db_client, ready_id, False, _short_snapshot.get("reason", "CAPITAL_ROUTING_BLOCKED"), usdt_liquid)
+                    continue
+                _authority_block = _fast_path_authority_block_reason(db_client, regime_mode, row)
+                if _authority_block:
+                    _release_capital_reservation(symbol, SPOT_MARGIN_SHORT)
+                    _update_fast_path_gate(db_client, ready_id, False, _authority_block, usdt_liquid)
                     continue
                 try:
                     _fast_order = _open_arbitrated_range_scalp_margin_short(
@@ -1238,6 +1963,11 @@ def _execute_validated_fast_path(
                 # whatever capital is genuinely available, instead of being
                 # discarded outright.
                 _short_final_alloc = float(_short_snapshot.get("reserved_usdt") or _short_alloc)
+                _authority_block = _fast_path_authority_block_reason(db_client, regime_mode, row)
+                if _authority_block:
+                    _release_capital_reservation(symbol, _fast_decision["selected_mode"])
+                    _update_fast_path_gate(db_client, ready_id, False, _authority_block, usdt_liquid)
+                    continue
                 _fast_order = _open_arbitrated_range_scalp_short(
                     symbol,
                     _fast_decision,
@@ -1259,9 +1989,20 @@ def _execute_validated_fast_path(
                     total_open += 1
                 # SHORT cannot fall through to SPOT (spot is LONG-only)
                 if not _fast_order:
-                    print(f"[FastPath] {symbol}: FUTURES_SHORT failed, no SPOT fallback (LONG-only)")
+                    _execution_reason = str(
+                        _fast_decision.get("execution_block_reason")
+                        or "FUTURES_SHORT_EXECUTION_FAILED"
+                    )
+                    print(f"[FastPath] {symbol}: FUTURES_SHORT blocked: {_execution_reason}; no SPOT fallback (LONG-only)")
                     _release_capital_reservation(symbol, _fast_decision["selected_mode"])
-                    _update_fast_path_gate(db_client, ready_id, False, "FUTURES_SHORT_NO_MARGIN", usdt_liquid)
+                    _update_fast_path_gate(db_client, ready_id, False, _execution_reason, usdt_liquid)
+                    update_signal_decision(
+                        symbol,
+                        "rejected",
+                        _execution_reason,
+                        signal_id=signal_meta_row.get("signal_id"),
+                        trade_type="futures",
+                    )
                 continue
             elif _fast_decision["selected_mode"] == "FUTURES_LONG":
                 _fp_policy_size = float(_fast_decision.get("locked_position_size_usdt") or policy.get("position_size_usdt") or _get_param(settings, "futures_usdt_per_trade") or 0)
@@ -1297,6 +2038,11 @@ def _execute_validated_fast_path(
                     continue
                 # s108/Opcion D: use the (possibly scaled-down) reserved amount.
                 _fp_final_size = float(_long_snapshot.get("reserved_usdt") or _fp_policy_size)
+                _authority_block = _fast_path_authority_block_reason(db_client, regime_mode, row)
+                if _authority_block:
+                    _release_capital_reservation(symbol, _fast_decision["selected_mode"])
+                    _update_fast_path_gate(db_client, ready_id, False, _authority_block, usdt_liquid)
+                    continue
                 _fast_order = _open_arbitrated_range_scalp_long(
                     symbol,
                     _fast_decision,
@@ -1316,22 +2062,21 @@ def _execute_validated_fast_path(
                     _release_capital_reservation(symbol, _fast_decision["selected_mode"])
                     total_open += 1
                     continue
-                _routing_intent = str(signal_meta_row.get("routing_intent") or "").strip().upper()
-                if _routing_intent == "FUTURES_LONG_ANALYSIS":
-                    print(f"[FastPath] {symbol}: FUTURES_LONG failed, no SPOT fallback (futures-only intent)")
-                    _release_capital_reservation(symbol, _fast_decision["selected_mode"])
-                    _update_fast_path_gate(db_client, ready_id, False, "FUTURES_LONG_NO_MARGIN", usdt_liquid)
-                    update_signal_decision(
-                        symbol,
-                        "rejected",
-                        "FUTURES_LONG_NO_MARGIN",
-                        signal_id=signal_meta_row.get("signal_id"),
-                        trade_type="futures",
-                    )
-                    continue
-                # Backward-compatible behavior for non-futures-only intents.
+                print(f"[FastPath] {symbol}: selected FUTURES_LONG failed; no SPOT fallback without a fresh arbitration")
+                _execution_reason = str(
+                    _fast_decision.get("execution_block_reason")
+                    or "FUTURES_LONG_EXECUTION_FAILED"
+                )
                 _release_capital_reservation(symbol, _fast_decision["selected_mode"])
-                print(f"[FastPath] {symbol}: FUTURES_LONG failed, falling through to SPOT LONG")
+                _update_fast_path_gate(db_client, ready_id, False, _execution_reason, usdt_liquid)
+                update_signal_decision(
+                    symbol,
+                    "rejected",
+                    _execution_reason,
+                    signal_id=signal_meta_row.get("signal_id"),
+                    trade_type="futures",
+                )
+                continue
 
         # ── Gate 3: MAX_POSITIONS ────────────────────────────────────────────
         if total_open >= _regime_max:
@@ -1387,6 +2132,23 @@ def _execute_validated_fast_path(
         selected_mode = _fast_decision.get("selected_mode") if isinstance(_fast_decision, dict) else regime_mode
         trade_bucket = _capital_bucket_for_mode(selected_mode)
         bucket_liquid = futures_liquid if trade_bucket == "futures" else usdt_liquid
+        _fast_spot_contract = (
+            _fast_decision.get("selected_contract")
+            if selected_mode == "SPOT_LONG" and isinstance(_fast_decision.get("selected_contract"), dict)
+            else None
+        )
+        if _fast_spot_contract:
+            _fast_locked_spot_size = float(
+                _fast_decision.get("locked_position_size_usdt")
+                or _fast_spot_contract.get("margin_usdt")
+                or 0.0
+            )
+            if _fast_locked_spot_size <= 0.0:
+                _release_capital_reservation(symbol, selected_mode)
+                _update_fast_path_gate(db_client, ready_id, False, "MISSING_EXECUTABLE_LOCKED_MARGIN", usdt_liquid)
+                continue
+            trade_allocation = min(trade_allocation, _fast_locked_spot_size)
+            _fast_spot_contract = scale_contract(_fast_spot_contract, trade_allocation)
 
         # Cap to the routed bucket and reserve it before order construction.
         if trade_bucket == "spot":
@@ -1398,6 +2160,8 @@ def _execute_validated_fast_path(
                 trade_allocation = _spot_min_ticket
 
         trade_allocation = min(trade_allocation, bucket_liquid * 0.95)
+        if _fast_spot_contract:
+            trade_allocation = min(trade_allocation, _fast_locked_spot_size)
         if trade_allocation < 10.0:
             print(f"[FastPath] {symbol}: BLOCKED allocation too small (${trade_allocation:.2f})")
             _update_fast_path_gate(db_client, ready_id, False, "ALLOCATION_TOO_SMALL", usdt_liquid)
@@ -1431,6 +2195,8 @@ def _execute_validated_fast_path(
             continue
         # s108/Opcion D: use the (possibly scaled-down) reserved amount.
         trade_allocation = float(routing_snapshot.get("reserved_usdt") or trade_allocation)
+        if _fast_spot_contract:
+            _fast_spot_contract = scale_contract(_fast_decision["selected_contract"], trade_allocation)
 
         # ── Get price and filters ────────────────────────────────────────────
         try:
@@ -1460,13 +2226,78 @@ def _execute_validated_fast_path(
         # ── Gate 5: USDT balance check ───────────────────────────────────────
         _comm_rate = _get_commission_config(settings).rate_for("spot")
         cost_estimate = qty * price * (1.0 + _comm_rate + 0.0005)
-        if usdt_liquid < cost_estimate:
-            print(f"[FastPath] {symbol}: BLOCKED insufficient USDT (${usdt_liquid:.2f} < ${cost_estimate:.2f})")
+        try:
+            from binance_commission import get_bnb_reserve_usdt
+            _fast_spot_bnb_reserve = max(0.0, float(get_bnb_reserve_usdt(settings)["spot_reserve_usdt"]))
+        except Exception as exc:
+            print(f"[FastPath] {symbol}: BLOCKED BNB reserve unavailable ({exc})")
             _release_capital_reservation(symbol, selected_mode)
-            _update_fast_path_gate(db_client, ready_id, False, "INSUFFICIENT_USDT", usdt_liquid)
+            _update_fast_path_gate(db_client, ready_id, False, "BNB_RESERVE_UNAVAILABLE", usdt_liquid)
             continue
+        _fast_spot_raw_usdt = float(balance.get("usdt_available", usdt_liquid))
+        _fast_spot_spendable = max(0.0, _fast_spot_raw_usdt - _fast_spot_bnb_reserve)
+        if _fast_spot_contract:
+            _fast_entry = float(_fast_spot_contract.get("entry_price") or 0.0)
+            _fast_stop = float(_fast_spot_contract.get("effective_stop_price") or 0.0)
+            _fast_target = float(_fast_spot_contract.get("effective_target_price") or 0.0)
+            if not (_fast_stop < _fast_entry < _fast_target):
+                _release_capital_reservation(symbol, selected_mode)
+                _update_fast_path_gate(db_client, ready_id, False, "INVALID_SPOT_EXECUTABLE_CONTRACT", usdt_liquid)
+                continue
+            try:
+                _fast_fresh_price = float(client.get_symbol_price(symbol))
+            except Exception:
+                _fast_fresh_price = 0.0
+            _fast_stop_pct = (_fast_entry - _fast_stop) / _fast_entry if _fast_entry > 0 else 0.0
+            _fast_target_pct = (_fast_target - _fast_entry) / _fast_entry if _fast_entry > 0 else 0.0
+            _fast_rr = _fast_target_pct / _fast_stop_pct if _fast_stop_pct > 0 else 0.0
+            _fast_remaining = (_fast_target - _fast_fresh_price) / _fast_fresh_price if _fast_fresh_price > 0 else 0.0
+            if (
+                _fast_fresh_price <= 0
+                or _fast_fresh_price <= _fast_stop
+                or _fast_fresh_price >= _fast_target
+                or _fast_rr < 2.0
+                or _fast_remaining < 0.0015
+            ):
+                _release_capital_reservation(symbol, selected_mode)
+                _update_fast_path_gate(db_client, ready_id, False, "SPOT_CONTRACT_STALE", usdt_liquid)
+                continue
+            price = _fast_fresh_price
+            qty = align_quantity_to_step(trade_allocation / price, filters["step"])
+            cost_estimate = qty * price * (1.0 + _comm_rate + 0.0005)
+        if _fast_spot_spendable < cost_estimate:
+            if not _fast_spot_contract:
+                print(f"[FastPath] {symbol}: BLOCKED spendable USDT after BNB reserve (${_fast_spot_spendable:.2f} < ${cost_estimate:.2f})")
+                _release_capital_reservation(symbol, selected_mode)
+                _update_fast_path_gate(db_client, ready_id, False, "INSUFFICIENT_USDT", usdt_liquid)
+                continue
+            _fast_futures_client = _get_futures_client(settings, injected_client=futures_client)
+            if not _fund_selected_spot_entry_from_futures(
+                client,
+                _fast_futures_client,
+                settings,
+                cost_estimate,
+                str(_fast_decision.get("decision_id") or ""),
+                db_client,
+                position_manager=position_manager,
+            ):
+                _release_capital_reservation(symbol, selected_mode)
+                _update_fast_path_gate(db_client, ready_id, False, "JIT_CAPITAL_FUNDING_BLOCKED", usdt_liquid)
+                continue
+            _fast_spot_raw_usdt = float(client.get_account_balance().get("USDT", 0.0))
+            usdt_liquid = max(0.0, _fast_spot_raw_usdt - _fast_spot_bnb_reserve)
+            _fast_spot_spendable = usdt_liquid
+            if _fast_spot_spendable < cost_estimate:
+                _release_capital_reservation(symbol, selected_mode)
+                _update_fast_path_gate(db_client, ready_id, False, "POST_TRANSFER_SPOT_BALANCE_LOW", usdt_liquid)
+                continue
 
         # ── Execute order ────────────────────────────────────────────────────
+        _authority_block = _fast_path_authority_block_reason(db_client, regime_mode, row)
+        if _authority_block:
+            _release_capital_reservation(symbol, selected_mode)
+            _update_fast_path_gate(db_client, ready_id, False, _authority_block, usdt_liquid)
+            continue
         try:
             print(f"[FastPath] {symbol}: EXECUTING BUY qty={qty} alloc=${trade_allocation:.2f}")
             order = client.create_market_order(symbol=symbol, side="BUY", quantity=qty)
@@ -1507,6 +2338,14 @@ def _execute_validated_fast_path(
                         sl_price = _policy_sl
                 except (TypeError, ValueError):
                     pass
+            if _fast_spot_contract:
+                _fast_contract_entry = float(_fast_spot_contract.get("entry_price") or 0.0)
+                _fast_contract_stop = float(_fast_spot_contract.get("effective_stop_price") or 0.0)
+                _fast_contract_target = float(_fast_spot_contract.get("effective_target_price") or 0.0)
+                if not (_fast_contract_stop < _fast_contract_entry < _fast_contract_target):
+                    raise RuntimeError("invalid selected SPOT_LONG executable contract")
+                sl_price = _fill_price * (1.0 - (_fast_contract_entry - _fast_contract_stop) / _fast_contract_entry)
+                tp_price = _fill_price * (1.0 + (_fast_contract_target - _fast_contract_entry) / _fast_contract_entry)
 
             _peak_profile = str(signal_meta_row.get("peak_quality_profile", "")).strip().upper()
             _peak_score = signal_meta_row.get("peak_quality_score", signal_meta_row.get("peak_quality"))
@@ -1549,6 +2388,13 @@ def _execute_validated_fast_path(
                         "entry_pred_pnl": float(policy.get("expected_pnl") or 0),
                         "entry_pred_prob": float(policy.get("success_probability") or 0),
                         "entry_type": "fast_path",
+                        "decision_id": _fast_decision.get("decision_id") if _fast_decision else None,
+                        "thesis_type": _fast_decision.get("selected_thesis_type") if _fast_decision else None,
+                        "directional_arbitration": _fast_decision or None,
+                        "selected_contract": _fast_spot_contract,
+                        "alternative_contract": _fast_decision.get("alternative_contract") if _fast_decision else None,
+                        "locked_position_size_usdt": _fast_decision.get("locked_position_size_usdt") if _fast_decision else None,
+                        "actual_margin_usdt": trade_allocation,
                         "reevaluation_count": 0,
                         "spot_total_at_open": usdt_liquid,
                         "btc_price_at_entry": _get_cycle_price(client, "BTCUSDT") if client else None,
@@ -1834,6 +2680,8 @@ def _get_spot_margin_client(settings, db_client=None, injected_client=None) -> S
         if db_client is not None and getattr(injected_client, "db_client", None) is None:
             injected_client.db_client = db_client
         return injected_client
+    if _spot_margin_client is not None and bool(getattr(_spot_margin_client, "is_simulation", False)):
+        return _spot_margin_client
     if not bool(getattr(settings, "binance_use_testnet", False)):
         raise RuntimeError("SPOT_MARGIN_SHORT is restricted to Binance Demo in staging")
     if bool(getattr(settings, "dry_run", False)):
@@ -1883,6 +2731,25 @@ def _get_cycle_price(client: BinanceClient, symbol: str) -> float:
     price = client.get_symbol_price(symbol)
     _cycle_price_cache[symbol] = price
     return price
+
+
+def _merge_futures_short_analysis(signal: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
+    """Preserve the complete technical payload for bilateral short arbitration."""
+    merged = dict(signal or {})
+    if isinstance(analysis, dict):
+        merged.update({key: value for key, value in analysis.items() if value is not None})
+        indicators = analysis.get("indicators")
+        if isinstance(indicators, dict):
+            merged["indicators"] = dict(indicators)
+            for key in (
+                "rsi", "atr", "support_level", "resistance_level", "sr_zone_position",
+                "sr_rejection", "sr_breakdown", "sr_breakout", "support_bounce_buy",
+                "support_breakdown_sell", "sr_break_pressure_short", "sr_break_pressure_long",
+                "nearest_support_dist_pct", "nearest_resistance_dist_pct",
+            ):
+                if merged.get(key) is None and indicators.get(key) is not None:
+                    merged[key] = indicators[key]
+    return merged
 
 
 _VOLSPIKE_COOLDOWN_HOURS = 4.0
@@ -4611,7 +5478,7 @@ def _is_analysis_cache_fresh(symbol: str, regime: str) -> bool:
 
 def _normalize_autonomous_signal(signal: Dict[str, Any], regime: str, volume_24h_usdt: float) -> Dict[str, Any]:
     indicators = signal.get("indicators") if isinstance(signal.get("indicators"), dict) else {}
-    current_price = signal.get("current_price", indicators.get("price"))
+    current_price = signal.get("current_price") or signal.get("price") or indicators.get("price")
     bb_lower = signal.get("bb_lower", indicators.get("lower_band"))
     bb_middle = signal.get("bb_middle", indicators.get("middle_band"))
     bb_upper = signal.get("bb_upper", indicators.get("upper_band"))
@@ -4637,6 +5504,8 @@ def _normalize_autonomous_signal(signal: Dict[str, Any], regime: str, volume_24h
         "higher_tf_trend": signal.get("higher_tf_trend", "FLAT"),
         "expected_side": signal.get("expected_side", "SHORT" if str(regime).upper() == "FUTURES_SHORT" else "LONG"),
         "trade_type": signal.get("trade_type", "futures" if str(regime).upper() == "FUTURES_SHORT" else "spot"),
+        "interval": signal.get("interval") or indicators.get("interval"),
+        "signal_interval": signal.get("signal_interval") or signal.get("interval") or indicators.get("interval"),
         "current_price": current_price,
         "bb_lower": bb_lower,
         "bb_upper": bb_upper,
@@ -6144,10 +7013,16 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                         _sso_s_sell_check = get_binance_sell_qty(
                                             client, symbol, _sso_s_target_qty, current_price)
                                         if _sso_s_sell_check.get('is_ghost'):
-                                            print(f"[GHOST] SSO/SPOT {symbol}: DB qty={_sso_s_full_qty} but Binance balance={_sso_s_sell_check.get('balance_qty')} — closing DB record")
+                                            print(f"[GHOST_DEFERRED] SSO/SPOT {symbol}: DB qty={_sso_s_full_qty} but confirmed Spot total={_sso_s_sell_check.get('balance_qty')} — preserve position pending reconciliation")
                                             if position_manager:
-                                                position_manager.close_all_positions_for_symbol(
-                                                    symbol, current_price, 'ghost_balance_mismatch', commission_rate)
+                                                position_manager._audit(symbol, 'ghost_close_deferred', {
+                                                    'route': 'sso_spot',
+                                                    'db_qty': _sso_s_full_qty,
+                                                    'free_qty': _sso_s_sell_check.get('free_balance_qty'),
+                                                    'locked_qty': _sso_s_sell_check.get('locked_balance_qty'),
+                                                    'total_qty': _sso_s_sell_check.get('balance_qty'),
+                                                    'reason': 'absence_requires_reconciliation_confirmation',
+                                                }, binance_confirmed=False)
                                             continue
                                         _sso_s_sell_qty = _sso_s_sell_check.get('qty_to_sell', 0.0)
                                         if _sso_s_sell_qty <= 0:
@@ -6168,11 +7043,9 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                         # Dust guard: if remaining cannot be sold later, convert to full close
                                         if 0 < _sso_s_remaining * current_price < _sso_s_filters.get('min_notional', 1.0):
                                             print(f"[SSO/SPOT] {symbol}: remaining ${_sso_s_remaining * current_price:.4f} < min_notional — converting to full close")
-                                            _sso_s_qty_sold = _sso_s_full_qty
-                                            _sso_s_remaining = 0.0
                                             # Sell the balance we actually have, not DB qty
-                                            _final_sell_check = get_binance_sell_qty(client, symbol, _sso_s_full_qty, current_price)
-                                            _final_qty = _final_sell_check.get('qty_to_sell', _sso_s_qty_sold)
+                                            _final_sell_check = get_binance_sell_qty(client, symbol, _sso_s_remaining, current_price)
+                                            _final_qty = _final_sell_check.get('qty_to_sell', 0.0) if _final_sell_check.get('balance_status') == 'ok' else 0.0
                                             if _final_qty > 0 and _final_qty != _sso_s_sell_qty:
                                                 _sso_s_order2 = client.create_market_order(symbol=symbol, side="SELL", quantity=_final_qty)
                                                 _sso_s_fill2 = client.verify_and_fetch_fills(_sso_s_order2, f"SSO/SPOT SELL2 {symbol}")
@@ -6180,6 +7053,8 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                                     from pnl_accounting import combine_spot_fills
                                                     _sso_s_fill = combine_spot_fills(_sso_s_fill, _sso_s_fill2)
                                                     _sso_s_qty_sold = float(_sso_s_fill.get('qty', _final_qty))
+                                                    _sso_s_remaining = align_quantity_to_step(
+                                                        _sso_s_full_qty - _sso_s_qty_sold, _sso_s_filters["step"])
                                         # Persist the partial close in DB via PositionManager with the EXACT filled qty
                                         _sso_s_closed = position_manager.close_position(
                                             symbol=symbol,
@@ -6195,11 +7070,10 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                             exit_fill=_sso_s_fill,
                                         )
                                         if _sso_s_closed is None:
-                                            print(f"[WARN] SSO/SPOT {symbol}: position_manager.close_position returned None — falling back to metadata-only update")
-                                            try:
-                                                position_manager.update_position_quantity(pos.position_id, _sso_s_remaining)
-                                            except Exception:
-                                                pass
+                                            print(f"[ERROR] SSO/SPOT {symbol}: close persistence failed after confirmed fill; retaining tracked quantity for reconciliation")
+                                            ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_ERROR,
+                                                f"SSO/SPOT {symbol}: confirmed fill could not be persisted; position quantity retained")
+                                            continue
                                         # Update SSO metadata (level tracking, last trigger) on the residual position
                                         metadata = getattr(pos, 'metadata', {}) or {}
                                         if not isinstance(metadata, dict):
@@ -6577,10 +7451,16 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         # ── Use real Binance balance as single source of truth for qty
                         _prs_sell_check = get_binance_sell_qty(client, symbol, _prs_target_qty, current_price)
                         if _prs_sell_check.get('is_ghost'):
-                            print(f"[GHOST] ProfitRealization/SPOT {symbol}: DB qty={full_qty} but Binance balance={_prs_sell_check.get('balance_qty')} — closing DB record")
+                            print(f"[GHOST_DEFERRED] ProfitRealization/SPOT {symbol}: DB qty={full_qty} but confirmed Spot total={_prs_sell_check.get('balance_qty')} — preserve position pending reconciliation")
                             if position_manager:
-                                position_manager.close_all_positions_for_symbol(
-                                    symbol, current_price, 'ghost_balance_mismatch', commission_rate)
+                                position_manager._audit(symbol, 'ghost_close_deferred', {
+                                    'route': 'prs_spot',
+                                    'db_qty': full_qty,
+                                    'free_qty': _prs_sell_check.get('free_balance_qty'),
+                                    'locked_qty': _prs_sell_check.get('locked_balance_qty'),
+                                    'total_qty': _prs_sell_check.get('balance_qty'),
+                                    'reason': 'absence_requires_reconciliation_confirmation',
+                                }, binance_confirmed=False)
                             continue
                         if _prs_sell_check.get('is_dust'):
                             print(f"[DUST] ProfitRealization/SPOT {symbol}: balance notional too low — skipping partial close")
@@ -6612,16 +7492,16 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         # Dust guard: if remaining < min_notional, treat as full close
                         if 0 < remaining_qty * current_price < filters.get('min_notional', 1.0):
                             print(f"[ProfitRealization] {symbol}: remaining ${remaining_qty * current_price:.4f} < min_notional — converting to full close")
-                            _prs_final_check = get_binance_sell_qty(client, symbol, full_qty, current_price)
-                            _prs_final_qty = _prs_final_check.get('qty_to_sell', remaining_qty)
-                            if _prs_final_qty > 0 and _prs_final_qty != _prs_qty_sold:
+                            _prs_final_check = get_binance_sell_qty(client, symbol, remaining_qty, current_price)
+                            _prs_final_qty = _prs_final_check.get('qty_to_sell', 0.0) if _prs_final_check.get('balance_status') == 'ok' else 0.0
+                            if _prs_final_qty > 0:
                                 _prs_order2 = client.create_market_order(symbol=symbol, side="SELL", quantity=_prs_final_qty)
                                 _prs_fill2 = client.verify_and_fetch_fills(_prs_order2, f"ProfitRealization SELL2 {symbol}")
                                 if _prs_fill2:
                                     from pnl_accounting import combine_spot_fills
                                     _prs_fill = combine_spot_fills(_prs_fill, _prs_fill2)
                                     _prs_qty_sold = float(_prs_fill.get('qty', _prs_final_qty))
-                            remaining_qty = 0.0
+                                    remaining_qty = align_quantity_to_step(full_qty - _prs_qty_sold, filters["step"])
 
                         _wolf_early_partial = bool(
                             supervisor_decision
@@ -6657,7 +7537,7 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         }
                         try:
                             position_manager.update_position_metadata(pos.position_id, metadata)
-                            position_manager.close_position(
+                            _prs_closed = position_manager.close_position(
                                 symbol=symbol,
                                 exit_price=current_price,
                                 close_reason=metadata['profit_realization_partial_reason'],
@@ -6667,6 +7547,12 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                                 exit_context=_exit_ctx,
                                 exit_fill=_prs_fill,
                             )
+                            if _prs_closed is None:
+                                print(f"[ERROR] ProfitRealization/SPOT {symbol}: close persistence failed after confirmed fill; retaining tracked quantity for reconciliation")
+                                ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_ERROR,
+                                    f"ProfitRealization/SPOT {symbol}: confirmed fill could not be persisted; position quantity retained")
+                                close_reason = None
+                                continue
                             position_manager._audit(
                                 symbol,
                                 'wolf_hunter_early_partial' if _wolf_early_partial else 'profit_realization_supervisor_partial',
@@ -6982,18 +7868,24 @@ def _check_sl_tp_positions(client: BinanceClient, settings, position_manager, ne
                         _sell_check = get_binance_sell_qty(client, symbol, full_qty, current_price)
                         if _sell_check.get('is_ghost'):
                             _ghost_msg = (
-                                f"[GHOST] {symbol}: DB qty={full_qty:.0f} but Binance balance={_sell_check.get('balance_qty')} "
-                                f"(ratio={_sell_check.get('ratio'):.6f}) — auto-closing ghost position"
+                                f"[GHOST_DEFERRED] {symbol}: DB qty={full_qty:.8f} but confirmed Spot total={_sell_check.get('balance_qty')} "
+                                f"(ratio={_sell_check.get('ratio'):.8f}) — preserve position pending reconciliation"
                             )
                             print(_ghost_msg)
                             ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_ERROR, _ghost_msg)
                             if position_manager:
                                 try:
-                                    position_manager.close_all_positions_for_symbol(
-                                        symbol, current_price, 'ghost_balance_mismatch', commission_rate
-                                    )
+                                    position_manager._audit(symbol, 'ghost_close_deferred', {
+                                        'route': 'sl_tp_spot',
+                                        'db_qty': full_qty,
+                                        'free_qty': _sell_check.get('free_balance_qty'),
+                                        'locked_qty': _sell_check.get('locked_balance_qty'),
+                                        'total_qty': _sell_check.get('balance_qty'),
+                                        'ratio': _sell_check.get('ratio'),
+                                        'reason': 'absence_requires_reconciliation_confirmation',
+                                    }, binance_confirmed=False)
                                 except Exception as _ghost_err:
-                                    print(f"[GHOST] close failed for {symbol}: {_ghost_err}")
+                                    print(f"[GHOST] audit failed for {symbol}: {_ghost_err}")
                             continue
                         if _sell_check.get('is_dust'):
                             _dust_msg = (
@@ -7336,7 +8228,6 @@ def _check_entry_quality(
 ) -> Tuple[bool, str]:
     """
     Behavior-first entry gate.
-
     Returns (is_valid, reason).  Only approve assets whose current price
     behavior matches a short-term profitable pattern for the active regime and
     profile.  The asset's name is irrelevant; only its current behavior matters.
@@ -7358,15 +8249,9 @@ def _check_entry_quality(
     trend_4h = str(meta.get("higher_tf_trend", "FLAT") or "FLAT").strip().upper()
     ema200_trend = str(meta.get("ema200_trend", "UNKNOWN") or "UNKNOWN").strip().upper()
 
-    # Profile modifier: A = more aggressive, C = more selective, B = baseline.
-    # Applied to upper/lower bounds so that the hard floor is never breached.
     _profile_mult = {"A": 0.92, "B": 1.0, "C": 1.12}.get(_profile, 1.0)
 
     if _regime == "SPOT_BULL":
-        # Want: rising assets, entering on pullbacks, with volume.
-        # Volume floor is lower than the 4h expert rule (1.5x) because the 1h
-        # signal generator is more reactive; volume_confirmed is still a sizing
-        # booster.
         _min_vol_base = float(_get_param(settings, 'entry_quality_vol_spike_min_spot_bull', 0.85))
         _rsi_min_base = float(_get_param(settings, 'entry_quality_rsi_min_spot_bull', 33.0))
         _rsi_max_base = float(_get_param(settings, 'entry_quality_rsi_max_spot_bull', 68.0))
@@ -7411,7 +8296,9 @@ def _check_entry_quality(
             return False, f"RANGE_VOL (vol_spike={vol_spike:.2f} < {_min_vol:.2f})"
         _bb_pos_ok = bb_position is not None and float(bb_position) <= _max_bb_pos
         _bb_touch_ok = bb_lower_touch or bb_near_lower
-        if not (_bb_pos_ok or _bb_touch_ok):
+        _thesis_type = str(meta.get("thesis_type") or "").strip().upper()
+        _requires_lower_band = not _thesis_type or _thesis_type == "LONG_SUPPORT_BOUNCE"
+        if _requires_lower_band and not (_bb_pos_ok or _bb_touch_ok):
             _bb_pos_str = f"{float(bb_position):.2f}" if bb_position is not None else "?"
             return False, f"RANGE_BB (bb_pos={_bb_pos_str} > {_max_bb_pos:.2f}, touch={bb_lower_touch}, near={bb_near_lower})"
         if strength < float(getattr(settings, "entry_quality_min_strength", 0.40)):
@@ -7534,6 +8421,7 @@ def _filter_buy_candidates(
     regime_mode: str,
     predictions: Optional[Dict[str, Dict]] = None,
     news_client: Optional[Any] = None,
+    client: Optional[BinanceClient] = None,
 ) -> List[Any]:
     """
     Pre-filter candidate signals using the behavior-first entry gate.
@@ -7577,14 +8465,74 @@ def _filter_buy_candidates(
                 signal_meta.setdefault(symbol, {})
             meta = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
 
-        # Merge live predictor output if available so the gate uses scale-invariant
-        # expected returns rather than stale signal metadata.
         _pred = (predictions or {}).get(symbol)
-        if _pred:
-            meta.setdefault("expected_pnl", _pred.get("expected_pnl"))
-            meta.setdefault("expected_pnl_percentage", _pred.get("expected_pnl_percentage"))
-            meta.setdefault("position_size_usdt", _pred.get("position_size_usdt"))
-            meta.setdefault("success_probability", _pred.get("success_probability"))
+        if not (meta.get("current_price") or meta.get("price")) and isinstance(_pred, dict):
+            _prediction_price = _pred.get("current_price") or _pred.get("price")
+            if _prediction_price:
+                meta["current_price"] = _prediction_price
+                if isinstance(cand, dict):
+                    cand["current_price"] = _prediction_price
+        if not (meta.get("current_price") or meta.get("price")) and client is not None:
+            try:
+                _fresh_price = float(_get_cycle_price(client, symbol) or 0.0)
+            except Exception as _price_err:
+                print(f"[FilterBuy] {symbol}: fresh price unavailable ({_price_err})")
+                _fresh_price = 0.0
+            if _fresh_price > 0:
+                meta["current_price"] = _fresh_price
+                if isinstance(cand, dict):
+                    cand["current_price"] = _fresh_price
+
+        _prediction_complete = bool(
+            isinstance(_pred, dict)
+            and _pred.get("expected_pnl") is not None
+            and _pred.get("success_probability") is not None
+        )
+        if not _prediction_complete and client is not None:
+            _fresh_price = meta.get("current_price") or meta.get("price")
+            if _fresh_price:
+                _trade_type = str(meta.get("trade_type") or ("futures" if regime_mode == "FUTURES_SHORT" else "spot")).lower()
+                _trade_side = str(meta.get("expected_side") or ("SHORT" if _trade_type == "futures" and regime_mode == "FUTURES_SHORT" else "LONG")).upper()
+                try:
+                    _position_size = float(meta.get("position_size_usdt") or 0.0)
+                except (TypeError, ValueError):
+                    _position_size = 0.0
+                if _position_size <= 0.0:
+                    if regime_mode == "RANGE_SCALP" and _trade_type == "futures":
+                        _size_key = "range_scalp_short_usdt_per_trade" if _trade_side == "SHORT" else "futures_usdt_per_trade"
+                        _position_size = float(getattr(settings, _size_key, 150.0) or 150.0)
+                    else:
+                        _position_size = float(getattr(settings, "max_per_trade_usdt", 150.0) or 150.0)
+                _raw_indicators = meta.get("indicators")
+                _precomputed = {"indicators": _raw_indicators} if isinstance(_raw_indicators, dict) and _raw_indicators else None
+                try:
+                    _retry_prediction, _ = pnl_service.predict_for_symbol(
+                        symbol,
+                        client,
+                        settings,
+                        position_size_usdt=_position_size,
+                        precomputed_signal=_precomputed,
+                        trade_type=_trade_type,
+                        trade_side=_trade_side,
+                        current_price=float(_fresh_price),
+                    )
+                except Exception as _prediction_err:
+                    print(f"[FilterBuy] {symbol}: missing-prediction retry failed ({_prediction_err})")
+                    _retry_prediction = None
+                if isinstance(_retry_prediction, dict):
+                    _pred = _retry_prediction
+                    if isinstance(predictions, dict):
+                        predictions[symbol] = _pred
+                    meta["entry_decision_prediction"] = _pred
+
+        # Fresh predictions take precedence over signal-time values.
+        if isinstance(_pred, dict):
+            for _key in ("expected_pnl", "expected_pnl_percentage", "position_size_usdt", "success_probability"):
+                if _pred.get(_key) is not None:
+                    meta[_key] = _pred[_key]
+
+        if meta.get("category") == "sr_pool":
+            _selection_capture_candidates([meta], predictions or {}, "sr_pool_filtered")
 
         # Entry-profile gate: A/B/C tiers calibrated on realized post-cost outcomes.
         # Anything that is not explicitly A, B or C is discarded.
@@ -7627,24 +8575,16 @@ def _filter_buy_candidates(
             "entry_model_missing_features": _profile_info.get("missing_features", []),
         })
         if _profile not in ("A", "B", "C"):
-            # Bypass the pre-filter for confirmed support/resistance events:
-            # bounce at support, breakout above resistance, or breakdown below support.
-            # The staged-entry lifecycle and predictor remain the real validators.
-            _sr_confirmed = bool(
-                meta.get("support_bounce_buy") or meta.get("sr_bounce")
-                or meta.get("support_breakout_buy") or meta.get("sr_breakout")
-                or meta.get("support_breakdown_sell") or meta.get("sr_breakdown")
+            print(f"[FilterBuy] Rejected {symbol}: PEAK_QUALITY_DISCARDED (profile={_profile})")
+            _selection_record_candidate_rejection(
+                meta,
+                stage="entry_profile_gate",
+                reason="PEAK_QUALITY_DISCARDED",
+                details={"profile": _profile, "score": _profile_score, "gate_info": _profile_info},
+                profile_rejected=True,
             )
-            if _sr_confirmed:
-                print(f"[FilterBuy] SR bypass {symbol}: gate discarded, but confirmed SR event present")
-                _profile = "C"
-                meta["peak_quality_profile"] = _profile
-                meta["peak_quality_score"] = max(float(meta.get("peak_quality_score", 0.0) or 0.0), 0.45)
-            else:
-                print(f"[FilterBuy] Rejected {symbol}: PEAK_QUALITY_DISCARDED (profile={_profile})")
-                _selection_record_filter_rejection("PEAK_QUALITY_DISCARDED", profile_rejected=True)
-                update_signal_decision(symbol, "rejected", "PEAK_QUALITY_DISCARDED")
-                continue
+            update_signal_decision(symbol, "rejected", "PEAK_QUALITY_DISCARDED")
+            continue
 
         _selection_context["profile_pass_count"] = int(_selection_context.get("profile_pass_count", 0)) + 1
         if regime_mode == "RANGE_SCALP":
@@ -7712,7 +8652,12 @@ def _filter_buy_candidates(
             })
         if not _entry_decision["eligible"]:
             print(f"[FilterBuy] Rejected {symbol}: {_entry_decision['reason']}")
-            _selection_record_filter_rejection(_entry_decision["reason"])
+            _selection_record_candidate_rejection(
+                meta,
+                stage="entry_decision",
+                reason=str(_entry_decision["reason"]),
+                details={"entry_decision": _entry_decision},
+            )
             update_signal_decision(symbol, "rejected", _entry_decision["reason"])
             continue
         _selection_context["entry_decision_pass_count"] = int(
@@ -7749,6 +8694,11 @@ def _filter_buy_candidates(
             if not _ok:
                 if _eq_mode == "blocking":
                     print(f"[FilterBuy] Rejected {symbol}: {_reason}")
+                    _selection_record_candidate_rejection(
+                        meta,
+                        stage="legacy_entry_quality",
+                        reason=str(_reason),
+                    )
                     update_signal_decision(symbol, "rejected", _reason.split(" ")[0])
                     continue
                 # advisory: keep the candidate but attach a warning
@@ -7774,6 +8724,12 @@ def _filter_buy_candidates(
                 print(
                     f"[FilterBuy] Rejected {symbol}: EVIDENCE_GATE_LOW "
                     f"(posterior={posterior:.3f} < {min_posterior})"
+                )
+                _selection_record_candidate_rejection(
+                    meta,
+                    stage="evidence_gate",
+                    reason="EVIDENCE_GATE_LOW",
+                    details={"posterior": posterior, "minimum_posterior": min_posterior},
                 )
                 update_signal_decision(symbol, "rejected", "EVIDENCE_GATE_LOW")
                 continue
@@ -7807,6 +8763,10 @@ def _range_scalp_direction_decision(
     short_mode = range_scalp_short_mode(settings)
     spot_symbols = set((screened_pairs_cache or {}).get("spot") or [])
     spot_executable = bool(symbol in spot_symbols and symbol not in _INVALID_SYMBOLS)
+    if bool(getattr(client, "is_simulation", False)):
+        simulated_symbols = set(getattr(client, "_price_feed", {}).keys())
+        spot_executable = symbol in simulated_symbols and symbol not in _INVALID_SYMBOLS
+        futures_executable = symbol in simulated_symbols and symbol not in _INVALID_FUTURES_SYMBOLS
     metadata["spot_executable"] = spot_executable
     short_executable = (
         futures_executable
@@ -7817,6 +8777,63 @@ def _range_scalp_direction_decision(
     if current_price <= 0:
         raise ValueError("BILATERAL_PREFLIGHT_PRICE_UNAVAILABLE")
     metadata["current_price"] = current_price
+    try:
+        metadata["spot_exchange_filters"] = get_symbol_filters(client, symbol) if spot_executable else None
+    except Exception as exc:
+        metadata["spot_exchange_filters"] = {}
+        print(f"[DirectionArbiter] {symbol}: Spot exchange filters unavailable ({exc})")
+    if futures_executable:
+        try:
+            _fc_filters = _get_futures_client(settings, injected_client=None)
+            _f_info = _fc_filters.get_symbol_info(symbol) if _fc_filters else {}
+            _f_filters: Dict[str, Any] = {}
+            _f_raw_filters = (_f_info or {}).get("filters", [])
+            _f_filter_types = {
+                _filter.get("filterType") for _filter in _f_raw_filters if isinstance(_filter, dict)
+            }
+            for _filter in _f_raw_filters:
+                _filter_type = _filter.get("filterType")
+                if _filter_type == "LOT_SIZE":
+                    _f_filters.update({
+                        "step": float(_filter.get("stepSize", 0.0)),
+                        "min_qty": float(_filter.get("minQty", 0.0)),
+                        "max_qty": float(_filter.get("maxQty", 0.0)),
+                    })
+                elif _filter_type == "MARKET_LOT_SIZE":
+                    _f_filters.update({
+                        "market_step": float(_filter.get("stepSize", 0.0)),
+                        "market_min_qty": float(_filter.get("minQty", 0.0)),
+                        "market_max_qty": float(_filter.get("maxQty", 0.0)),
+                    })
+                elif _filter_type == "PRICE_FILTER":
+                    _f_filters["tick_size"] = float(_filter.get("tickSize", 0.0))
+                elif _filter_type in {"MIN_NOTIONAL", "NOTIONAL"}:
+                    _f_filters["min_notional"] = float(_filter.get("notional", _filter.get("minNotional", 0.0)))
+            _f_filters["filter_snapshot"] = _f_raw_filters
+            _f_filters.update(describe_filter_snapshot(
+                _f_raw_filters,
+                venue="usd_m_futures_testnet" if bool(getattr(settings, "binance_use_testnet", False)) else "usd_m_futures",
+                symbol=symbol,
+                source="FuturesClient.get_symbol_info",
+            ))
+            _f_filters["exchange_filters_validated"] = bool(
+                _f_info
+                and {"LOT_SIZE", "MARKET_LOT_SIZE", "PRICE_FILTER"}.issubset(_f_filter_types)
+                and bool(_f_filter_types.intersection({"MIN_NOTIONAL", "NOTIONAL"}))
+                and _f_filters.get("step", 0.0) > 0
+                and _f_filters.get("max_qty", 0.0) > 0
+                and _f_filters.get("market_step", 0.0) > 0
+                and _f_filters.get("market_max_qty", 0.0) > 0
+                and _f_filters.get("tick_size", 0.0) > 0
+                and _f_filters.get("min_notional", 0.0) > 0
+            )
+            metadata["futures_exchange_filters"] = _f_filters
+        except Exception as exc:
+            metadata["futures_exchange_filters"] = {}
+            print(f"[DirectionArbiter] {symbol}: Futures exchange filters unavailable ({exc})")
+    else:
+        metadata["futures_exchange_filters"] = None
+    metadata["spot_margin_exchange_filters"] = metadata.get("spot_exchange_filters")
     long_size = float(getattr(settings, "max_per_trade_usdt", 500.0))
     long_prediction, formatted_indicators = pnl_service.predict_for_symbol(
         symbol,
@@ -7826,21 +8843,38 @@ def _range_scalp_direction_decision(
         trade_type="spot",
         trade_side="LONG",
         current_price=current_price,
-        precomputed_signal={"indicators": metadata.get("indicators", {})},
+        precomputed_signal=None,
     )
     short_prediction = None
+    futures_short_prediction = None
+    spot_margin_short_prediction = None
     futures_long_prediction = None
-    if short_executable:
-        short_prediction, _ = pnl_service.predict_for_symbol(
+    if futures_executable:
+        futures_short_prediction, _ = pnl_service.predict_for_symbol(
             symbol,
             client,
             settings,
             position_size_usdt=float(getattr(settings, "range_scalp_short_usdt_per_trade", 1000.0)),
-            trade_type="futures" if short_mode == FUTURES_SHORT else "spot",
+            trade_type="futures",
             trade_side="SHORT",
             current_price=current_price,
-            precomputed_signal={"indicators": metadata.get("indicators", {})},
+            precomputed_signal=None,
         )
+    if bool(getattr(settings, "spot_margin_short_enabled", False)) and spot_executable:
+        spot_margin_short_prediction, _ = pnl_service.predict_for_symbol(
+            symbol,
+            client,
+            settings,
+            position_size_usdt=float(getattr(settings, "range_scalp_short_usdt_per_trade", 1000.0)),
+            trade_type="spot",
+            trade_side="SHORT",
+            current_price=current_price,
+            precomputed_signal=None,
+        )
+    short_prediction = (
+        spot_margin_short_prediction if short_mode != FUTURES_SHORT
+        else futures_short_prediction
+    )
     futures_long_size = float(getattr(settings, "futures_usdt_per_trade", 150.0))
     if futures_executable:
         futures_long_prediction, _ = pnl_service.predict_for_symbol(
@@ -7851,7 +8885,7 @@ def _range_scalp_direction_decision(
             trade_type="futures",
             trade_side="LONG",
             current_price=current_price,
-            precomputed_signal={"indicators": metadata.get("indicators", {})},
+            precomputed_signal=None,
         )
 
     support = float(metadata.get("support_level") or 0.0)
@@ -7865,6 +8899,9 @@ def _range_scalp_direction_decision(
     support_context = bool(zone <= support_limit or metadata.get("support_bounce_buy") or metadata.get("sr_bounce") or metadata.get("support_breakdown_sell") or metadata.get("sr_breakdown"))
     resistance_context = bool(zone >= resistance_limit or metadata.get("resistance_bounce_sell") or metadata.get("sr_rejection") or metadata.get("resistance_breakout_buy") or metadata.get("sr_breakout"))
     predictor = pnl_service.get_predictor()
+    # Build both thesis families when their context is present. Reversion is
+    # reserved for bounce/rejection; continuation uses the side-specific PnL
+    # predictor already computed above.
     if formatted_indicators and support_context:
         spot_bounce = predictor.predict_range_reversion(
             current_price, formatted_indicators, long_size, settings=settings,
@@ -7881,15 +8918,41 @@ def _range_scalp_direction_decision(
             if futures_bounce.get("valid"):
                 futures_bounce.update({"symbol": symbol, "current_price": current_price, "thesis_type": "LONG_SUPPORT_BOUNCE"})
                 futures_long_prediction = futures_bounce
-    elif formatted_indicators and resistance_context and short_executable:
+    if formatted_indicators and resistance_context:
         short_size = float(getattr(settings, "range_scalp_short_usdt_per_trade", 1000.0))
-        rejection = predictor.predict_range_reversion(
-            current_price, formatted_indicators, short_size, settings=settings,
-            trade_type="futures" if short_mode == FUTURES_SHORT else "spot", trade_side="SHORT",
+        if futures_executable:
+            rejection = predictor.predict_range_reversion(
+                current_price, formatted_indicators, short_size, settings=settings,
+                trade_type="futures", trade_side="SHORT",
+            )
+            if rejection.get("valid"):
+                rejection.update({"symbol": symbol, "current_price": current_price, "thesis_type": "SHORT_RESISTANCE_REJECTION"})
+                futures_short_prediction = rejection
+        if bool(getattr(settings, "spot_margin_short_enabled", False)) and spot_executable:
+            rejection = predictor.predict_range_reversion(
+                current_price, formatted_indicators, short_size, settings=settings,
+                trade_type="spot", trade_side="SHORT",
+            )
+            if rejection.get("valid"):
+                rejection.update({"symbol": symbol, "current_price": current_price, "thesis_type": "SHORT_RESISTANCE_REJECTION"})
+                spot_margin_short_prediction = rejection
+        short_prediction = (
+            spot_margin_short_prediction if short_mode != FUTURES_SHORT
+            else futures_short_prediction
         )
-        if rejection.get("valid"):
-            rejection.update({"symbol": symbol, "current_price": current_price, "thesis_type": "SHORT_RESISTANCE_REJECTION"})
-            short_prediction = rejection
+
+    if support_context:
+        # SHORT_SUPPORT_BREAKDOWN competes with LONG_SUPPORT_BOUNCE using the
+        # fresh SHORT continuation prediction, never a LONG reversion model.
+        short_prediction = (
+            spot_margin_short_prediction if short_mode != FUTURES_SHORT
+            else futures_short_prediction
+        ) or short_prediction
+    if resistance_context:
+        # LONG_RESISTANCE_BREAKOUT keeps the fresh LONG continuation prediction;
+        # only SHORT_RESISTANCE_REJECTION receives the reversion specialist.
+        long_prediction = long_prediction or {}
+        long_prediction.setdefault("thesis_type", "LONG_RESISTANCE_BREAKOUT")
 
     decision = evaluate_range_scalp_direction(
         symbol=symbol,
@@ -7900,8 +8963,13 @@ def _range_scalp_direction_decision(
         futures_executable=futures_executable,
         settings=settings,
         short_executable=short_executable,
+        futures_short_prediction=futures_short_prediction,
+        spot_margin_short_prediction=spot_margin_short_prediction,
+        spot_margin_executable=spot_executable,
     ).to_dict()
+    decision["decision_id"] = uuid.uuid4().hex
     decision["routing_intent"] = metadata.get("routing_intent")
+    decision.update(_entry_generation_payload(settings))
     try:
         if _db_client_ref:
             _db_client_ref.execute_update(
@@ -8479,12 +9547,6 @@ def _revalidate_entry_before_submit(
     structural room to justify opening, given how long this candidate may
     have waited in the execution queue (e.g. behind a capital-routing block).
 
-    s110: callers must gate this behind `_candidate_delayed_by_capital_or_slots`
-    — see that function's docstring. This check was always designed for the
-    "waited behind a capital/slot block" scenario (per the docstring below), but
-    was being invoked unconditionally on every execution attempt, including ones
-    with zero delay.
-
     Deliberately reuses the SR levels already computed by `support_resistance.py`
     (`metadata["support_level"]`/`["resistance_level"]`) instead of re-running
     any prediction model — the opposite-side SR level is the structural target
@@ -8492,16 +9554,16 @@ def _revalidate_entry_before_submit(
     and the stop is the same `sl_pct` percentage that will govern the real
     order, applied to the same fresh price used here.
 
-    Fails OPEN (returns True) whenever it cannot form an opinion (missing
-    price/SR data) — this is a guard against acting on an exhausted setup, not
-    a new mandatory gate that could reject symbols with incomplete data.
+    Missing or invalid price, target, or risk data blocks submission because
+    the executor cannot prove that it is sending the contract selected by the
+    immediately preceding bilateral arbitration.
     """
     try:
         fresh_price = float(fc.get_price(symbol))
     except Exception:
-        return True, "PRICE_REFRESH_FAILED_FAIL_OPEN", None
+        return False, "PRICE_REFRESH_FAILED", None
     if fresh_price is None or fresh_price <= 0:
-        return True, "PRICE_REFRESH_FAILED_FAIL_OPEN", None
+        return False, "PRICE_REFRESH_FAILED", None
 
     is_short = str(side or "").upper() == "SHORT"
     sr_target = metadata.get("support_level") if is_short else metadata.get("resistance_level")
@@ -8510,7 +9572,7 @@ def _revalidate_entry_before_submit(
     except (TypeError, ValueError):
         sr_target = None
     if sr_target is None or sr_target <= 0:
-        return True, "NO_SR_TARGET_FAIL_OPEN", fresh_price
+        return False, "NO_SR_TARGET", fresh_price
 
     sl_fraction = max(0.0, float(sl_pct or 0.0)) / 100.0
     stop_price = fresh_price * (1.0 + sl_fraction) if is_short else fresh_price * (1.0 - sl_fraction)
@@ -8521,7 +9583,7 @@ def _revalidate_entry_before_submit(
     if remaining_pct < min_remaining_pct:
         return False, "STALE_ENTRY_SR_TARGET_EXHAUSTED", fresh_price
     if risk <= 0:
-        return True, "ZERO_RISK_DISTANCE_FAIL_OPEN", fresh_price
+        return False, "ZERO_RISK_DISTANCE", fresh_price
     reward_risk_ratio = remaining / risk
     if reward_risk_ratio < min_reward_risk_ratio:
         return False, "STALE_ENTRY_REWARD_RISK_BELOW_MIN", fresh_price
@@ -8552,6 +9614,10 @@ def _build_entry_context(
     context: Dict[str, Any] = {
         "directional_arbitration_reason": decision.get("reason"),
         "directional_arbitration": decision,
+        "entry_generation": decision.get("entry_generation") or metadata.get("entry_generation"),
+        "entry_code_hash": decision.get("entry_code_hash") or metadata.get("entry_code_hash"),
+        "entry_config_hash": decision.get("entry_config_hash") or metadata.get("entry_config_hash"),
+        "entry_model_hash": decision.get("entry_model_hash") or metadata.get("entry_model_hash"),
         "thesis_type": decision.get("selected_thesis_type"),
         "selected_contract": _contract,
         "alternative_contract": decision.get("alternative_contract"),
@@ -8606,14 +9672,18 @@ def _build_indicators_at_entry(metadata: Optional[Dict[str, Any]]) -> Dict[str, 
     meta = metadata if isinstance(metadata, dict) else {}
     ind = dict(meta.get("indicators") or {})
     for key in (
-        "sr_path_long", "sr_path_short", "atr", "atr_pct", "interval",
+        "sr_path_long", "sr_path_short", "atr", "atr_pct", "interval", "signal_interval", "sr_primary_timeframe",
         "vol_spike", "rsi", "trend_4h", "higher_tf_trend",
         "support_level", "resistance_level",
         "nearest_support_dist_pct", "nearest_resistance_dist_pct",
-        "sr_zone_position",
+        "sr_zone_position", "bb_lower", "bb_middle", "bb_upper", "bb_position", "bollinger_bands",
     ):
         if ind.get(key) is None and meta.get(key) is not None:
             ind[key] = meta.get(key)
+    if ind.get("interval") is None:
+        _timeframe = meta.get("sr_primary_timeframe") or meta.get("signal_interval")
+        if _timeframe:
+            ind["interval"] = _timeframe
     if ind.get("current_price") is None:
         _px = meta.get("current_price") or meta.get("price")
         if _px is not None:
@@ -8736,6 +9806,12 @@ def _open_arbitrated_range_scalp_short(
     candidate_data: Optional[Dict[str, Any]] = None,
     allow_scale_in_ready_id: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
+    decision.pop("execution_block_reason", None)
+
+    def _blocked(reason: str) -> None:
+        decision["execution_block_reason"] = str(reason or "FUTURES_SHORT_EXECUTION_FAILED")
+        return None
+
     # s113: mirrors `_symbol_has_open_futures_position`'s scale-in allowance — this
     # function has its own inline duplicate-position guard (independent of the
     # fast-path caller's check), so the same allowance has to be threaded through
@@ -8743,7 +9819,7 @@ def _open_arbitrated_range_scalp_short(
     if _symbol_has_open_futures_position(
         settings, futures_client, position_manager, symbol, allow_scale_in_ready_id=allow_scale_in_ready_id,
     ):
-        return None
+        return _blocked("DUPLICATE_POSITION_SKIP")
     fc = _get_futures_client(settings, injected_client=futures_client)
     available = float(fc.get_available_usdt()) if not fc.dry_run else float(getattr(settings, "range_scalp_short_usdt_per_trade", 1000.0))
 
@@ -8793,36 +9869,15 @@ def _open_arbitrated_range_scalp_short(
     _locked_margin = float(decision.get("locked_position_size_usdt") or 0.0)
     if _locked_margin <= 0:
         print(f"[Futures/SHORT] {symbol}: missing executable locked margin — skip")
-        return None
+        return _blocked("MISSING_EXECUTABLE_LOCKED_MARGIN")
     amount = min(amount, _locked_margin)
     if amount < 10.0:
         print(f"[Futures/SHORT] {symbol}: amount ${amount:.2f} < $10 minimum — skip")
-        return None
-
-    # ── Just-in-time capital transfer: if futures wallet insufficient, pull from spot ──
-    reserve = max(2.0, available * 0.02)
-    avail_net = available - reserve
-    if amount > avail_net and not fc.dry_run:
-        print(f"[Futures/SHORT] {symbol}: need ${amount:.2f} but futures has ${avail_net:.2f} — requesting transfer from spot")
-        funded = fc.check_and_fund(
-            amount + 2.0,
-            spot_api_key=getattr(settings, "binance_api_key", None),
-            spot_api_secret=getattr(settings, "binance_api_secret", None),
-        )
-        if funded:
-            available = float(fc.get_available_usdt())
-            avail_net = available - max(2.0, available * 0.02)
-            amount = min(amount, avail_net)
-            print(f"[Futures/SHORT] {symbol}: post-transfer avail=${available:.2f}, final amount=${amount:.2f}")
-        else:
-            amount = min(amount, avail_net)
-            print(f"[Futures/SHORT] {symbol}: transfer failed, capped to avail=${amount:.2f}")
-    else:
-        amount = min(amount, avail_net)
+        return _blocked("ALLOCATION_TOO_SMALL")
 
     if amount < 10.0:
-        print(f"[Futures/SHORT] {symbol}: final amount ${amount:.2f} < $10 after funding — skip")
-        return None
+        print(f"[Futures/SHORT] {symbol}: amount ${amount:.2f} < $10 — skip")
+        return _blocked("ALLOCATION_TOO_SMALL")
     _funding_guard = _evaluate_funding_guard_for_entry(
         symbol,
         "SHORT",
@@ -8836,26 +9891,33 @@ def _open_arbitrated_range_scalp_short(
     )
     if _funding_guard.get("block"):
         print(f"[Futures/SHORT] {symbol}: BLOCKED by funding guard ({_funding_guard.get('reason')})")
-        return None
+        return _blocked(str(_funding_guard.get("reason") or "FUNDING_GUARD_BLOCKED"))
     _selected_contract = decision.get("selected_contract") if isinstance(decision.get("selected_contract"), dict) else {}
     _contract_entry = float(_selected_contract.get("entry_price") or 0.0)
     _contract_stop = float(_selected_contract.get("effective_stop_price") or 0.0)
     _contract_target = float(_selected_contract.get("effective_target_price") or 0.0)
     if not (_contract_target < _contract_entry < _contract_stop):
         print(f"[Futures/SHORT] {symbol}: invalid selected executable contract — skip")
-        return None
+        return _blocked("INVALID_SELECTED_EXECUTABLE_CONTRACT")
     _short_sl_pct = (_contract_stop - _contract_entry) / _contract_entry * 100.0
     _short_tp_pct = (_contract_entry - _contract_target) / _contract_entry * 100.0
-    # s110: only re-validate reward:risk against a fresh price if this candidate
-    # actually waited behind a capital or slot block — otherwise open immediately
-    # on the confirmed breakout instead of re-deriving the whole thesis from scratch.
-    if _candidate_delayed_by_capital_or_slots(candidate_data):
-        _revalidate_ok, _revalidate_reason, _revalidate_price = _revalidate_entry_before_submit(
-            symbol, "SHORT", fc, _short_sl_pct, metadata,
-        )
-        if not _revalidate_ok:
-            print(f"[Futures/SHORT] {symbol}: SKIPPED at execution — {_revalidate_reason} (fresh_price={_revalidate_price})")
-            return None
+    _revalidate_ok, _revalidate_reason, _revalidate_price = _revalidate_entry_before_submit(
+        symbol, "SHORT", fc, _short_sl_pct, metadata,
+    )
+    if not _revalidate_ok:
+        print(f"[Futures/SHORT] {symbol}: SKIPPED at execution — {_revalidate_reason} (fresh_price={_revalidate_price})")
+        return _blocked(_revalidate_reason)
+    _contract_entry_fee = max(0.0, float(_selected_contract.get("projected_entry_fee_usdt") or 0.0))
+    _required_futures_usdt = amount + _contract_entry_fee * min(1.0, amount / max(_locked_margin, 1e-9))
+    if not fc.dry_run and not fc.check_and_fund(
+        _required_futures_usdt,
+        spot_api_key=getattr(settings, "binance_api_key", None),
+        spot_api_secret=getattr(settings, "binance_api_secret", None),
+        decision_id=str(decision.get("decision_id") or ""),
+        position_manager=position_manager,
+    ):
+        print(f"[Futures/SHORT] {symbol}: selected entry lacks verified funding after BNB reserves — skip")
+        return _blocked("FUTURES_FUNDING_BLOCKED")
     profile = str(metadata.get("peak_quality_profile") or "B").strip().upper()
     entry_context = _build_scaled_entry_context(decision, metadata, candidate_data, amount)
     position = fc.open_short(
@@ -8872,7 +9934,7 @@ def _open_arbitrated_range_scalp_short(
         entry_context=entry_context,
     )
     if position is None:
-        return None
+        return _blocked("FUTURES_ORDER_REJECTED")
     _record_order_success()
     return {
         "symbol": symbol,
@@ -8882,6 +9944,10 @@ def _open_arbitrated_range_scalp_short(
         "sl": position.sl_price,
         "tp": position.tp_price,
         "position_persistence_confirmed": True,
+        "position_id": getattr(position, "position_id", None),
+        "thesis_id": getattr(position, "thesis_id", None),
+        "close_group_id": getattr(position, "close_group_id", None),
+        "entry_metadata": entry_context,
         "directional_arbitration": decision,
     }
 
@@ -8973,6 +10039,7 @@ def _open_arbitrated_range_scalp_margin_short(
         "thesis_id": position.thesis_id,
         "close_group_id": position.close_group_id,
         "position_persistence_confirmed": True,
+        "entry_metadata": thesis_meta,
         "directional_arbitration": decision,
     }
 
@@ -8988,11 +10055,17 @@ def _open_arbitrated_range_scalp_long(
     usdt_override: Optional[float] = None,
     candidate_data: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    if position_manager and position_manager.get_positions_count(symbol) > 0:
+    decision.pop("execution_block_reason", None)
+
+    def _blocked(reason: str) -> None:
+        decision["execution_block_reason"] = str(reason or "FUTURES_LONG_EXECUTION_FAILED")
         return None
+
+    if position_manager and position_manager.get_positions_count(symbol) > 0:
+        return _blocked("DUPLICATE_POSITION_SKIP")
     fc = _get_futures_client(settings, injected_client=futures_client)
     if any(not pos.closed and pos.symbol == symbol for pos in fc._open_positions.values()):
-        return None
+        return _blocked("DUPLICATE_POSITION_SKIP")
     available = float(fc.get_available_usdt()) if not fc.dry_run else float(getattr(settings, "futures_usdt_per_trade", 150.0))
 
     if usdt_override and usdt_override > 0:
@@ -9039,38 +10112,15 @@ def _open_arbitrated_range_scalp_long(
     _locked_margin = float(decision.get("locked_position_size_usdt") or 0.0)
     if _locked_margin <= 0:
         print(f"[Futures/LONG] {symbol}: missing executable locked margin — skip")
-        return None
+        return _blocked("MISSING_EXECUTABLE_LOCKED_MARGIN")
     amount = min(amount, _locked_margin)
     if amount < 10.0:
         print(f"[Futures/LONG] {symbol}: amount ${amount:.2f} < $10 minimum — skip")
-        return None
-
-    # ── Just-in-time capital transfer: if futures wallet insufficient, pull from spot ──
-    reserve = max(2.0, available * 0.02)
-    avail_net = available - reserve
-    if amount > avail_net and not fc.dry_run:
-        shortfall = round(amount - avail_net + 2.0, 2)  # +$2 buffer for Binance rounding
-        print(f"[Futures/LONG] {symbol}: need ${amount:.2f} but futures has ${avail_net:.2f} — transferring ${shortfall:.2f} from spot")
-        funded = fc.check_and_fund(
-            amount + 2.0,
-            spot_api_key=getattr(settings, "binance_api_key", None),
-            spot_api_secret=getattr(settings, "binance_api_secret", None),
-        )
-        if funded:
-            available = float(fc.get_available_usdt())
-            avail_net = available - max(2.0, available * 0.02)
-            amount = min(amount, avail_net)
-            print(f"[Futures/LONG] {symbol}: post-transfer avail=${available:.2f}, final amount=${amount:.2f}")
-        else:
-            # Transfer failed — use what we have
-            amount = min(amount, avail_net)
-            print(f"[Futures/LONG] {symbol}: transfer failed, capped to avail=${amount:.2f}")
-    else:
-        amount = min(amount, avail_net)
+        return _blocked("ALLOCATION_TOO_SMALL")
 
     if amount < 10.0:
-        print(f"[Futures/LONG] {symbol}: final amount ${amount:.2f} < $10 after funding attempt — skip")
-        return None
+        print(f"[Futures/LONG] {symbol}: amount ${amount:.2f} < $10 — skip")
+        return _blocked("ALLOCATION_TOO_SMALL")
     _funding_guard = _evaluate_funding_guard_for_entry(
         symbol,
         "LONG",
@@ -9084,24 +10134,33 @@ def _open_arbitrated_range_scalp_long(
     )
     if _funding_guard.get("block"):
         print(f"[Futures/LONG] {symbol}: BLOCKED by funding guard ({_funding_guard.get('reason')})")
-        return None
+        return _blocked(str(_funding_guard.get("reason") or "FUNDING_GUARD_BLOCKED"))
     _selected_contract = decision.get("selected_contract") if isinstance(decision.get("selected_contract"), dict) else {}
     _contract_entry = float(_selected_contract.get("entry_price") or 0.0)
     _contract_stop = float(_selected_contract.get("effective_stop_price") or 0.0)
     _contract_target = float(_selected_contract.get("effective_target_price") or 0.0)
     if not (_contract_stop < _contract_entry < _contract_target):
         print(f"[Futures/LONG] {symbol}: invalid selected executable contract — skip")
-        return None
+        return _blocked("INVALID_SELECTED_EXECUTABLE_CONTRACT")
     _long_sl_pct = (_contract_entry - _contract_stop) / _contract_entry * 100.0
     _long_tp_pct = (_contract_target - _contract_entry) / _contract_entry * 100.0
-    # s110: same delay-conditioned gate as the SHORT path above.
-    if _candidate_delayed_by_capital_or_slots(candidate_data):
-        _revalidate_ok, _revalidate_reason, _revalidate_price = _revalidate_entry_before_submit(
-            symbol, "LONG", fc, _long_sl_pct, metadata,
-        )
-        if not _revalidate_ok:
-            print(f"[Futures/LONG] {symbol}: SKIPPED at execution — {_revalidate_reason} (fresh_price={_revalidate_price})")
-            return None
+    _revalidate_ok, _revalidate_reason, _revalidate_price = _revalidate_entry_before_submit(
+        symbol, "LONG", fc, _long_sl_pct, metadata,
+    )
+    if not _revalidate_ok:
+        print(f"[Futures/LONG] {symbol}: SKIPPED at execution — {_revalidate_reason} (fresh_price={_revalidate_price})")
+        return _blocked(_revalidate_reason)
+    _contract_entry_fee = max(0.0, float(_selected_contract.get("projected_entry_fee_usdt") or 0.0))
+    _required_futures_usdt = amount + _contract_entry_fee * min(1.0, amount / max(_locked_margin, 1e-9))
+    if not fc.dry_run and not fc.check_and_fund(
+        _required_futures_usdt,
+        spot_api_key=getattr(settings, "binance_api_key", None),
+        spot_api_secret=getattr(settings, "binance_api_secret", None),
+        decision_id=str(decision.get("decision_id") or ""),
+        position_manager=position_manager,
+    ):
+        print(f"[Futures/LONG] {symbol}: selected entry lacks verified funding after BNB reserves — skip")
+        return _blocked("FUTURES_FUNDING_BLOCKED")
     profile = str(metadata.get("peak_quality_profile") or "B").strip().upper()
     entry_context = _build_scaled_entry_context(decision, metadata, candidate_data, amount)
     position = fc.open_long(
@@ -9118,7 +10177,7 @@ def _open_arbitrated_range_scalp_long(
         indicators_at_entry=_build_indicators_at_entry(metadata),
     )
     if position is None:
-        return None
+        return _blocked("FUTURES_ORDER_REJECTED")
     _record_order_success()
     return {
         "symbol": symbol,
@@ -9128,11 +10187,15 @@ def _open_arbitrated_range_scalp_long(
         "sl": position.sl_price,
         "tp": position.tp_price,
         "position_persistence_confirmed": True,
+        "position_id": getattr(position, "position_id", None),
+        "thesis_id": getattr(position, "thesis_id", None),
+        "close_group_id": getattr(position, "close_group_id", None),
+        "entry_metadata": entry_context,
         "directional_arbitration": decision,
     }
 
 
-def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: List, portfolio_manager=None, position_manager=None, precomputed_predictions: Dict = None, news_client=None, regime_obj: "MarketRegime" = None, regime_mode_override: str = None, screened_pairs_cache: dict = None, pre_switch_state: Optional[Dict[str, Any]] = None, futures_client=None) -> List[Dict]:
+def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: List, portfolio_manager=None, position_manager=None, precomputed_predictions: Dict = None, news_client=None, regime_obj: "MarketRegime" = None, regime_mode_override: str = None, screened_pairs_cache: dict = None, pre_switch_state: Optional[Dict[str, Any]] = None, futures_client=None, candidates_pre_filtered: bool = False) -> List[Dict]:
     # Accept either plain symbol strings or dicts with metadata (for aggressive mode)
     if top_signals_with_meta and isinstance(top_signals_with_meta[0], dict):
         top_symbols = [s['symbol'] for s in top_signals_with_meta]
@@ -9179,14 +10242,26 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         except Exception:
             pass
 
-    # ── Entry-profile gate (secondary pass) ─────────────────────────────────
-    # Always run the profile gate when this function is called directly; it is a
-    # no-op duplicate if execute_once() already filtered the same symbols.
-    top_signals_with_meta = _filter_buy_candidates(
-        top_signals_with_meta, signal_meta, settings, _regime_mode,
-        precomputed_predictions,
-        news_client,
-    )
+    # Run the gate here for direct/staged callers; execute_once filters its
+    # candidates before QUBO and marks them pre-filtered at this boundary.
+    if not candidates_pre_filtered:
+        if str(getattr(settings, "directional_policy_mode", "active") or "active").lower() == "active":
+            top_signals_with_meta, precomputed_predictions, signal_meta = _prepare_range_scalp_staging_candidates(
+                top_signals_with_meta,
+                precomputed_predictions or {},
+                signal_meta,
+                _regime_mode,
+                client,
+                settings,
+                screened_pairs_cache,
+                refresh_profile_for_selected_side=True,
+            )
+        top_signals_with_meta = _filter_buy_candidates(
+            top_signals_with_meta, signal_meta, settings, _regime_mode,
+            precomputed_predictions,
+            news_client,
+            client=client,
+        )
     if top_signals_with_meta and isinstance(top_signals_with_meta[0], dict):
         top_symbols = [s['symbol'] for s in top_signals_with_meta]
     else:
@@ -9214,7 +10289,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             balance = portfolio_manager.get_total_balance()
         # Use liquid USDT as the actual cap — not total portfolio value
         # Prefer BNB-reserve-aware balance so commission buffer is never traded away
-        usdt_liquid = float(balance.get("usdt_available_after_reserve", balance.get("usdt_available", usdt)))
+        balance = _capital_balance_with_futures(balance, settings, futures_client)
+        usdt_liquid = float(balance.get(
+            "spot_deployable_usdt_after_reserve",
+            balance.get("usdt_available_after_reserve", balance.get("usdt_available", usdt)),
+        ))
         _total_portfolio = float(balance.get("total_usdt", usdt_liquid))
         # BNB held as commission reserve is cash-equivalent, not invested trading capital
         _spot_bnb_value = float(balance.get("spot_bnb_usdt", 0.0))
@@ -9357,23 +10436,35 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             _signal_id = signal_meta.get(symbol, {}).get('signal_id')
         if str(getattr(settings, "directional_policy_mode", "active") or "active").lower() != "disabled":
             _arb_meta = signal_meta.get(symbol, {}) if isinstance(signal_meta, dict) else {}
+            _prior_side = _arb_meta.get("expected_side")
             _prior_arb = _arb_meta.get("directional_arbitration") if isinstance(_arb_meta, dict) else None
+            _prior_thesis_type = (
+                _arb_meta.get("thesis_type")
+                or (_prior_arb.get("selected_thesis_type") if isinstance(_prior_arb, dict) else None)
+            )
             _preflight_started_at = time.time()
-            try:
-                # Synchronous authority immediately before routing/submission: this
-                # refreshes predictions and may change the staged side.
-                _arb_decision = _range_scalp_direction_decision(
+            _fresh_ok, _fresh_reason, _fresh_meta, _arb_decision = _fresh_arbitrate_and_revalidate(
+                symbol,
+                _arb_meta,
+                client,
+                settings,
+                screened_pairs_cache,
+                _regime_mode,
+                fear_greed_value=_fng_value,
+                previous_side=_prior_side,
+                previous_thesis_type=_prior_thesis_type,
+            )
+            if not _fresh_ok:
+                print(f"[DirectionArbiter] {symbol}: fresh revalidation blocked ({_fresh_reason})")
+                update_signal_decision(
                     symbol,
-                    _arb_meta,
-                    client,
-                    settings,
-                    screened_pairs_cache,
-                    precomputed_predictions,
+                    "rejected",
+                    _fresh_reason,
+                    signal_id=_signal_id,
+                    trade_type=_arb_meta.get("trade_type"),
                 )
-            except Exception as exc:
-                print(f"[DirectionArbiter] {symbol}: fail-closed ({exc})")
-                update_signal_decision(symbol, "rejected", "DIRECTION_ARBITER_ERROR", signal_id=_signal_id)
                 continue
+            _arb_meta = _fresh_meta
             _arb_meta["directional_arbitration"] = _arb_decision
             _arb_meta["bilateral_preflight_evidence"] = {
                 "active": True,
@@ -9393,19 +10484,10 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
             }
             _arb_meta["capital_intent"] = _arb_decision.get("capital_intent")
             _arb_meta["locked_position_size_usdt"] = _arb_decision.get("locked_position_size_usdt")
-            _arb_meta["thesis_type"] = _arb_decision.get("selected_thesis_type")
-            if _arb_decision["selected_mode"] == "FUTURES_SHORT":
-                _arb_meta["expected_side"] = "SHORT"
-                _arb_meta["trade_type"] = "futures"
-            elif _arb_decision["selected_mode"] == SPOT_MARGIN_SHORT:
-                _arb_meta["expected_side"] = "SHORT"
-                _arb_meta["trade_type"] = "spot_margin"
-            elif _arb_decision["selected_mode"] == "FUTURES_LONG":
-                _arb_meta["expected_side"] = "LONG"
-                _arb_meta["trade_type"] = "futures"
-            elif _arb_decision["selected_mode"] == "SPOT_LONG":
-                _arb_meta["expected_side"] = "LONG"
-                _arb_meta["trade_type"] = "spot"
+            if isinstance(signal_meta, dict):
+                signal_meta[symbol] = _arb_meta
+            if isinstance(precomputed_predictions, dict):
+                precomputed_predictions[symbol] = _arb_meta.get("entry_decision_prediction") or {}
             if _arb_decision["selected_mode"] == "ABSTAIN":
                 update_signal_decision(symbol, "rejected", _arb_decision["reason"], signal_id=_signal_id)
                 continue
@@ -9486,7 +10568,11 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     orders.append(_arb_order)
                     update_signal_decision(symbol, "executed", "RANGE_SCALP_SHORT_FIRST", signal_id=_signal_id, trade_type="futures", binance_confirmed=True)
                 else:
-                    update_signal_decision(symbol, "rejected", "RANGE_SCALP_SHORT_EXECUTION_FAILED", signal_id=_signal_id, trade_type="futures")
+                    _execution_reason = str(
+                        _arb_decision.get("execution_block_reason")
+                        or "RANGE_SCALP_SHORT_EXECUTION_FAILED"
+                    )
+                    update_signal_decision(symbol, "rejected", _execution_reason, signal_id=_signal_id, trade_type="futures")
                 continue
             if _arb_decision["selected_mode"] == "FUTURES_LONG":
                 _arb_long_amount = float(_arb_decision.get("locked_position_size_usdt") or 0.0)
@@ -9525,13 +10611,17 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     orders.append(_arb_order)
                     update_signal_decision(symbol, "executed", "RANGE_SCALP_FUTURES_LONG", signal_id=_signal_id, trade_type="futures", binance_confirmed=True)
                 else:
-                    update_signal_decision(symbol, "rejected", "RANGE_SCALP_LONG_EXECUTION_FAILED", signal_id=_signal_id, trade_type="futures")
+                    _execution_reason = str(
+                        _arb_decision.get("execution_block_reason")
+                        or "RANGE_SCALP_LONG_EXECUTION_FAILED"
+                    )
+                    update_signal_decision(symbol, "rejected", _execution_reason, signal_id=_signal_id, trade_type="futures")
                 continue
             if _arb_decision["selected_mode"] == "SPOT_LONG":
                 if isinstance(signal_meta, dict):
                     signal_meta[symbol] = _arb_meta
                 if isinstance(precomputed_predictions, dict):
-                    precomputed_predictions[symbol] = _arb_decision.get("long_prediction") or {}
+                    precomputed_predictions[symbol] = _arb_meta.get("entry_decision_prediction") or _arb_decision.get("long_prediction") or {}
         # ── FUTURES_SHORT legacy executor ───────────────────────────────────
         # Futures positions are in a separate wallet — they must NOT be blocked
         # by the spot max_positions counter (which fills up with open spot trades).
@@ -9857,6 +10947,21 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     print(f'[Futures/PB1] SHORT {symbol} SKIPPED: max {_pb_max_new_per_cycle} new shorts/cycle reached — queued for next cycle')
                     update_signal_decision(symbol, 'rejected', 'STAGGER_LIMIT')
                     continue
+                # Noise floor (fail-closed): reject shorts whose contractual stop
+                # sits inside the ATR band — sub-noise stops have ~97% SL-hit.
+                _nf_mult = float(_get_param(settings, 'range_scalp_min_stop_atr_multiple') or 0.0)
+                if _nf_mult > 0:
+                    _nf_entry = float(_get_cycle_price(client, symbol) or 0.0)
+                    _nf_stop = _nf_entry * (1.0 + _f_sl / 100.0) if _nf_entry > 0 else 0.0
+                    _nf_ok, _nf_sd, _nf_atr = stop_noise_gate(
+                        entry_price=_nf_entry, stop_price=_nf_stop,
+                        indicators=_f_sig_meta.get('indicators') or _f_sig_meta,
+                        min_stop_atr_multiple=_nf_mult,
+                    )
+                    if not _nf_ok:
+                        print(f"[Futures/NoiseFloor] SHORT {symbol} SKIPPED: stop {_nf_sd*100:.2f}% below {_nf_mult}x ATR {_nf_atr*100:.2f}%")
+                        update_signal_decision(symbol, 'rejected', 'STOP_INSIDE_NOISE_FLOOR')
+                        continue
                 print(f"[Futures] FUTURES_SHORT mode: opening short {symbol} margin=${_f_usdt}")
                 _f_peak_profile = str(_f_sig_meta.get('peak_quality_profile', '') or '').strip().upper()
                 _f_peak_quality = _f_sig_meta.get('peak_quality')
@@ -10138,13 +11243,15 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                 # B1: Check BB position — s70: accepts bb_near_lower; s72: also accepts bb_position <= range_scalp_max_bb_position (40%)
                 if getattr(settings, 'range_scalp_require_bb_lower', True):
                     _sym_meta = signal_meta.get(symbol, {})
+                    _thesis_type = str(_sym_meta.get('thesis_type') or '').strip().upper()
+                    _requires_lower_band = not _thesis_type or _thesis_type == 'LONG_SUPPORT_BOUNCE'
                     _meta_bb_touch = _sym_meta.get('bb_lower_touch', None)
                     _meta_bb_near  = _sym_meta.get('bb_near_lower', None)
                     _meta_bb_pos   = _sym_meta.get('bb_position', None)  # s72: (price-BBL)/(BBU-BBL)
                     _rs_max_bb_pos = float(getattr(settings, 'range_scalp_max_bb_position', 0.40))
                     _bb_pos_ok = (_meta_bb_pos is not None and float(_meta_bb_pos) <= _rs_max_bb_pos)
                     _bb_ok = bool(_meta_bb_near) or (_meta_bb_touch is not False) or _bb_pos_ok
-                    if not _bb_ok and _meta_bb_touch is False:
+                    if _requires_lower_band and not _bb_ok and _meta_bb_touch is False:
                         print(f"Skipping buy {symbol}: RANGE_SCALP — price not near BB lower band (bb_pos={_meta_bb_pos})")
                         _ready_id = _sym_meta.get("ready_candidate_id")
                         try:
@@ -10174,6 +11281,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
                     continue
                 # LONG futuros: si precio en BB inferior + futures habilitado, abrir LONG en futuros
                 if (getattr(settings, 'futures_enabled', True)
+                    and str(getattr(settings, "directional_policy_mode", "active") or "active").lower() == "disabled"
                         and _get_param(settings, 'futures_long_enabled')
                         and _get_param(settings, 'futures_long_in_range_scalp')
                         and (signal_meta.get(symbol, {}).get('bb_lower_touch', False)
@@ -10232,6 +11340,7 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
 
         # ── SPOT_BULL + RSI oversold: LONG futuros más eficiente que spot ──
         if (_regime_mode == "SPOT_BULL" and _regime is not None and _regime.confirmed
+            and str(getattr(settings, "directional_policy_mode", "active") or "active").lower() == "disabled"
                 and getattr(settings, 'futures_enabled', True)
                 and _get_param(settings, 'futures_long_enabled')
                 and _get_param(settings, 'futures_long_in_spot_bull')):
@@ -10719,12 +11828,73 @@ def _buy_top_symbols(client: BinanceClient, settings, top_signals_with_meta: Lis
         # Use real spot commission rate + 0.05% slippage buffer
         _comm_rate = _get_commission_config(settings).rate_for('spot')
         cost_estimate = qty * price * (1.0 + _comm_rate + 0.0005)
-        if usdt_liquid_now < cost_estimate:
-            print(f"Skipping buy {symbol}: insufficient USDT ({usdt_liquid_now:.4f} < {cost_estimate:.4f} needed)")
-            ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_WARNING,
-                         f"Skipped buy {symbol}: insufficient USDT ({usdt_liquid_now:.4f} < {cost_estimate:.4f})")
-            update_signal_decision(symbol, "rejected", "SIN_SALDO", signal_id=_signal_id)
+        try:
+            from binance_commission import get_bnb_reserve_usdt
+            _spot_bnb_reserve = max(
+                0.0,
+                float(get_bnb_reserve_usdt(settings)["spot_reserve_usdt"]),
+            )
+        except Exception as exc:
+            print(f"Skipping buy {symbol}: BNB reserve unavailable ({exc})")
+            update_signal_decision(symbol, "rejected", "BNB_RESERVE_UNAVAILABLE", signal_id=_signal_id)
             continue
+        _spot_spendable_usdt = max(0.0, usdt_liquid_now - _spot_bnb_reserve)
+        if _spot_spendable_usdt < cost_estimate:
+            if not _spot_contract:
+                print(f"Skipping buy {symbol}: spendable USDT after BNB reserve ({_spot_spendable_usdt:.4f} < {cost_estimate:.4f} needed)")
+                ec.add_error(ec.SOURCE_TRADING_CYCLE, ec.LEVEL_WARNING,
+                             f"Skipped buy {symbol}: spendable USDT after BNB reserve ({_spot_spendable_usdt:.4f} < {cost_estimate:.4f})")
+                update_signal_decision(symbol, "rejected", "SIN_SALDO", signal_id=_signal_id)
+                continue
+            _spot_entry_contract = _spot_contract
+            _spot_entry_contract_entry = float(_spot_entry_contract.get("entry_price") or 0.0)
+            _spot_entry_contract_stop = float(_spot_entry_contract.get("effective_stop_price") or 0.0)
+            _spot_entry_contract_target = float(_spot_entry_contract.get("effective_target_price") or 0.0)
+            if not (_spot_entry_contract_stop < _spot_entry_contract_entry < _spot_entry_contract_target):
+                update_signal_decision(symbol, "rejected", "INVALID_SPOT_EXECUTABLE_CONTRACT", signal_id=_signal_id)
+                continue
+            try:
+                _spot_fresh_price = float(client.get_symbol_price(symbol))
+            except Exception:
+                _spot_fresh_price = 0.0
+            if _spot_fresh_price <= 0:
+                update_signal_decision(symbol, "rejected", "SPOT_PRICE_REFRESH_FAILED", signal_id=_signal_id)
+                continue
+            _spot_fresh_sl_pct = (
+                _spot_entry_contract_entry - _spot_entry_contract_stop
+            ) / _spot_entry_contract_entry
+            _spot_fresh_tp_pct = (
+                _spot_entry_contract_target - _spot_entry_contract_entry
+            ) / _spot_entry_contract_entry
+            _spot_fresh_reward_risk = _spot_fresh_tp_pct / _spot_fresh_sl_pct if _spot_fresh_sl_pct > 0 else 0.0
+            _spot_remaining_reward = (
+                _spot_entry_contract_target - _spot_fresh_price
+            ) / _spot_fresh_price
+            if (
+                _spot_fresh_price <= _spot_entry_contract_stop
+                or _spot_fresh_price >= _spot_entry_contract_target
+                or _spot_fresh_reward_risk < 2.0
+                or _spot_remaining_reward < 0.0015
+            ):
+                update_signal_decision(symbol, "rejected", "SPOT_CONTRACT_STALE", signal_id=_signal_id)
+                continue
+            price = _spot_fresh_price
+            qty = align_quantity_to_step(trade_allocation / price, filters["step"])
+            cost_estimate = qty * price * (1.0 + _comm_rate + 0.0005)
+            _spot_fc = _get_futures_client(settings, injected_client=futures_client)
+            if not _fund_selected_spot_entry_from_futures(
+                client, _spot_fc, settings, cost_estimate,
+                str(_spot_decision.get("decision_id") or ""), _db_client_ref,
+                position_manager=position_manager,
+            ):
+                print(f"Skipping selected SPOT_LONG {symbol}: JIT funding unavailable after BNB reserves")
+                update_signal_decision(symbol, "rejected", "JIT_CAPITAL_FUNDING_BLOCKED", signal_id=_signal_id)
+                continue
+            usdt_liquid_now = float(client.get_account_balance().get("USDT", 0.0))
+            _spot_spendable_usdt = max(0.0, usdt_liquid_now - _spot_bnb_reserve)
+            if _spot_spendable_usdt < cost_estimate:
+                update_signal_decision(symbol, "rejected", "POST_TRANSFER_SPOT_BALANCE_LOW", signal_id=_signal_id)
+                continue
 
         try:
             # Register NARRATIVE cooldown BEFORE placing order to prevent race condition
@@ -11229,7 +12399,10 @@ def _build_predictions(top_symbols: List[str], client: BinanceClient, settings, 
     try:
         _default_side = 'SHORT' if (str(trade_type).lower() == 'futures' and str(regime_mode or '').strip().upper() == 'FUTURES_SHORT') else 'LONG'
         _pm_balance = portfolio_manager.get_total_balance()
-        usdt_liquid = float(_pm_balance.get("usdt_available_after_reserve", _pm_balance.get("usdt_available", 0)))
+        usdt_liquid = float(_pm_balance.get(
+            "spot_deployable_usdt_after_reserve",
+            _pm_balance.get("usdt_available_after_reserve", _pm_balance.get("usdt_available", 0)),
+        ))
         alloc_per = min(settings.max_per_trade_usdt, usdt_liquid / len(top_symbols))
         for symbol in top_symbols:
             _pre_sig = (signal_meta or {}).get(symbol)
@@ -11325,7 +12498,10 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
         # Use decide_position_closures (prediction-only path, fallback disabled)
         from portfolio_manager import CapitalAllocation
         _pm_balance_r = portfolio_manager.get_total_balance()
-        usdt_liquid = float(_pm_balance_r.get("usdt_available_after_reserve", _pm_balance_r.get("usdt_available", 0)))
+        usdt_liquid = float(_pm_balance_r.get(
+            "spot_deployable_usdt_after_reserve",
+            _pm_balance_r.get("usdt_available_after_reserve", _pm_balance_r.get("usdt_available", 0)),
+        ))
         alloc_per = min(settings.max_per_trade_usdt, usdt_liquid / max(len(top_symbols), 1))
         new_allocations = [
             CapitalAllocation(
@@ -11493,7 +12669,8 @@ def _close_prediction_based(top_symbols: List[str], client: BinanceClient, setti
 def _is_new_entries_paused(db_client) -> bool:
     """Check if new entries are paused via trading_runtime_state."""
     if db_client is None:
-        return False
+        print("[PauseCheck] DB unavailable — blocking new entries fail-closed")
+        return True
     try:
         rows = db_client.execute_query(
             "SELECT value, updated_at FROM trading_runtime_state WHERE key = 'pause_new_entries'"
@@ -11503,8 +12680,13 @@ def _is_new_entries_paused(db_client) -> bool:
             if isinstance(val, str):
                 val = json.loads(val)
             if not isinstance(val, dict):
-                return False
-            paused = bool(val.get('paused', False))
+                print("[PauseCheck] malformed pause state — blocking new entries fail-closed")
+                return True
+            paused_value = val.get('paused', False)
+            if not isinstance(paused_value, bool):
+                print("[PauseCheck] malformed paused flag — blocking new entries fail-closed")
+                return True
+            paused = paused_value
             if not paused:
                 return False
 
@@ -11532,37 +12714,38 @@ def _is_new_entries_paused(db_client) -> bool:
                         expires_at = None
 
             if expires_at is not None and now >= expires_at:
-                try:
-                    db_client.execute_update(
-                        "DELETE FROM trading_runtime_state WHERE key = 'pause_new_entries'",
-                        (),
-                    )
-                    db_client.execute_update(
-                        "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) VALUES (%s, %s, %s, %s, %s)",
-                        (
-                            '__config__',
-                            'system',
-                            'pause_new_entries_auto_resume',
-                            json.dumps({
-                                'reason': val.get('reason', 'pause_ttl_expired'),
-                                'started_at': started_at.isoformat() if started_at else None,
-                                'expires_at': expires_at.isoformat() if expires_at else None,
-                                'resumed_at': now.isoformat(),
-                            }),
-                            False,
-                        ),
-                    )
+                detail = json.dumps({
+                    'reason': val.get('reason', 'pause_ttl_expired'),
+                    'started_at': started_at.isoformat() if started_at else None,
+                    'expires_at': expires_at.isoformat(),
+                    'resumed_at': now.isoformat(),
+                })
+                resumed_rows = db_client.execute_query(
+                    "WITH expired_pause AS ("
+                    "DELETE FROM trading_runtime_state "
+                    "WHERE key='pause_new_entries' AND value=%s::jsonb "
+                    "AND updated_at IS NOT DISTINCT FROM %s RETURNING key"
+                    "), resume_audit AS ("
+                    "INSERT INTO trades_audit (symbol, trade_type, event, detail, binance_confirmed) "
+                    "SELECT '__config__', 'system', 'pause_new_entries_auto_resume', %s::jsonb, false "
+                    "FROM expired_pause RETURNING id"
+                    ") SELECT COUNT(*) AS resumed FROM resume_audit",
+                    (json.dumps(val), rows[0].get('updated_at'), detail),
+                ) or []
+                resumed = int((resumed_rows[0] or {}).get('resumed') or 0) if resumed_rows else 0
+                if resumed == 1:
                     print(
-                        f"[PauseCheck] pause_new_entries TTL expired at {expires_at.isoformat() if expires_at else '?'} — auto-resumed entries"
+                        f"[PauseCheck] pause_new_entries TTL expired at {expires_at.isoformat()} — auto-resumed entries"
                     )
-                except Exception as _resume_err:
-                    print(f"[PauseCheck] auto-resume failed after TTL expiration: {_resume_err}")
-                return False
+                    return False
+                print("[PauseCheck] expired pause changed concurrently or resume audit missing — blocking entries")
+                return True
 
             return True
+        return False
     except Exception as e:
-        print(f"[PauseCheck] error reading pause_new_entries: {e}")
-    return False
+        print(f"[PauseCheck] error reading pause_new_entries: {e} — blocking new entries fail-closed")
+    return True
 
 
 def _is_health_results_critical(db_client, max_age_minutes: int = 20) -> bool:
@@ -11782,6 +12965,9 @@ def _maybe_open_range_scalp_shorts(
     """
     opened: List[Dict] = []
     if not db_client:
+        return opened
+    if str(getattr(settings, "directional_policy_mode", "active") or "active").lower() != "disabled":
+        print("[RangeScalpShort] direct legacy execution disabled; route candidates through bilateral arbiter")
         return opened
     if regime_mode != "RANGE_SCALP":
         return opened
@@ -12174,11 +13360,15 @@ def _maybe_open_sr_pool_shorts(
     Execution is gated by sr_pool_trade_enabled and futures_enabled.
     """
     opened: List[Dict[str, Any]] = []
+    if str(getattr(settings, "directional_policy_mode", "active") or "active").lower() != "disabled":
+        print("[SRPoolShort] direct legacy execution disabled; route candidates through bilateral arbiter")
+        return opened
     if not short_signals:
         return opened
     if not getattr(settings, "sr_pool_trade_enabled", False):
         for sig in short_signals:
-            print(f"[SRPool/Shadow] SHORT {sig['symbol']} would open (profile={sig.get('sr_pool_profile')}, score={sig.get('sr_pool_score'):.4f})")
+            score = float(sig.get("sr_pool_score") or 0.0)
+            print(f"[SRPool/Shadow] SHORT {sig['symbol']} would open (profile={sig.get('sr_pool_profile')}, score={score:.4f})")
         return opened
     if not getattr(settings, "futures_enabled", True):
         print("[SRPoolShort] futures disabled")
@@ -12253,6 +13443,19 @@ def _maybe_open_sr_pool_shorts(
         _tp = float(getattr(settings, "futures_tp_pct", 4.0))
         _lev = int(getattr(settings, "futures_leverage", 10))
 
+        _nf_mult = float(getattr(settings, "range_scalp_min_stop_atr_multiple", 0.0) or 0.0)
+        if _nf_mult > 0:
+            _nf_entry = float(_get_cycle_price(client, symbol) or 0.0)
+            _nf_stop = _nf_entry * (1.0 + _sl / 100.0) if _nf_entry > 0 else 0.0
+            _nf_ok, _nf_sd, _nf_atr = stop_noise_gate(
+                entry_price=_nf_entry, stop_price=_nf_stop,
+                indicators=sig.get("indicators") or sig,
+                min_stop_atr_multiple=_nf_mult,
+            )
+            if not _nf_ok:
+                print(f"[SRPoolShort/NoiseFloor] SHORT {symbol} SKIPPED: stop {_nf_sd*100:.2f}% below {_nf_mult}x ATR {_nf_atr*100:.2f}%")
+                continue
+
         try:
             _pos = _fc.open_short(
                 symbol,
@@ -12303,6 +13506,7 @@ def _maybe_open_sr_pool_shorts(
 
 def execute_once(monitor_only: bool = False, components=None):
     global _db_client_ref, _FUTURES_MASS_SL_COOLDOWN_UNTIL, _VOLSPIKE_POSITIONS, _OVERRIDE_DAILY_COUNT
+    global _spot_margin_client
     global _consecutive_failures, _circuit_breaker_until, _SSO7_BEST_CANDIDATE_CACHE
     global _SR_POOL_LAST_FULL_SCAN, _SR_POOL_SYMBOLS, _SR_POOL_LAST_SIGNALS
     if components is None:
@@ -12312,6 +13516,8 @@ def execute_once(monitor_only: bool = False, components=None):
         comp = components
     settings = comp.settings
     client = comp.binance_client
+    if getattr(comp, "spot_margin_client", None) is not None:
+        _spot_margin_client = comp.spot_margin_client
     news_client = comp.news_client
     position_manager = comp.position_manager
     portfolio_manager = comp.portfolio_manager
@@ -12446,21 +13652,16 @@ def execute_once(monitor_only: bool = False, components=None):
                     if _mm_code == 'SPOT_GHOST_IN_DB':
                         try:
                             _mm_positions = position_manager.get_all_positions().get(_mm_sym, []) if position_manager else []
-                            _mm_position = _mm_positions[0] if _mm_positions else None
-                            if not _spot_autofix_enabled:
-                                print(f"[SpotTruth/AutoFix] SKIPPED ghost DB position {_mm_sym} (autofix disabled)")
-                                continue
-                            if not _should_autofix_ghost(settings, _mm_position, client):
-                                print(f"[SpotTruth/AutoFix] DEFERRED ghost DB position {_mm_sym} (too recent or order still filling)")
-                                continue
-                            _mm_price = float(client.get_symbol_price(_mm_sym) or _mm.get('price', 0))
-                            position_manager.close_all_positions_for_symbol(
-                                _mm_sym, _mm_price, 'pretrade_ghost_auto_close',
-                                float(getattr(settings, 'binance_commission_rate', 0.001))
-                            )
-                            print(f"[SpotTruth/AutoFix] Closed ghost DB position {_mm_sym}")
+                            _mm_db_qty = sum(float(getattr(pos, 'quantity', 0.0) or 0.0) for pos in _mm_positions)
+                            position_manager._audit(_mm_sym, 'spot_truth_ghost_close_deferred', {
+                                'db_qty': _mm_db_qty,
+                                'exchange_total_qty': float(_mm.get('binance_qty') or 0.0),
+                                'reason': 'single_parity_snapshot_cannot_close_position',
+                                'auto_fix_enabled': _spot_autofix_enabled,
+                            }, binance_confirmed=False)
+                            print(f"[SpotTruth/AutoFix] Deferred ghost {_mm_sym}; preserving DB state pending confirmed balance reconciliation")
                         except Exception as _mm_err:
-                            print(f"[SpotTruth/AutoFix] Failed to close ghost {_mm_sym}: {_mm_err}")
+                            print(f"[SpotTruth/AutoFix] Failed to audit ghost deferral {_mm_sym}: {_mm_err}")
                     elif _mm_code == 'SPOT_ORPHAN_IN_BINANCE':
                         try:
                             _mm_value = float(_mm.get('value_usdt') or 0.0)
@@ -12803,6 +14004,7 @@ def execute_once(monitor_only: bool = False, components=None):
             futures_client=_fc,
             db_client=_db_client_ref,
             regime_mode=_regime_mode,
+            allow_funding_actions=False,
         )
         print(f"[BNB] regime={_bnb_status.get('regime_mode')} spot={_bnb_status['spot_bnb']:.4f} "
               f"futures={_bnb_status['futures_bnb']:.4f} price={_bnb_status['bnb_price']:.2f} "
@@ -12924,10 +14126,13 @@ def execute_once(monitor_only: bool = False, components=None):
                         spot_api_secret  = settings.binance_api_secret,
                         min_transfer     = _cb_min_tx,
                         futures_arbiter_active = _cb_arbiter_active,
+                        execute_transfers = False,
                     )
                     if _cb_result.get('error'):
                         print(f"[CapBridge] ERROR logged for analysis: dir={_cb_result['direction']} "
                               f"amount=${_cb_result['amount']:.2f} error={_cb_result['error']}")
+                    elif _cb_result.get('direction') != 'none':
+                        print(f"[CapBridge] PLAN ONLY: {_cb_result['direction']} ${_cb_result['amount']:.2f}; no funds moved before entry acceptance")
                 except Exception as _cb_err:
                     print(f"[CapBridge] ERROR: exception in capital bridge setup: {_cb_err}")
 
@@ -13329,6 +14534,7 @@ def execute_once(monitor_only: bool = False, components=None):
                         if _ta_signal:
                             print(f"[Futures/Inject] {_fsym}: skipped signal={_ta_signal} (requires SELL or HOLD with strength>={_hold_min_strength:.2f} and RSI>={_hold_min_rsi:.1f})")
                         continue
+                    _fsig = _merge_futures_short_analysis(_fsig, _ta)
                     _fsig["strength"]       = _ta_strength
                     _fsig["vol_spike"]      = float(_ta.get("vol_spike", _ta_ind.get("volume_spike", 0.0)))
                     _fsig["rsi"]            = _ta_rsi
@@ -13384,6 +14590,22 @@ def execute_once(monitor_only: bool = False, components=None):
     )
     _selection_capture_candidates(top_signals, predictions, "predicted")
 
+    # Direction-specific gates and QUBO must see the bilateral winner, not the
+    # side that happened to arrive on the raw signal. Re-arbitrate again after
+    # QUBO below, then once more with a fresh price immediately before submit.
+    if str(getattr(settings, "directional_policy_mode", "active") or "active").lower() == "active":
+        top_signals, predictions, _step2_signal_meta = _prepare_range_scalp_staging_candidates(
+            top_signals,
+            predictions,
+            _step2_signal_meta,
+            _regime_mode,
+            client,
+            settings,
+            _cached_screened_pairs,
+            refresh_profile_for_selected_side=True,
+        )
+        _selection_capture_candidates(top_signals, predictions, "bilateral_prepared")
+
     # ── Peaks-first: apply the entry-profile gate before QUBO ────────────────
     # The old behavior-first entry_quality gate is superseded by the calibrated
     # entry_profile_gate and is disabled by default; see entry_quality_gate_mode.
@@ -13391,6 +14613,7 @@ def execute_once(monitor_only: bool = False, components=None):
         top_signals, _step2_signal_meta, settings, _regime_mode,
         predictions,
         news_client,
+        client=client,
     )
 
     if top_signals and isinstance(top_signals[0], dict):
@@ -13432,12 +14655,13 @@ def execute_once(monitor_only: bool = False, components=None):
         top_symbols = [s['symbol'] for s in top_signals]
     else:
         top_symbols = list(top_signals)
-    _selection_capture_candidates(top_signals, predictions, "qubo_selected")
     for _qubo_excluded_symbol in _pre_qubo_symbols - set(top_symbols):
         _selection_mark_stage(_qubo_excluded_symbol, "qubo_excluded", "QUBO_EXCLUDED")
     _selection_context["qubo_selected_count"] = len(top_symbols)
     _selection_context["qubo_excluded_count"] = len(_pre_qubo_symbols - set(top_symbols))
     _selection_context["selected_count"] = len(top_symbols)
+    _persist_qubo_authority(_db_client_ref, _regime_mode, top_symbols)
+    _selection_capture_candidates(top_signals, predictions, "qubo_selected")
 
     # ── Staged multi-cycle entry validation ───────────────────────────────────
     # Inserted between QUBO selection and actual execution.  Validated candidates
@@ -13452,6 +14676,7 @@ def execute_once(monitor_only: bool = False, components=None):
         client,
         settings,
         _cached_screened_pairs,
+        refresh_profile_for_selected_side=True,
     )
     _staged_top_symbols = [
         signal.get("symbol") if isinstance(signal, dict) else str(signal)
@@ -13493,15 +14718,30 @@ def execute_once(monitor_only: bool = False, components=None):
                     except Exception as _leg1_exc:
                         print(f"[ImmediateLeg] error: {_leg1_exc}")
                 # 3. Only pass validated candidates that are still QUBO-selected to execution.
-                _openable_rows = staged_entry.get_openable_candidates(
-                    _db_client_ref, _regime_mode, _staged_top_symbols, settings=settings,
-                )
+                _qubo_authority = staged_entry.get_qubo_authority_snapshot(_db_client_ref, _regime_mode)
+                _expected_qubo_symbols = sorted({str(_symbol) for _symbol in top_symbols if _symbol})
+                if (
+                    not _qubo_authority
+                    or _qubo_authority.get("cycle_id") != _selection_context.get("cycle_id")
+                    or _qubo_authority.get("symbols") != _expected_qubo_symbols
+                ):
+                    print("[StagedEntry] QUBO authority did not match the current cycle; refusing validated execution")
+                    _openable_rows = []
+                else:
+                    _openable_rows = staged_entry.get_openable_candidates(
+                        _db_client_ref, _regime_mode, _staged_top_symbols, settings=settings,
+                        qubo_cycle_id=_qubo_authority["cycle_id"],
+                        qubo_symbols_hash=_qubo_authority["symbols_hash"],
+                        qubo_authority_symbols=_qubo_authority["symbols"],
+                    )
                 if _openable_rows:
                     _buy_signals = [dict(_r.get('signal_meta', {})) for _r in _openable_rows]
                     for _sig, _ready_row in zip(_buy_signals, _openable_rows):
                         _sig.setdefault('symbol', _ready_row.get('symbol'))
                         _sig['ready_candidate_id'] = _ready_row.get('id')
                         _sig['staged_direction'] = ((_ready_row.get('data') or {}).get('direction') or {})
+                        _sig['qubo_cycle_id'] = _ready_row.get('qubo_cycle_id')
+                        _sig['qubo_symbols_hash'] = _ready_row.get('qubo_symbols_hash')
                     _openable_ready_ids_by_symbol = {
                         _r['symbol']: _r['id'] for _r in _openable_rows if _r.get('symbol')
                     }
@@ -13595,9 +14835,46 @@ def execute_once(monitor_only: bool = False, components=None):
             if _pool_signals:
                 _SR_POOL_LAST_SIGNALS = (_SR_POOL_LAST_SIGNALS + _pool_signals)[-50:]
 
-            # Append LONG pool signals to the buy list; they carry peak_quality_profile so
-            # the entry-profile gate will pass them through unchanged.
-            _buy_signals.extend(_sr_pool_long_signals)
+            # Pool signals join after QUBO, so capture and filter them exactly once here.
+            _sr_pool_buy_signals = list(_sr_pool_long_signals)
+            if (
+                _sr_pool_short_signals
+                and _regime_mode == "RANGE_SCALP"
+                and str(getattr(settings, "directional_policy_mode", "active") or "active").lower() != "disabled"
+            ):
+                _sr_pool_buy_signals.extend(_sr_pool_short_signals)
+            _known_buy_symbols = {
+                str(signal.get("symbol") if isinstance(signal, dict) else signal)
+                for signal in _buy_signals
+            }
+            _sr_pool_buy_signals = [
+                signal for signal in _sr_pool_buy_signals
+                if str(signal.get("symbol") or "") not in _known_buy_symbols
+            ]
+            for _sr_signal in _sr_pool_buy_signals:
+                _sr_side = str(_sr_signal.get("side") or "LONG").upper()
+                _sr_signal["expected_side"] = _sr_side
+                _sr_signal["trade_type"] = "futures" if _sr_side == "SHORT" else "spot"
+            if _sr_pool_buy_signals:
+                _sr_meta = {signal["symbol"]: signal for signal in _sr_pool_buy_signals}
+                _sr_predictions: Dict[str, Any] = {}
+                if str(getattr(settings, "directional_policy_mode", "active") or "active").lower() == "active":
+                    _sr_pool_buy_signals, _sr_predictions, _sr_meta = _prepare_range_scalp_staging_candidates(
+                        _sr_pool_buy_signals,
+                        _sr_predictions,
+                        _sr_meta,
+                        _regime_mode,
+                        client,
+                        settings,
+                        _cached_screened_pairs,
+                        refresh_profile_for_selected_side=True,
+                    )
+                _selection_capture_candidates(_sr_pool_buy_signals, _sr_predictions, "sr_pool_bilateral")
+                _sr_pool_buy_signals = _filter_buy_candidates(
+                    _sr_pool_buy_signals, _sr_meta, settings, _regime_mode,
+                    _sr_predictions, news_client, client=client,
+                )
+                _buy_signals.extend(_sr_pool_buy_signals)
         except Exception as _sr_pool_err:
             print(f"[SRPool] scan error: {_sr_pool_err}")
 
@@ -13629,7 +14906,7 @@ def execute_once(monitor_only: bool = False, components=None):
 
     # ── Step 5: Buy top symbols — pass full signal dicts for aggressive mode ───
     buy_orders = list(_priority_short_orders)
-    buy_orders.extend(_buy_top_symbols(client, settings, _buy_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client, regime_obj=_regime_exe, regime_mode_override=_regime_mode, screened_pairs_cache=_cached_screened_pairs, pre_switch_state=_pre_switch_state, futures_client=comp.futures_client))
+    buy_orders.extend(_buy_top_symbols(client, settings, _buy_signals, portfolio_manager, position_manager, precomputed_predictions=predictions, news_client=news_client, regime_obj=_regime_exe, regime_mode_override=_regime_mode, screened_pairs_cache=_cached_screened_pairs, pre_switch_state=_pre_switch_state, futures_client=comp.futures_client, candidates_pre_filtered=True))
 
     # Mark staged-entry candidates as opened when the trade filled.
     if _openable_ready_ids_by_symbol and buy_orders:

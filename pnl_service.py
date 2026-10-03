@@ -122,7 +122,11 @@ def predict_for_symbol(
             candles=candles,
             interval_minutes=interval_minutes,
         )
-        if isinstance(prediction, dict) and not prediction.get("bootstrap_mode"):
+        if (
+            isinstance(prediction, dict)
+            and prediction.get("valid") is not False
+            and not prediction.get("bootstrap_mode")
+        ):
             _ev = float(prediction.get("expected_pnl", 0.0) or 0.0)
             _prob = float(prediction.get("success_probability", 0.5) or 0.5)
             # Degenerate output detector: repeated near-zero EV + neutral probability
@@ -151,7 +155,10 @@ def validate(prediction: Dict, settings, symbol: str = None,
         (is_valid, reason_string)
     """
     if prediction is None:
-        return True, "no prediction available – allowing trade"
+        return False, "MISSING_PREDICTION"
+    if prediction.get("valid") is False:
+        error_code = prediction.get("error_code") or "PREDICTOR_ERROR"
+        return False, f"INVALID_PREDICTION:{error_code}"
     # s76: No bootstrap bypass — predictions must satisfy the same thresholds
     # regardless of how much trade history exists.  The behavior-first entry gate
     # in run_trades already filters out setups whose current price action is

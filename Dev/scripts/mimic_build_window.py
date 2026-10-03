@@ -90,7 +90,10 @@ def _coverage_ok(symbols: List[str], start: datetime, end: datetime, data_dir: s
             ok = False
             continue
         ts_col = "open_time" if "open_time" in df.columns else df.columns[0]
-        df[ts_col] = pd.to_datetime(df[ts_col], unit="s", utc=True)
+        _numeric_ts = pd.to_numeric(df[ts_col], errors="coerce")
+        _finite_ts = _numeric_ts.dropna()
+        _unit = "ms" if not _finite_ts.empty and float(_finite_ts.abs().median()) >= 100_000_000_000 else "s"
+        df[ts_col] = pd.to_datetime(_numeric_ts, unit=_unit, utc=True, errors="coerce")
         _tol = timedelta(days=1)
         if df[ts_col].min() > start + _tol or df[ts_col].max() < end - _tol:
             print(f"[Window] {symbol} coverage {df[ts_col].min()} - {df[ts_col].max()} does not contain {start.date()} - {end.date()}")

@@ -6,6 +6,7 @@ Manages open and closed trades, tracks PnL, and handles automatic position closu
 
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -19,6 +20,7 @@ import error_collector as ec
 from config_helpers import get_param
 from close_contract import apply_close_contract
 from side_utils import is_long_side
+from trade_utils import has_recent_binance_sell_proof
 
 
 def _parse_exit_time(t) -> datetime:
@@ -44,8 +46,42 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def _stable_position_id(row: Dict[str, Any]) -> str:
+    """Resolve the persisted position identity when hydrating an open row."""
+    position_id = row.get("position_id")
+    if position_id:
+        return str(position_id)
+    metadata = row.get("metadata") or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except Exception:
+            metadata = {}
+    if isinstance(metadata, dict) and metadata.get("position_id"):
+        return str(metadata["position_id"])
+    return str(uuid.uuid4())
+
+
 # Treat residual quantities below this threshold as zero / full close.
 _QTY_EPS = 1e-9
+
+# Assets that should never be imported as SPOT positions from Binance balance sync.
+# Includes fiat/stablecoin tokens and testnet/demo "dust" assets that can appear
+# in a demo wallet but are not tradeable candidates.
+_DEFAULT_EXCLUDED_BALANCE_ASSETS: set = {
+    # Stablecoins / fiat-like tokens
+    "USDT", "USDC", "BUSD", "TUSD", "FDUSD", "DAI", "USDD", "GUSD", "UUSD", "USD1",
+    "PAXG", "XAUT", "RLUSD", "SPCXB",
+    # Fiat testnet placeholders / non-tradeable symbols
+    "TRY", "ZAR", "UAH", "BRL", "ARS", "JPY", "MXN", "COP", "IDR", "KZT", "AED", "USD",
+    # Common demo-account "dust" assets with no real liquidity
+    "BTTC", "WIN", "JST", "IQ", "SPELL", "FLOKI", "PEPE", "DOGS", "HMSTR",
+    "1000SATS", "BONK", "XEC", "LUNC", "SHIB",
+    # Illiquid/low-cap tokens observed in staging demo wallet
+    "PYR", "HFT", "PIVX", "VIC", "VANRY", "ACX",
+    # Known invalid/non-tradeable assets
+    "456", "这是测试币",
+}
 
 
 @dataclass
@@ -126,6 +162,18 @@ class PositionManager:
         if self.db_client:
             self._load_positions_from_db()
     
+    @staticmethod
+    def _position_age_minutes(position: Position) -> float:
+        """Return position age in minutes. Missing entry_time is treated as very old."""
+        try:
+            entry = getattr(position, 'entry_time', None)
+            if not entry:
+                return 1_000_000.0
+            entry_dt = datetime.fromisoformat(str(entry).replace('Z', '+00:00'))
+            return (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
+        except Exception:
+            return 1_000_000.0
+
     def _audit(self, symbol: str, event: str, detail: dict, binance_confirmed: bool = False) -> None:
         """FIX-9: Write a traceability record to trades_audit for SPOT events."""
         if not self.db_client:
@@ -182,7 +230,7 @@ class PositionManager:
         try:
             # Load ALL open positions (multiple per symbol supported)
             query = """
-                SELECT id, symbol, side, quantity, price as entry_price,
+                SELECT id, position_id, symbol, side, quantity, price as entry_price,
                        strategy_id, entry_time, stop_loss, take_profit, metadata,
                        entry_commission, pnl_prediction, indicators_at_entry
                 FROM trades_open
@@ -198,6 +246,7 @@ class PositionManager:
                     quantity=row['quantity'],
                     entry_price=row['entry_price'],
                     entry_time=row['entry_time'],
+                    position_id=_stable_position_id(row),
                     stop_loss=row['stop_loss'],
                     take_profit=row['take_profit'],
                     strategy_id=row['strategy_id'],
@@ -352,13 +401,29 @@ class PositionManager:
         position.metadata = _json_safe(position.metadata)
         position.pnl_prediction = _json_safe(position.pnl_prediction)
         position.indicators_at_entry = _json_safe(position.indicators_at_entry)
+        from position_thesis import build_thesis_snapshot
+        position.metadata = dict(position.metadata or {})
+        position.metadata.setdefault('position_id', position.position_id)
+        position.metadata.setdefault('thesis_id', str(uuid.uuid4()))
+        position.metadata.setdefault('close_group_id', str(uuid.uuid4()))
+        thesis = build_thesis_snapshot(
+            metadata=position.metadata,
+            pnl_prediction=position.pnl_prediction,
+            indicators_at_entry=position.indicators_at_entry,
+            side=position.side,
+            regime_mode=position.metadata.get('regime_at_entry') or position.metadata.get('regime_mode'),
+        )
+        if thesis:
+            position.metadata['thesis_snapshot_v1'] = thesis
 
         if self.db_client:
             try:
                 query = """
                     INSERT INTO trades_open
-                    (symbol, side, quantity, price, strategy_id, entry_time, stop_loss, take_profit, metadata, entry_commission, pnl_prediction, indicators_at_entry)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (symbol, side, quantity, price, strategy_id, entry_time, stop_loss, take_profit,
+                     metadata, entry_commission, pnl_prediction, indicators_at_entry,
+                     position_id, thesis_id, close_group_id, entry_order_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """
                 self.db_client.execute_update(
                     query,
@@ -375,8 +440,18 @@ class PositionManager:
                         position.entry_commission,
                         json.dumps(position.pnl_prediction) if position.pnl_prediction is not None else None,
                         json.dumps(position.indicators_at_entry) if position.indicators_at_entry is not None else None,
+                        position.position_id,
+                        position.metadata['thesis_id'],
+                        position.metadata['close_group_id'],
+                        position.metadata.get('entry_order_id') or position.metadata.get('order_id'),
                     )
                 )
+                inserted = self.db_client.execute_query(
+                    "SELECT id FROM trades_open WHERE position_id = %s ORDER BY id DESC LIMIT 1",
+                    (position.position_id,),
+                )
+                if inserted:
+                    position.db_id = int(inserted[0]["id"])
                 logger.info(f"Position added to database: {position.symbol}")
             except Exception as exc:
                 logger.error(f"Failed to save position to database: {exc}")
@@ -434,7 +509,7 @@ class PositionManager:
         if self.db_client:
             try:
                 query = """
-                    SELECT id, symbol, side, quantity, price as entry_price,
+                    SELECT id, position_id, symbol, side, quantity, price as entry_price,
                            strategy_id, entry_time, stop_loss, take_profit, metadata,
                            entry_commission, pnl_prediction, indicators_at_entry
                     FROM trades_open
@@ -450,6 +525,7 @@ class PositionManager:
                         quantity=row['quantity'],
                         entry_price=row['entry_price'],
                         entry_time=row['entry_time'],
+                        position_id=_stable_position_id(row),
                         stop_loss=row['stop_loss'],
                         take_profit=row['take_profit'],
                         strategy_id=row['strategy_id'],
@@ -485,35 +561,21 @@ class PositionManager:
         binance_client,
         symbol: str,
         hours: int = 24,
+        minimum_qty: float = 0.0,
+        since_time: Optional[datetime] = None,
     ) -> bool:
-        """Return True if there is a SELL trade on Binance for ``symbol`` within the last ``hours``.
+        """Confirm aggregate SELL fills since entry and within the recent window.
 
-        This prevents `ghost_balance_mismatch` from closing a real position when the
-        asset balance is temporarily not visible in the spot wallet (e.g. in funding/earn).
-        On API errors we default to False (defer closure).
+        A spot-wallet zero without a matching sell can mean the asset moved to another
+        Binance wallet. Missing trade data and API errors therefore defer closure.
         """
-        if not binance_client:
-            return False
-        try:
-            raw_trades = binance_client.get_my_trades(symbol=symbol, limit=50)
-            if not raw_trades:
-                return False
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-            cutoff_ms = int(cutoff.timestamp() * 1000)
-            for t in raw_trades:
-                if not isinstance(t, dict):
-                    continue
-                ts = int(t.get("time", 0))
-                if ts < cutoff_ms:
-                    continue
-                is_buyer = bool(t.get("isBuyer", True))
-                qty = float(t.get("qty", 0.0)) or float(t.get("quantity", 0.0))
-                if not is_buyer and qty > 0:
-                    return True
-            return False
-        except Exception as e:
-            logger.warning(f"Could not verify recent SELL trades for {symbol}: {e}")
-            return False
+        return has_recent_binance_sell_proof(
+            binance_client,
+            symbol,
+            hours=hours,
+            minimum_qty=minimum_qty,
+            since_time=since_time,
+        )
 
     def sync_with_exchange_balance(self, binance_client, settings, min_value_usdt: float = 5.0) -> List[str]:
         """
@@ -533,20 +595,49 @@ class PositionManager:
         """
         # Default $5 aligns with user-defined dust threshold; anything below is not imported.
         min_value_usdt = float(min_value_usdt or 5.0)
-        EXCLUDED_ASSETS = {"USDT", "BTTC", "WIN", "JST", "IQ"}
+        # In dry-run / spot-margin-simulation mode we do NOT import real balances as
+        # positions.  Simulation uses its own capital envelope and synthetic positions.
+        # Check both settings and the Binance client / env because staging may have
+        # the environment variable set while the Settings object still reflects .env defaults.
+        _env_dry_run = str(os.environ.get("DRY_RUN", "false")).lower() in ("1", "true", "yes")
+        _client_dry_run = bool(getattr(binance_client, 'dry_run', False))
+        if (
+            getattr(settings, 'dry_run', False)
+            or getattr(settings, 'spot_margin_simulation_enabled', False)
+            or _client_dry_run
+            or _env_dry_run
+        ):
+            logger.info("sync_with_exchange_balance skipped: dry_run/spot_margin_simulation enabled")
+            return []
+        _excluded = set(_DEFAULT_EXCLUDED_BALANCE_ASSETS)
+        _cfg_excluded = get_param(settings, 'spot_balance_sync_excluded_assets')
+        if isinstance(_cfg_excluded, (list, tuple, set)):
+            _excluded.update(str(a).upper() for a in _cfg_excluded)
         _keep_bnb_for_commission = bool(get_param(settings, 'use_bnb_for_commission')) or bool(
             get_param(settings, 'auto_bnb_for_commission')
         )
         imported = []
+        balance_details = {}
         try:
-            balances = binance_client.get_account_balance()
+            if hasattr(binance_client, 'get_account_balance_details'):
+                balance_details = binance_client.get_account_balance_details()
+                balances = {
+                    asset: float(row['total'])
+                    for asset, row in balance_details.items()
+                }
+            else:
+                balances = binance_client.get_account_balance()
+                balance_details = {
+                    asset: {'free': float(amount), 'locked': 0.0, 'total': float(amount)}
+                    for asset, amount in balances.items()
+                }
             existing_positions = self.get_all_positions()
             existing = set(existing_positions.keys())
 
             for asset, amount in balances.items():
                 if asset == "BNB" and _keep_bnb_for_commission:
                     continue
-                if asset in EXCLUDED_ASSETS or amount <= 0:
+                if asset in _excluded or amount <= 0:
                     continue
                 symbol = f"{asset}USDT"
                 if symbol in existing:
@@ -566,21 +657,32 @@ class PositionManager:
                 _tp_pct  = _cat_th.get('take_profit_pct', get_param(settings, 'take_profit_pct'))
                 sl_price = price * (1 - _sl_pct / 100)
                 tp_price = price * (1 + _tp_pct / 100)
-                commission_rate = get_param(settings, 'binance_commission_rate')
-                entry_commission = amount * price * commission_rate
 
                 recovered_metadata = self._failed_entry_context(symbol, float(amount))
                 metadata = {
                     "source": "balance_sync",
                     "sync_time": datetime.utcnow().isoformat() + "Z",
                     "value_usdt_at_sync": round(value_usdt, 4),
+                    "base_asset": asset,
+                    "base_quantity_at_import": float(amount),
+                    "balance_free_qty": float(balance_details.get(asset, {}).get('free', amount)),
+                    "balance_locked_qty": float(balance_details.get(asset, {}).get('locked', 0.0)),
+                    "balance_total_qty": float(amount),
+                    "mark_value_usdt_at_import": round(value_usdt, 8),
                 }
                 if recovered_metadata:
                     metadata.update(recovered_metadata)
                     metadata["source"] = "reconcile_canonical_restored"
                     metadata["entry_context_status"] = "restored_from_failed_persistence"
+                    metadata.setdefault("cost_basis_status", "fill_verified")
+                    metadata.setdefault("entry_price_source", "verified_entry_fill")
+                    entry_commission = float(recovered_metadata.get('entry_commission_usdt') or 0.0)
                 else:
                     metadata["entry_context_status"] = "unknown_reconciled"
+                    metadata["cost_basis_status"] = "unknown"
+                    metadata["entry_price_source"] = "balance_sync_mark_not_acquisition_cost"
+                    metadata["commission_basis_status"] = "unknown"
+                    entry_commission = 0.0
                 pos = Position(
                     symbol=symbol,
                     side="BUY",
@@ -592,6 +694,7 @@ class PositionManager:
                     entry_commission=entry_commission,
                     metadata=metadata,
                 )
+                metadata.setdefault('lineage_id', str(pos.position_id))
                 if not self.add_position(pos):
                     self._audit(symbol, 'reconcile_entry_persist_failed', {
                         'quantity': float(amount),
@@ -602,8 +705,14 @@ class PositionManager:
                 imported.append(symbol)
                 reconcile_event = 'reconcile_canonical_restored' if recovered_metadata else 'reconcile_unknown_context'
                 self._audit(symbol, reconcile_event, {
+                    'position_id': pos.position_id,
+                    'base_asset': asset,
                     'quantity': float(amount),
-                    'price': float(price),
+                    'base_quantity': float(amount),
+                    'mark_price': float(price),
+                    'mark_value_usdt': round(value_usdt, 8),
+                    'cost_basis_status': metadata.get('cost_basis_status'),
+                    'entry_price_source': metadata.get('entry_price_source'),
                     'entry_context_status': metadata['entry_context_status'],
                     'entry_order_id': metadata.get('entry_order_id'),
                 })
@@ -628,53 +737,9 @@ class PositionManager:
                     continue
                 if balance_qty > 0:
                     self._missing_balance_streak[symbol] = 0
-                    # ── Ghost detection: Binance balance << DB qty by factor >1000x ──
-                    _ratio = balance_qty / db_qty if db_qty > 0 else 1.0
-                    if _ratio < 0.001:
-                        _ghost_hours = int(getattr(settings, 'spot_ghost_sell_confirmation_hours', 24) or 24)
-                        _recent_sell = self._has_recent_binance_sell_trade(binance_client, symbol, hours=_ghost_hours)
-                        _ghost_warn = (
-                            f"[GHOST_WARN] {symbol}: Binance balance={balance_qty} vs DB qty={db_qty:.2f} "
-                            f"(ratio={_ratio:.6f}, recent_sell={_recent_sell})"
-                        )
-                        logger.error(_ghost_warn)
-                        try:
-                            ec.add_error(ec.SOURCE_SYSTEM, ec.LEVEL_ERROR, _ghost_warn)
-                        except Exception:
-                            pass
-                        try:
-                            exit_price = binance_client.get_symbol_price(symbol)
-                        except Exception:
-                            exit_price = float(pos_list[0].entry_price or 0)
-                        if not _recent_sell:
-                            # Balance is tiny but no evidence of a recent sale — the asset may be
-                            # in funding/earn or the wallet snapshot may be transient. Defer closure.
-                            self._audit(symbol, 'ghost_balance_mismatch_deferred', {
-                                'db_qty': db_qty,
-                                'exchange_qty': balance_qty,
-                                'ratio': round(_ratio, 6),
-                                'exit_price': exit_price,
-                                'reason': 'no_recent_sell_trade_on_binance',
-                                'confirmation_hours': _ghost_hours,
-                            }, binance_confirmed=True)
-                            continue
-                        self._audit(symbol, 'reconcile_ghost_balance', {
-                            'db_qty': db_qty,
-                            'exchange_qty': balance_qty,
-                            'ratio': round(_ratio, 6),
-                            'exit_price': exit_price,
-                            'reason': 'binance_balance_too_small_vs_db',
-                        }, binance_confirmed=True)
-                        self.close_all_positions_for_symbol(
-                            symbol,
-                            exit_price,
-                            'ghost_balance_mismatch',
-                            get_param(settings, 'binance_commission_rate') if settings else 0.001,
-                        )
-                        continue
-
-                    # Material quantity drift (DB qty > Binance qty) should trim exactly the excess
-                    # so DB quantity matches the exchange balance in a single reconciliation pass.
+                    # Any remaining exchange quantity is still a position, including
+                    # tiny residuals. Reconcile only the confirmed excess; never erase
+                    # the whole position based on a ratio threshold or recent trade alone.
                     _qty_drift = db_qty - balance_qty
                     if _qty_drift > 1e-8:
                         try:
@@ -687,6 +752,7 @@ class PositionManager:
                             'drift_qty': round(_qty_drift, 8),
                             'exit_price': exit_price,
                             'reason': 'binance_balance_smaller_than_db',
+                            'confirmed_total_qty': balance_qty,
                         }, binance_confirmed=True)
                         self.close_all_positions_for_symbol(
                             symbol,
@@ -695,6 +761,60 @@ class PositionManager:
                             get_param(settings, 'binance_commission_rate') if settings else 0.001,
                             qty_closed=min(_qty_drift, db_qty),
                         )
+                        continue
+
+                    _untracked_qty = balance_qty - db_qty
+                    if _untracked_qty > 1e-8:
+                        try:
+                            mark_price = float(binance_client.get_symbol_price(symbol))
+                        except Exception:
+                            mark_price = 0.0
+                        if mark_price <= 0:
+                            self._audit(symbol, 'reconcile_surplus_deferred', {
+                                'db_qty': db_qty,
+                                'exchange_total_qty': balance_qty,
+                                'untracked_qty': _untracked_qty,
+                                'reason': 'mark_price_unavailable',
+                            }, binance_confirmed=False)
+                            continue
+                        _surplus_metadata = {
+                            'trade_type': 'spot',
+                            'source': 'balance_sync_delta',
+                            'entry_context_status': 'unknown_reconciled',
+                            'cost_basis_status': 'unknown',
+                            'entry_price_source': 'balance_sync_mark_not_acquisition_cost',
+                            'base_asset': asset,
+                            'base_quantity_at_import': _untracked_qty,
+                            'balance_free_qty': float(balance_details.get(asset, {}).get('free', balance_qty)),
+                            'balance_locked_qty': float(balance_details.get(asset, {}).get('locked', 0.0)),
+                            'balance_total_qty': balance_qty,
+                            'mark_value_usdt_at_import': round(_untracked_qty * mark_price, 8),
+                            'sync_time': datetime.now(timezone.utc).isoformat(),
+                        }
+                        surplus_position = Position(
+                            symbol=symbol,
+                            side='BUY',
+                            quantity=_untracked_qty,
+                            entry_price=mark_price,
+                            entry_time=datetime.now(timezone.utc).isoformat(),
+                            stop_loss=mark_price * (1 - get_param(settings, 'stop_loss_pct') / 100),
+                            take_profit=mark_price * (1 + get_param(settings, 'take_profit_pct') / 100),
+                            entry_commission=0.0,
+                            metadata=_surplus_metadata,
+                        )
+                        _surplus_metadata['lineage_id'] = str(surplus_position.position_id)
+                        if self.add_position(surplus_position):
+                            self._audit(symbol, 'reconcile_unknown_context', {
+                                'position_id': surplus_position.position_id,
+                                'base_asset': asset,
+                                'db_qty_before': db_qty,
+                                'exchange_total_qty': balance_qty,
+                                'imported_base_qty': _untracked_qty,
+                                'mark_price': mark_price,
+                                'mark_value_usdt': round(_untracked_qty * mark_price, 8),
+                                'cost_basis_status': 'unknown',
+                                'source': 'balance_sync_delta',
+                            }, binance_confirmed=False)
                         continue
 
                     for _pos in pos_list:
@@ -708,6 +828,20 @@ class PositionManager:
                     continue
                 # If Binance no longer shows the asset, treat the position as externally closed.
                 if balance_qty <= 0:
+                    # Staging/testnet safety: never close missing-balance positions that are too recent.
+                    _min_age_min = float(getattr(settings, 'spot_ghost_min_age_minutes', 0.0) or 0.0)
+                    _youngest_age_min = min(
+                        self._position_age_minutes(p) for p in pos_list
+                    ) if pos_list else 1_000_000.0
+                    if _min_age_min > 0 and _youngest_age_min < _min_age_min:
+                        self._audit(symbol, 'reconcile_missing_balance_deferred', {
+                            'db_qty': db_qty,
+                            'exchange_qty': balance_qty,
+                            'youngest_age_min': round(_youngest_age_min, 2),
+                            'required_age_min': _min_age_min,
+                            'reason': 'position_too_recent_for_missing_balance',
+                        }, binance_confirmed=True)
+                        continue
                     _streak = int(self._missing_balance_streak.get(symbol, 0) or 0) + 1
                     self._missing_balance_streak[symbol] = _streak
                     if _streak < _min_missing_confirm:
@@ -719,6 +853,25 @@ class PositionManager:
                             'reason': 'waiting_confirmation_cycles',
                         }, binance_confirmed=True)
                         continue
+                    _ghost_hours = int(getattr(settings, 'spot_ghost_sell_confirmation_hours', 24) or 24)
+                    _since_entry = min((_parse_exit_time(pos.entry_time) for pos in pos_list), default=None)
+                    _recent_sell = self._has_recent_binance_sell_trade(
+                        binance_client,
+                        symbol,
+                        hours=_ghost_hours,
+                        minimum_qty=db_qty,
+                        since_time=_since_entry,
+                    )
+                    if not _recent_sell:
+                        self._audit(symbol, 'reconcile_missing_balance_deferred', {
+                            'db_qty': db_qty,
+                            'exchange_total_qty': balance_qty,
+                            'streak': _streak,
+                            'required': _min_missing_confirm,
+                            'confirmation_hours': _ghost_hours,
+                            'reason': 'no_recent_spot_sell_proof_asset_may_be_in_other_wallet',
+                        }, binance_confirmed=False)
+                        continue
                     try:
                         exit_price = binance_client.get_symbol_price(symbol)
                     except Exception:
@@ -728,7 +881,11 @@ class PositionManager:
                         'exchange_qty': balance_qty,
                         'exit_price': exit_price,
                         'reason': 'balance_missing_on_exchange',
-                    }, binance_confirmed=True)
+                        'confirmation_streak': _streak,
+                        'required_confirmations': _min_missing_confirm,
+                        'balance_source': 'valid_spot_total_snapshot',
+                        'recent_spot_sell_proof': _recent_sell,
+                    }, binance_confirmed=False)
                     closed = self.close_all_positions_for_symbol(
                         symbol,
                         exit_price,
@@ -765,6 +922,38 @@ class PositionManager:
                         except Exception as e:
                             logger.warning(f"Could not persist metadata update for {position_id}: {e}")
                     return
+
+    def set_stop_loss_by_usd_loss(self, symbol: str, max_loss_usd: float) -> Dict[str, Any]:
+        positions = list(self._open_positions.get(symbol) or [])
+        target_loss = float(max_loss_usd or 0.0)
+        if not positions or target_loss <= 0:
+            return {"ok": False, "reason": "INVALID_POSITION_OR_LOSS"}
+        sides = {"LONG" if is_long_side(pos.side) else "SHORT" for pos in positions}
+        if len(sides) != 1:
+            return {"ok": False, "reason": "MIXED_POSITION_SIDES"}
+        total_qty = sum(float(pos.quantity or 0.0) for pos in positions)
+        total_cost = sum(float(pos.quantity or 0.0) * float(pos.entry_price or 0.0) for pos in positions)
+        if total_qty <= 0:
+            return {"ok": False, "reason": "INVALID_POSITION_QUANTITY"}
+        average_entry = total_cost / total_qty
+        stop_price = average_entry - target_loss / total_qty if "LONG" in sides else average_entry + target_loss / total_qty
+        if stop_price <= 0:
+            return {"ok": False, "reason": "INVALID_STOP_PRICE"}
+        for pos in positions:
+            pos.stop_loss = stop_price
+            if self.db_client and pos.db_id:
+                self.db_client.execute_update(
+                    "UPDATE trades_open SET stop_loss = %s WHERE id = %s",
+                    (stop_price, pos.db_id),
+                )
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "target_loss_usd": target_loss,
+            "average_entry_price": average_entry,
+            "stop_loss_price": stop_price,
+            "position_count": len(positions),
+        }
 
     def update_position_sl(self, position_id: str, new_sl_price: float) -> None:
         """Move stop-loss price of an open position (e.g. to breakeven after scale-out)."""

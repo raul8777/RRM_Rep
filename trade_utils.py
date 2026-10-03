@@ -9,7 +9,8 @@ cache in BinanceClient is always used.
 
 import math
 from decimal import Decimal
-from typing import Dict, TYPE_CHECKING
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from binance_client import BinanceClient
@@ -56,6 +57,74 @@ def compute_commission(quantity: float, price: float, settings, trade_type: str 
     return entry_commission(quantity, price, trade_type, settings)
 
 
+def get_binance_asset_balance(client: "BinanceClient", asset: str) -> Dict[str, Any]:
+    """Return typed Spot balances; an API failure is never represented as zero."""
+    try:
+        if hasattr(client, "get_account_balance_details"):
+            try:
+                details = client.get_account_balance_details()
+            except (AttributeError, NotImplementedError):
+                details = None
+            if details is not None:
+                row = details.get(asset, {"free": 0.0, "locked": 0.0, "total": 0.0})
+                free = float(row["free"])
+                locked = float(row["locked"])
+                total = float(row["total"])
+                if min(free, locked, total) < 0 or abs(total - free - locked) > 1e-8:
+                    raise ValueError(f"invalid balance breakdown for {asset}")
+                return {"ok": True, "free": free, "locked": locked, "total": total, "source": "free_locked"}
+
+        balances = client.get_account_balance()
+        free = float(balances.get(asset, 0.0))
+        if free < 0:
+            raise ValueError(f"negative free balance for {asset}")
+        return {"ok": True, "free": free, "locked": 0.0, "total": free, "source": "free_only_legacy"}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "free": None,
+            "locked": None,
+            "total": None,
+            "source": "api_error",
+            "error": str(exc),
+        }
+
+
+def has_recent_binance_sell_proof(
+    client: "BinanceClient",
+    symbol: str,
+    *,
+    minimum_qty: float,
+    since_time: Any = None,
+    hours: int = 24,
+) -> bool:
+    """Require recent SELL fills covering the tracked quantity; fail closed."""
+    try:
+        trades = client.get_my_trades(symbol=symbol, limit=50)
+        if not isinstance(trades, list):
+            return False
+        cutoff_ms = int((datetime.now(timezone.utc) - timedelta(hours=hours)).timestamp() * 1000)
+        if since_time:
+            if isinstance(since_time, datetime):
+                since_dt = since_time
+            else:
+                since_dt = datetime.fromisoformat(str(since_time).replace("Z", "+00:00"))
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+            cutoff_ms = max(cutoff_ms, int(since_dt.timestamp() * 1000))
+        sold_qty = 0.0
+        for trade in trades:
+            if not isinstance(trade, dict) or bool(trade.get("isBuyer", True)):
+                continue
+            if int(trade.get("time", 0)) < cutoff_ms:
+                continue
+            sold_qty += float(trade.get("qty", 0.0) or trade.get("quantity", 0.0) or 0.0)
+        tolerance = max(1e-8, float(minimum_qty) * 0.001)
+        return sold_qty + tolerance >= float(minimum_qty)
+    except Exception:
+        return False
+
+
 def get_binance_sell_qty(
     client: "BinanceClient",
     symbol: str,
@@ -74,45 +143,63 @@ def get_binance_sell_qty(
       - top_up_qty: qty needed to reach min_notional_usdt (None if already >= min_notional)
       - reason: human-readable explanation
     """
-    asset = symbol.replace("USDT", "")
-    balance_qty = 0.0
-    try:
-        balances = client.get_account_balance()
-        balance_qty = float(balances.get(asset, 0.0))
-    except Exception:
-        balance_qty = 0.0
+    asset = symbol.removesuffix("USDT")
+    balance = get_binance_asset_balance(client, asset)
+    if not balance["ok"]:
+        return {
+            "qty_to_sell": 0.0,
+            "balance_qty": None,
+            "free_balance_qty": None,
+            "locked_balance_qty": None,
+            "db_qty": db_qty,
+            "is_ghost": False,
+            "is_dust": False,
+            "top_up_qty": None,
+            "ratio": None,
+            "min_notional": min_notional_usdt,
+            "balance_status": "api_error",
+            "reason": "balance_unavailable",
+            "error": balance.get("error"),
+        }
+    free_qty = balance["free"]
+    locked_qty = balance["locked"]
+    total_qty = balance["total"]
 
     filters = get_symbol_filters(client, symbol)
     step = filters.get("step", 0.001)
     min_notional = filters.get("min_notional", min_notional_usdt)
 
-    ratio = balance_qty / db_qty if db_qty > 0 else 0.0
-    is_ghost = ratio < 0.001 and db_qty > 0
+    ratio = total_qty / db_qty if db_qty > 0 else 0.0
+    is_ghost = total_qty < 0.001 * db_qty if db_qty > 0 else False
 
-    effective_qty = min(db_qty, balance_qty)
+    effective_qty = min(db_qty, free_qty)
     aligned_qty = align_quantity_to_step(effective_qty, step)
 
-    balance_notional = balance_qty * current_price
+    balance_notional = total_qty * current_price
     is_dust = 0 < balance_notional < min_notional
     top_up_qty = None
     if is_dust:
         target_qty = math.ceil(min_notional / max(current_price, 1e-12) / step) * step
         target_qty = align_quantity_to_step(target_qty, step)
-        if target_qty > balance_qty:
-            top_up_qty = align_quantity_to_step(target_qty - balance_qty, step)
+        if target_qty > total_qty:
+            top_up_qty = align_quantity_to_step(target_qty - total_qty, step)
 
     return {
         "qty_to_sell": aligned_qty,
-        "balance_qty": balance_qty,
+        "balance_qty": total_qty,
+        "free_balance_qty": free_qty,
+        "locked_balance_qty": locked_qty,
         "db_qty": db_qty,
         "is_ghost": is_ghost,
         "is_dust": is_dust,
         "top_up_qty": top_up_qty,
         "ratio": ratio,
         "min_notional": min_notional,
+        "balance_status": "ok",
         "reason": (
             "ghost" if is_ghost else
             "dust" if is_dust else
+            "balance_locked" if total_qty > 0 and aligned_qty <= 0 else
             "balance_capped" if aligned_qty < db_qty else
             "ok"
         ),
@@ -134,12 +221,27 @@ def get_min_notional_delta(
     min_notional = filters.get("min_notional", target_notional_usdt)
     asset = symbol.replace("USDT", "")
 
-    balance_qty = 0.0
-    try:
-        balances = client.get_account_balance()
-        balance_qty = float(balances.get(asset, 0.0))
-    except Exception:
-        balance_qty = 0.0
+    balance = get_binance_asset_balance(client, asset)
+    if not balance["ok"]:
+        return {
+            "needed": False,
+            "buy_qty": 0.0,
+            "sell_qty": 0.0,
+            "balance_status": "api_error",
+            "reason": "balance_unavailable",
+            "error": balance.get("error"),
+        }
+    balance_qty = balance["free"]
+    if balance["locked"] > 0:
+        return {
+            "needed": False,
+            "buy_qty": 0.0,
+            "sell_qty": align_quantity_to_step(balance_qty, step),
+            "balance_status": "locked",
+            "locked_balance_qty": balance["locked"],
+            "total_balance_qty": balance["total"],
+            "min_notional": min_notional,
+        }
 
     total_notional = balance_qty * current_price
     if total_notional >= min_notional:
@@ -153,6 +255,7 @@ def get_min_notional_delta(
         "needed": True,
         "buy_qty": needed_qty,
         "sell_qty": align_quantity_to_step(balance_qty + needed_qty, step),
+        "balance_status": "ok",
         "min_notional": min_notional,
         "balance_qty": balance_qty,
     }

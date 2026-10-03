@@ -69,19 +69,27 @@ def download_funding_rate(
     end_ms = _ts_to_ms(end)
 
     for symbol in symbols:
-        url = (
-            f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={symbol}"
-            f"&startTime={start_ms}&endTime={end_ms}&limit=1000"
-        )
+        cursor = start_ms
         try:
-            data = _fetch_json(url)
-            for row in data:
-                all_rows.append({
-                    "symbol": symbol,
-                    "funding_time": datetime.fromtimestamp(int(row["fundingTime"]) / 1000, tz=timezone.utc),
-                    "funding_rate": float(row["fundingRate"]),
-                    "source_url": url,
-                })
+            while cursor <= end_ms:
+                url = (
+                    f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={symbol}"
+                    f"&startTime={cursor}&endTime={end_ms}&limit=1000"
+                )
+                data = _fetch_json(url)
+                if not data:
+                    break
+                for row in data:
+                    all_rows.append({
+                        "symbol": symbol,
+                        "funding_time": datetime.fromtimestamp(int(row["fundingTime"]) / 1000, tz=timezone.utc),
+                        "funding_rate": float(row["fundingRate"]),
+                        "source_url": url,
+                    })
+                next_cursor = int(data[-1]["fundingTime"]) + 1
+                if next_cursor <= cursor or len(data) < 1000:
+                    break
+                cursor = next_cursor
         except Exception as e:
             print(f"[FundingRate] {symbol}: {e}")
 
@@ -95,37 +103,49 @@ def download_funding_rate(
 def download_ticker_24h(
     dates: List[datetime],
     output_dir: str = EXTERNAL_DIR,
+    data_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Download daily 24hr ticker snapshots from Binance."""
+    data_dir = data_dir or os.path.join(repo_root, "historical_data")
+    symbols = [
+        name[:-11] for name in os.listdir(data_dir)
+        if name.endswith("_1h.parquet")
+    ]
+    frames = {}
+    for symbol in symbols:
+        path = os.path.join(data_dir, f"{symbol}_1h.parquet")
+        try:
+            frame = pd.read_parquet(path)
+            frame["timestamp"] = pd.to_datetime(frame["open_time"], utc=True, errors="coerce")
+            frames[symbol] = frame.dropna(subset=["timestamp"]).set_index("timestamp").sort_index()
+        except Exception:
+            continue
     paths: List[str] = []
     for date in dates:
-        # Use a time near the end of the day UTC for consistency
         snapshot_time = date.replace(hour=23, minute=59)
-        url = "https://api.binance.com/api/v3/ticker/24hr"
-        try:
-            data = _fetch_json(url)
-            rows = []
-            for row in data:
-                if not row.get("symbol", "").endswith("USDT"):
-                    continue
-                rows.append({
-                    "symbol": row["symbol"],
-                    "snapshot_time": snapshot_time,
-                    "last_price": float(row.get("lastPrice", 0)),
-                    "price_change_percent": float(row.get("priceChangePercent", 0)),
-                    "volume": float(row.get("volume", 0)),
-                    "quote_volume": float(row.get("quoteVolume", 0)),
-                    "weighted_avg_price": float(row.get("weightedAvgPrice", 0)),
-                    "source_url": url,
-                })
-            path = os.path.join(output_dir, f"ticker_24h_{date.strftime('%Y%m%d')}.parquet")
-            df = pd.DataFrame(rows)
-            df.to_parquet(path, index=False)
-            paths.append(path)
-            time.sleep(0.5)  # be polite to public API
-        except Exception as e:
-            print(f"[Ticker24h] {date.date()}: {e}")
-    return {"paths": paths, "total_files": len(paths)}
+        start_time = snapshot_time - timedelta(hours=24)
+        rows = []
+        for symbol, frame in frames.items():
+            sample = frame[(frame.index > start_time) & (frame.index <= snapshot_time)]
+            if sample.empty:
+                continue
+            first = float(sample.iloc[0]["open"])
+            last = float(sample.iloc[-1]["close"])
+            volume = float(sample["volume"].sum())
+            quote_volume = float((sample["volume"].astype(float) * sample["close"].astype(float)).sum())
+            rows.append({
+                "symbol": symbol,
+                "snapshot_time": snapshot_time,
+                "last_price": last,
+                "price_change_percent": (last - first) / first * 100.0 if first > 0 else 0.0,
+                "volume": volume,
+                "quote_volume": quote_volume,
+                "weighted_avg_price": quote_volume / volume if volume > 0 else last,
+                "source": "ohlcv_1h_derived",
+            })
+        path = os.path.join(output_dir, f"ticker_24h_historical_{date.strftime('%Y%m%d')}.parquet")
+        pd.DataFrame(rows).to_parquet(path, index=False)
+        paths.append(path)
+    return {"paths": paths, "total_files": len(paths), "source": "ohlcv_1h_derived"}
 
 
 def download_btc_dominance(
@@ -133,12 +153,9 @@ def download_btc_dominance(
     end: datetime,
     output_dir: str = EXTERNAL_DIR,
 ) -> Dict[str, Any]:
-    """Download CoinGecko BTC dominance (global data) daily.
-
-    Note: CoinGecko /global returns current data only on free tier.
-    We record the fetch and flag it as snapshot; historical daily data may
-    require paid tier or interpolation.
-    """
+    """Capture today's CoinGecko global snapshot; reject historical requests."""
+    if start.date() != end.date() or start.date() != datetime.now(timezone.utc).date():
+        raise ValueError("CoinGecko /global is a current snapshot, not historical BTC dominance")
     url = "https://api.coingecko.com/api/v3/global"
     rows = []
     date = start

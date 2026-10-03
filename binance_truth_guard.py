@@ -200,9 +200,14 @@ def evaluate_spot_parity(
     _ignore_bnb_in_parity = bool(getattr(settings, 'spot_ignore_bnb_when_commission_enabled', True))
     _skip_bnb = _keep_bnb_for_commission and _ignore_bnb_in_parity
     # Assets excluded from parity: not tradable/dust tokens and stablecoins handled separately
-    _excluded_assets = {"USDT", "BTTC", "WIN", "JST", "IQ"}
+    _excluded_assets = {"USDT", "USDC", "BUSD", "FDUSD", "TUSD", "BTTC", "WIN", "JST", "IQ"}
     try:
-        raw_balances = binance_client.get_account_balance() if binance_client else {}
+        # Use walletBalance (free + locked/earn) for parity to avoid false ghosts
+        # when assets are not in the spot trading wallet but still belong to the account.
+        if binance_client and hasattr(binance_client, 'get_wallet_balance'):
+            raw_balances = binance_client.get_wallet_balance()
+        else:
+            raw_balances = binance_client.get_account_balance() if binance_client else {}
         for asset, qty in raw_balances.items():
             if asset in _excluded_assets:
                 continue
@@ -367,20 +372,21 @@ def auto_reconcile_spot(
             continue
 
         if code == "SPOT_GHOST_IN_DB" and position_manager:
-            # Close DB ghost using current market price as exit reference
+            # A single parity snapshot is advisory, not proof that an asset was sold.
+            # PositionManager owns the repeated valid-zero confirmation policy.
+            skipped.append({
+                **rec,
+                "reason": "deferred_to_confirmed_position_reconciliation",
+            })
             try:
-                pos = position_manager.get_position(symbol)
-                if pos is not None:
-                    px = _market_price(symbol)
-                    if px <= 0:
-                        skipped.append({**rec, "reason": "no_market_price"})
-                        continue
-                    position_manager.close_position(symbol, px, "truth_reconcile_ghost")
-                    applied.append({**rec, "action": "close_ghost", "exit_price": px})
-                    continue
-            except Exception as e:
-                skipped.append({**rec, "reason": f"close_error: {e}"})
-                continue
+                position_manager._audit(symbol, "spot_truth_ghost_close_deferred", {
+                    "db_qty": db_qty,
+                    "exchange_total_qty": bn_qty,
+                    "reason": "single_parity_snapshot_cannot_close_position",
+                }, binance_confirmed=False)
+            except Exception:
+                pass
+            continue
 
         elif code == "SPOT_QTY_DRIFT" and position_manager:
             # Adjust residual to match Binance (trim or expand with synthetic average)
@@ -850,7 +856,7 @@ def is_truth_critical(db_client, max_age_seconds: int = 900) -> bool:
 
 def compute_basket_reset_decision(
     positions: List[Dict[str, Any]],
-    pnl_threshold_usd: float = 10.0,
+    pnl_threshold_usd: float = -10.0,
     min_avg_age_hours: float = 4.0,
     momentum_positive_count_limit: int = 1,
 ) -> Dict[str, Any]:
@@ -858,6 +864,9 @@ def compute_basket_reset_decision(
 
     Positions may contain: symbol, unrealized_pnl, hours_held, pnl_pct, momentum_score.
     """
+    if pnl_threshold_usd >= 0:
+        raise ValueError("pnl_threshold_usd must be negative")
+
     if not positions:
         return {
             "trigger": False,
@@ -905,6 +914,25 @@ def compute_basket_reset_decision(
         },
         "ts": _utc_now_iso(),
     }
+
+
+def basket_reset_trigger_is_actionable(
+    decision: Dict[str, Any],
+    previous: Optional[Dict[str, Any]],
+    *,
+    cooldown_seconds: float,
+    now: Optional[datetime] = None,
+) -> bool:
+    if not bool((decision or {}).get("trigger")):
+        return False
+    if not isinstance(previous, dict) or not bool(previous.get("trigger")):
+        return True
+    previous_ts = previous.get("actioned_at") or previous.get("ts")
+    parsed = _parse_iso_ts(previous_ts) if previous_ts else None
+    if parsed is None:
+        return True
+    current = now or datetime.now(timezone.utc)
+    return (current - parsed).total_seconds() >= max(0.0, float(cooldown_seconds))
 
 
 # ── Phase 2: Closed-positions parity audit (report-only) ─────────────────────

@@ -17,13 +17,355 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from config_helpers import get_param
+from position_thesis import build_thesis_snapshot
+from position_belief import evaluate_belief
 
 _lock = threading.Lock()
 _last_db_flush: Dict[str, float] = {}
 _last_audit_flush: Dict[str, float] = {}
+
+# ── Belief-driven exit lifecycle (STAGING s130) ─────────────────────────────
+# {position_id: (last_persisted_belief_state, last_persisted_ts)}
+_belief_persist_state: Dict[str, Tuple[str, float]] = {}
+
+
+def _resolve_thesis_snapshot(
+    *,
+    metadata: Optional[Dict[str, Any]],
+    pnl_prediction: Optional[Dict[str, Any]] = None,
+    indicators_at_entry: Optional[Dict[str, Any]] = None,
+    side: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    meta = metadata if isinstance(metadata, dict) else {}
+    persisted = meta.get("thesis_snapshot_v1")
+    if isinstance(persisted, str):
+        try:
+            persisted = json.loads(persisted)
+        except (TypeError, ValueError):
+            persisted = None
+    if isinstance(persisted, dict) and persisted:
+        return dict(persisted)
+    return build_thesis_snapshot(
+        metadata=meta,
+        pnl_prediction=pnl_prediction,
+        indicators_at_entry=indicators_at_entry,
+        side=side,
+        regime_mode=meta.get("regime_at_entry") or meta.get("regime_mode"),
+    )
+
+
+def _should_persist_belief(position_id: str, belief_state: str, throttle_seconds: float = 30.0) -> bool:
+    """Throttle `belief_last` DB writes: always persist on first evaluation or
+    on a state transition; throttle repeated writes of an unchanged state.
+    evaluate_belief() runs every ~1s per open position — persisting every
+    unchanged read would flood trades_open with redundant writes."""
+    now = _now_ts()
+    with _lock:
+        prev = _belief_persist_state.get(position_id)
+        if prev is None or belief_state != prev[0] or (now - prev[1]) >= throttle_seconds:
+            _belief_persist_state[position_id] = (belief_state, now)
+            return True
+        return False
+
+
+def _evaluate_position_belief(
+    *,
+    position_id: str,
+    symbol: str,
+    side: str,
+    pnl_usdt: float,
+    current_price: float,
+    metadata: Optional[Dict[str, Any]],
+    pnl_prediction: Optional[Dict[str, Any]] = None,
+    indicators_at_entry: Optional[Dict[str, Any]] = None,
+    settings: Any,
+    db_client: Any = None,
+) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """Evaluate structural belief for one open position.
+
+    Returns (belief_result_or_None, should_persist). belief_result is None when
+    `position_belief_enabled` is off; should_persist follows the throttle rule
+    in `_should_persist_belief`.
+    """
+    if not bool(get_param(settings, "position_belief_enabled", True)):
+        return None, False
+    try:
+        buf = _update_drawdown_buffer(position_id, current_price, pnl_usdt)
+        momentum = _analyze_drawdown_trend(buf, side)
+
+        thesis = _resolve_thesis_snapshot(
+            metadata=metadata,
+            pnl_prediction=pnl_prediction,
+            indicators_at_entry=indicators_at_entry,
+            side=side,
+        )
+
+        signal_direction = None
+        signal_strength = None
+        if db_client and symbol:
+            lookback = float(get_param(settings, "sr_invalidation_lookback_minutes", 10.0) or 10.0)
+            sig_map = _fetch_recent_signals(db_client, [symbol], lookback)
+            sig_list = sig_map.get(symbol) or []
+            if sig_list:
+                latest = sig_list[-1]
+                signal_direction = latest.get("action")
+                try:
+                    signal_strength = float(latest.get("strength")) if latest.get("strength") is not None else None
+                except Exception:
+                    signal_strength = None
+
+        # sr_path_v1: pass the fresh thesis-anchored structural state (persisted
+        # by hard_risk_monitor / futures client into _smart_meta) so belief can
+        # consume it as structural evidence when the evaluator is active.
+        _sr_path_state = None
+        if isinstance(metadata, dict):
+            _smart = metadata.get("_smart_meta") or metadata.get("smart_meta") or {}
+            if isinstance(_smart, dict):
+                _sr_path_state = _smart.get("sr_path_state")
+        belief = evaluate_belief(
+            side=side,
+            pnl_usdt=pnl_usdt,
+            current_price=current_price,
+            thesis_snapshot=thesis,
+            momentum=momentum,
+            signal_direction=signal_direction,
+            signal_strength=signal_strength,
+            sr_path_state=_sr_path_state,
+        )
+        throttle = float(get_param(settings, "position_belief_persist_throttle_seconds", 30.0) or 30.0)
+        should_persist = _should_persist_belief(position_id, belief.get("belief_state", "uncertain"), throttle)
+        return belief, should_persist
+    except Exception as e:
+        print(f"[PositionTelemetry] belief evaluation error for {position_id}: {e}")
+        return None, False
+
+
+# ── Exit Lifecycle Refactor (STAGING s130b): 1s-loop exit decision cycle ────
+_exit_decision_metrics_lock = threading.Lock()
+_exit_decision_metrics: Dict[str, Any] = {
+    "name": "position_exit_decision",
+    "evaluated": 0,
+    "closed_spot": 0,
+    "closed_futures": 0,
+    "errors": 0,
+    "last_at": None,
+}
+
+# {position_id: last_refresh_ts}
+_exit_evidence_refresh_state: Dict[str, float] = {}
+_exit_evidence_refresh_lock = threading.Lock()
+
+
+def get_exit_decision_metrics() -> Dict[str, Any]:
+    """Expose exit-decision cycle counters for /metrics endpoints."""
+    with _exit_decision_metrics_lock:
+        return dict(_exit_decision_metrics)
+
+
+def _run_exit_decision_cycle(components: Any, snapshots: List[Dict[str, Any]], settings: Any) -> Dict[str, Any]:
+    """s130b: high-frequency exit decision cycle driven by the telemetry watcher.
+
+    Delegates to the existing SL/TP (`run_trades._check_sl_tp_positions`) and
+    futures (`components.futures_client.check_positions`) machinery so exit
+    decisions run at telemetry-loop cadence without duplicating trading logic.
+    Controlled by `position_exit_decision_loop_enabled`.
+    """
+    summary: Dict[str, Any] = {"closed_spot": [], "closed_futures": [], "error": None}
+    if not bool(get_param(settings, "position_exit_decision_loop_enabled", True)):
+        return summary
+
+    client = getattr(components, "binance_client", None)
+    position_manager = getattr(components, "position_manager", None)
+    if client is None or position_manager is None:
+        summary["error"] = "missing client or position_manager"
+        return summary
+
+    with _exit_decision_metrics_lock:
+        _exit_decision_metrics["evaluated"] += len(snapshots)
+
+    try:
+        import run_trades as _rt
+
+        regime_mode = None
+        if bool(get_param(settings, "market_regime_enabled", False)):
+            regime_mode = getattr(settings, "current_regime_mode", None)
+        closed_spot = _rt._check_sl_tp_positions(
+            client,
+            settings,
+            position_manager,
+            news_client=getattr(components, "news_client", None),
+            regime=regime_mode,
+            monitor_only=False,
+        ) or []
+        summary["closed_spot"] = closed_spot
+        with _exit_decision_metrics_lock:
+            _exit_decision_metrics["closed_spot"] += len(closed_spot)
+    except Exception as e:
+        print(f"[PositionTelemetry] exit decision cycle error (spot): {e}")
+        with _exit_decision_metrics_lock:
+            _exit_decision_metrics["errors"] += 1
+
+    futures_client = getattr(components, "futures_client", None)
+    if futures_client is not None and bool(get_param(settings, "futures_enabled", True)):
+        try:
+            closed_futures = futures_client.check_positions(settings=settings, monitor_only=False) or []
+            summary["closed_futures"] = closed_futures
+            with _exit_decision_metrics_lock:
+                _exit_decision_metrics["closed_futures"] += len(closed_futures)
+        except Exception as e:
+            print(f"[PositionTelemetry] exit decision cycle error (futures): {e}")
+            with _exit_decision_metrics_lock:
+                _exit_decision_metrics["errors"] += 1
+
+    with _exit_decision_metrics_lock:
+        _exit_decision_metrics["last_at"] = _now_ts()
+
+    return summary
+
+
+def _should_refresh_exit_evidence(position_id: str, throttle_seconds: float = 15.0) -> bool:
+    """Throttle per-position prediction/indicator refreshes feeding the peak
+    capture context and belief evaluator."""
+    now = _now_ts()
+    with _exit_evidence_refresh_lock:
+        prev = _exit_evidence_refresh_state.get(position_id)
+        if prev is None or (now - prev) >= throttle_seconds:
+            _exit_evidence_refresh_state[position_id] = now
+            return True
+        return False
+
+
+def _to_fraction(value: Any, *, assume_percent_threshold: float = 1.5) -> float:
+    """Normalize percent-or-fraction values to fraction units (0.10 = 10%)."""
+    raw = _to_float(value, 0.0)
+    if abs(raw) > assume_percent_threshold:
+        return raw / 100.0
+    return raw
+
+
+def _build_peak_capture_context(
+    snapshot: Dict[str, Any],
+    prediction: Optional[Dict[str, Any]],
+    indicators: Optional[Dict[str, Any]],
+    settings: Any,
+) -> Any:
+    """Build a `PeakCaptureContext` from a telemetry snapshot + fresh evidence."""
+    from peak_capture_engine import PeakCaptureContext
+
+    trade_type = str(snapshot.get("trade_type") or "spot")
+    side = str(snapshot.get("side") or "LONG").upper()
+    entry_price = _to_float(snapshot.get("entry_price"), 0.0)
+    current_price = _to_float(snapshot.get("current_price"), entry_price)
+    quantity = _to_float(snapshot.get("quantity"), 0.0)
+    leverage = _to_float(snapshot.get("leverage"), 1.0) or 1.0
+    position_size_usdt = abs(quantity) * current_price
+
+    current_pnl_pct = _to_fraction(snapshot.get("unrealized_pnl_pct"))
+    current_pnl_usdt = _to_float(snapshot.get("unrealized_pnl_usdt"), 0.0)
+    peak_pnl_pct = _to_fraction(snapshot.get("peak_pnl_pct"))
+
+    indicators = indicators or {}
+    signal_direction = str(indicators.get("signal") or "NONE").upper()
+    signal_strength = _to_float(indicators.get("strength"), 0.0)
+    rsi = _to_float(indicators.get("rsi"), 50.0)
+
+    momentum_exhausted = False
+    if side == "LONG" and signal_direction == "SELL" and rsi >= 70:
+        momentum_exhausted = True
+    elif side == "SHORT" and signal_direction == "SELL" and rsi <= 30:
+        momentum_exhausted = True
+
+    metadata = snapshot.get("metadata")
+    thesis = _resolve_thesis_snapshot(metadata=metadata, side=side)
+    if not thesis:
+        thesis = snapshot.get("_thesis_snapshot") or {}
+    current_sl_price = _to_float(snapshot.get("stop_loss"), 0.0) or _to_float(thesis.get("stop_price"), 0.0) or None
+    current_tp_price = _to_float(snapshot.get("take_profit"), 0.0) or _to_float(thesis.get("target_price"), 0.0) or None
+
+    return PeakCaptureContext(
+        symbol=str(snapshot.get("symbol") or ""),
+        trade_type=trade_type,
+        side=side,
+        position_size_usdt=position_size_usdt,
+        portfolio_total_usdt=_to_float(get_param(settings, "portfolio_total_usdt", 0.0), 0.0),
+        current_price=current_price,
+        entry_price=entry_price,
+        current_pnl_usdt=current_pnl_usdt,
+        current_pnl_pct=current_pnl_pct,
+        peak_pnl_pct=peak_pnl_pct,
+        regime_mode=str(get_param(settings, "current_regime_mode", "SPOT_BULL") or "SPOT_BULL"),
+        profile_label=snapshot.get("profile_label"),
+        signal_strength=signal_strength,
+        signal_direction=signal_direction,
+        pnl_velocity_1h=snapshot.get("pnl_velocity_1h"),
+        indicators=indicators,
+        fear_greed_value=_to_float(get_param(settings, "fear_greed_value", 50.0), 50.0),
+        metadata=snapshot.get("metadata") or {},
+        leverage=leverage,
+        prediction_1h=prediction,
+        prediction_4h=None,
+        momentum_exhausted=momentum_exhausted,
+        trend_reversal=False,
+        current_sl_price=current_sl_price,
+        current_tp_price=current_tp_price,
+    )
+
+
+def _run_exit_evidence_refresh_cycle(components: Any, snapshots: List[Dict[str, Any]], settings: Any) -> Dict[str, Any]:
+    """s130b: refresh prediction/indicator evidence per open position at a
+    throttled cadence, feeding `_build_peak_capture_context` and
+    `evaluate_belief` with fresh data without hammering the predictor."""
+    result: Dict[str, Any] = {"refreshed": 0, "skipped": 0, "errors": 0}
+    if not bool(get_param(settings, "position_exit_evidence_refresh_enabled", True)):
+        return result
+
+    client = getattr(components, "binance_client", None)
+    if client is None:
+        return result
+
+    throttle = float(get_param(settings, "position_exit_evidence_refresh_seconds", 15.0) or 15.0)
+
+    import pnl_service
+
+    for snapshot in snapshots:
+        position_id = snapshot.get("position_id") or snapshot.get("symbol")
+        if not position_id:
+            continue
+        if not _should_refresh_exit_evidence(position_id, throttle):
+            result["skipped"] += 1
+            continue
+        symbol = snapshot.get("symbol")
+        try:
+            trade_type = str(snapshot.get("trade_type") or "spot")
+            side = snapshot.get("side")
+            current_price = snapshot.get("current_price")
+            position_size_usdt = _to_float(snapshot.get("quantity"), 0.0) * _to_float(current_price, 0.0)
+            prediction, indicators = pnl_service.predict_for_symbol(
+                symbol,
+                client,
+                settings,
+                position_size_usdt,
+                trade_type=trade_type,
+                trade_side=side,
+                current_price=current_price,
+            )
+            ctx = _build_peak_capture_context(snapshot, prediction, indicators, settings)
+            snapshot["_exit_evidence"] = {
+                "prediction": prediction,
+                "indicators": indicators,
+                "peak_capture_context": ctx,
+                "refreshed_at": _now_ts(),
+            }
+            result["refreshed"] += 1
+        except Exception as e:
+            print(f"[PositionTelemetry] exit evidence refresh error for {symbol}: {e}")
+            result["errors"] += 1
+
+    return result
+
 
 # Shadow metrics for sr_structure_invalidation_exit
 try:
@@ -1051,7 +1393,7 @@ def _fetch_futures_metrics(futures_client: Any, symbol: str) -> Dict[str, Any]:
     return out
 
 
-def _snapshot_spot_position(symbol: str, pos: Any, price: float) -> Dict[str, Any]:
+def _snapshot_spot_position(symbol: str, pos: Any, price: float, *, settings: Any = None, db_client: Any = None) -> Dict[str, Any]:
     entry = float(pos.entry_price or 0.0)
     qty = float(pos.quantity or 0.0)
     unrealized_pct = _compute_unrealized_pct(entry, price, "LONG")
@@ -1059,6 +1401,37 @@ def _snapshot_spot_position(symbol: str, pos: Any, price: float) -> Dict[str, An
     sltp = _extract_sl_tp(getattr(pos, "metadata", None), pos.stop_loss or 0.0, 0.0)
     meta = getattr(pos, "metadata", {}) or {}
     smart = meta.get("_smart_meta") or {}
+    position_id = str(pos.position_id)
+    thesis = _resolve_thesis_snapshot(
+        metadata=meta,
+        pnl_prediction=getattr(pos, "pnl_prediction", None),
+        indicators_at_entry=getattr(pos, "indicators_at_entry", None),
+        side="LONG",
+    )
+
+    belief_last = None
+    if settings is not None:
+        belief_last, should_persist = _evaluate_position_belief(
+            position_id=position_id,
+            symbol=symbol,
+            side="LONG",
+            pnl_usdt=unrealized_usdt,
+            current_price=price,
+            metadata=meta,
+            pnl_prediction=getattr(pos, "pnl_prediction", None),
+            indicators_at_entry=getattr(pos, "indicators_at_entry", None),
+            settings=settings,
+            db_client=db_client,
+        )
+        if belief_last and should_persist and db_client and getattr(pos, "db_id", None):
+            try:
+                db_client.execute_update(
+                    "UPDATE trades_open SET metadata = metadata || %s::jsonb WHERE id = %s",
+                    (json.dumps({"belief_last": belief_last}), pos.db_id),
+                )
+            except Exception as e:
+                print(f"[PositionTelemetry] belief persist failed {symbol}: {e}")
+
     return {
         "trade_type": "spot",
         "symbol": symbol,
@@ -1076,13 +1449,15 @@ def _snapshot_spot_position(symbol: str, pos: Any, price: float) -> Dict[str, An
         "trail_best_price": float(smart.get("trail_best_price") or 0.0),
         "support_level": smart.get("support_level"),
         "resistance_level": smart.get("resistance_level"),
+        "metadata": {"thesis_snapshot_v1": thesis} if thesis else {},
         "dist_to_support_pct": round(_distance_to_sr(price, smart.get("support_level"), "LONG") or 0.0, 4) if smart.get("support_level") else None,
         "dist_to_resistance_pct": round(_distance_to_sr(price, smart.get("resistance_level"), "LONG") or 0.0, 4) if smart.get("resistance_level") else None,
+        "belief_last": belief_last,
         "ts": datetime.now(timezone.utc).isoformat(),
     }
 
 
-def _snapshot_futures_position(pos: Any, price: float, futures_client: Any) -> Dict[str, Any]:
+def _snapshot_futures_position(pos: Any, price: float, futures_client: Any, *, settings: Any = None) -> Dict[str, Any]:
     entry = float(pos.entry_price or 0.0)
     qty = abs(float(getattr(pos, "qty", getattr(pos, "quantity", 0.0)) or 0.0))
     side = str(pos.side).upper()
@@ -1091,7 +1466,37 @@ def _snapshot_futures_position(pos: Any, price: float, futures_client: Any) -> D
     unrealized_usdt = _compute_unrealized(entry, qty, price, side, leverage=leverage)
     sltp = _extract_sl_tp(getattr(pos, "_smart_meta", None) or {}, pos.sl_price or 0.0, pos.tp_price or 0.0)
     smart = getattr(pos, "_smart_meta", {}) or {}
+    position_id = str(getattr(pos, "position_id", "") or f"{pos.symbol}_{side}")
     metrics = _fetch_futures_metrics(futures_client, pos.symbol)
+    thesis = _resolve_thesis_snapshot(
+        metadata=smart,
+        pnl_prediction=getattr(pos, "pnl_prediction", None),
+        indicators_at_entry=getattr(pos, "indicators_at_entry", None),
+        side=side,
+    )
+
+    belief_last = None
+    if settings is not None:
+        belief_last, should_persist = _evaluate_position_belief(
+            position_id=position_id,
+            symbol=pos.symbol,
+            side=side,
+            pnl_usdt=unrealized_usdt,
+            current_price=price,
+            metadata=smart,
+            pnl_prediction=getattr(pos, "pnl_prediction", None),
+            indicators_at_entry=getattr(pos, "indicators_at_entry", None),
+            settings=settings,
+            db_client=getattr(futures_client, "db_client", None),
+        )
+        if belief_last and should_persist:
+            try:
+                smart["belief_last"] = belief_last
+                pos._smart_meta = smart
+                futures_client._persist_smart_meta(pos)
+            except Exception as e:
+                print(f"[PositionTelemetry] belief persist failed {pos.symbol}: {e}")
+
     return {
         "trade_type": "futures",
         "symbol": pos.symbol,
@@ -1110,8 +1515,10 @@ def _snapshot_futures_position(pos: Any, price: float, futures_client: Any) -> D
         "trail_best_price": float(smart.get("trail_best_price") or 0.0),
         "support_level": smart.get("support_level"),
         "resistance_level": smart.get("resistance_level"),
+        "metadata": {"thesis_snapshot_v1": thesis} if thesis else {},
         "dist_to_support_pct": round(_distance_to_sr(price, smart.get("support_level"), side) or 0.0, 4) if smart.get("support_level") else None,
         "dist_to_resistance_pct": round(_distance_to_sr(price, smart.get("resistance_level"), side) or 0.0, 4) if smart.get("resistance_level") else None,
+        "belief_last": belief_last,
         **metrics,
         "ts": datetime.now(timezone.utc).isoformat(),
     }
@@ -1209,7 +1616,11 @@ def collect_position_telemetry(components: Any) -> List[Dict[str, Any]]:
                     continue
                 for pos in pos_list:
                     try:
-                        snapshots.append(_snapshot_spot_position(symbol, pos, price))
+                        snapshots.append(_snapshot_spot_position(
+                            symbol, pos, price,
+                            settings=settings,
+                            db_client=getattr(components, "db_client", None),
+                        ))
                     except Exception:
                         pass
 
@@ -1238,7 +1649,7 @@ def collect_position_telemetry(components: Any) -> List[Dict[str, Any]]:
                 except Exception:
                     continue
                 try:
-                    snapshots.append(_snapshot_futures_position(pos, price, futures_client))
+                    snapshots.append(_snapshot_futures_position(pos, price, futures_client, settings=settings))
                 except Exception:
                     pass
     except Exception as e:
@@ -1270,6 +1681,20 @@ def run_telemetry_cycle(components: Any) -> List[Dict[str, Any]]:
         "loss_positions_evaluated": sum(1 for s in snapshots if _to_float(s.get("unrealized_pnl_usdt"), 0.0) < 0),
         "ts": datetime.now(timezone.utc).isoformat(),
     }
+
+    # s130b: Exit Lifecycle Refactor — 1s-loop exit decision + evidence refresh
+    exit_decision_summary = _run_exit_decision_cycle(components, snapshots, settings)
+    if exit_decision_summary.get("closed_spot") or exit_decision_summary.get("closed_futures"):
+        summary["exit_decision_closed_spot"] = len(exit_decision_summary.get("closed_spot") or [])
+        summary["exit_decision_closed_futures"] = len(exit_decision_summary.get("closed_futures") or [])
+    if exit_decision_summary.get("error"):
+        summary["exit_decision_error"] = exit_decision_summary["error"]
+
+    exit_evidence_summary = _run_exit_evidence_refresh_cycle(components, snapshots, settings)
+    if exit_evidence_summary.get("refreshed"):
+        summary["exit_evidence_refreshed"] = exit_evidence_summary["refreshed"]
+    if exit_evidence_summary.get("errors"):
+        summary["exit_evidence_errors"] = exit_evidence_summary["errors"]
 
     # Dynamic 1s profit-follow guard across all modes (SPOT + FUTURES).
     guard_actions = _run_profit_guard_cycle(components, snapshots, settings)

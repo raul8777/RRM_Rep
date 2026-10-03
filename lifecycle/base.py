@@ -119,6 +119,7 @@ class ExitPolicy:
     use_expected_gain_for_tp: bool = False
     expected_gain_mult: float = 1.0
     time_stop_hours: Optional[float] = None
+    allow_partial_exits: bool = False
 
 
 @dataclass(frozen=True)

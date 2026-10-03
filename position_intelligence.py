@@ -553,3 +553,196 @@ def compute_sr_aware_trail_distance(
             return base_trail_dist_pct * proximity_factor
 
     return base_trail_dist_pct
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# THESIS-ANCHORED PATH EVALUATOR (sr_path_v1 lifecycle)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Single structural evaluator anchored to the LEVELS OF THE ENTRY THESIS
+# (metadata['thesis_snapshot_v1']['sr_path_v1']), evaluated only at the close of
+# the primary timeframe candle — never per 1s tick. This replaces the previous
+# situation where 3 disconnected evaluators (PIM on 1m levels, market_structure
+# shadow, signal-invalidation on the watcher) watched levels that were NOT the
+# ones that justified the entry.
+#
+# Path states (persisted per primary-candle close):
+#   on_track               — progressing toward the target
+#   stalled                — candles consumed without progress past progress mark
+#   invalidated            — primary candle CLOSED beyond the anchor level
+#   target_reached         — target level reached (first objective met)
+#   extended_to_next_level — target broken with confirmation; thesis extends to
+#                            the next level in the map (let winners run; nothing
+#                            expires by time)
+
+THESIS_PATH_STATES = (
+    "on_track",
+    "stalled",
+    "invalidated",
+    "target_reached",
+    "extended_to_next_level",
+)
+
+
+def _tf_seconds(timeframe: Optional[str]) -> Optional[float]:
+    """Map a kline interval string to seconds. Returns None if unparseable."""
+    tf = str(timeframe or "").strip().lower()
+    if not tf:
+        return None
+    try:
+        if tf.endswith("m"):
+            return float(tf[:-1]) * 60.0
+        if tf.endswith("h"):
+            return float(tf[:-1]) * 3600.0
+        if tf.endswith("d"):
+            return float(tf[:-1]) * 86400.0
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def should_evaluate_thesis_path(
+    smart_meta: Dict[str, Any],
+    primary_timeframe: Optional[str],
+    now_ts: Optional[float] = None,
+) -> bool:
+    """Candle-close gating: evaluate only when a new primary candle has closed.
+
+    Tracks `sr_path_last_eval_bucket` in smart_meta — the integer index of the
+    current primary-timeframe candle (now // tf_seconds). A new evaluation is
+    due only when the bucket advances (i.e., a new candle has closed). This is
+    what keeps structural evaluation off the 1s tick noise.
+    """
+    tf_s = _tf_seconds(primary_timeframe)
+    if not tf_s or tf_s <= 0:
+        return True  # unknown timeframe → do not block evaluation
+    now = float(now_ts if now_ts is not None else time.time())
+    bucket = int(now // tf_s)
+    last = smart_meta.get("sr_path_last_eval_bucket")
+    if last is None or bucket > int(last):
+        return True
+    return False
+
+
+def evaluate_thesis_path(
+    *,
+    thesis_path: Optional[Dict[str, Any]],
+    entry_price: float,
+    current_price: float,
+    sr_behavior: Dict[str, Any],
+    candles_consumed: float,
+    vol_spike: Optional[float] = None,
+    settings: Any = None,
+) -> Dict[str, Any]:
+    """Evaluate the position's progress along its declared SR path.
+
+    Args:
+        thesis_path: metadata['thesis_snapshot_v1']['sr_path_v1'] dict.
+        entry_price: Position entry price.
+        current_price: Current price (should be the primary-candle close).
+        sr_behavior: behavioral tracker dict from update_sr_behavior().
+        candles_consumed: primary candles elapsed since entry.
+        vol_spike: current volume ratio vs baseline (for extension confirmation).
+        settings: config (reads sr_path_stall_multiplier, sr_path_extension_min_vol).
+
+    Returns:
+        {
+          "state": one of THESIS_PATH_STATES | "no_path",
+          "reason": str,
+          "progress_pct": float,        # 0..1+ of anchor->target distance covered
+          "target_extended_to": float|None,  # new target when extended
+          "detail": dict,
+        }
+        Never raises; missing thesis → state "no_path".
+    """
+    def _f(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    path = thesis_path if isinstance(thesis_path, dict) else {}
+    side = str(path.get("side") or "").strip().upper()
+    is_long = side in ("LONG", "BUY")
+    anchor = _f(path.get("anchor_level"))
+    target = _f(path.get("target_level"))
+    next_levels = [x for x in (_f(v) for v in (path.get("next_levels") or [])) if x is not None]
+    expected_candles = _f(path.get("expected_candles"))
+
+    entry = _f(path.get("entry_price")) or float(entry_price or 0.0)
+    price = float(current_price or 0.0)
+    if entry <= 0 or price <= 0:
+        return {"state": "no_path", "reason": "invalid_prices", "progress_pct": 0.0,
+                "target_extended_to": None, "detail": {}}
+
+    if anchor is None and target is None:
+        return {"state": "no_path", "reason": "no_levels", "progress_pct": 0.0,
+                "target_extended_to": None, "detail": {}}
+
+    stall_mult = 2.0
+    ext_min_vol = 1.0
+    if settings is not None:
+        try:
+            from config_helpers import get_param as _gp
+            stall_mult = float(_gp(settings, "sr_path_stall_multiplier", 2.0) or 2.0)
+            ext_min_vol = float(_gp(settings, "sr_path_extension_min_vol", 1.0) or 1.0)
+        except Exception:
+            pass
+
+    # Progress toward target: 0 at anchor, 1 at target (can exceed 1 beyond).
+    progress_pct = 0.0
+    if anchor is not None and target is not None and abs(target - anchor) > 0:
+        progress_pct = (price - anchor) / (target - anchor)
+        if not is_long:
+            progress_pct = (anchor - price) / (anchor - target)
+        progress_pct = max(0.0, progress_pct)
+
+    # Behavioral evidence from the tracker (level tests against thesis levels).
+    anchor_tests = int(sr_behavior.get("support_tests" if is_long else "resistance_tests", 0) or 0)
+    anchor_held = sr_behavior.get("support_held" if is_long else "resistance_broken")
+    if not is_long and anchor_held is not None:
+        anchor_held = not anchor_held  # for SHORT, resistance NOT broken = held
+
+    detail = {
+        "anchor_level": anchor,
+        "target_level": target,
+        "expected_candles": expected_candles,
+        "candles_consumed": round(float(candles_consumed), 3),
+        "anchor_tests": anchor_tests,
+        "anchor_held": anchor_held,
+        "vol_spike": vol_spike,
+    }
+
+    # 1) INVALIDATED: primary candle closed beyond the anchor (thesis broken).
+    if anchor is not None:
+        beyond_anchor = (price < anchor) if is_long else (price > anchor)
+        if beyond_anchor:
+            return {"state": "invalidated", "reason": "anchor_broken_at_candle_close",
+                    "progress_pct": progress_pct, "target_extended_to": None, "detail": detail}
+
+    # 2) TARGET REACHED / EXTENSION: price reached/exceeded the target.
+    if target is not None:
+        reached = (price >= target) if is_long else (price <= target)
+        if reached:
+            # Extension only when there is a next level AND breakout confirmation
+            # (volume at/above the minimum) — this is "let winners run".
+            if next_levels and vol_spike is not None and vol_spike >= ext_min_vol:
+                return {"state": "extended_to_next_level", "reason": "target_broken_with_confirmation",
+                        "progress_pct": progress_pct, "target_extended_to": next_levels[0],
+                        "detail": detail}
+            return {"state": "target_reached", "reason": "target_reached",
+                    "progress_pct": progress_pct, "target_extended_to": None, "detail": detail}
+
+    # 3) STALLED: consumed k× expected candles without reaching halfway progress,
+    #    or the anchor was tested repeatedly without holding (absorption).
+    if expected_candles and expected_candles > 0 and candles_consumed >= stall_mult * expected_candles:
+        if progress_pct < 0.5:
+            return {"state": "stalled", "reason": "no_progress_within_expected_path",
+                    "progress_pct": progress_pct, "target_extended_to": None, "detail": detail}
+    if anchor_tests >= 2 and anchor_held is False:
+        return {"state": "stalled", "reason": "anchor_absorption_without_bounce",
+                "progress_pct": progress_pct, "target_extended_to": None, "detail": detail}
+
+    # 4) ON TRACK: progressing and structure intact.
+    return {"state": "on_track", "reason": "progressing_within_path",
+            "progress_pct": progress_pct, "target_extended_to": None, "detail": detail}

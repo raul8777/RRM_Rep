@@ -184,6 +184,7 @@ class SmartScaleOut:
         self.target_daily_usd = _dyn_daily if _dyn_daily else self._cfg('sso_target_daily_usd', 40.0)
         self.target_min_hours = self._cfg('sso_target_min_hours', 1.0)
         # SSO-5: Re-entry Upgrade
+        self.reentry_upgrade_enabled = self._cfg('sso_reentry_upgrade_enabled', False)
         self.reentry_min_strength_diff = self._cfg('sso_reentry_min_strength_diff', 0.3)
         self.reentry_min_ev_multiplier = self._cfg('sso_reentry_min_ev_multiplier', 1.5)
         # SSO-6: Bounce Rescue Mode
@@ -569,9 +570,9 @@ class SmartScaleOut:
 
                 if _opp_ok:
                     # Collapse SL to just below current price (≈ comisión de salida)
-                    _collapse_sl = round(_cur_price * (1.0 - _commission_margin), 8)
-                    # Never set SL below what it already is (only move up)
-                    _collapse_sl = max(_collapse_sl, _cur_sl)
+                    _is_short = str(pos.side or "").upper() in ("SHORT", "SELL")
+                    _collapse_sl = round(_cur_price * (1.0 + _commission_margin if _is_short else 1.0 - _commission_margin), 8)
+                    _collapse_sl = min(_collapse_sl, _cur_sl) if _is_short else max(_collapse_sl, _cur_sl)
                     return SSOAction(
                         should_close=False,
                         reason="sso7_opportunity_collapse",
@@ -610,14 +611,18 @@ class SmartScaleOut:
         _squeeze_factor = max(_min_dist / _base_dist, 1.0 - _squeeze * (_new_cycles - _threshold))
         _trail_dist = max(_min_dist, _base_dist * _squeeze_factor)
 
-        _new_sl = _cur_price * (1.0 - _trail_dist)
-
-        # SL only moves up, never below entry if breakeven already done
-        _floor = _entry if _cur_sl >= _entry else 0.0
-        _new_sl = max(_new_sl, _cur_sl, _floor)
+        _is_short = str(pos.side or "").upper() in ("SHORT", "SELL")
+        _new_sl = _cur_price * (1.0 + _trail_dist if _is_short else 1.0 - _trail_dist)
+        if _is_short:
+            _ceiling = _entry if _cur_sl <= _entry else float("inf")
+            _new_sl = min(_new_sl, _cur_sl, _ceiling)
+        else:
+            _floor = _entry if _cur_sl >= _entry else 0.0
+            _new_sl = max(_new_sl, _cur_sl, _floor)
         _new_sl = round(_new_sl, 8)
 
-        if _new_sl <= _cur_sl:
+        no_change = _new_sl >= _cur_sl if _is_short else _new_sl <= _cur_sl
+        if no_change:
             return SSOAction(
                 should_close=False,
                 diagnosis=f"SSO-7:trail_nochange(sl={_cur_sl:.4f} already>={_new_sl:.4f} cycles={_new_cycles})",
@@ -1060,6 +1065,8 @@ class SmartScaleOut:
     # ── SSO-5: Re-entry Upgrade ───────────────────────────────────────────────
     def _check_sso5_reentry_upgrade(self, pos: SSOPositionData) -> Optional[SSOAction]:
         """Close if better opportunity available and slots are full."""
+        if not self.reentry_upgrade_enabled:
+            return None
         if not pos.all_slots_full:
             return None
         if pos.pnl_usdt <= 0:

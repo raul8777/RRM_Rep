@@ -198,6 +198,31 @@ def test_get_bnb_reserve_usdt():
     assert cfg['total_reserve_usdt'] == cfg['spot_reserve_usdt'] + cfg['futures_reserve_usdt']
 
 
+def test_bnb_observation_does_not_buy_sell_or_transfer_before_entry_decision():
+    spot = FakeSpotClient(bnb=0.0, usdt=1000.0)
+    fut = FakeFuturesClient(bnb=0.0, usdt=500.0, spot_client=spot)
+    db = MagicMock()
+
+    result = auto_manage_bnb_discount(
+        BNBAutoSettings(),
+        spot_client=spot,
+        futures_client=fut,
+        db_client=db,
+        allow_funding_actions=False,
+    )
+
+    assert result["funding_actions_allowed"] is False
+    assert result["spot_reserve_usdt"] > 0
+    assert result["futures_reserve_usdt"] > 0
+    assert result["shortfall_usdt"] > 0
+    assert spot._bnb == 0.0
+    assert fut._bnb == 0.0
+    assert spot._usdt == 1000.0
+    assert fut._usdt == 500.0
+    assert spot.orders == []
+    assert fut.transferred_to_spot == 0.0
+
+
 def test_auto_manage_bnb_discount_buy_and_transfer():
     spot = FakeSpotClient(bnb=0.0, usdt=1000.0)
     fut = FakeFuturesClient(bnb=0.0)

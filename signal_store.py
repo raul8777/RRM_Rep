@@ -296,6 +296,7 @@ def expire_stale_signals(max_age_minutes: int = 30) -> int:
                 WHERE data_type = 'signal'
                 AND (data->>'source' = 'autonomous' OR data->>'source' IS NULL)
                 AND (data->>'decision' IS NULL OR data->>'decision' = 'pending')
+                AND COALESCE((data->>'processed')::boolean, false) = false
                 AND timestamp < NOW() - make_interval(mins => %s)
             """
             expired = _db_client.execute_update(query, (max_age_minutes,))

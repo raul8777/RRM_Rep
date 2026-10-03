@@ -71,6 +71,9 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'spot_dust_cleanup_min_notional_usdt': 5.0,
     'spot_reconcile_auto_fix_enabled': True,
     'spot_reconcile_min_value_usdt': 5.0,
+    'spot_ghost_min_age_minutes': 0.0,
+    'spot_reconcile_missing_confirm_cycles': 2,
+    'spot_truth_autofix_enabled': True,
 
     # Kelly position sizing (aggressive canonical baseline)
     'kelly_base_usdt': 150.0,          # concentrated: base digna para $5,100
@@ -189,6 +192,14 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'auto_bnb_for_commission': True,
     'slippage_pct': 0.00052,
 
+    'close_execution_mode': 'active',
+    'close_execution_depth_levels': 20,
+    'close_execution_max_slippage_bps': 10.0,
+    'close_execution_fok_retries': 1,
+    'close_execution_stale_book_seconds': 3.0,
+    'close_execution_hard_risk_deadline_ms': 0,
+    'close_execution_soft_deadline_ms': 1500,
+
     # F&G boost
     'fng_kelly_boost_enabled': True,
     'fng_capitulation_threshold': 15,
@@ -250,6 +261,11 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'hard_risk_monitor_enabled': True,
     'hard_risk_monitor_interval_seconds': 2.0,
     'hard_risk_breakeven_enabled': True,
+    'basket_reset_auto_execute': False,
+    'basket_reset_pnl_threshold_usd': -10.0,
+    'basket_reset_min_avg_age_hours': 4.0,
+    'basket_reset_max_positive_momentum_positions': 1,
+    'basket_reset_cooldown_seconds': 3600.0,
     # High-frequency telemetry watcher for open positions
     'position_telemetry_watcher_enabled': True,
     'position_telemetry_watcher_interval_seconds': 1.0,
@@ -290,6 +306,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'range_scalp_direction_mode': 'ev_symmetric',  # short_priority | ev_symmetric
     'range_scalp_direction_min_probability': 0.55,
     'range_scalp_short_resistance_threshold': 0.65,
+    'directional_unconfirmed_countertrend_margin': 0.10,
     'range_scalp_short_min_probability': 0.50,
     # TEMP (jul 24 2026, RANGE_SCALP universe expansion to ~100 assets):
     # lower liquidity floor to broaden the universe while keeping slippage in check.
@@ -347,6 +364,10 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'preservation_kelly_mult': 0.6,
     'range_scalp_sl_pct': 0.8,          # s70: 1.2→0.8 (R:R 2.25)
     'range_scalp_tp_pct': 1.8,          # s70: 1.5→1.8
+    'range_scalp_contract_sl_multiplier': 1.0,
+    'range_scalp_contract_tp_multiplier': 1.0,
+    'entry_contract_sl_multiplier': 1.0,
+    'entry_contract_tp_multiplier': 1.0,
     'range_scalp_min_rsi': 25.0,        # s70: new
     'range_scalp_breakeven_pct': 0.40,  # s70: new
     'spot_bull_breakeven_pct': 0.25,
@@ -436,6 +457,9 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'range_scalp_short_resistance_threshold': 0.65,
     'range_scalp_short_max_per_cycle': 2,
     'range_scalp_short_execution_enabled': True,
+    'spot_margin_short_enabled': True,
+    'spot_margin_isolated_only': True,
+    'range_scalp_short_instrument': 'spot_margin',
     'opportunity_shadow_mode': 'active_canary',
     'opportunity_shadow_canary_fraction': 0.20,
     'opportunity_shadow_max_promotions_per_side': 1,
@@ -521,7 +545,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'require_predictor_valid': True,
             'policy_version': 'v1',
             'max_open_per_cycle': 2,
-            'direction_confirmation_mode': 'enforced',
+            'direction_confirmation_mode': 'disabled',
             'direction_min_progress_bps': 1.0,
             'direction_max_adverse_bps': 150.0,
             'direction_required_confirmations': 1,
@@ -563,7 +587,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'min_expected_pnl': 0.0,
             'policy_version': 'v1',
             'max_open_per_cycle': 2,
-            'direction_confirmation_mode': 'enforced',
+            'direction_confirmation_mode': 'disabled',
             'direction_min_progress_bps': 3.0,
             'direction_max_adverse_bps': 50.0,
             'direction_required_confirmations': 2,
@@ -599,7 +623,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
             'min_expected_pnl': 0.0,
             'policy_version': 'v1',
             'max_open_per_cycle': 2,
-            'direction_confirmation_mode': 'enforced',
+            'direction_confirmation_mode': 'disabled',
             'direction_min_progress_bps': 3.0,
             'direction_max_adverse_bps': 50.0,
             'direction_required_confirmations': 2,
@@ -798,6 +822,9 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'profit_realization_sr_accel_full_multiplier': 0.85,
     'profit_realization_sr_accel_drawback_multiplier': 0.85,
     'profit_realization_sr_resistance_zone_min': 0.68,
+    # Global exit contract: partial-close requests are blocked and held unless
+    # an operator deliberately restores legacy behavior.
+    'exit_fractionation_mode': 'disabled',
     'unified_governance_enabled': True,
     'unified_governance_profit_enabled': True,
     'ug_breakout_follow_enabled': True,
@@ -817,6 +844,12 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'position_intelligence_enabled': True,
     'position_intelligence_sr_refresh_seconds': 30.0,
     'position_intelligence_min_confidence': 0.3,
+    'sr_path_evaluator_mode': 'active',
+    'sr_path_stall_multiplier': 2.0,
+    'sr_path_extension_min_vol': 1.0,
+    'sr_path_horizon_gate_mode': 'active',
+    'sr_path_horizon_min_candles': 1.0,
+    'sr_path_horizon_max_candles': 4.0,
     'position_intelligence_emergency_confidence': 0.7,
     'unified_governance_loss_enabled': True,
     'unified_governance_loss_min_age_profile_a': 90.0,    # jul07: 30→90 (wolf-hunter: SL lógico primero)
@@ -922,12 +955,10 @@ _TRADE_TYPE_PARAM_MAP: Dict[str, Dict[str, str]] = {
 # fall below the aggressive baseline.
 _AGGRESSIVE_KELLY_FLOORS: Dict[str, float] = {
     'kelly_base_usdt': 150.0,
-    'kelly_max_usdt': 2500.0,
     'kelly_max_pct_liquid': 0.90,
     'kelly_dynamic_base_pct': 0.22,
     'kelly_conviction_max_pct': 0.22,
     'futures_kelly_base_usdt': 200.0,
-    'futures_kelly_max_usdt': 2500.0,
     'futures_kelly_max_pct_liquid': 0.90,
     'futures_kelly_cap_pct': 0.90,
 }
@@ -1024,15 +1055,12 @@ def get_staged_entry_regime_config(settings, regime: str) -> Dict[str, Any]:
     if settings is not None:
         enabled_global = bool(getattr(settings, 'staged_entry_enabled', True))
     merged['enabled'] = bool(merged.get('enabled', False)) and enabled_global
-    # Allow RANGE_SCALP to use a single confirmation for fast SR bounces.
-    if regime != "RANGE_SCALP":
-        merged['direction_required_confirmations'] = max(2, int(merged.get('direction_required_confirmations', 2) or 2))
-    elif bool(getattr(settings, 'range_scalp_short_first_enabled', False)):
-        merged['direction_confirmation_mode'] = 'enforced'
-        merged['direction_required_confirmations'] = min(max(1, int(merged.get('direction_required_confirmations', 1) or 1)), 1)
-        merged['direction_min_progress_bps'] = min(float(merged.get('direction_min_progress_bps', 1.0) or 1.0), 1.0)
+    # Immediate-entry policy: no regime accumulates temporal direction confirmations.
+    # Legacy DB overrides and short-first flags cannot reactivate the retired gate.
+    merged['direction_confirmation_mode'] = 'disabled'
+    merged['direction_required_confirmations'] = 0
     if regime == "RANGE_SCALP" and settings is not None:
-        rollout_mode = str(getattr(settings, "direction_volume_gate_rollout", "active_canary") or "active_canary").strip().lower()
+        rollout_mode = str(getattr(settings, "direction_volume_gate_rollout", "respect_regime_config") or "respect_regime_config").strip().lower()
         if rollout_mode == "active_canary":
             merged['direction_volume_gate_enabled'] = True
             merged['direction_volume_gate_canary_fraction'] = max(

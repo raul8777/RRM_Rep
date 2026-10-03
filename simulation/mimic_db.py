@@ -343,6 +343,7 @@ class SimulationDatabaseClient:
         use_indicator_weights: bool = True,
     ):
         self._tables: Dict[str, List[Dict[str, Any]]] = {}
+        self.audit_events: List[Dict[str, Any]] = []
         self._runtime_state: Dict[str, Any] = dict(runtime_state or {})
         # D19: Load historical indicator_weights for meta-learning
         self._indicator_weights: Dict[str, Any] = {}
@@ -443,6 +444,29 @@ class SimulationDatabaseClient:
                 self._runtime_state[key] = value
             return 1
         if "insert into trades_audit" in sql_lower:
+            values = tuple(params or ())
+            event = None
+            detail = None
+            symbol = None
+            trade_type = None
+            if len(values) >= 4:
+                symbol, trade_type, event, detail = values[:4]
+            elif len(values) == 1:
+                detail = values[0]
+                marker = "'"
+                parts = sql.split(marker)
+                if len(parts) >= 8:
+                    symbol, trade_type, event = parts[1], parts[3], parts[5]
+            try:
+                parsed_detail = json.loads(detail) if isinstance(detail, str) else detail
+            except Exception:
+                parsed_detail = detail
+            self.audit_events.append({
+                "symbol": symbol,
+                "trade_type": trade_type,
+                "event": event,
+                "detail": parsed_detail,
+            })
             return 1
         if "insert into" in sql_lower and "trading_runtime_state" in sql_lower:
             key = params[0] if params else None

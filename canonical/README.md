@@ -6,14 +6,37 @@ Este directorio contiene los **documentos canónicos** del sistema crypto-agent.
 
 | Archivo | Tipo | Dominio | Estado |
 |---------|------|---------|--------|
-| `calibracion_entradas-a20ab8-v3.md` | planning | Entradas, capital por modo, datos externos, maduración | active (2026-08-16) |
-| `calibrar-ciclo-vida-52fe5d.md` | canonical-memory | Lifecycle de posiciones (apertura → monitoreo → cierre); incluye event stream, reconciliación Binance, drawdown monitor y profit erosion detection | active (s120b) |
+| `calibracion_entradas-a20ab8-v3.md` | planning | Entradas, selector bilateral SR, renovación de evidencia, capital, routing y preflight atómico | active (s140, 2026-09-28) |
+| `calibrar-ciclo-vida-52fe5d.md` | canonical-memory | Lifecycle, concurrencia de cierres, belief TTL, hard-risk y preservación de tesis | active (s135, 2026-09-12) |
 | `calibrar_datos.md` | canonical-memory | Datos: inventario, calidad, linaje, contratos analíticos | active (s120b) |
 | `staging_env.md` | operations | Infraestructura, seguridad y paridad Kelly/capital de staging | active (2026-08-16) |
 | `analisis_inteligente_cierres.md` | canonical-protocol | AIC recurrente: prevención de entrada, protección lifecycle, configuración, contrafactual y verificación live | active (AIC-20260807-01) |
+| `analisis_ejecucion_cierres_slippage.md` | design/operations | Ejecución full-size, profundidad, VWAP, FOK/MARKET y trazabilidad expected-vs-real | active (s138, 2026-09-12) |
 | `analisis_suficiencia_datos_2026-08-05.md` | canonical-memory | Evaluación de suficiencia de datos para aperturas/lifecycle y brechas priorizadas | proposal |
 | `modelo_retencion_datos_2026-08-05.md` | canonical-memory | Retención/purga por capas para operación, calibración e investigación histórica | proposal |
 | `hard_risk_breakeven_s99d.md` | canonical-memory | Breakeven en hard-risk monitor — protección de ganancias cada 2s | active |
+| `analisis-shorts-direccion-rota-20260927.md` | canonical-memory | Diagnóstico y corrección de entradas: stops sub-ruido, ranking por EV neto, evidencia de breakout, cobertura por ruta y frescura de reintentos | active (s140, 2026-09-28) |
+| `plan_replay_bilateral_y_variables_entrada_20260928.md` | planning | Plan de replay bilateral + inventario de variables de entrada con revisión [DEVIN] de qué calibrar/congelar/excluir | active (2026-09-28) |
+| `plan-cierre-bypasses-entrada-20260929.md` | planning | Cierre de bypasses Entry: pausa DB en watcher, filtro QUBO real, revalidación completa de lado/venue, predictores por tesis, filtros Binance en contrato | pending-implementation (2026-09-29) |
+
+---
+
+## Entradas — corrección 2026-09-27 (`analisis-shorts-direccion-rota-20260927.md`)
+
+**Propósito:** registro del diagnóstico y corrección del defecto de dirección en entradas. Los SHORTs fallaban no por salida sino por entrada: stop contractual mediano de 0.28% (=0.26×ATR 1h) dentro del ruido de barra, ranking por `expected_return_on_risk` que premiaba riesgo artificialmente pequeño, y evidencia de breakout sin penalizar la tesis de reversión.
+
+**Mecanismos implementados (todos con flag reversible, default-off en producción, activos en staging):**
+
+- `range_scalp_min_stop_atr_multiple` — gate de piso de ruido: un stop más cercano que N×ATR no es ejecutable (fail-closed si falta ATR). Aplica al árbitro bilateral y a las rutas directas `open_short` (FUTURES_SHORT y SR Pool).
+- `range_scalp_ranking_mode="ev_net"` — el árbitro ordena por EV neto, ROR solo como desempate.
+- `range_scalp_rejection_breakout_penalty` — penaliza la probabilidad del contrato SHORT cuando `rejection_evidence.breakout_pressure=true`.
+- Resultados de sweep marcados con `entry_flags.generation` (`baseline` vs `v2_entry_fix`) para comparación A/B limpia.
+
+**Cobertura:** todos los lados e instrumentos del árbitro (SPOT LONG, FUTURES LONG, FUTURES SHORT, SPOT_MARGIN SHORT) + rutas directas de shorts futures. SPOT LONGs directos sin stop contractual a la entrada quedan fuera por diseño — su gestión es lifecycle.
+
+**Referencia completa:** `analisis-shorts-direccion-rota-20260927.md` — datos observados, correcciones del diagnóstico inicial, respuesta de Copilot, gaps cerrados y plan de validación dirigida.
+
+**Actualización s140:** la evidencia de una candidata reutilizada debe renovarse antes de cada intento. El snapshot persistido sirve para linaje, pero `staged_entry.py` y los ejecutores deben consumir precio/features/predicción/contrato frescos; ver `calibracion_entradas-a20ab8-v3.md` y `SYSTEM_REFERENCE.md`.
 
 ---
 
@@ -27,7 +50,10 @@ Este directorio contiene los **documentos canónicos** del sistema crypto-agent.
 
 - **Apertura canónica (arquitectura):** el documento inicia con diagrama Mermaid del pipeline de calibración de entrada y tabla de responsabilidades por módulo (`market_regime`, `run_trades`, `autonomous_signals`, `entry_profile_gate`, `staged_entry`, `portfolio_selector`, `pnl_service`, `analysis_cycle`, `external_data_client`, `technical_graph_analyst`, `app`).
 
-- **Estado del sistema (s94–s101):** Historial cronológico de cambios aplicados (Directional Arbiter, Hard-Risk Monitor, SR features, modelo universal, routing de capital con retry acotado y observabilidad completa de espera/ejecución). Cada estado incluye cambios, validación y rollback.
+- **Estado vigente s135:** selector bilateral SR por retorno neto esperado sobre riesgo; soporte compara bounce LONG/breakdown SHORT y resistencia rejection SHORT/breakout LONG; fast-path y ciclo normal re-arbitran con precio fresco; confirmación temporal retirada; quality model RANGE_SCALP en `shadow` hasta instalar artefacto.
+- **Reparación s136:** circuit breaker fast-path recuperable y limitado a fallos técnicos; validación RANGE_SCALP por `thesis_type` para no aplicar range-reversion a breakout/breakdown.
+- **Contrato s137:** `ExecutableOpportunity` unifica arbitraje/ejecución, costes y max-loss; rejection no confirmado se abstiene, sizing no puede superar el lock y SR Pool directo queda desactivado.
+- **Histórico s94–s134:** cambios anteriores de arbiter, hard-risk, SR, modelos, routing y lifecycle se conservan como trazabilidad; s135 tiene precedencia cuando exista conflicto.
 - **§1 Decisiones del usuario:** Capital modo-único, PRESERVATION más ofensivo, datos de terceros selectivos, maduración absoluta.
 - **§2 Asignación de capital por modo:** SPOT_BULL (80-95%), RANGE_SCALP (70-90%), PRESERVATION (30-60%), FUTURES_SHORT (60-90%). Reglas duras: no cerrar posiciones por cambio de modo, reserva de comisiones intacta, leverage máx 2x.
 - **§3 Datos de terceros:** Evaluación de 8 fuentes (CoinGlass ✅, Usenami ✅ free tier, MMT ✅ fase 2, resto descartado). Fase 1: funding rate, OI, liquidation clusters, L/S ratio, ETF flows.
@@ -39,7 +65,7 @@ Este directorio contiene los **documentos canónicos** del sistema crypto-agent.
 - **§13 Discovery agnóstico:** `opportunity_shadow` en pair_screener para observación sin ejecución.
 - **§14 Estado C7-C10 completado:** PRESERVATION ofensivo, paralelización del análisis, datos externos fase 1 y analista técnico gráfico.
 
-**Rollback:** `PATCH /config/kelly {"range_scalp_short_first_enabled": false, "hard_risk_monitor_enabled": false}`
+**Rollback de entrada s135:** `PATCH /config/kelly {"directional_policy_mode": "disabled"}` restaura el executor legacy; no desactivar `hard_risk_monitor`. `short_priority` no es rollback válido porque está neutralizado como alias bilateral.
 
 **Actualización reciente (s115, ago 3 2026, revalidación de tesis S/R + regla de visibilidad shadow):** encontrada la causa raíz de `币安人生USDT`/`SYNUSDT` y 4 casos más en 48h — `_staged_range_scalp_decision` ejecutaba SHORT/LONG sin volver a revisar si el precio estaba realmente cerca del S/R de su propia tesis. Simulado contra 85 operaciones reales de 48h antes de implementar: con umbral 5%, el PnL neto habría sido +$31.28 en vez de -$180.92 (sacrificando 11 ganancias reales de +$122.18 para evitar 16 pérdidas de -$334.38). Implementado activo (no shadow) y simétrico para SHORT/LONG. Nueva regla dura: todo mecanismo shadow debe tener visibilidad en `/metrics/shadow-readiness` — aplicada retroactivamente a los mecanismos shadow de s113. 571/574 tests pasan. Ver "Estado del sistema — ago 3 2026 — s115".
 

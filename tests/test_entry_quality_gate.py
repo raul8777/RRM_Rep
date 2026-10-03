@@ -139,6 +139,25 @@ def test_range_scalp_rejects_not_near_lower_band():
     assert "RANGE_BB" in reason
 
 
+def test_range_scalp_resistance_breakout_does_not_require_lower_band():
+    metadata = _meta(
+        rsi=45.0,
+        vol_spike=1.2,
+        bb_position=0.80,
+        bb_lower_touch=False,
+        bb_near_lower=False,
+        trend_4h="FLAT",
+    )
+    metadata["TESTUSDT"]["thesis_type"] = "LONG_RESISTANCE_BREAKOUT"
+
+    ok, reason = _check_entry_quality(
+        "TESTUSDT", metadata, SETTINGS, "RANGE_SCALP", "B"
+    )
+
+    assert ok is True
+    assert reason == "OK"
+
+
 def test_range_scalp_rejects_low_volume():
     ok, reason = _check_entry_quality(
         "TESTUSDT",
@@ -355,6 +374,8 @@ def test_quality_model_artifact_loads():
     entry_profile_gate._model_load_attempted = False
     model = entry_profile_gate._load_quality_score_model()
 
+    if model is None:
+        pytest.skip("optional quality-score model artifact is not installed")
     assert model is not None
     assert hasattr(model, "predict")
 
@@ -396,7 +417,6 @@ def test_universal_thresholds_without_model_use_legacy_fallback_thresholds(monke
     monkeypatch.setattr(entry_profile_gate, "load_thresholds", lambda path=None: universal_like)
     monkeypatch.setattr(entry_profile_gate, "_universal_model_cache", None)
     monkeypatch.setattr(entry_profile_gate, "_universal_model_attempted", True)
-    monkeypatch.setattr(entry_profile_gate, "_universal_missing_warned", False)
 
     meta = {
         "signal": "BUY",
@@ -414,6 +434,24 @@ def test_universal_thresholds_without_model_use_legacy_fallback_thresholds(monke
         symbol="TESTUSDT",
     )
 
-    assert info["score_source"] == "fallback_universal_model_missing"
+    assert info["thresholds_source"] == "legacy_fallback_model_unavailable"
+    assert info["score_source"] in {"fallback", "model"}
     assert info["thresholds"]["C"] == -1.0
     assert profile in {"A", "B", "C", None}
+
+
+def test_universal_model_unscorable_signal_switches_to_legacy_thresholds(monkeypatch):
+    import entry_profile_gate
+
+    monkeypatch.setattr(entry_profile_gate, "load_thresholds", lambda path=None: {
+        "meta": {"version": "universal_test"},
+        "RANGE_SCALP": {"A": 0.8, "B": 0.7, "C": 0.6},
+    })
+    monkeypatch.setattr(entry_profile_gate, "_universal_model_cache", {"model": object()})
+    monkeypatch.setattr(entry_profile_gate, "_universal_model_attempted", True)
+    monkeypatch.setattr(entry_profile_gate, "_universal_quality_score", lambda *args: (None, [], None))
+
+    _, info = entry_profile_gate.classify({}, "RANGE_SCALP", symbol="TESTUSDT")
+
+    assert info["thresholds_source"] == "legacy_fallback_unscorable_signal"
+    assert info["thresholds"]["C"] == -1.0

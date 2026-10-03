@@ -265,7 +265,7 @@ def test_close_short_persists_real_fill_price_and_pnl():
     fc._get_step_size = MagicMock(return_value=1.0)
     fc._get_position_qty_real = MagicMock(return_value=0.0)
     fc._get_realized_pnl_from_trades = MagicMock(return_value={
-        "exit_price": 0.1167902,
+        "exit_price": 0.1172504,
         "pnl": 119.86,
         "pnl_accounting_mode": "binance_user_trade_verified",
         "realized_pnl": 128.41,
@@ -277,7 +277,7 @@ def test_close_short_persists_real_fill_price_and_pnl():
     result = fc.close_short("DIAUSDT", reason="manual_close")
 
     assert result is not None
-    assert saved["exit_price"] == 0.1167902
+    assert saved["exit_price"] == 0.1172504
     assert saved["pnl"] == 119.86
     assert saved["reason"] == "manual_close"
     assert pos.closed is True

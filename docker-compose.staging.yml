@@ -66,21 +66,49 @@ services:
       STAGING_MODE: true
 
       # ── ONLY execution-safety exceptions vs production ──────────────────────
-      DRY_RUN: "true"
-      ALLOW_REAL_TRADING: "false"
-      # DRY_RUN-only sizing simulation (no-op in production; required here so
-      # Kelly sizing has a capital baseline to size against without real orders)
+      # Staging trades REAL orders against Binance TESTNET (fake money, real
+      # execution mechanics). DRY_RUN=false + ALLOW_REAL_TRADING=true intentionally.
+      DRY_RUN: "false"
+      ALLOW_REAL_TRADING: "true"
+      # Staging/testnet anti-churn overrides: do not auto-close DB ghosts on testnet
+      # snapshot lag; require 5 confirmation cycles and 10 min position age.
+      SPOT_TRUTH_AUTOFIX_ENABLED: "false"
+      SPOT_GHOST_MIN_AGE_MINUTES: "10.0"
+      SPOT_RECONCILE_MISSING_CONFIRM_CYCLES: "5"
+      # These simulated-capital controls are consumed only when DRY_RUN=true.
+      # Active Testnet orders (DRY_RUN=false) size from the actual sandbox wallet;
+      # these values do not cap active order size. Use active risk/position caps
+      # for a bounded Testnet canary, never a Production wallet snapshot.
       DRY_RUN_SIMULATED_CAPITAL_USDT: "2611"
       DRY_RUN_MAX_POSITION_NOTIONAL_USDT: "5000"
       DRY_RUN_FUTURES_MARGIN_FRACTION: "1.0"
-      # config.py resolves .env.staging.example as a pydantic dotenv fallback
-      # whenever APP_ENV=staging (see config.py::_resolve_env_file). That file
-      # still contains SR_POOL_ENABLED=true from an earlier iteration of this
-      # stack; explicit OS env below always wins over the dotenv file, so these
-      # force parity with production's config.py defaults (False/False/False).
-      SR_POOL_ENABLED: "false"
+      # Canonical staging decisions execute fully; testnet remains the execution
+      # safety boundary and must not disable or shadow decision gates.
+      SR_POOL_ENABLED: "true"
       SR_POOL_TRADE_ENABLED: "false"
-      SR_POOL_INTRA_CYCLE_ENABLED: "false"
+      SR_POOL_INTRA_CYCLE_ENABLED: "true"
+      SR_INVALIDATION_SHADOW_MODE: "false"
+      RANGE_SCALP_QUALITY_MODEL_MODE: "shadow"
+      RANGE_REVERSION_PREDICTOR_MODE: "enforced"
+      DIRECTIONAL_POLICY_MODE: "active"
+      DIRECTION_VOLUME_GATE_ROLLOUT: "respect_regime_config"
+      SR_ATTEMPT_SEQUENCE_MODE: "active"
+      REALTIME_OPEN_RERANK_MODE: "active"
+      ANTI_MONOPOLY_DECAY_MODE: "active"
+      SR_POOL_ATTEMPT_MEMORY_MODE: "active"
+      OPPORTUNITY_SHADOW_MODE: "active"
+      UG_LOSS_POLICY_MODE: "active"
+      # Binance Spot Demo/Testnet exposes /api only; isolated Margin requires
+      # /sapi and must remain disabled in this fake-money environment.
+      SPOT_MARGIN_SHORT_ENABLED: "false"
+      SPOT_MARGIN_ISOLATED_ONLY: "true"
+      RANGE_SCALP_SHORT_INSTRUMENT: "spot_margin"
+      # Entry-quality fixes (2026-09-27): stop must clear the ATR noise band,
+      # arbitration ranks by net EV (not inflated return-on-risk), and breakout
+      # pressure penalizes the fade thesis.
+      RANGE_SCALP_MIN_STOP_ATR_MULTIPLE: "1.5"
+      RANGE_SCALP_RANKING_MODE: "ev_net"
+      RANGE_SCALP_REJECTION_BREAKOUT_PENALTY: "0.5"
       # Same dotenv-fallback issue as SR_POOL_*: production resolves these from
       # the shared .env file (not from docker-compose.yml's explicit env list),
       # so they never showed up in a plain `docker exec printenv` diff. Found by
@@ -95,7 +123,10 @@ services:
       #    (docker-compose.yml + docker-compose.override.yml + .env, dumped
       #    live from crypto-agent-app on 2026-08-16). Do not let this drift —
       #    re-diff against `docker exec crypto-agent-app printenv` if in doubt.
-      BINANCE_USE_TESTNET: "false"
+      BINANCE_USE_TESTNET: "true"
+      # Authenticated testnet websocket rejects these REST-valid credentials;
+      # retain canonical polling instead of spawning an unhandled reconnect loop.
+      BINANCE_EVENT_STREAM_ENABLED: "false"
       AGENT_MODE: "auto"
       PORTFOLIO_ALLOCATION_PCT: "100.0"
       MIN_PAIR_CONFIDENCE_SCORE: "50.0"
@@ -125,6 +156,11 @@ services:
       FUTURES_KELLY_CAP_PCT: "0.90"
       FUTURES_CAPITAL_BRIDGE_ENABLED: "true"
       FUTURES_CAPITAL_BRIDGE_MIN_TRANSFER: "10.0"
+      PORTFOLIO_PROACTIVE_LIQUIDITY_ENABLED: "true"
+      PORTFOLIO_CROSS_WALLET_TRANSFER_ENABLED: "false"
+      PORTFOLIO_LIQUIDITY_BUFFER_USDT: "10.0"
+      PORTFOLIO_LIQUIDITY_MAX_CONVERSION_SLIPPAGE_BPS: "25.0"
+      PORTFOLIO_LIQUIDITY_TRANSFER_COOLDOWN_MINUTES: "30.0"
       USE_UNIFIED_PORTFOLIO_MANAGER: "true"
       FUTURES_KELLY_BASE_USDT: "200.0"
       FUTURES_KELLY_MAX_USDT: "2500.0"
@@ -215,14 +251,15 @@ services:
       SCREENER_FUTURES_MIN_VOL: "10000000"
       SCREENER_MAX_PAIRS: "100"
       SCREENER_MAX_FUTURES_PAIRS: "100"
-      RANGE_SCALP_SHORT_FIRST_ENABLED: "true"
-      RANGE_SCALP_SHORT_PRIORITY_BONUS: "0.05"
-      RANGE_SCALP_LONG_SUPERIORITY_DELTA: "0.10"
+      RANGE_SCALP_SHORT_FIRST_ENABLED: "false"
+      RANGE_SCALP_SHORT_PRIORITY_BONUS: "0.0"
+      RANGE_SCALP_LONG_SUPERIORITY_DELTA: "0.0"
       RANGE_SCALP_DIRECTION_MIN_PROBABILITY: "0.55"
       HARD_RISK_MONITOR_ENABLED: "true"
       HARD_RISK_MONITOR_INTERVAL_SECONDS: "2"
     ports:
       - "8001:8001"
+      - "8002:8002"
     depends_on:
       postgres_stg:
         condition: service_healthy
@@ -232,7 +269,7 @@ services:
       - .:/app
       - ./frontend:/app/frontend
     restart: unless-stopped
-    command: bash -lc "touch /tmp/empty.env && uvicorn app:app --host 0.0.0.0 --port 8001"
+    command: bash -lc "touch /tmp/empty.env && uvicorn dashboard_fast:app --host 0.0.0.0 --port 8002 & exec uvicorn app:app --host 0.0.0.0 --port 8001"
 
 volumes:
   staging_postgres_data:

@@ -32,6 +32,7 @@ class Components:
     position_manager: object = None
     portfolio_manager: object = None
     futures_client: object = None
+    spot_margin_client: object = None
     orchestrator: object = None
     settings: object = None
 
@@ -44,6 +45,7 @@ def build_components(
     position_manager=None,
     portfolio_manager=None,
     futures_client=None,
+    spot_margin_client=None,
     orchestrator=None,
 ) -> Components:
     """Build a Components instance, allowing injected implementations.
@@ -69,6 +71,7 @@ def build_components(
     c.position_manager = position_manager
     c.portfolio_manager = portfolio_manager
     c.futures_client = futures_client
+    c.spot_margin_client = spot_margin_client
     c.orchestrator = orchestrator
 
     # ── Binance client (if not injected) ─────────────────────────────────────
