@@ -7,6 +7,7 @@ orders against SimulationBinanceClient / SimulationFuturesClient.
 
 from __future__ import annotations
 
+import bisect
 import json
 import time
 from collections import defaultdict
@@ -259,6 +260,21 @@ def _predicted_pnl_pct(bars: List[Dict[str, Any]], atr: float, horizon: int = 4)
     # Mild mean reversion of recent momentum plus ATR-based expected move, net of rough fees.
     expected_move = -momentum * 0.3 + (atr / current) * 0.5
     return expected_move * 100 - 0.4
+
+
+def _slice_feed_to_time(feed: Dict[str, List[Dict[str, Any]]], current_ts: float) -> Dict[str, List[Dict[str, Any]]]:
+    """Slice feed to only include bars with open_time <= current_ts.
+
+    Uses bisect for O(log n) per symbol. Returns a view (list slices) without copying bar dicts.
+    """
+    sliced = {}
+    for symbol, bars in feed.items():
+        if not bars:
+            sliced[symbol] = []
+            continue
+        idx = bisect.bisect_right(bars, current_ts, key=lambda b: b["open_time"])
+        sliced[symbol] = bars[:idx]
+    return sliced
 
 
 def _build_analyses(
@@ -694,7 +710,10 @@ def run_lifecycle_simulation(
         runner._invalidate_caches()
         runner.news_client.update_for_date(current)
         try:
-            analyses = _build_analyses(runner.symbols, runner.price_feed, regime=config.regime)
+            # Slice feed to current simulation time so indicators use correct data
+            current_ts = current.timestamp()
+            sliced_feed = _slice_feed_to_time(runner.price_feed, current_ts)
+            analyses = _build_analyses(runner.symbols, sliced_feed, regime=config.regime)
             # Inyectar señales peak cuyo peak_start_ts cae en este ciclo o antes
             while (
                 peak_schedule_idx < len(peak_entry_schedule)
@@ -788,7 +807,7 @@ def _spot_bull_config_a() -> LifecycleConfig:
         exit_policy=ExitPolicy(
             regime="SPOT_BULL",
             profile="A",
-            hard_sl_atr_mult=4.5,
+            hard_sl_atr_mult=5.5,
             hard_tp_atr_mult=3.5,
             trailing_activation_pct=0.02,
             trailing_atr_mult=1.5,
@@ -834,7 +853,7 @@ def _spot_bull_config_b() -> LifecycleConfig:
         exit_policy=ExitPolicy(
             regime="SPOT_BULL",
             profile="B",
-            hard_sl_atr_mult=4.5,
+            hard_sl_atr_mult=5.5,
             hard_tp_atr_mult=3.5,
             trailing_activation_pct=0.02,
             trailing_atr_mult=1.5,
@@ -880,7 +899,7 @@ def _spot_bull_config_c() -> LifecycleConfig:
         exit_policy=ExitPolicy(
             regime="SPOT_BULL",
             profile="C",
-            hard_sl_atr_mult=4.5,
+            hard_sl_atr_mult=5.5,
             hard_tp_atr_mult=3.5,
             trailing_activation_pct=0.02,
             trailing_atr_mult=1.5,
@@ -938,7 +957,7 @@ def spot_bull_config_from_params(params: Dict[str, Any], profile: str = "A") -> 
         exit_policy=ExitPolicy(
             regime="SPOT_BULL",
             profile=profile,
-            hard_sl_atr_mult=float(params.get("hard_sl_atr_mult", 4.5)),
+            hard_sl_atr_mult=float(params.get("hard_sl_atr_mult", 5.5)),
             hard_tp_atr_mult=float(params.get("hard_tp_atr_mult", 3.5)),
             trailing_activation_pct=0.02,
             trailing_atr_mult=1.5,

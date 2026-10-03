@@ -92,7 +92,7 @@ _PARAM_DEFAULTS: Dict[str, Any] = {
     'entry_quality_min_vol_spike': 1.2,  # concentrated: volumen confirma dirección
     'entry_quality_min_strength': 0.40,
     'entry_quality_max_failures': 0,  # concentrated: todos los gates deben pasar
-    'entry_quality_vol_spike_min_spot_bull': 0.85,
+    'entry_quality_vol_spike_min_spot_bull': 0.70,
     'entry_quality_vol_spike_floor_spot_bull': 0.70,
     'entry_quality_rsi_min_spot_bull': 33.0,
     'entry_quality_rsi_max_spot_bull': 68.0,

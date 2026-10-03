@@ -62,6 +62,7 @@ from spot_correlation import get_correlation_matrix as _get_spot_correlation_mat
 from futures_correlation import get_correlation_matrix as _get_futures_correlation_matrix
 from support_resistance import compute_sr_features as _compute_sr_features
 from market_structure import build_snapshot as _build_lifecycle_structure_snapshot, evaluate as _evaluate_lifecycle_structure
+from position_manager import _DEFAULT_EXCLUDED_BALANCE_ASSETS as _EXCLUDED_BALANCE_ASSETS
 
 
 # Symbols confirmed invalid on Binance (delisted) — skip without API call
@@ -110,6 +111,29 @@ _CAPITAL_ROUTING_MAX_RETRIES_DEFAULT: int = 960
 # consumers (BTC trend check, futures inject, pnl_service) share one instance
 # and benefit from the per-symbol signal cache without redundant re-instantiation.
 _asg_cycle_instance: "AutonomousSignalGenerator" = None
+
+
+def _apply_dry_run_balance_envelope(client: BinanceClient, settings) -> None:
+    """
+    When running in dry-run mode with a configured simulated capital, force
+    BinanceClient.get_account_balance() to return only the simulated USDT so
+    staging does not size positions against the real testnet/demo balance.
+    """
+    _enabled = bool(getattr(settings, 'dry_run', False))
+    _sim_cap = float(getattr(settings, 'dry_run_simulated_capital_usdt', 0.0) or 0.0)
+    if not _enabled or _sim_cap <= 0:
+        return
+    _orig = getattr(client, 'get_account_balance', None)
+    if _orig is None or getattr(_orig, '_sim_envelope_applied', False):
+        return
+
+    def _wrapped_balance(*args, **kwargs):
+        return {"USDT": float(_sim_cap)}
+
+    _wrapped_balance._sim_envelope_applied = True
+    _wrapped_balance._orig_get_account_balance = _orig
+    client.get_account_balance = _wrapped_balance
+    print(f"[DryRun] Simulated capital envelope applied: USDT={_sim_cap:.2f}")
 _asg_cycle_id: int = 0  # incremented each cycle to know when to reset
 
 # Whipsaw protection: count consecutive cycles where regime is NOT a short-friendly mode.
@@ -3641,12 +3665,19 @@ def _check_liquidity_and_slippage(symbol: str, vol_24h_usdt: float,
     """
     if not getattr(settings, 'liquidity_filter_enabled', True):
         return True, ""
-    if str(regime_mode or "").upper() == "RANGE_SCALP":
-        min_vol = getattr(settings, 'min_liquidity_vol_usdt_range_scalp', 1_000_000.0)
-    else:
-        min_vol = getattr(settings, 'min_liquidity_vol_usdt', 3_000_000.0)
-    if vol_24h_usdt > 0 and vol_24h_usdt < min_vol:
-        return False, f"BAJA_LIQUIDEZ vol24h=${vol_24h_usdt/1e6:.1f}M < ${min_vol/1e6:.0f}M"
+    # Binance Testnet's own 24h ticker volume is not a real liquidity signal
+    # (near-zero for almost every altcoin, unrelated to real market depth) —
+    # this check only means something against mainnet volume data. Skip it
+    # when running against testnet so real-order staging validation isn't
+    # blocked by a number that carries no real risk information. Production
+    # always has binance_use_testnet=False, so this never relaxes production.
+    if not getattr(settings, 'binance_use_testnet', False):
+        if str(regime_mode or "").upper() == "RANGE_SCALP":
+            min_vol = getattr(settings, 'min_liquidity_vol_usdt_range_scalp', 1_000_000.0)
+        else:
+            min_vol = getattr(settings, 'min_liquidity_vol_usdt', 3_000_000.0)
+        if vol_24h_usdt > 0 and vol_24h_usdt < min_vol:
+            return False, f"BAJA_LIQUIDEZ vol24h=${vol_24h_usdt/1e6:.1f}M < ${min_vol/1e6:.0f}M"
     max_ratio = getattr(settings, 'max_slippage_tp_ratio', 0.25)
     est_spread_pct = 0.0005  # 0.05% conservative spread for Binance spot
     if tp_pct > 0 and (est_spread_pct / tp_pct) > max_ratio:
@@ -6838,6 +6869,8 @@ def _sell_holdings_not_in_top(client: BinanceClient, settings, balances: Dict[st
 
         symbol = f"{asset.upper()}USDT"
         if symbol in _INVALID_SYMBOLS:
+            continue
+        if asset.upper() in _EXCLUDED_BALANCE_ASSETS:
             continue
 
         # Keep BNB out of orphan cleanup when commission discount is active.
@@ -11606,6 +11639,9 @@ def execute_once(monitor_only: bool = False, components=None):
     news_client = comp.news_client
     position_manager = comp.position_manager
     portfolio_manager = comp.portfolio_manager
+
+    # In dry-run, cap the reported account balance to the configured simulated capital.
+    _apply_dry_run_balance_envelope(client, settings)
 
     # ── C3: Inicializar referencia DB para cooldowns persistentes ───────────────
     if _db_client_ref is None and hasattr(comp, 'db_client') and comp.db_client:

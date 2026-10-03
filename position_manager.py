@@ -6,6 +6,7 @@ Manages open and closed trades, tracks PnL, and handles automatic position closu
 
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -46,6 +47,24 @@ def _json_safe(value: Any) -> Any:
 
 # Treat residual quantities below this threshold as zero / full close.
 _QTY_EPS = 1e-9
+
+# Assets that should never be imported as SPOT positions from Binance balance sync.
+# Includes fiat/stablecoin tokens and testnet/demo "dust" assets that can appear
+# in a demo wallet but are not tradeable candidates.
+_DEFAULT_EXCLUDED_BALANCE_ASSETS: set = {
+    # Stablecoins / fiat-like tokens
+    "USDT", "USDC", "BUSD", "TUSD", "FDUSD", "DAI", "USDD", "GUSD", "UUSD", "USD1",
+    "PAXG", "XAUT", "RLUSD", "SPCXB",
+    # Fiat testnet placeholders / non-tradeable symbols
+    "TRY", "ZAR", "UAH", "BRL", "ARS", "JPY", "MXN", "COP", "IDR", "KZT", "AED", "USD",
+    # Common demo-account "dust" assets with no real liquidity
+    "BTTC", "WIN", "JST", "IQ", "SPELL", "FLOKI", "PEPE", "DOGS", "HMSTR",
+    "1000SATS", "BONK", "XEC", "LUNC", "SHIB",
+    # Illiquid/low-cap tokens observed in staging demo wallet
+    "PYR", "HFT", "PIVX", "VIC", "VANRY", "ACX",
+    # Known invalid/non-tradeable assets
+    "456", "这是测试币",
+}
 
 
 @dataclass
@@ -533,7 +552,24 @@ class PositionManager:
         """
         # Default $5 aligns with user-defined dust threshold; anything below is not imported.
         min_value_usdt = float(min_value_usdt or 5.0)
-        EXCLUDED_ASSETS = {"USDT", "BTTC", "WIN", "JST", "IQ"}
+        # In dry-run / spot-margin-simulation mode we do NOT import real balances as
+        # positions.  Simulation uses its own capital envelope and synthetic positions.
+        # Check both settings and the Binance client / env because staging may have
+        # the environment variable set while the Settings object still reflects .env defaults.
+        _env_dry_run = str(os.environ.get("DRY_RUN", "false")).lower() in ("1", "true", "yes")
+        _client_dry_run = bool(getattr(binance_client, 'dry_run', False))
+        if (
+            getattr(settings, 'dry_run', False)
+            or getattr(settings, 'spot_margin_simulation_enabled', False)
+            or _client_dry_run
+            or _env_dry_run
+        ):
+            logger.info("sync_with_exchange_balance skipped: dry_run/spot_margin_simulation enabled")
+            return []
+        _excluded = set(_DEFAULT_EXCLUDED_BALANCE_ASSETS)
+        _cfg_excluded = get_param(settings, 'spot_balance_sync_excluded_assets')
+        if isinstance(_cfg_excluded, (list, tuple, set)):
+            _excluded.update(str(a).upper() for a in _cfg_excluded)
         _keep_bnb_for_commission = bool(get_param(settings, 'use_bnb_for_commission')) or bool(
             get_param(settings, 'auto_bnb_for_commission')
         )
@@ -546,7 +582,7 @@ class PositionManager:
             for asset, amount in balances.items():
                 if asset == "BNB" and _keep_bnb_for_commission:
                     continue
-                if asset in EXCLUDED_ASSETS or amount <= 0:
+                if asset in _excluded or amount <= 0:
                     continue
                 symbol = f"{asset}USDT"
                 if symbol in existing:

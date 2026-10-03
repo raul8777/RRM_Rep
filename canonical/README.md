@@ -9,7 +9,7 @@ Este directorio contiene los **documentos canónicos** del sistema crypto-agent.
 | `calibracion_entradas-a20ab8-v3.md` | planning | Entradas, capital por modo, datos externos, maduración | active (2026-08-16) |
 | `calibrar-ciclo-vida-52fe5d.md` | canonical-memory | Lifecycle de posiciones (apertura → monitoreo → cierre); incluye event stream, reconciliación Binance, drawdown monitor y profit erosion detection | active (s120b) |
 | `calibrar_datos.md` | canonical-memory | Datos: inventario, calidad, linaje, contratos analíticos | active (s120b) |
-| `staging_env.md` | operations | Infraestructura, seguridad y paridad Kelly/capital de staging | active (2026-08-16) |
+| `staging_env.md` | operations | Infraestructura, seguridad, endpoints Binance Demo/Testnet y paridad Kelly/capital de staging | active (2026-08-28) |
 | `analisis_inteligente_cierres.md` | canonical-protocol | AIC recurrente: prevención de entrada, protección lifecycle, configuración, contrafactual y verificación live | active (AIC-20260807-01) |
 | `analisis_suficiencia_datos_2026-08-05.md` | canonical-memory | Evaluación de suficiencia de datos para aperturas/lifecycle y brechas priorizadas | proposal |
 | `modelo_retencion_datos_2026-08-05.md` | canonical-memory | Retención/purga por capas para operación, calibración e investigación histórica | proposal |

@@ -5,7 +5,49 @@ status: active
 created_at: 2026-07-22
 merged_from: Calibracion_Entradas-a20ab8-v2.md
 supersedes: Calibracion_Entradas-a20ab8-v2.md
-updated_at: 2026-08-16
+updated_at: 2026-08-28 (sweep multi-régimen + staging Demo Mode)
+---
+
+## Actualización (2026-08-28) — Sweep multi-régimen: ganador Config B, SHORTs inválidos en SPOT_BULL
+
+### Contexto
+
+Se ejecutó un sweep de 5 configuraciones × 8 ventanas temporales = 40 simulaciones para calibrar la combinación de SL/TP, umbral de volumen y habilitación de SHORTs en SPOT_BULL.
+
+### Resultado
+
+| Config | Descripción | Ventanas positivas | PnL total | MaxDD |
+|---|---|---:|---:|---:|
+| A | Baseline | 0/8 | -$401 | 6.0% |
+| **B** | **Quick wins SL=5.5, vol=0.70** | **3/8** | **-$381** | **5.8%** |
+| C | con SHORTs SPOT_BULL | 0/8 | -$3,806 | 24.7% |
+| D | con SHORTs SPOT_BULL | 0/8 | -$3,806 | 24.7% |
+| E | con SHORTs SPOT_BULL | 0/8 | -$3,806 | 24.7% |
+
+### Decisiones canónicas
+
+- Ganador por default: **Config B** (`SL hard=5.5 ATR`, `vol spike min=0.70`, quick wins).
+- **SHORTs en SPOT_BULL quedan deshabilitados en producción**. Los SHORTs defensivos en régimen alcista son catastróficos en todas las ventanas probadas.
+- Detección de régimen dinámico no pudo validarse: las 8 ventanas canónicas fueron alcistas (BTC 7d% > -2%). Falta evidencia en mercado bajista/lateral.
+
+### Bugs corregidos en el sweep
+
+1. `run_multiregime_sweep.py`: conteo de trades (`entries_executed` → `len(entries)`).
+2. `simulation/mimic_lifecycle_adapter.py`: `expected_pnl` para señales SELL se niega correctamente para SHORTs (la ganancia de un SHORT es cuando el precio cae).
+3. `lifecycle/signal.py::_regime_alignment`: 0.0 → 0.4 para SHORT en SPOT_BULL.
+4. `run_multiregime_sweep.py`: `shorts_enabled`/`gates_enhanced` agregados al diccionario `params`.
+
+### Archivos modificados
+
+- `s:\Tools\AI\crypto-agent-staging\simulation\mimic_lifecycle_adapter.py`
+- `s:\Tools\AI\crypto-agent-staging\lifecycle\signal.py`
+- `s:\Tools\AI\crypto-agent-staging\run_multiregime_sweep.py`
+
+### Pendiente
+
+- Requerir ventanas bajistas/laterales para validar el switch de régimen.
+- Re-simular Config B con datos más recuentes antes de promover de staging a producción.
+
 ---
 
 ## Arquitectura canónica de calibración de entrada
@@ -62,6 +104,17 @@ produciendo un doble recorte antes de abrir.
 
 La operación, recertificación de capital y comandos de verificación viven en
 `canonical/staging_env.md`.
+
+### Actualización operativa (s130, 2026-08-16) - SR Discovery: pool S/R como fuente propia de candidatos
+
+Se rediseñó el pool S/R (`sr_pool_scanner.py`) de simple modificador de fricción a fuente propia de `ready_candidates`, en 4 capas activadas vía hot-config en staging (`sr_discovery_source_enabled=true`):
+
+- **Capa 1**: `build_discovery_candidates` construye, para cada símbolo cerca de zona S/R, un candidato completo (régimen, `trade_type`, `expected_side`, niveles) cubriendo las 8 combinaciones régimen × mercado × lado, marcado con `data.discovery_source = "sr_discovery"`.
+- **Capa 2**: `candidate_scoring.py` (nuevo módulo) asigna `expected_pnl` geométrico, `success_probability` empírico y `strength` a candidatos sin predictor ML. El valor geométrico se guarda como `sr_geometric_expected_pnl_pct` y solo se expone a `entry_profile_gate`/`entry_decision` fuera de RANGE_SCALP, porque `expected_pnl`/`expected_pnl_pct` alimentan `_range_scalp_score()` con semántica **contraria** (forecast ML de corto plazo, no distancia geométrica) — inyectarlo ahí penalizaba los mejores setups. `entry_decision.evaluate()` requiere `meta["entry_decision_prediction"]` con `target_price`/`stop_price` propios; sin poblarlo, todo candidato SR quedaba `DIRECTION_TARGET_MISSING`.
+- **Capa 3**: `direction_geometry_anchor_enabled` (antes opt-in solo RANGE_SCALP) se activa automáticamente para cualquier candidato `discovery_source=sr_discovery` en cualquier régimen (`staged_entry.py::_has_sr_geometry`), sin tocar el default por régimen ni los bps fijos ya calibrados/testeados para candidatos `autonomous_signals`.
+- **Capa 4**: TTL adaptativo (`staged_entry.py::_adaptive_ttl_minutes`) deriva soft/hard TTL (p60/p90) de la distribución histórica real de tiempo-a-confirmación por (`regime_mode`, `discovery_source`), con fallback a `staged_hold_soft_ttl_min`/`staged_hold_hard_ttl_min` fijos si hay <30 observaciones. Flag: `staged_hold_adaptive_ttl_enabled`.
+
+Verificado end-to-end en staging con ciclos reales de RANGE_SCALP (24 candidatos SR observados → 12 staged → 5 progresando por la FSM de confirmación direccional con target/stop geométricos reales). Suite completa 466 passed (7 fallos preexistentes no relacionados). Detalle completo en `SYSTEM_REFERENCE.md` (s130) y `rules.md` §6. Solo activo en staging; pendiente de evidencia de conversión/PnL antes de promover a producción.
 
 ### Actualización operativa (s121, 2026-08-07) - calibración SR ganadora aplicada
 

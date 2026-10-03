@@ -756,21 +756,74 @@ class AutonomousSignalGenerator:
             f"{[(s['symbol'], s['signal'], round(s['strength'],2), s.get('higher_tf_trend','?')) for s in all_signals]}"
         )
 
-        # BUG-E10: In FUTURES_SHORT mode, include SELL/HOLD signals as short candidates
-        # (overbought symbols generating SELL/HOLD are better shorts than BUY signals)
-        if regime_mode == 'FUTURES_SHORT':
-            _short_min_strength = min(min_strength, 0.4)
+        def _side_score(signal: Dict[str, object]) -> Dict[str, float]:
+            """Return an EV-like directional score for LONG vs SHORT using the signal data.
+
+            SR geometry is still used as a filter, but the final side is selected by the
+            stronger directional score. This keeps the system data-driven instead of a
+            regime-name default.
+            """
+            zone_raw = signal.get('sr_zone_position')
+            zone = float(zone_raw) if zone_raw is not None else 0.5
+            rsi_raw = signal.get('rsi')
+            rsi = float(rsi_raw) if rsi_raw is not None else 50.0
+            strength = float(signal.get('strength', 0.0) or 0.0)
+
+            long_score = strength
+            short_score = strength * 0.85
+
+            if signal.get('signal') == 'BUY':
+                long_score += 0.75
+            elif signal.get('signal') in ('SELL', 'HOLD'):
+                short_score += 0.75
+
+            if signal.get('support_bounce_buy') or signal.get('sr_bounce') or signal.get('support_breakout_buy') or signal.get('sr_breakout'):
+                long_score += 1.5
+            if signal.get('support_breakdown_sell') or signal.get('sr_breakdown') or signal.get('resistance_bounce_sell') or signal.get('sr_rejection'):
+                short_score += 1.5
+
+            if signal.get('bb_lower_touch') or signal.get('bb_near_lower'):
+                long_score += 1.0
+            if signal.get('bb_upper_touch') or signal.get('bb_near_upper'):
+                short_score += 1.0
+
+            if zone <= 0.35:
+                long_score += 1.1
+            if zone >= 0.65:
+                short_score += 1.1
+
+            if rsi <= 40.0:
+                long_score += max(0.0, (40.0 - rsi) / 20.0)
+            if rsi >= 60.0:
+                short_score += max(0.0, (rsi - 60.0) / 20.0)
+
+            if signal.get('higher_tf_trend') == 'UP':
+                long_score += 0.35
+            elif signal.get('higher_tf_trend') == 'DOWN':
+                short_score += 0.35
+
+            return {'LONG': long_score, 'SHORT': short_score}
+
+        # BUG-E10: include both sides when the signal data supports either direction,
+        # but select by the stronger directional score rather than a regime-name default.
+        if regime_mode in {'FUTURES_SHORT', 'SPOT_BULL'}:
+            _short_min_strength = min(min_strength, 0.4) if regime_mode == 'FUTURES_SHORT' else min_strength
             buy_signals = [
                 s for s in all_signals
                 if s['strength'] >= (min_strength if s['signal'] == 'BUY' else _short_min_strength)
             ]
             for _sig in buy_signals:
-                _sig['expected_side'] = 'SHORT'
-                _sig['trade_type'] = 'futures'
-                _sig['routing_intent'] = 'FUTURES_SHORT'
+                side_score = _side_score(_sig)
+                if side_score['LONG'] >= side_score['SHORT']:
+                    _sig['expected_side'] = 'LONG'
+                    _sig['trade_type'] = 'spot'
+                    _sig['routing_intent'] = 'SPOT_LONG'
+                else:
+                    _sig['expected_side'] = 'SHORT'
+                    _sig['trade_type'] = 'futures'
+                    _sig['routing_intent'] = 'FUTURES_SHORT'
             logger.info(
-                f"[{regime_mode}] SHORT-first candidates: {len(buy_signals)} "
-                f"(BUY+SELL+HOLD with strength>={_short_min_strength})"
+                f"[{regime_mode}] EV-first directional scores applied to {len(buy_signals)} candidates"
             )
         elif regime_mode == 'RANGE_SCALP':
             _short_min_strength = min(min_strength, 0.4)

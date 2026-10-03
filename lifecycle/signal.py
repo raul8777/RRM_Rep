@@ -125,11 +125,11 @@ class SignalPipeline:
         """Return 0..1 score indicating how well the signal side aligns with the regime."""
         dominant = ctx.regime
         if dominant == "SPOT_BULL":
-            return 1.0 if side == Side.LONG else 0.0
+            return 1.0 if side == Side.LONG else 0.4  # allow defensive shorts
         if dominant == "FUTURES_SHORT":
             return 1.0 if side == Side.SHORT else 0.0
         if dominant == "RANGE_SCALP":
-            return 0.8 if side == Side.LONG else 0.0
+            return 0.8 if side == Side.LONG else 0.6  # shorts valid in range
         if dominant == "PRESERVATION":
             return 0.1  # discourage entries in preservation
         return 0.5

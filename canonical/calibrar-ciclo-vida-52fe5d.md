@@ -3,7 +3,7 @@ title: "Calibración del ciclo de vida de una operación"
 type: canonical-memory
 tags: ["lifecycle", "exit_pipeline", "SSO", "PRS", "UG", "peak_capture", "trailing", "breakeven", "spot", "futures", "profit_preservation", "loss_control", "drawdown_monitor", "erosion_detection"]
 created_at: 2026-07-23
-updated_at: 2026-08-08 (s129)
+updated_at: 2026-08-28 (staging Demo Mode + sweep multi-régimen)
 source_file: "C:\\Users\\raul8\\.windsurf\\plans\\calibrar-ciclo-vida-52fe5d.md"
 ---
 
@@ -11,11 +11,147 @@ source_file: "C:\\Users\\raul8\\.windsurf\\plans\\calibrar-ciclo-vida-52fe5d.md"
 
 Documento vivo que consolida el diseño actual del ciclo de vida de una posición (apertura → monitoreo → cierre) y controla las tareas para calibrar la preservación de ganancias y el control de pérdidas en SPOT y FUTURES.
 
+## Actualización (2026-08-28) — Validación lifecycle en staging Demo Mode + fixes de sweep MIMIC
+
+### Validación en staging real
+
+Tras la migración de staging a Binance Demo Mode (`demo-api.binance.com` spot, `testnet.binancefuture.com` futures), el ciclo de vida completo se validó contra el exchange con órdenes reales en el entorno demo:
+
+- **Apertura**: `FuturesClient initialized — synced 2 open position(s)`; posiciones ETHFIUSDT LONG y ETCUSDT LONG sincronizadas desde Binance.
+- **Monitoreo**: trailing stops actualizados (`Futures/Trail`), `hard_risk_monitor` sin degradación y `position_telemetry_watcher` de 1s operativo.
+- **Salida**: cierre LINKUSDT SHORT con `profit_realization_superv`, PnL positivo.
+- **Ejecución spot**: `bought_0.168000_bnb`, `Balance sync: no orphan assets found`, `Commission refresh: spot=0.001 futures=0.0004`.
+- **Capital bridge**: `futures_avail=$4684`, `spot=$2611`, `regime=RANGE_SCALP`, `open_shorts=0/4`.
+- **Screener**: 93 pares escaneados.
+
+### Fixes del sweep multi-régimen con impacto en lifecycle
+
+El sweep de 8 ventanas (ago 28 2026) corrigió defectos en el simulador que distorsionaban el lifecycle:
+
+1. **Conteo de aperturas**: `entries_executed` → `len(entries)` en `run_multiregime_sweep.py`; evita subcontar entradas validadas.
+2. **PnL esperado para SHORTs**: `expected_pnl` para señales SELL se niega correctamente en `simulation/mimic_lifecycle_adapter.py` (SHORT gana cuando el precio baja).
+3. **Alineación de régimen**: `_regime_alignment` en `lifecycle/signal.py` pasa de 0.0 a 0.4 para SHORT en SPOT_BULL, evitando que el simulador elimine por completo la señal residual permitida para pruebas.
+4. **Toggles de parámetros**: `shorts_enabled` y `gates_enhanced` se propagan explícitamente en el diccionario `params` del sweep.
+
+### Archivos modificados
+
+- `s:\Tools\AI\crypto-agent-staging\simulation\mimic_lifecycle_adapter.py`
+- `s:\Tools\AI\crypto-agent-staging\lifecycle\signal.py`
+- `s:\Tools\AI\crypto-agent-staging\run_multiregime_sweep.py`
+
+### Pendiente
+
+- El lifecycle de salida s130b (`position_exit_decision_loop_enabled=True`) sigue validándose en staging; sin regresiones observadas en la ventana de Demo Mode.
+- Requerir ventanas bajistas/laterales para validar cambios de régimen en el lifecycle.
+
+---
+
+## Actualización s130b — Exit Lifecycle Refactor: detectar rápido, actuar rápido (2026-08-17)
+
+### Origen — directiva explícita del usuario
+
+Tras la auditoría s130, el usuario identificó el patrón **"detectar rápido, actuar lento"**: `position_telemetry_watcher.py` detectaba señales de salida en 1s (`belief_last`, PIM, drawdown, profit-guard), pero todo el ejecutor de cierres (SSO, PRS, UG, PeakCapture, PIM, SmartTP, trailing, breakeven, belief) seguía en `run_trades.py::execute_once()` con un ciclo de 3-45 min. La instrucción fue mover toda la decisión y ejecución de salida al loop de 1s, con un **corte limpio** del ciclo de trading y validación en staging.
+
+### Cambios aplicados
+
+1. **Fase 1** — `_check_sl_tp_positions()` ahora es invocable desde `position_telemetry_watcher.py`. Se mantiene en `run_trades.py` como función de módulo; el watcher lo importa y ejecuta con un lock dedicado `_exit_decision_lock`. `execute_once()` deja de llamarlo cuando `position_exit_decision_loop_enabled=True` (tanto en modo normal como `monitor_only`/PAUSED). Si el flag se desactiva, la llamada se reactiva automáticamente.
+2. **Fase 2** — nuevo `_run_exit_evidence_refresh_cycle()` en `position_telemetry_watcher.py`: refresco throttled (default 15s) del predictor `success_probability` y de `peak_capture_engine.compute_prob_higher_peak()` para **SPOT y FUTURES**. Los valores se persisten en metadata y se consumen por `_run_belief_cycle()` — cerrando el gap documentado en s130 donde `evaluate_belief()` solo recibía 2 de sus 4 señales. Se añade `peak_capture_engine.compute_prob_higher_peak()` como API pública ligera.
+3. **Fase 3** — `_run_exit_decision_cycle()` ejecuta `_check_sl_tp_positions()` y `futures_client.check_positions()` cada 1s, con TTL de 60s para el régimen y `sso7_candidate_cache=None` (Opportunity Collapse deshabilitado). Este ciclo es el ejecutor único cuando el flag está activo; `hard_risk_monitor` sigue como backstop de SL/TP duro.
+4. **Fase 4** — nuevas flags hot-config (`position_exit_decision_loop_enabled`, `position_exit_evidence_refresh_enabled`, `position_exit_evidence_refresh_seconds`) en `config.py` y `config_helpers.py`. Tests nuevos: `tests/test_exit_evidence_refresh.py`, `tests/test_exit_decision_cycle.py`, `tests/test_peak_capture_engine.py`.
+
+### Configuración y rollback
+
+```json
+PATCH /config/kelly {"position_exit_decision_loop_enabled": true}
+```
+Activa el loop de 1s como ejecutor único. `execute_once()` ya no duplica salidas. En staging este flag ahora está por defecto `True` tras validación.
+
+```json
+PATCH /config/kelly {"position_exit_decision_loop_enabled": false}
+```
+Fallback: `execute_once()` vuelve a llamar `_check_sl_tp_positions()` automáticamente.
+
+```json
+PATCH /config/kelly {"position_exit_evidence_refresh_seconds": 15.0}
+```
+Ajusta throttle de evidencia cara.
+
+### Validación
+
+- Suite completa: 516 passed, 6 fallos preexistentes no relacionados (mismos que s130), 0 nuevos.
+- Tests nuevos: `test_exit_evidence_refresh.py` (throttle, SPOT+FUTURES context, predict mock), `test_exit_decision_cycle.py` (enabled/disabled, lock, snapshots), `test_peak_capture_engine.py` (paridad `compute_prob_higher_peak` vs `evaluate().prob_higher_peak`).
+
+### Pendiente
+
+- Validar en staging real con `position_exit_decision_loop_enabled=True` y posiciones abiertas menores a 10. Se recomienda una ventana de auditoría corta comparando lo que el nuevo loop de 1s cerraría vs. lo que habría cerrado el ciclo lento, antes de dejar el flag como default `True` en producción.
+
+---
+
 ## Plano en el que estamos
 
 **Fase:** calibración del ciclo de vida de posiciones abiertas.
 **Objetivo:** documentar el pipeline actual de salida, diagnosticar por qué las últimas 48h generaron pérdidas grandes / ganancias mínimas, y proponer ajustes canónicos a los módulos de exit (SSO, PRS, UG, PredExit, trailing, breakeven, hard SL/TP) sin romper la arquitectura existente.
 **Alcance:** SPOT y FUTURES, con paridad de criterios salvo que la mecánica de mercado justifique una diferencia documentada.
+
+## Actualización s130 — Belief-Driven Exit Lifecycle: cierre guiado por creencia, no por tiempo/target-diario/intercambio (2026-08-16)
+
+### Origen — directiva explícita del usuario
+
+Tras revisar todo el historial de este documento (s107→s129), el usuario pidió una redefinición del criterio de cierre: *"el cerrado debe ser determinado por lo que pensamos que va a hacer una posición: si creemos que no va a ganar más, ciérrala; si creemos que estamos esperando un gran rompimiento a favor, mantenla"* — explícitamente **no** por límites de tiempo, **no** por progreso del target diario, y **no** por intercambio de oportunidad (cerrar una posición perezosa porque otro candidato promete más). Aplicado simétricamente a ganancia y pérdida, con la instrucción de no dejar nada en modo shadow: *"implementa de una vez y se verificará en staging su comportamiento"*, y al llegar a la fase de limpieza final: *"retíralos de todos modos y documéntalo"*.
+
+### Diagnóstico — qué del stack existente ya hacía esto (y qué no)
+
+El stack de salida ya documentado en este archivo (s107-s129: Intelligent Drawdown Monitor, Profit Erosion, PRS anti-estrangulación, UG breakout-follow) ya tenía la filosofía correcta de "nunca cerrar solo por marcador" para el lado de erosión de ganancia — pero:
+- El invalidador "SR" de `position_telemetry_watcher.py` (`_evaluate_sr_invalidation_for_snapshot`) usaba conteo de señales autónomas opuestas, **no** los niveles S/R reales de la tesis de entrada, y vivía en shadow.
+- `smart_scale_out.py` SSO-4 (Target Contribution) cerraba ganadores por progreso del **target diario del portafolio**, no por evidencia del activo.
+- SSO-5 (Re-entry Upgrade) y la rama Opportunity Collapse de SSO-7 cerraban/colapsaban el SL de una posición propia únicamente porque **otro candidato** lucía mejor — comparación externa, no creencia sobre la posición misma.
+- `profit_realization_supervisor.py` (PRS) seguía usando `partial_minutes`/`full_minutes` como piso de gracia antes de evaluar degradación — no cierra nunca por tiempo puro (verificado y bloqueado con test de regresión), pero tampoco tenía forma de **extender indefinidamente** la paciencia cuando la tesis seguía intacta.
+
+### Cambios aplicados (6 fases, todas activas — sin etapa shadow)
+
+1. **Fase 0** — `smart_scale_out.py::_check_sso4_target_contribution` (SSO-4) retirado de `SmartScaleOut.evaluate()`. El target diario deja de ser un mecanismo de cierre individual.
+2. **Fase 1** — nuevo `position_thesis.py::build_thesis_snapshot()`: consolida `target_price`/`stop_price`/`support_level`/`resistance_level`/`entry_success_probability` de forma uniforme en los 4 regímenes (antes solo existía, disperso, para RANGE_SCALP vía `range_scalp_intelligent_hold.py`). Persistido en `metadata['_thesis_snapshot']` al abrir (`position_manager.py::add_position` spot; `futures_client.py::open_short`/`open_long` futures, ambos lados).
+3. **Fase 2-3** — nuevo `position_belief.py::evaluate_belief()`: produce `belief_state ∈ {running_strong, exhausted, uncertain}` combinando momentum/aceleración de `position_telemetry_watcher.py::_analyze_drawdown_trend` (ya existente), probabilidad del predictor entrada-vs-ahora, señal autónoma actual y distancia al target/stop estructural de la tesis. Barra de confianza **asimétrica** (perdedor necesita ≥2 señales favorables sin ninguna adversa; ganador necesita ≥1) y cerca del stop estructural (<0.5%) exige señal de recuperación real, no solo ausencia de deterioro. **Piso estructural**: cruzar el stop de la tesis fuerza `exhausted` de inmediato, sin importar el momentum — este es el límite a la paciencia, no un timer ni un dólar fijo. Se ejecuta cada 1s en `position_telemetry_watcher.py::_run_belief_cycle` (nuevo), reutilizando el buffer de momentum ya existente (cero costo de API extra), persistido en `metadata['belief_last']`.
+4. **Fase 4** — `unified_governance_supervisor.py::evaluate()` lee `belief_last` al inicio, antes de cualquier rama de ganancia/pérdida: `exhausted` → cierre inmediato (prioridad 99, por encima de SSO/PRS); `running_strong` → hold, suprimiendo todos los timers de PRS/SSO por debajo — **excepto** cuando el sistema está en `monitor_only` (modo degradado), que nunca se ve overrideado por creencia.
+5. **Fase 5** — SSO-5 (`_check_sso5_reentry_upgrade`) retirado del pipeline de cierre; rama Opportunity Collapse de SSO-7 deshabilitada por default (`sso7_opp_enabled: True → False`) — ambas eran "intercambio de oportunidad" puro (cerrar/colapsar una posición propia por comparación con otro candidato). Se conserva el Stagnation Trailing de SSO-7 (solo aprieta SL por falta de progreso propio, nunca por comparación externa). Se auditó PRS línea por línea: no existe un cierre por tiempo puro sin evidencia de degradación (`held_min` es siempre un piso de gracia, nunca un disparador aislado) — documentado con test de regresión (`tests/test_profit_realization_supervisor.py::test_prs_never_closes_on_time_alone_without_degradation_evidence`) en vez de fabricar una remoción inexistente.
+
+### Validación
+
+- Suite completa: 495 passed, mismos 6 fallos preexistentes de antes de esta sesión (`test_config_governance`, `test_entry_quality_gate`×2, `test_portfolio_selector`, `test_position_manager`, `test_staging_compare`) — ninguno relacionado.
+- 39 tests nuevos: `tests/test_position_thesis.py` (11), `tests/test_position_belief.py` (10, matriz running_strong/exhausted/uncertain × ganador/perdedor × cerca/lejos del stop), `tests/test_position_belief_ug_integration.py` (8, incluye el carve-out de `monitor_only`), 1 test de regresión en PRS, más ajuste de defaults en `test_smart_scale_out.py`.
+- Nueva tarjeta `/metrics/shadow-readiness` (id `position_belief`, modo `active`) en `app.py` para observar la distribución real de `belief_state` en staging.
+
+### Rollback
+
+```json
+PATCH /config/kelly {"position_belief_enabled": false}
+```
+UG vuelve a decidir 100% por PRS/SSO/PeakCapture como antes de s130 (sin tocar código). Para restaurar el intercambio de oportunidad de SSO-7 específicamente: `PATCH /config/kelly {"sso7_opp_enabled": true}`. SSO-4 (Fase 0) y SSO-5 (Fase 5) son remociones deliberadas y permanentes del pipeline — no tienen flag; su rollback es revertir el commit correspondiente en `smart_scale_out.py` (los métodos permanecen en el código como referencia histórica, solo se retiraron de la lista `checks` de `SmartScaleOut.evaluate()`).
+
+### Pendiente explícito
+
+- La Fase 5 se ejecutó de inmediato por directiva explícita del usuario, sin esperar la evidencia de staging que el diseño original de la fase pedía (N≥30 posiciones con `belief_state` registrado antes de retirar las redes de respaldo). Monitorear si posiciones `belief_state=uncertain` (evidencia mixta, o legacy sin `_thesis_snapshot`) quedan con holding times excesivos al perder SSO-5/SSO-7-collapse como red de rotación de capital — su única protección residual es `hard_risk_monitor` y el Intelligent Drawdown Monitor de s120.
+- Plan de diseño completo: `C:\Users\raul8\.windsurf\plans\sr-exit-lifecycle-redesign-741a4c.md`.
+
+### Auditoría punto a punto post-implementación (2026-08-16, misma sesión)
+
+Por pedido explícito del usuario, se auditó todo el ciclo de vida (selección → apertura → monitoreo → cierre) buscando bugs/gaps introducidos por s130 o preexistentes no vistos.
+
+**Bug encontrado y corregido — escritura a DB de `belief_last` sin throttle:**
+- `_run_belief_cycle` evalúa `evaluate_belief()` cada 1s por posición (barato, en memoria), pero la persistencia a `metadata` **no tenía throttle**, a diferencia de `_persist_snapshots` (throttle 5s) que ya existía en el mismo archivo. Cada tick de 1s escribía la metadata completa a `trades_open` para **cada posición abierta**; en futures, `_persist_smart_meta` hace además un `SELECT` antes del `UPDATE` (2 round-trips por posición por segundo).
+- Con los límites documentados en `rules.md §9` (hasta ~32 posiciones abiertas simultáneas entre los 4 regímenes), esto representaba decenas de escrituras/segundo innecesarias a Postgres, sin beneficio real: UG solo lee `belief_last` cada 3-5 min.
+- **Fix**: nuevo `_should_persist_belief()` en `position_telemetry_watcher.py` — persiste inmediatamente en toda transición de `belief_state` (nunca se retrasa un `exhausted` nuevo), pero limita re-escrituras del mismo estado a como máximo una cada `position_belief_persist_throttle_seconds` (default 10.0, hot-config). Test de regresión: `tests/test_position_belief_persist_throttle.py` (5 tests).
+- Se verificó que el flujo de lectura (`context.metadata` en `run_trades.py` → `UnifiedGovernanceContext`) sigue viendo `belief_last` fresco de inmediato tras cualquier escritura, tanto en spot (mismo objeto `Position` mutado in-place por `position_manager.update_position_metadata`) como en futures (mismo singleton `FuturesClient` vía `_get_futures_client`) — no hay staleness introducida por el throttle, solo se evitan re-escrituras redundantes del mismo valor.
+
+**Gap documentado, no corregido (requiere trabajo adicional fuera de alcance de un fix rápido):**
+- `evaluate_belief()` está diseñado para combinar hasta 4 fuentes de evidencia (momentum, probabilidad del predictor "ahora" vs. "al entrar", señal autónoma, EV de `peak_capture_engine`), pero el ciclo de 1s en `position_telemetry_watcher.py` solo alimenta 2 (`momentum` y `signal_direction/strength`). `current_success_probability` requeriría re-ejecutar el modelo ML cada 1s por posición (costoso, deliberadamente no wireado); `peak_capture_prob_higher_peak` se calcula en `peak_capture_engine.py` pero solo dentro del ciclo de 3-5min de `run_trades.py`, nunca en el watcher de 1s. Efecto práctico: un perdedor necesita `favor>=2` para ser `running_strong`, pero con máximo 2 señales disponibles, en la práctica requiere momentum favorable **y** señal alineada con fuerza ≥0.55 simultáneamente — más estricto de lo que el diseño original preveía, pero no incorrecto (nunca cierra ni sostiene sin evidencia real). Pendiente evaluar en una siguiente iteración si vale la pena exponer el `prob_higher_peak` ya calculado por el ciclo lento hacia el `belief_last` de la próxima ventana de 1s (cache de última lectura), en vez de recalcularlo.
+- Se verificó que `evaluate_belief()` degrada correctamente a `uncertain` (nunca `exhausted` ni `running_strong` fabricado) cuando `thesis_snapshot=None` (posiciones legacy abiertas antes de Fase 1, o sin predictor) — no requiere fix.
+
+**Resto del pipeline (selección → apertura → cierre):** no se encontraron regresiones nuevas fuera del árbitro de creencia; el resto del stack (staged_entry, entry_decision, hard_risk_monitor, position_intelligence, SSO/PRS remanente) permanece sin cambios de esta sesión y ya fue auditado en iteraciones previas (s76, s93b, s96b, s99, s108, s109 — ver arriba y `rules.md §8`).
+
+Validación final: 500 passed (5 tests nuevos del fix de throttle), mismos 6 fallos preexistentes no relacionados.
+
+---
 
 ## Actualización s129 — mitigación bidireccional de ahorcamiento de ganadores (2026-08-08)
 

@@ -1,7 +1,72 @@
 # Staging real — configuración operativa
 
 **Estado:** activo  
-**Última actualización:** 2026-08-16
+**Última actualización:** 2026-08-28
+
+## ACTUALIZACIÓN ago 28 2026 — Binance Demo Mode migration + futures testnet fix
+
+### Problema
+
+Staging usaba keys de **Binance Demo Trading** (`demo.binance.com`) pero apuntaba a endpoints incompatibles:
+- **Spot** (`binance_client.py`): `testnet.binance.vision/api` — endpoint viejo, rechaza keys de Demo Mode.
+- **Futures** (`futures_client.py`): `fapi.binance.com` — producción hardcoded, rechaza cualquier key testnet/demo.
+
+### Causa raíz
+
+Binance tiene **3 entornos** con keys incompatibles entre sí:
+
+| Entorno | Spot REST | Futures REST | Key source |
+|---|---|---|---|
+| **Producción** | `api.binance.com/api` | `fapi.binance.com` | Cuenta real Binance |
+| **Testnet viejo** | `testnet.binance.vision/api` | `testnet.binancefuture.com` | `testnet.binance.vision` (deprecado para spot) |
+| **Demo Mode (actual)** | `demo-api.binance.com/api` | `testnet.binancefuture.com` | `demo.binance.com` |
+
+Las keys generadas en Demo Mode **no funcionan** en `testnet.binance.vision`. El futures testnet (`testnet.binancefuture.com`) sí acepta keys de Demo Mode.
+
+### Mapa de endpoints canónico — staging
+
+| Servicio | URL usada | Archivo/línea |
+|---|---|---|
+| Spot REST | `https://demo-api.binance.com/api` | `binance_client.py:31` |
+| Futures REST | `https://testnet.binancefuture.com` | `futures_client.py:99,167` |
+| Spot WS | `python-binance` `testnet=True` (resuelve internamente) | `binance_event_stream.py:109` |
+| Futures WS | `python-binance` `ThreadedWebsocketManager(testnet=True)` | `binance_event_stream.py:109` |
+
+### Gestión de API keys
+
+- Keys generadas en `demo.binance.com` → válidas para spot REST (`demo-api`) y futures REST (`testnet.binancefuture.com`).
+- Keys se configuran en `.env` (variables `BINANCE_API_KEY`, `BINANCE_API_SECRET`).
+- **NO** usar keys de `testnet.binance.vision` (entorno viejo) — son incompatibles con Demo Mode.
+- `BINANCE_USE_TESTNET=true` es obligatorio en staging — sin este flag, ambos clientes apuntan a producción.
+
+### Nota sobre WebSocket spot
+
+`python-binance` `ThreadedWebsocketManager` con `testnet=True` puede crear `listenKey` contra `testnet.binance.vision` (URL vieja hardcoded en la librería). Esto produce un 401 en el log del WebSocket spot, pero **no bloquea** la operación REST. El ciclo de trading principal funciona sin el WebSocket spot.
+
+### Fixes aplicados
+
+| Archivo | Cambio |
+|---|---|
+| `binance_client.py:31` | `testnet.binance.vision/api` → `demo-api.binance.com/api` |
+| `futures_client.py:99` | `FAPI_BASE_TESTNET` (ya existía) ahora se usa |
+| `futures_client.py:162-166` | `self._fapi_base` dinámico según `BINANCE_USE_TESTNET` |
+| `futures_client.py:1038,1061,1073` | `FAPI_BASE` → `self._fapi_base` |
+| `.dockerignore` | Excluye `Dev/`, `historical_data/`, `tmp_*`, `.git/` (build: 5GB → 34KB) |
+
+### Impacto en producción
+
+**Ninguno.** Todos los cambios son condicionales sobre `testnet=True` / `BINANCE_USE_TESTNET=true`. Producción usa `testnet=False` y sigue apuntando a `api.binance.com` (spot) y `fapi.binance.com` (futures).
+
+### Validación (ago 28 2026)
+
+- Spot REST: `Balance sync: no orphan assets found` ✅
+- Spot órdenes: `[BNB] bought_0.168000_bnb` ✅
+- Futures sync: `FuturesClient initialized — synced 2 open position(s)` ✅
+- Capital Bridge: `futures_avail=$4684, spot=$2611` ✅
+- Screener: `93 pairs scanned` ✅
+- Futures balance: $4,999 USDT verificado vía REST directo ✅
+
+---
 
 ## ACTUALIZACIÓN s130 (16 ago 2026) — aislamiento de código real
 
@@ -76,11 +141,12 @@ El código que implementa la lógica de staging existe, pero un entorno de stagi
 4. expone `APP_ENV=staging`,
 5. presenta el dashboard con etiqueta `STAGING`,
 6. no comparte Datasource ni persistence con producción,
-7. mantiene `DRY_RUN=true` y `ALLOW_REAL_TRADING=false`.
+7. opera contra Binance Demo/Testnet (`BINANCE_USE_TESTNET=true`), nunca contra producción.
 
-Staging puede consumir precios y datos de cuenta de Binance para simular con
-verdad de mercado, pero nunca puede enviar órdenes reales. La paridad con
-producción aplica a sizing y política Kelly, no al permiso de ejecución.
+**Nota (ago 28 2026):** staging ahora opera con `DRY_RUN=false` y `ALLOW_REAL_TRADING=true`
+contra Binance Demo Mode / Futures Testnet. Las órdenes son reales dentro del entorno demo
+(con fondos virtuales), lo que permite validar el ciclo completo de ejecución. La seguridad
+radica en que `BINANCE_USE_TESTNET=true` redirige a endpoints demo que no tocan capital real.
 
 ## Infraestructura
 
