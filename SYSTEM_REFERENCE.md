@@ -3,6 +3,15 @@
 > **Archivo vivo. Actualizar en cada sesión relevante.**  
 > Última actualización: ago 28 2026 | Staging API endpoints: migración a Binance Demo Mode
 
+> ⚠️ **Producción detenida a nuevas aperturas (oct 2026)**  
+> El entorno de producción no tiene contenedores corriendo (`crypto-agent-app` inactivo en `localhost:8000`).  
+> Antes de reactivar producción con el nuevo código (`s139-s141`) se debe:  
+> 1. Confirmar `pause_new_entries = true` en la base de producción.  
+> 2. Levantar servicios con `docker compose -f docker-compose.yml up -d` (no staging).  
+> 3. Verificar health endpoint (`/health`) y `/control/status`.  
+> 4. Solo cuando se valide que el arbitraje bilateral, QUBO authority y pausa DB funcionan, desactivar la pausa manualmente.  
+> 5. NO reactivar entradas hasta que el benchmark universal confirme que la nueva fórmula supera al baseline OOS.
+
 ---
 
 ## 🟢 Estado del Sistema — ago 28 2026 — Staging: Binance Demo Mode migration + futures testnet fix
