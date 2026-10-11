@@ -1,1 +1,1 @@
-Proyecto local privado para un agente con análisis y noticias reales.
+Proyecto local  para un agente con análisis y noticias reales.
