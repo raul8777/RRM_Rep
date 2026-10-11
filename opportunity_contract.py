@@ -1,6 +1,7 @@
 """Executable opportunity contract shared by arbitration and execution."""
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -35,7 +36,8 @@ class ExecutableOpportunity:
 
 def _n(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else default
     except (TypeError, ValueError):
         return default
 
@@ -177,11 +179,20 @@ def build_executable_opportunity(
     leverage = 2 if leverage > 1 else 1
     requested_notional = margin * leverage
     price_distance_pct = abs(stop - entry) / entry if entry > 0 and stop > 0 else 0.0
-    total_cost_bps = max(0.0, entry_fee_bps + exit_fee_bps + slippage_bps + funding_bps)
-    cost_ratio = total_cost_bps / 10000.0
+    entry_fee_rate = max(0.0, entry_fee_bps) / 10000.0
+    exit_fee_rate = max(0.0, exit_fee_bps) / 10000.0
+    slippage_rate = max(0.0, slippage_bps) / 10000.0
+    funding_rate = abs(funding_bps) / 10000.0 if leverage > 1 else 0.0
+    stop_notional_ratio = stop / entry if entry > 0 and stop > 0 else 1.0
+    risk_cost_ratio = (
+        entry_fee_rate
+        + stop_notional_ratio * exit_fee_rate
+        + (1.0 + stop_notional_ratio) * slippage_rate
+        + funding_rate
+    )
     notional = requested_notional
-    if max_loss_usd > 0 and price_distance_pct > 0 and cost_ratio >= 0:
-        max_notional = max_loss_usd / (price_distance_pct + cost_ratio)
+    if max_loss_usd > 0 and price_distance_pct > 0:
+        max_notional = max_loss_usd / (price_distance_pct + risk_cost_ratio)
         notional = min(requested_notional, max_notional)
     notional = max(0.0, notional)
     min_qty = max(0.0, _n(filters.get("min_qty") or filters.get("minQty")))
@@ -208,11 +219,14 @@ def build_executable_opportunity(
         notional = qty * entry
         margin = notional / leverage
 
-    entry_fee = notional * max(0.0, entry_fee_bps) / 10000.0
-    exit_fee = notional * max(0.0, exit_fee_bps) / 10000.0
-    slippage = notional * max(0.0, slippage_bps) / 10000.0
-    funding = notional * abs(funding_bps) / 10000.0 if leverage > 1 else 0.0
-    exit_reserve = exit_fee + slippage + funding
+    target_notional = qty * target
+    stop_notional = qty * stop
+    entry_fee = notional * entry_fee_rate
+    target_exit_fee = target_notional * exit_fee_rate
+    stop_exit_fee = stop_notional * exit_fee_rate
+    target_slippage = (notional + target_notional) * slippage_rate
+    stop_slippage = (notional + stop_notional) * slippage_rate
+    funding = notional * funding_rate
 
     geometry = entry > 0 and qty > 0 and (market_min_qty <= 0 or qty >= market_min_qty) and (
         market_max_qty <= 0 or qty <= market_max_qty
@@ -221,18 +235,25 @@ def build_executable_opportunity(
     )
     gross_risk = abs(stop - entry) * qty if geometry else 0.0
     gross_reward = abs(target - entry) * qty if geometry else 0.0
-    economic_risk = gross_risk + entry_fee + exit_reserve
     rejection = resistance_rejection_evidence(metadata) if thesis_type == "SHORT_RESISTANCE_REJECTION" else None
-    probability = _n(pred.get("success_probability"))
+    raw_probability = _n(pred.get("success_probability"), -1.0)
+    probability_valid = 0.0 <= raw_probability <= 1.0
+    probability = raw_probability if probability_valid else 0.0
     # The fade thesis is invalidated by breakout pressure: the observed signal
     # systematically precedes continuation, not reversion. Penalize the contract
     # probability so the competing breakout contract wins on merit.
     if breakout_penalty < 1.0 and rejection and rejection.get("breakout_pressure"):
         probability *= breakout_penalty
-    total_costs = entry_fee + exit_reserve
-    expected_net = probability * gross_reward - (1.0 - probability) * gross_risk - total_costs
+    exit_fee = probability * target_exit_fee + (1.0 - probability) * stop_exit_fee
+    slippage = probability * target_slippage + (1.0 - probability) * stop_slippage
+    economic_risk = gross_risk + entry_fee + stop_exit_fee + stop_slippage + funding
+    expected_net = (
+        probability * gross_reward
+        - (1.0 - probability) * gross_risk
+        - entry_fee - exit_fee - slippage - funding
+    )
     # Noise floor: a stop inside ~1×ATR is dominated by bar noise, which the
-    # binary EV model cannot express (observed: 97% SL-hit rate at ~0.7% stops).
+    # binary EV model cannot express.
     stop_distance_frac = abs(stop - entry) / entry if entry > 0 and stop > 0 else 0.0
     if min_stop_atr_multiple > 0:
         # fail-closed: ATR missing means we cannot prove the stop is outside the
@@ -241,7 +262,7 @@ def build_executable_opportunity(
     else:
         stop_above_noise = True
     valid = bool(
-        executable and pred and geometry and economic_risk > 0
+        executable and pred and probability_valid and geometry and economic_risk > 0
         and expected_net > 0 and probability >= minimum_probability and stop_above_noise
     )
     if max_loss_usd > 0:
@@ -257,6 +278,7 @@ def build_executable_opportunity(
             "economic_risk_positive": economic_risk > 0,
             "expected_net_positive": expected_net > 0,
             "success_probability": probability,
+            "success_probability_input_valid": probability_valid,
             "minimum_probability": minimum_probability,
             "probability_passed": probability >= minimum_probability,
             "max_loss_passed": max_loss_usd <= 0 or economic_risk <= max_loss_usd + 1e-9,
@@ -277,7 +299,7 @@ def build_executable_opportunity(
             "exchange_filter_snapshot_symbol": filters.get("filter_snapshot_symbol"),
             "exchange_filter_snapshot_source": filters.get("filter_snapshot_source"),
             "exchange_min_qty": min_qty,
-            "exchange_min_notional": min_notional,
+            "exchange_min_notional": min_notional if math.isfinite(min_notional) else None,
             "exchange_tick_size": tick_size,
             "market_step_size": market_step,
             "market_min_qty": market_min_qty,

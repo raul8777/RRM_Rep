@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+import math
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
@@ -26,12 +28,14 @@ class BookSimulation:
     sufficient_depth: bool
     levels_consumed: int
     depth_timestamp: Optional[str] = None
+    marginal_price: Optional[float] = None
 
     @property
     def slippage_bps(self) -> Optional[float]:
         if self.expected_vwap is None or not self.reference_price:
             return None
-        return abs(self.expected_vwap - self.reference_price) / self.reference_price * 10000.0
+        slippage = abs(self.expected_vwap - self.reference_price) / self.reference_price * 10000.0
+        return slippage if math.isfinite(slippage) else None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -46,6 +50,7 @@ class BookSimulation:
             "sufficient_depth": self.sufficient_depth,
             "levels_consumed": self.levels_consumed,
             "depth_timestamp": self.depth_timestamp,
+            "marginal_price": self.marginal_price,
         }
 
 
@@ -65,6 +70,7 @@ class CloseExecutionPlan:
     reason: str
     decision_at: str
     book: Dict[str, Any] = field(default_factory=dict)
+    limit_price: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -82,6 +88,7 @@ class CloseExecutionPlan:
             "reason": self.reason,
             "decision_at": self.decision_at,
             "book": self.book,
+            "limit_price": self.limit_price,
         }
 
 
@@ -95,9 +102,9 @@ def _levels(raw_levels: Iterable[Any]) -> List[Tuple[float, float]]:
             else:
                 price = float(raw[0])
                 quantity = float(raw[1])
-        except (TypeError, ValueError, IndexError):
+        except (TypeError, ValueError, IndexError, OverflowError):
             continue
-        if price > 0 and quantity > 0:
+        if math.isfinite(price) and math.isfinite(quantity) and price > 0 and quantity > 0:
             levels.append((price, quantity))
     return levels
 
@@ -114,22 +121,29 @@ def simulate_close_book(
     normalized_position_side = str(position_side or "").strip().upper()
     if normalized_position_side not in {"LONG", "SHORT"}:
         raise ValueError("position_side must be LONG or SHORT")
-    if quantity <= 0:
-        raise ValueError("quantity must be positive")
+    try:
+        quantity = float(quantity)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("quantity must be finite and positive") from exc
+    if not math.isfinite(quantity) or quantity <= 0:
+        raise ValueError("quantity must be finite and positive")
 
-    bid_levels = _levels(bids)
-    ask_levels = _levels(asks)
+    bid_levels = sorted(_levels(bids), reverse=True)
+    ask_levels = sorted(_levels(asks))
     sell_to_bid = normalized_position_side == "LONG"
     close_side = "SELL" if sell_to_bid else "BUY"
     executable_levels = bid_levels if sell_to_bid else ask_levels
     reference = executable_levels[0][0] if executable_levels else None
     opposite = ask_levels[0][0] if sell_to_bid and ask_levels else bid_levels[0][0] if bid_levels else None
     spread_bps = abs(opposite - reference) / reference * 10000.0 if reference and opposite else None
+    if spread_bps is not None and not math.isfinite(spread_bps):
+        spread_bps = None
 
     remaining = float(quantity)
     filled = 0.0
     notional = 0.0
     levels_consumed = 0
+    marginal_price = None
     for price, available in executable_levels:
         if remaining <= 0:
             break
@@ -138,9 +152,12 @@ def simulate_close_book(
         filled += taken
         remaining -= taken
         levels_consumed += 1
+        marginal_price = price
 
-    vwap = notional / filled if filled > 0 else None
+    vwap = notional / filled if filled > 0 and math.isfinite(notional) else None
     impact_bps = abs(vwap - reference) / reference * 10000.0 if vwap and reference else None
+    if impact_bps is not None and not math.isfinite(impact_bps):
+        impact_bps = None
     return BookSimulation(
         side=close_side,
         quantity=float(quantity),
@@ -149,9 +166,10 @@ def simulate_close_book(
         reference_price=reference,
         spread_bps=spread_bps,
         impact_bps=impact_bps,
-        sufficient_depth=remaining <= 1e-12,
+        sufficient_depth=vwap is not None and remaining <= quantity * 1e-12,
         levels_consumed=levels_consumed,
         depth_timestamp=depth_timestamp,
+        marginal_price=marginal_price,
     )
 
 
@@ -167,10 +185,10 @@ def build_close_plan(
     notional_usdt: Optional[float] = None,
     depth_timestamp: Optional[str] = None,
     decision_at: Optional[str] = None,
+    decision_price: Optional[float] = None,
+    price_tick: Optional[float] = None,
 ) -> CloseExecutionPlan:
     """Choose a full-size close order while preserving hard-risk priority."""
-    if full_quantity <= 0:
-        raise ValueError("full_quantity must be positive")
     normalized_urgency = str(urgency or "").strip().upper()
     if normalized_urgency not in HARD_RISK_URGENCIES | SOFT_URGENCIES:
         raise ValueError(f"unsupported close urgency: {urgency}")
@@ -181,22 +199,63 @@ def build_close_plan(
         asks=asks,
         depth_timestamp=depth_timestamp,
     )
+    try:
+        slippage_limit = float(max_slippage_bps)
+    except (TypeError, ValueError, OverflowError):
+        slippage_limit = float("nan")
+    slippage_limit_valid = math.isfinite(slippage_limit) and slippage_limit >= 0
+    reference = simulation.reference_price
+    if decision_price is not None:
+        try:
+            reference = float(decision_price)
+        except (TypeError, ValueError, OverflowError):
+            reference = None
+    if reference is not None and (not math.isfinite(reference) or reference <= 0):
+        reference = None
+    limit_price = simulation.marginal_price
+    if price_tick is not None and limit_price is not None:
+        try:
+            tick = float(price_tick)
+            if not math.isfinite(tick) or tick <= 0:
+                raise ValueError("invalid price tick")
+            rounding = ROUND_FLOOR if simulation.side == "SELL" else ROUND_CEILING
+            tick_decimal = Decimal(str(tick))
+            limit_price = float((Decimal(str(limit_price)) / tick_decimal).to_integral_value(rounding=rounding) * tick_decimal)
+        except (TypeError, ValueError, ArithmeticError):
+            limit_price = None
+    if limit_price is not None and (not math.isfinite(limit_price) or limit_price <= 0):
+        limit_price = None
+    total_slippage = abs(simulation.expected_vwap - reference) / reference * 10000.0 if reference and simulation.expected_vwap else None
+    limit_slippage = abs(limit_price - reference) / reference * 10000.0 if reference and limit_price else None
+    if total_slippage is not None and not math.isfinite(total_slippage):
+        total_slippage = None
+    if limit_slippage is not None and not math.isfinite(limit_slippage):
+        limit_slippage = None
     if normalized_urgency in HARD_RISK_URGENCIES:
         order_type = "MARKET"
         reason = "hard_risk_immediate" if normalized_urgency == "HARD_RISK" else "emergency_immediate"
     elif not simulation.sufficient_depth:
-        order_type = "MARKET"
-        reason = "insufficient_full_close_depth_fallback_market"
-    elif simulation.slippage_bps is not None and simulation.slippage_bps <= max(0.0, max_slippage_bps):
+        order_type = "DEFERRED"
+        reason = "insufficient_full_close_depth_deferred"
+    elif not slippage_limit_valid:
+        order_type = "DEFERRED"
+        reason = "invalid_slippage_limit_deferred"
+    elif total_slippage is not None and limit_slippage is not None and limit_slippage <= slippage_limit:
         order_type = "LIMIT_FOK"
         reason = "full_size_fok_within_slippage_limit"
     else:
-        order_type = "MARKET"
-        reason = "estimated_slippage_over_limit_fallback_market"
+        order_type = "DEFERRED"
+        reason = "estimated_slippage_over_limit_deferred"
 
     slippage_usdt = None
-    if simulation.slippage_bps is not None and notional_usdt is not None:
-        slippage_usdt = float(notional_usdt) * simulation.slippage_bps / 10000.0
+    if total_slippage is not None and notional_usdt is not None:
+        try:
+            notional = float(notional_usdt)
+        except (TypeError, ValueError, OverflowError):
+            notional = float("nan")
+        if math.isfinite(notional) and notional >= 0:
+            estimated = notional * (total_slippage / 10000.0)
+            slippage_usdt = estimated if math.isfinite(estimated) else None
     return CloseExecutionPlan(
         symbol=str(symbol),
         position_side=str(position_side).strip().upper(),
@@ -205,11 +264,13 @@ def build_close_plan(
         urgency=normalized_urgency,
         order_type=order_type,
         expected_vwap=simulation.expected_vwap,
-        max_slippage_bps=float(max_slippage_bps),
-        estimated_slippage_bps=simulation.slippage_bps,
+        max_slippage_bps=slippage_limit if slippage_limit_valid else 0.0,
+        estimated_slippage_bps=total_slippage,
         estimated_slippage_usdt=slippage_usdt,
         sufficient_depth=simulation.sufficient_depth,
         reason=reason,
         decision_at=decision_at or datetime.now(timezone.utc).isoformat(),
-        book=simulation.to_dict(),
+          book={**simulation.to_dict(), "slippage_limit_valid": slippage_limit_valid,
+              "decision_reference_price": reference, "limit_slippage_bps": limit_slippage},
+          limit_price=limit_price,
     )

@@ -22,14 +22,16 @@ decision. Nothing here is a fixed floor/threshold; every field degrades to
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+import math
 
 
 def _f(value: Any) -> Optional[float]:
     try:
         if value is None:
             return None
-        return float(value)
-    except (TypeError, ValueError):
+        result = float(value)
+        return result if math.isfinite(result) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -40,6 +42,7 @@ def build_thesis_snapshot(
     indicators_at_entry: Optional[Dict[str, Any]] = None,
     side: Optional[str] = None,
     regime_mode: Optional[str] = None,
+    entry_price: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a uniform entry-thesis snapshot from whatever sources are available.
 
@@ -86,8 +89,12 @@ def build_thesis_snapshot(
         entry_range_position = _f(ind.get("sr_zone_position"))
 
     discovery_source = meta.get("discovery_source")
+    resolved_entry_price = _f(entry_price)
+    if resolved_entry_price is None:
+        resolved_entry_price = _f(meta.get("current_price") or meta.get("price") or ind.get("current_price"))
 
     snapshot = {
+        "entry_price": resolved_entry_price,
         "target_price": target_price,
         "stop_price": stop_price,
         "support_level": support_level,
@@ -99,7 +106,7 @@ def build_thesis_snapshot(
         "regime_at_entry": str(regime_mode or "").strip().upper() or None,
     }
 
-    if all(v is None for k, v in snapshot.items() if k not in ("side", "regime_at_entry")):
+    if all(v is None for k, v in snapshot.items() if k not in ("entry_price", "side", "regime_at_entry")):
         return None
 
     sr_path = build_sr_path_v1(
@@ -251,28 +258,70 @@ def evaluate_sr_path_horizon(
 
 def structural_stop_price(
     snapshot: Optional[Dict[str, Any]],
+    entry_price: Optional[float] = None,
 ) -> Optional[float]:
     """Return the best available structural stop for the thesis.
 
     Prefers the predictor's explicit `stop_price`; falls back to the S/R level
     that would invalidate the thesis if broken (support for LONG, resistance
     for SHORT) when the predictor did not provide one directly.
+
+    AIC-20261007-05: A minimum distance floor of 1.0% from entry is enforced.
+    Structural stops closer than 1.0% are indistinguishable from market noise
+    (typical ATR 4h = 0.8-2.0%) and cause premature belief_exhausted closures.
+    This floor is a policy assumption, not proof of effectiveness.
+    Runtime outcomes require separately authorized local evidence.
     """
     if not snapshot:
         return None
-    stop_price = snapshot.get("stop_price")
-    if stop_price:
-        return stop_price
     side = str(snapshot.get("side") or "").strip().upper()
+    entry = _f(entry_price)
+    if entry is None:
+        entry = _f(snapshot.get("entry_price"))
+
+    stop_price = _f(snapshot.get("stop_price"))
+
+    # When entry_price is unavailable, return raw stop/target without floor
+    # (backward compatibility for callers like evaluate_belief that may not
+    # have entry_price yet). Still validate the value is positive.
+    if entry is None or entry <= 0:
+        if stop_price is not None and stop_price > 0:
+            return stop_price
+        if side in ("LONG", "BUY"):
+            val = _f(snapshot.get("support_level"))
+            return val if val is not None and val > 0 else None
+        if side in ("SHORT", "SELL"):
+            val = _f(snapshot.get("resistance_level"))
+            return val if val is not None and val > 0 else None
+        return None
+
+    # AIC-20261007-05: minimum structural stop distance floor (1.0% of entry)
+    _struct_floor_pct = 0.01  # 1.0%
+
     if side in ("LONG", "BUY"):
-        return snapshot.get("support_level")
-    if side in ("SHORT", "SELL"):
-        return snapshot.get("resistance_level")
+        fallback = _f(snapshot.get("support_level"))
+        candidates = (stop_price, fallback)
+        raw = next((price for price in candidates if price is not None and 0 < price < entry), None)
+        if raw is not None:
+            floor_price = entry * (1.0 - _struct_floor_pct)
+            if raw > floor_price:
+                raw = floor_price  # push stop further from entry
+        return raw
+    elif side in ("SHORT", "SELL"):
+        fallback = _f(snapshot.get("resistance_level"))
+        candidates = (stop_price, fallback)
+        raw = next((price for price in candidates if price is not None and price > entry), None)
+        if raw is not None:
+            floor_price = entry * (1.0 + _struct_floor_pct)
+            if raw < floor_price:
+                raw = floor_price  # push stop further from entry
+        return raw
     return None
 
 
 def structural_target_price(
     snapshot: Optional[Dict[str, Any]],
+    entry_price: Optional[float] = None,
 ) -> Optional[float]:
     """Return the best available structural target ("dream" level) for the thesis.
 
@@ -281,12 +330,32 @@ def structural_target_price(
     """
     if not snapshot:
         return None
-    target_price = snapshot.get("target_price")
-    if target_price:
-        return target_price
     side = str(snapshot.get("side") or "").strip().upper()
+    entry = _f(entry_price)
+    if entry is None:
+        entry = _f(snapshot.get("entry_price"))
+
+    target_price = _f(snapshot.get("target_price"))
+
+    # When entry_price is unavailable, return raw target without validation
+    # Still reject non-positive values.
+    if entry is None or entry <= 0:
+        if target_price is not None and target_price > 0:
+            return target_price
+        if side in ("LONG", "BUY"):
+            val = _f(snapshot.get("resistance_level"))
+            return val if val is not None and val > 0 else None
+        if side in ("SHORT", "SELL"):
+            val = _f(snapshot.get("support_level"))
+            return val if val is not None and val > 0 else None
+        return None
+
     if side in ("LONG", "BUY"):
-        return snapshot.get("resistance_level")
-    if side in ("SHORT", "SELL"):
-        return snapshot.get("support_level")
+        fallback = _f(snapshot.get("resistance_level"))
+        candidates = (target_price, fallback)
+        return next((price for price in candidates if price is not None and price > entry), None)
+    elif side in ("SHORT", "SELL"):
+        fallback = _f(snapshot.get("support_level"))
+        candidates = (target_price, fallback)
+        return next((price for price in candidates if price is not None and 0 < price < entry), None)
     return None

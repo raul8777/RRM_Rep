@@ -88,6 +88,29 @@ def _sr_side(metadata: Dict[str, Any], settings: Any) -> str:
     return "NONE"
 
 
+def _philosophy_contradiction_veto(side: str, thesis: str, metadata: Dict[str, Any], settings: Any) -> bool:
+    if not bool(getattr(settings, "entry_philosophy_contradiction_veto_enabled", False)):
+        return False
+    trend = str(metadata.get("trend_4h") or metadata.get("higher_tf_trend") or "").strip().upper()
+    macd = _n(metadata.get("macd_histogram", metadata.get("macd")))
+    volume = _n(
+        metadata.get("vol_spike")
+        or metadata.get("volume_spike_ratio")
+        or metadata.get("relative_volume")
+        or metadata.get("volume_ratio")
+    )
+    min_volume = _n(getattr(settings, "entry_philosophy_contradiction_volume_min", 1.25), 1.25)
+    if volume < min_volume:
+        return False
+    if side == "SHORT" and thesis == "SHORT_RESISTANCE_REJECTION":
+        explicit_rejection = bool(metadata.get("resistance_bounce_sell") or metadata.get("sr_rejection"))
+        return not explicit_rejection and trend in ("UP", "1", "1.0", "BULLISH") and macd > 0
+    if side == "LONG" and thesis == "LONG_SUPPORT_BOUNCE":
+        explicit_bounce = bool(metadata.get("support_bounce_buy") or metadata.get("sr_bounce"))
+        return not explicit_bounce and trend in ("DOWN", "-1", "-1.0", "BEARISH") and macd < 0
+    return False
+
+
 def _with_position_size(pred: Optional[Dict[str, Any]], size: float) -> Optional[Dict[str, Any]]:
     if not isinstance(pred, dict):
         return pred
@@ -261,10 +284,18 @@ def evaluate_range_scalp(symbol: str, metadata: Dict[str, Any], long_prediction:
     if futures_executable:
         longs.append(("FUTURES_LONG", fut_long))
     long_mode, long_contract = max(longs, key=lambda item: _rank_key(item[1]))
-    long_ok = bool(getattr(settings, "range_scalp_long_entries_enabled", True) and long_contract.executable)
-    short_ok = any(contract.executable for _, contract in venue_short_candidates)
+    long_veto = _philosophy_contradiction_veto("LONG", long_thesis, metadata, settings)
+    short_veto = _philosophy_contradiction_veto("SHORT", short_thesis, metadata, settings)
+    long_ok = bool(getattr(settings, "range_scalp_long_entries_enabled", True) and long_contract.executable and not long_veto)
+    short_ok = bool(any(contract.executable for _, contract in venue_short_candidates) and not short_veto)
     selected_mode, thesis = "ABSTAIN", "NONE"
     reason = "BILATERAL_NEUTRAL_NO_POSITIVE_EXECUTABLE_RETURN" if side == "NONE" else "BILATERAL_NO_POSITIVE_EXECUTABLE_RETURN"
+    if long_veto and short_veto:
+        reason = "PHILOSOPHY_CONTRADICTION_VETO_BOTH"
+    elif long_veto and not short_ok:
+        reason = "PHILOSOPHY_CONTRADICTION_VETO_LONG"
+    elif short_veto and not long_ok:
+        reason = "PHILOSOPHY_CONTRADICTION_VETO_SHORT"
     selected = alternative = None
     candidates = []
     if long_ok:
